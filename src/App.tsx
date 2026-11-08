@@ -601,6 +601,17 @@ export default function App() {
         if ((event.button === 2 || event.ctrlKey) && contextGesture.current.moved) {
           event.preventDefault();
           event.stopPropagation();
+          return;
+        }
+        const state = useEditor.getState();
+        if (
+          event.target instanceof HTMLCanvasElement &&
+          state.tool === 'align' &&
+          state.operation.mode === 'surface'
+        ) {
+          event.preventDefault();
+          event.stopPropagation();
+          state.openContextMenu({ x: event.clientX, y: event.clientY, kind: 'brush' });
         }
       }}
       onContextMenu={(event) => {
@@ -615,9 +626,18 @@ export default function App() {
           return;
         event.preventDefault();
         const partId = target.closest<HTMLElement>('[data-part-id]')?.dataset.partId;
-        useEditor
-          .getState()
-          .openContextMenu({ x: event.clientX, y: event.clientY, ...(partId ? { partId } : {}) });
+        const state = useEditor.getState();
+        state.openContextMenu({
+          x: event.clientX,
+          y: event.clientY,
+          kind:
+            target.closest('.viewport') &&
+            state.tool === 'align' &&
+            state.operation.mode === 'surface'
+              ? 'brush'
+              : undefined,
+          ...(partId ? { partId } : {}),
+        });
       }}
       onDragEnter={(e) => {
         e.preventDefault();

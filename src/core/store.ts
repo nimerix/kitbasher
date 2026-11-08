@@ -45,6 +45,7 @@ export type Modal = 'export' | 'import' | 'merge' | 'help' | 'new' | 'rename' | 
 export interface EditorContextMenu {
   x: number;
   y: number;
+  kind?: 'brush';
   partId?: string;
   point?: SurfacePoint;
 }
@@ -305,7 +306,9 @@ export const useEditor = create<EditorState>((set, get) => ({
     set((state) => ({
       contextMenu,
       selected:
-        contextMenu.partId && !state.selected.includes(contextMenu.partId)
+        contextMenu.kind !== 'brush' &&
+        contextMenu.partId &&
+        !state.selected.includes(contextMenu.partId)
           ? [contextMenu.partId]
           : state.selected,
     })),

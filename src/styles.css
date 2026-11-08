@@ -4183,6 +4183,12 @@ optgroup {
   flex-direction: column;
   gap: 4px;
 }
+.brush-context-menu {
+  padding: 12px;
+}
+.brush-context-menu .context-heading {
+  padding: 0 0 4px;
+}
 .context-heading > span {
   overflow: hidden;
   text-overflow: ellipsis;

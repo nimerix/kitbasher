@@ -53,6 +53,9 @@ async function editorState(page: Page) {
       operation: state.operation,
       selected: state.selected,
       painting: state.painting,
+      brushRadius: state.brushRadius,
+      brushErase: state.brushErase,
+      brushPlane: state.brushPlane,
       pivotPicking: state.pivotPicking,
       tool: state.tool,
       parts: state.scene.parts.map((part: any) => ({
@@ -116,6 +119,84 @@ async function openFixture(page: Page, scene = fixture) {
   await page.keyboard.press('Home');
   await expect(page.locator('.document-title')).toContainText(fixture.name);
   await expect(page).toHaveTitle('Kitbasher — Assembly workbench');
+}
+
+for (const method of ['contact', 'flush']) {
+  test(`adjusts the ${method} brush by right-click without changing paint picks, selection, or right-drag navigation`, async ({
+    page,
+  }) => {
+    await openFixture(page);
+    await page.keyboard.press('b');
+    await page.getByRole('combobox', { name: 'Surface relationship' }).selectOption(method);
+    await page.getByRole('combobox', { name: 'Target part', exact: true }).selectOption('target');
+    await paint(page, 'moving', [-8, 0, 0]);
+    const before = await editorState(page);
+    const target = await screenPoint(page, 'target', [0, 0, 0]);
+    await page.mouse.click(target.x, target.y, { button: 'right' });
+    const popup = page.getByRole('dialog', { name: 'Paint brush settings' });
+    await expect(popup).toBeVisible();
+    const radius = popup.getByRole('spinbutton', { name: 'Brush radius', exact: true });
+    await expect(radius).toBeFocused();
+    await radius.fill('6.5');
+    await radius.press('Enter');
+    await expect(popup).toBeVisible();
+    await expect(
+      page
+        .locator('.assembly-inspector')
+        .getByRole('spinbutton', { name: 'Brush radius', exact: true }),
+    ).toHaveValue('6.5');
+    const slider = popup.getByRole('slider', { name: 'Brush radius slider' });
+    await slider.focus();
+    await slider.press('ArrowLeft');
+    await expect(radius).toHaveValue('6.4');
+    await popup.getByRole('button', { name: 'Erase', exact: true }).click();
+    expect((await editorState(page)).brushErase).toBe(true);
+    await popup.getByRole('button', { name: 'Paint', exact: true }).click();
+    await popup.getByRole('switch', { name: 'Restrict brush to seed plane' }).click();
+    const angle = popup.getByRole('spinbutton', { name: 'Brush plane angle tolerance' });
+    await angle.fill('15');
+    await angle.press('Enter');
+    const distance = popup.getByRole('spinbutton', { name: 'Brush plane distance tolerance' });
+    await distance.fill('0.2');
+    await distance.press('Enter');
+    const settings = await editorState(page);
+    expect(settings.brushPlane).toEqual({ enabled: true, angle: 15, distance: 0.2 });
+    expect(settings.operation).toEqual(before.operation);
+    expect(settings.selected).toEqual(before.selected);
+    expect(settings.camera).toEqual(before.camera);
+    expect(settings.parts).toEqual(before.parts);
+    await radius.fill('7.5');
+    await popup.getByRole('button', { name: 'Done', exact: true }).click();
+    await expect(popup).toHaveCount(0);
+    expect((await editorState(page)).brushRadius).toBe(7.5);
+    await paint(page, 'moving', [-8, 0, 0]);
+    expect(
+      (await editorState(page)).operation.surfacePairs[0].source!.faces.length,
+    ).toBeGreaterThan(before.operation.surfacePairs[0].source!.faces.length);
+    const bounds = (await page.locator('canvas').boundingBox())!;
+    const blank = { x: bounds.x + bounds.width * 0.45, y: bounds.y + bounds.height * 0.2 };
+    await page.mouse.click(blank.x, blank.y, { button: 'right' });
+    await expect(popup).toBeVisible();
+    await page.keyboard.press('Escape');
+    await expect(popup).toHaveCount(0);
+    await page.locator('.viewport').focus();
+    await page.keyboard.press('Shift+F10');
+    await expect(popup).toBeVisible();
+    await popup.getByRole('spinbutton', { name: 'Brush radius', exact: true }).fill('8.5');
+    await page.mouse.click(blank.x - 20, blank.y - 20);
+    await expect(popup).toHaveCount(0);
+    expect((await editorState(page)).brushRadius).toBe(8.5);
+    const beforePan = await editorState(page);
+    await page.mouse.move(blank.x, blank.y);
+    await page.mouse.down({ button: 'right' });
+    await page.mouse.move(blank.x - 85, blank.y - 20, { steps: 10 });
+    await page.mouse.up({ button: 'right' });
+    await expect(popup).toHaveCount(0);
+    const afterPan = await editorState(page);
+    expect(afterPan.camera).not.toEqual(beforePan.camera);
+    expect(afterPan.operation).toEqual(beforePan.operation);
+    expect(afterPan.selected).toEqual(beforePan.selected);
+  });
 }
 
 test('paints across gaps in either direction, previews all seams, and applies an undoable flush correction', async ({
@@ -328,4 +409,37 @@ test('keeps paint controls and pivot picking reachable on a narrow screen', asyn
   await expect(page.getByRole('button', { name: 'Add seam', exact: true })).toBeVisible();
   expect(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth)).toBe(false);
   await page.screenshot({ path: '/tmp/kitbasher-flush-mobile.png' });
+  await page.getByRole('button', { name: 'Close inspector', exact: true }).click();
+  const canvas = (await page.locator('canvas').boundingBox())!;
+  await page.mouse.click(canvas.x + canvas.width - 12, canvas.y + canvas.height / 2, {
+    button: 'right',
+  });
+  const popup = page.getByRole('dialog', { name: 'Paint brush settings' });
+  await expect(popup).toBeVisible();
+  await popup.getByRole('switch', { name: 'Restrict brush to seed plane' }).click();
+  await expect(
+    popup.getByRole('spinbutton', { name: 'Brush plane angle tolerance' }),
+  ).toBeVisible();
+  await expect
+    .poll(async () => {
+      const bounds = (await popup.boundingBox())!;
+      return (
+        bounds.x >= 8 &&
+        bounds.y >= 8 &&
+        bounds.x + bounds.width <= 382 &&
+        bounds.y + bounds.height <= 836
+      );
+    })
+    .toBe(true);
+  await popup.getByRole('button', { name: 'Done', exact: true }).focus();
+  await page.keyboard.press('Tab');
+  await expect(popup.getByRole('button', { name: 'Paint', exact: true })).toBeFocused();
+  await page.keyboard.press('Shift+Tab');
+  await expect(popup.getByRole('button', { name: 'Done', exact: true })).toBeFocused();
+  await page.screenshot({ path: '/tmp/kitbasher-brush-context-mobile.png' });
+  const radius = (await editorState(page)).brushRadius;
+  await popup.getByRole('spinbutton', { name: 'Brush radius', exact: true }).fill('9');
+  await page.keyboard.press('Escape');
+  await expect(popup).toHaveCount(0);
+  expect((await editorState(page)).brushRadius).toBe(radius);
 });

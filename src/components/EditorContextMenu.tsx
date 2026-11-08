@@ -28,6 +28,7 @@ import { editorCommands, executeEditorCommand } from '../core/commands';
 import type { CommandContext, CommandId } from '../core/commands';
 import { useEditor } from '../core/store';
 import type { EditorContextMenu as MenuLocation } from '../core/store';
+import { SurfaceBrushControls } from './SurfaceBrushControls';
 
 const icons = {
   copy: Copy,
@@ -70,6 +71,7 @@ function OpenContextMenu({
   actions: CommandContext;
 }) {
   const state = useEditor();
+  const brush = location.kind === 'brush';
   const menu = useRef<HTMLDivElement>(null);
   const previousFocus = useRef(document.activeElement as HTMLElement | null);
   const typeahead = useRef({ query: '', time: 0 });
@@ -80,6 +82,8 @@ function OpenContextMenu({
   const hasSelection = selected.length > 0;
   const unlocked = selected.some((part) => !part.locked);
   const close = useCallback((restore = false) => {
+    if (menu.current?.contains(document.activeElement))
+      (document.activeElement as HTMLElement).blur();
     useEditor.getState().closeContextMenu();
     if (restore) {
       const target = previousFocus.current;
@@ -98,10 +102,17 @@ function OpenContextMenu({
   }, [location.x, location.y]);
   useLayoutEffect(() => {
     reposition();
-    menu.current
-      ?.querySelector<HTMLButtonElement>('[role="menuitem"]:not(:disabled)')
-      ?.focus({ preventScroll: true });
-  }, [location, reposition]);
+    const first = menu.current?.querySelector<HTMLElement>(
+      brush ? '[aria-label="Brush radius"]' : '[role="menuitem"]:not(:disabled)',
+    );
+    first?.focus({ preventScroll: true });
+    if (first instanceof HTMLInputElement) first.select();
+  }, [location, reposition, brush]);
+  useLayoutEffect(() => {
+    const observer = new ResizeObserver(reposition);
+    observer.observe(menu.current!);
+    return () => observer.disconnect();
+  }, [reposition]);
   useEffect(() => {
     const pointer = (event: PointerEvent) => {
       if (!menu.current?.contains(event.target as Node)) close();
@@ -158,13 +169,37 @@ function OpenContextMenu({
   return createPortal(
     <div
       ref={menu}
-      className="editor-context-menu"
-      role="menu"
-      aria-label="Component actions"
+      className={`editor-context-menu ${brush ? 'brush-context-menu' : ''}`}
+      role={brush ? 'dialog' : 'menu'}
+      aria-label={brush ? 'Paint brush settings' : 'Component actions'}
       tabIndex={-1}
       style={position}
       onContextMenu={(event) => event.preventDefault()}
       onKeyDown={(event) => {
+        if (brush) {
+          event.stopPropagation();
+          if (event.key === 'Escape') {
+            event.preventDefault();
+            close(true);
+          }
+          if (event.key === 'Tab') {
+            const controls = Array.from(
+              menu.current!.querySelectorAll<HTMLElement>(
+                'button:not(:disabled), input:not(:disabled)',
+              ),
+            );
+            const first = controls[0],
+              last = controls.at(-1);
+            if (event.shiftKey && document.activeElement === first) {
+              event.preventDefault();
+              last?.focus();
+            } else if (!event.shiftKey && document.activeElement === last) {
+              event.preventDefault();
+              first?.focus();
+            }
+          }
+          return;
+        }
         const items = Array.from(
           menu.current!.querySelectorAll<HTMLButtonElement>('[role="menuitem"]:not(:disabled)'),
         );
@@ -210,36 +245,51 @@ function OpenContextMenu({
         }
       }}
     >
-      <div className="context-heading" role="presentation">
-        <span>
-          {selected.length === 1
-            ? selected[0].name
-            : hasSelection
-              ? `${selected.length} components selected`
-              : 'Assembly actions'}
-        </span>
-        {hasSelection ? (
-          <small>
-            {selected.filter((part) => part.locked).length
-              ? 'Includes locked parts'
-              : 'Component actions'}
-          </small>
-        ) : null}
-      </div>
-      {hasSelection ? (
+      {brush ? (
         <>
-          <div className="context-tools" role="group" aria-label="Transform tools">
-            {(['move', 'rotate', 'scale'] as const).map((id) => item(id, true))}
+          <div className="context-heading">
+            <span>Paint brush settings</span>
+            <small>Right-click to adjust · Right-drag to pan</small>
           </div>
-          <div role="separator" className="context-separator" />
+          <SurfaceBrushControls />
+          <button className="button secondary full-width" onClick={() => close(true)}>
+            Done
+          </button>
         </>
-      ) : null}
-      {groups.map((group, index) => (
-        <div key={index} role="group">
-          {index ? <div role="separator" className="context-separator" /> : null}
-          {group.map((id) => item(id))}
-        </div>
-      ))}
+      ) : (
+        <>
+          <div className="context-heading" role="presentation">
+            <span>
+              {selected.length === 1
+                ? selected[0].name
+                : hasSelection
+                  ? `${selected.length} components selected`
+                  : 'Assembly actions'}
+            </span>
+            {hasSelection ? (
+              <small>
+                {selected.filter((part) => part.locked).length
+                  ? 'Includes locked parts'
+                  : 'Component actions'}
+              </small>
+            ) : null}
+          </div>
+          {hasSelection ? (
+            <>
+              <div className="context-tools" role="group" aria-label="Transform tools">
+                {(['move', 'rotate', 'scale'] as const).map((id) => item(id, true))}
+              </div>
+              <div role="separator" className="context-separator" />
+            </>
+          ) : null}
+          {groups.map((group, index) => (
+            <div key={index} role="group">
+              {index ? <div role="separator" className="context-separator" /> : null}
+              {group.map((id) => item(id))}
+            </div>
+          ))}
+        </>
+      )}
     </div>,
     document.body,
   );

@@ -101,7 +101,9 @@ export function useKeyboard(openScene: () => void, searchParts: () => void) {
       }
       if (key === 'contextmenu' || (key === 'f10' && event.shiftKey)) {
         event.preventDefault();
-        state.openContextMenu(keyboardContextMenu(target));
+        state.openContextMenu(
+          keyboardContextMenu(target, state.tool === 'align' && state.operation.mode === 'surface'),
+        );
         return;
       }
       if (target.closest('[role=menu]') || cmd || event.altKey) return;

@@ -89,6 +89,9 @@ for an empty workbench or to reload the sample.
    at least three complete pairs. There is no fixed limit on the pair count.
    Brush radius is in millimeters; **[ / ]** resize it, **Erase** or **Alt** removes
    paint, and **Undo last paint stroke** (also Ctrl/⌘ Z) restores the last stroke.
+   **Right-click** in the viewport opens brush settings for radius, paint/erase,
+   stroke undo, and seed-plane limits. Changes also update the inspector; click
+   **Done**, press **Esc**, or click outside to continue painting.
    **Middle-drag** or hold **Space** and left-drag to orbit while keeping the paint
    tool and all picks. **Right-drag** pans and the wheel zooms. These gestures also
    work during point alignment. **O** / **H** select persistent camera tools;
