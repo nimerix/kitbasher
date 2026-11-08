@@ -15,8 +15,17 @@ import { ThreeMFLoader } from 'three/addons/loaders/3MFLoader.js';
 import { GLTFExporter } from 'three/addons/exporters/GLTFExporter.js';
 import { STLExporter } from 'three/addons/exporters/STLExporter.js';
 import { strFromU8, strToU8, unzipSync, zipSync } from 'fflate';
-import { partMatrix, sceneBounds, serializeGeometry, transformFromMatrix, uid } from './geometry';
-import { serializeScene } from './scene-file';
+import {
+  bakedPartGeometry,
+  isMirrored,
+  partMatrix,
+  sceneBounds,
+  serializeGeometry,
+  transformFromMatrix,
+  triangleCount,
+  uid,
+} from './geometry';
+import { sceneSubset, serializeScene } from './scene-file';
 import type { Part, SceneDocument } from './types';
 
 export const safeFilename = (name: string) =>
@@ -59,22 +68,30 @@ export async function importModels(files: File[], options: ImportOptions): Promi
       throw new Error(`${file.name} exceeds the 250 MB per-file limit.`);
     const ext = file.name.split('.').pop()?.toLowerCase(),
       buffer = await file.arrayBuffer();
-    let root: Object3D;
-    if (ext === 'stl') {
-      root = new Mesh(
-        new STLLoader().parse(buffer),
-        new MeshStandardMaterial({ color: '#c5c2b8' }),
-      );
-    } else if (ext === 'obj') root = new OBJLoader().parse(new TextDecoder().decode(buffer));
-    else if (ext === 'glb' || ext === 'gltf') {
-      const gltf = await new GLTFLoader().parseAsync(
-        ext === 'glb' ? buffer : new TextDecoder().decode(buffer),
-        '',
-      );
-      root = gltf.scene;
-    } else if (ext === '3mf') root = new ThreeMFLoader().parse(buffer);
-    else
+    if (!['stl', 'obj', 'glb', 'gltf', '3mf'].includes(ext ?? ''))
       throw new Error(`${file.name}: supported formats are STL, OBJ, GLB, embedded GLTF, and 3MF.`);
+    let root: Object3D;
+    try {
+      if (ext === 'stl') {
+        root = new Mesh(
+          new STLLoader().parse(buffer),
+          new MeshStandardMaterial({ color: '#c5c2b8' }),
+        );
+      } else if (ext === 'obj') root = new OBJLoader().parse(new TextDecoder().decode(buffer));
+      else if (ext === '3mf') root = new ThreeMFLoader().parse(buffer);
+      else {
+        const gltf = await new GLTFLoader().parseAsync(
+          ext === 'glb' ? buffer : new TextDecoder().decode(buffer),
+          '',
+        );
+        root = gltf.scene;
+      }
+    } catch (error) {
+      // Loader errors describe parser internals, such as out-of-bounds reads.
+      throw new Error(
+        `${file.name} could not be read. The file may be damaged. (${(error as Error).message})`,
+      );
+    }
     const unit =
       options.units === 'auto' ? (ext === 'glb' || ext === 'gltf' ? 'm' : 'mm') : options.units;
     const up = options.up === 'auto' ? (ext === 'glb' || ext === 'gltf' ? 'y' : 'z') : options.up;
@@ -105,6 +122,8 @@ export async function importModels(files: File[], options: ImportOptions): Promi
     let meshIndex = 0;
     root.traverse((object) => {
       if (!(object instanceof Mesh) || !object.geometry?.getAttribute('position')) return;
+      // An empty part could never be reopened: scene files reject meshes without triangles.
+      if (triangleCount(object.geometry) < 1) return;
       const geometry: BufferGeometry = object.geometry.clone();
       if (!geometry.getAttribute('normal')) geometry.computeVertexNormals();
       const positions = geometry.getAttribute('position');
@@ -116,7 +135,8 @@ export async function importModels(files: File[], options: ImportOptions): Promi
         )
           throw new Error(`${file.name} contains invalid vertices.`);
       const material = Array.isArray(object.material) ? object.material[0] : object.material;
-      const color = 'color' in material ? (material.color as Color).getHexString() : 'c5c2b8';
+      const color =
+        material && 'color' in material ? (material.color as Color).getHexString() : 'c5c2b8';
       const name =
         object.name ||
         object.parent?.name ||
@@ -182,14 +202,13 @@ function meshGroup(parts: Part[]) {
 
 export async function exportGlb(scene: SceneDocument, parts: Part[]): Promise<ArrayBuffer> {
   const root = meshGroup(parts);
+  const included = sceneSubset(scene, parts);
   root.name = scene.name;
   root.scale.setScalar(0.001);
   root.userData = {
     units: 'meters',
-    kitbasherJoints: scene.joints,
-    kitbasherPlaneConstraints: (scene.constraints ?? []).filter(
-      (c) => parts.some((p) => p.id === c.sourceId) && parts.some((p) => p.id === c.targetId),
-    ),
+    kitbasherJoints: included.joints,
+    kitbasherPlaneConstraints: included.constraints ?? [],
   };
   try {
     const result = await new GLTFExporter().parseAsync(root, { binary: true, onlyVisible: false });
@@ -204,13 +223,23 @@ export async function exportGlb(scene: SceneDocument, parts: Part[]): Promise<Ar
 }
 
 export function exportStl(parts: Part[]): ArrayBuffer {
-  const root = meshGroup(parts);
+  // STL facet normals follow triangle winding, which a mirrored transform reverses.
+  const baked: BufferGeometry[] = [];
+  const root = meshGroup(
+    parts.map((part): Part => {
+      if (!isMirrored(part)) return part;
+      const geometry = bakedPartGeometry(part);
+      baked.push(geometry);
+      return { ...part, geometry, position: [0, 0, 0], quaternion: [0, 0, 0, 1], scale: [1, 1, 1] };
+    }),
+  );
   root.rotation.x = Math.PI / 2;
   root.updateMatrixWorld(true);
   try {
     const data = new STLExporter().parse(root, { binary: true });
     return data.buffer as ArrayBuffer;
   } finally {
+    baked.forEach((geometry) => geometry.dispose());
     root.traverse((o) => {
       if (o instanceof Mesh) (o.material as MeshStandardMaterial).dispose();
     });

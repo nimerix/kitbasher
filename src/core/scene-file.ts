@@ -1,17 +1,41 @@
-import { deserializeGeometry, serializeGeometry } from './geometry';
+import { binaryGeometry, deserializeGeometry, serializeGeometry } from './geometry';
 import { validateJoint } from './constraints';
 import { validatePlaneConstraints } from './plane-constraints';
-import type { Joint, PlaneConstraint, SceneDocument, SceneFile } from './types';
+import type { Joint, Part, PlaneConstraint, SceneDocument, SceneFile } from './types';
 
-export function serializeScene(scene: SceneDocument): SceneFile {
-  return {
+const sceneHeader = (scene: SceneDocument) =>
+  ({
     format: 'kitbasher',
     version: 1,
     units: 'mm',
     name: scene.name,
-    parts: scene.parts.map((p) => ({ ...p, geometry: serializeGeometry(p.geometry) })),
     joints: scene.joints,
     constraints: scene.constraints ?? [],
+  }) as const;
+
+export function serializeScene(scene: SceneDocument): SceneFile {
+  return {
+    ...sceneHeader(scene),
+    parts: scene.parts.map((p) => ({ ...p, geometry: serializeGeometry(p.geometry) })),
+  };
+}
+
+/** Autosave runs after every edit, so it stores typed arrays instead of number lists. */
+export function serializeRecovery(scene: SceneDocument) {
+  return {
+    ...sceneHeader(scene),
+    parts: scene.parts.map((p) => ({ ...p, geometry: binaryGeometry(p.geometry) })),
+  };
+}
+
+/** Relationships to excluded parts would make the resulting scene file invalid. */
+export function sceneSubset(scene: SceneDocument, parts: Part[]): SceneDocument {
+  const ids = new Set(parts.map((part) => part.id));
+  return {
+    ...scene,
+    parts,
+    joints: scene.joints.filter((j) => ids.has(j.parentId) && ids.has(j.childId)),
+    constraints: scene.constraints?.filter((c) => ids.has(c.sourceId) && ids.has(c.targetId)),
   };
 }
 
@@ -127,8 +151,23 @@ async function recoveryDatabase(): Promise<IDBDatabase> {
   });
 }
 
+export async function clearRecovery() {
+  const db = await recoveryDatabase();
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const transaction = db.transaction('scenes', 'readwrite');
+      transaction.objectStore('scenes').delete('current');
+      transaction.oncomplete = () => resolve();
+      transaction.onerror = () => reject(transaction.error);
+      transaction.onabort = () => reject(transaction.error);
+    });
+  } finally {
+    db.close();
+  }
+}
+
 export async function saveRecovery(scene: SceneDocument) {
-  const file = serializeScene(scene),
+  const file = serializeRecovery(scene),
     db = await recoveryDatabase();
   try {
     await new Promise<void>((resolve, reject) => {

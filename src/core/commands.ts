@@ -7,6 +7,23 @@ export function primaryShortcut(key: string, shift = false) {
   return `${apple ? '⌘' : 'Ctrl'}${shift ? '+Shift' : ''}+${key}`;
 }
 
+/** Very large scenes can exceed the browser's string limit, so report that failure. */
+export function saveCurrentScene() {
+  const state = useEditor.getState();
+  try {
+    saveSceneFile(state.scene);
+    state.markSaved();
+    state.notify('Scene file downloaded');
+  } catch (error) {
+    state.notify(
+      error instanceof RangeError
+        ? 'This scene is too large for a .kitbash file. Export it as GLB, or merge or remove dense parts.'
+        : `The scene could not be saved: ${(error as Error).message}`,
+      'error',
+    );
+  }
+}
+
 export interface CommandContext {
   openScene?: () => void;
   searchParts?: () => void;
@@ -179,16 +196,7 @@ export function editorCommands(context: CommandContext = {}) {
       primaryShortcut('O'),
     ),
     import: command('Import parts…', () => state.setModal('import'), idle, primaryShortcut('I')),
-    save: command(
-      'Save scene',
-      () => {
-        saveSceneFile(state.scene);
-        state.markSaved();
-        state.notify('Scene file downloaded');
-      },
-      true,
-      primaryShortcut('S'),
-    ),
+    save: command('Save scene', saveCurrentScene, true, primaryShortcut('S')),
     export: command(
       'Export assembly…',
       () => state.setModal('export'),

@@ -137,8 +137,7 @@ describe('AC-2: continuous gizmo precision', () => {
     expect(scale.x).toBeCloseTo(2 ** 0.1, 8);
     const source = part('source');
     useEditor.getState().setScene({ name: 'Precision', parts: [source], joints: [] });
-    useEditor.getState().beginTransform();
-    useEditor.getState().transform('source', { position: [10, 0, 0] }, false);
+    useEditor.getState().transform('source', { position: [10, 0, 0] }, true);
     useEditor.getState().transform('source', { position: [11, 0, 0] }, false);
     useEditor.getState().undo();
     expect(useEditor.getState().scene.parts[0].position).toEqual([0, 0, 0]);

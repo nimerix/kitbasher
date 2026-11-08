@@ -10,6 +10,7 @@ import {
   selectionOrbitCenter,
   setOrbitCenter,
   stepCamera,
+  transferView,
 } from '../core/navigation';
 import type { CameraDirection, CameraStep } from '../core/navigation';
 import { useEditor } from '../core/store';
@@ -21,7 +22,6 @@ const initialOrbitTarget: [number, number, number] = [0, 54, 0];
 export function CameraRig() {
   const controls = useRef<OrbitControlsImpl>(null);
   const focusRequest = useEditor((state) => state.focusRequest);
-  const projection = useEditor((state) => state.view.projection);
   const pivotRequest = useEditor((state) => state.pivotRequest);
   const navigationMode = useEditor((state) =>
     state.temporaryOrbit ? 'orbit' : state.navigationMode,
@@ -38,6 +38,12 @@ export function CameraRig() {
   const { camera, gl, invalidate, size } = useThree();
   const connected = useThree((state) => state.events.connected);
   const handledPivot = useRef(0);
+  const framedRequest = useRef<typeof focusRequest | null>(null);
+  const activeView = useRef<{
+    camera: typeof camera;
+    orbit: OrbitControlsImpl;
+    projection: 'perspective' | 'orthographic';
+  } | null>(null);
   const rotation = useRef<{ pivot: Vector3; previous: Quaternion } | null>(null);
 
   const orbitPivot = useCallback(() => {
@@ -77,9 +83,27 @@ export function CameraRig() {
     invalidate();
   }, [camera, invalidate, settle]);
 
+  // Only an explicit request frames the view, so resizing keeps what the user set up.
+  // The default camera is also replaced at startup, so only a changed projection counts
+  // as a swap that carries the current view across.
   useEffect(() => {
+    const previous = activeView.current;
+    const projection = useEditor.getState().view.projection;
+    activeView.current = controls.current ? { camera, orbit: controls.current, projection } : null;
+    const cameraChanged = previous?.camera !== camera;
+    if (controls.current && previous && cameraChanged && previous.projection !== projection) {
+      settle();
+      transferView(previous.camera, camera, previous.orbit.target, controls.current.target);
+      controls.current.update();
+      invalidate();
+      return;
+    }
+    if (framedRequest.current === focusRequest && !cameraChanged) return;
+    framedRequest.current = focusRequest;
     const state = useEditor.getState();
-    const selected = state.scene.parts.filter((part) => state.selected.includes(part.id));
+    const selected = state.scene.parts.filter(
+      (part) => part.visible && state.selected.includes(part.id),
+    );
     const bounds = sceneBounds(focusRequest.all || !selected.length ? state.scene.parts : selected);
     const center = bounds.getCenter(new Vector3());
     const radius = Math.max(bounds.getSize(new Vector3()).length() / 2, 8);
@@ -110,7 +134,7 @@ export function CameraRig() {
     controls.current?.target.copy(center);
     controls.current?.update();
     invalidate();
-  }, [focusRequest, projection, camera, size.width, size.height, invalidate, settle]);
+  }, [focusRequest, camera, invalidate, settle]);
 
   useEffect(() => settle(), [navigationMode, pivotPicking, surfacePainting, settle]);
 

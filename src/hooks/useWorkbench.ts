@@ -55,7 +55,13 @@ export function useRecovery() {
 
 export function useKeyboard(openScene: () => void, searchParts: () => void) {
   useEffect(() => {
+    // :focus-visible cannot tell these apart, because browsers set it on any key press.
+    let focusedByKeyboard = false;
+    const onPointerDown = () => {
+      focusedByKeyboard = false;
+    };
     const onKey = (event: KeyboardEvent) => {
+      if (event.key === 'Tab') focusedByKeyboard = true;
       if (event.defaultPrevented || event.isComposing) return;
       const target = event.target instanceof HTMLElement ? event.target : document.body;
       const state = useEditor.getState();
@@ -73,7 +79,18 @@ export function useKeyboard(openScene: () => void, searchParts: () => void) {
       }
       if (editable) return;
       if (key === 'shift') useEditor.setState({ precision: true });
-      if (event.code === 'Space' && !cmd && !event.altKey && !target.closest('[role=menu]')) {
+      // A control reached by keyboard keeps its native Space and Enter activation. Mouse
+      // clicks also leave focus on buttons, and those must not capture the tool shortcuts.
+      const nativeActivation =
+        focusedByKeyboard &&
+        !!target.closest('button, a[href], summary, [role="button"], [role="switch"]');
+      if (
+        event.code === 'Space' &&
+        !nativeActivation &&
+        !cmd &&
+        !event.altKey &&
+        !target.closest('[role=menu]')
+      ) {
         event.preventDefault();
         state.endPaintStroke();
         useEditor.setState({ temporaryOrbit: true });
@@ -85,6 +102,8 @@ export function useKeyboard(openScene: () => void, searchParts: () => void) {
         return;
       }
       if (target.closest('[role=menu]') || cmd || event.altKey) return;
+      // Auto-repeat would flicker toggles such as P, O, H, and 5. Only brush sizing repeats.
+      if (event.repeat && key !== '[' && key !== ']') return;
       const tools = {
         v: 'select',
         g: 'translate',
@@ -157,7 +176,7 @@ export function useKeyboard(openScene: () => void, searchParts: () => void) {
         event.preventDefault();
         executeEditorCommand('delete');
       }
-      if (key === 'enter' && ['align', 'joint'].includes(state.tool)) {
+      if (key === 'enter' && !nativeActivation && ['align', 'joint'].includes(state.tool)) {
         event.preventDefault();
         state.tool === 'joint' ? state.createJoint() : state.applyAlignment();
       }
@@ -178,11 +197,13 @@ export function useKeyboard(openScene: () => void, searchParts: () => void) {
       }
     };
     const blur = () => useEditor.setState({ temporaryOrbit: false, precision: false });
+    window.addEventListener('pointerdown', onPointerDown, true);
     window.addEventListener('keydown', onKey);
     window.addEventListener('keyup', up);
     window.addEventListener('blur', blur);
     window.addEventListener('pointercancel', blur);
     return () => {
+      window.removeEventListener('pointerdown', onPointerDown, true);
       window.removeEventListener('keydown', onKey);
       window.removeEventListener('keyup', up);
       window.removeEventListener('blur', blur);

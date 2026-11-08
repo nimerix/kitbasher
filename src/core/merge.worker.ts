@@ -1,9 +1,9 @@
 /// <reference lib="webworker" />
 import { Brush, Evaluator, ADDITION } from 'three-bvh-csg';
-import { deserializeGeometry, serializeGeometry } from './geometry';
-import type { SerializedGeometry } from './types';
+import { binaryGeometry, deserializeGeometry } from './geometry';
+import type { BinaryGeometry } from './types';
 
-self.onmessage = (event: MessageEvent<{ meshes: SerializedGeometry[] }>) => {
+self.onmessage = (event: MessageEvent<{ meshes: BinaryGeometry[] }>) => {
   const brushes: Brush[] = [];
   try {
     const evaluator = new Evaluator();
@@ -25,7 +25,7 @@ self.onmessage = (event: MessageEvent<{ meshes: SerializedGeometry[] }>) => {
     const geometry = result.geometry;
     if (!geometry.getAttribute('position')?.count)
       throw new Error('The union produced an empty mesh. Check that the meshes are closed.');
-    self.postMessage({ result: serializeGeometry(geometry) });
+    self.postMessage({ result: binaryGeometry(geometry) });
   } catch (error) {
     self.postMessage({ error: (error as Error).message });
   } finally {

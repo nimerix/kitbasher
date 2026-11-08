@@ -1155,6 +1155,9 @@ optgroup {
   left: 50%;
   transform: translateX(-50%);
   z-index: 5;
+  padding: 4px 10px;
+  border-radius: 6px;
+  background: rgba(24, 26, 29, 0.88);
   color: #bca38a;
   font-size: 10px;
   display: flex;
@@ -1199,6 +1202,35 @@ optgroup {
   max-width: 400px;
   overflow-wrap: anywhere;
   color: #ba9f84;
+}
+.app-crash {
+  min-height: 100dvh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  gap: 15px;
+  padding: 25px;
+  text-align: center;
+  line-height: 1.6;
+  color: #aeb6c0;
+  background: #181a1d;
+}
+.app-crash h1 {
+  font-size: 19px;
+  color: #eee;
+}
+.app-crash code {
+  font-size: 10px;
+  max-width: 400px;
+  overflow-wrap: anywhere;
+  color: #ba9f84;
+}
+.app-crash div {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 8px;
 }
 .inspector-title {
   height: 46px;

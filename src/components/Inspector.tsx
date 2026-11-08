@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Box,
   Check,
@@ -149,6 +149,32 @@ function KeepConnectedToggle({
   );
 }
 
+function PartColorInput({ part }: { part: Part }) {
+  const input = useRef<HTMLInputElement>(null);
+  const editing = useRef(false);
+  useEffect(() => {
+    // React's onChange fires throughout a picker drag. Only the native change event ends it.
+    const element = input.current!;
+    const finish = () => {
+      editing.current = false;
+    };
+    element.addEventListener('change', finish);
+    return () => element.removeEventListener('change', finish);
+  }, []);
+  return (
+    <input
+      ref={input}
+      aria-label="Part material color"
+      type="color"
+      value={part.color}
+      onChange={(e) => {
+        useEditor.getState().patchParts([part.id], { color: e.target.value }, !editing.current);
+        editing.current = true;
+      }}
+    />
+  );
+}
+
 function PartProperties({ part }: { part: Part }) {
   const joints = useEditor((s) => s.scene.joints),
     parts = useEditor((s) => s.scene.parts),
@@ -171,6 +197,7 @@ function PartProperties({ part }: { part: Part }) {
   const size = sceneBounds([{ ...part, visible: true }]).getSize(new Vector3());
   const [editing, setEditing] = useState(false),
     [name, setName] = useState(part.name);
+  const cancelRename = useRef(false);
   useEffect(() => {
     setName(part.name);
     setEditing(false);
@@ -190,15 +217,15 @@ function PartProperties({ part }: { part: Part }) {
               value={name}
               onChange={(e) => setName(e.target.value)}
               onBlur={() => {
-                if (name.trim()) patchParts([part.id], { name: name.trim() });
+                if (!cancelRename.current && name.trim())
+                  patchParts([part.id], { name: name.trim() });
+                else setName(part.name);
+                cancelRename.current = false;
                 setEditing(false);
               }}
               onKeyDown={(e) => {
-                if (e.key === 'Enter') e.currentTarget.blur();
-                if (e.key === 'Escape') {
-                  setName(part.name);
-                  setEditing(false);
-                }
+                if (e.key === 'Escape') cancelRename.current = true;
+                if (e.key === 'Enter' || e.key === 'Escape') e.currentTarget.blur();
               }}
             />
           ) : (
@@ -390,12 +417,7 @@ function PartProperties({ part }: { part: Part }) {
         <div className="appearance-row">
           <span>Material tint</span>
           <label className="color-control">
-            <input
-              aria-label="Part material color"
-              type="color"
-              value={part.color}
-              onChange={(e) => patchParts([part.id], { color: e.target.value })}
-            />
+            <PartColorInput key={part.id} part={part} />
             <span>{part.color.toUpperCase()}</span>
             <ChevronDown size={11} />
           </label>

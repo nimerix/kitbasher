@@ -2,12 +2,12 @@ import { Vector3 } from 'three';
 import { mergeVertices } from 'three/addons/utils/BufferGeometryUtils.js';
 import {
   bakedPartGeometry,
+  binaryGeometry,
   combineParts,
   deserializeGeometry,
-  serializeGeometry,
   uid,
 } from './geometry';
-import type { Part, SerializedGeometry } from './types';
+import type { BinaryGeometry, Part } from './types';
 
 /** Reject open/non-manifold inputs before attempting a solid Boolean. */
 export function assertClosed(part: Part) {
@@ -53,12 +53,12 @@ export async function mergeParts(
     onWorker?.(worker);
     const meshes = parts.map((part) => {
       const geometry = bakedPartGeometry(part);
-      const data = serializeGeometry(geometry);
+      const data = binaryGeometry(geometry);
       geometry.dispose();
       return data;
     });
     try {
-      const result = await new Promise<SerializedGeometry>((resolve, reject) => {
+      const result = await new Promise<BinaryGeometry>((resolve, reject) => {
         const timeout = window.setTimeout(() => {
           worker.terminate();
           reject(

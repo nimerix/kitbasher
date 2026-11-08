@@ -34,12 +34,26 @@ export function saveOrbitPreference(enabled: boolean) {
   }
 }
 
-export function displayedPosition(part: Part, explode: number): Vec3 {
-  if (!explode) return part.position;
-  const direction = vec(part.position).sub(new Vector3(0, 55, 0));
-  if (direction.length() < 10) direction.set(0, 0, 15);
+export interface ExplodeFrame {
+  center: Vector3;
+  /** Displacement in mm at 100%, so the slider suits any assembly size. */
+  reach: number;
+}
+
+export function explodeFrame(parts: Part[]): ExplodeFrame {
+  const bounds = sceneBounds(parts.map((part) => ({ ...part, visible: true })));
+  return {
+    center: bounds.getCenter(new Vector3()),
+    reach: bounds.getSize(new Vector3()).length() * 0.25,
+  };
+}
+
+export function displayedPosition(part: Part, explode: number, frame?: ExplodeFrame): Vec3 {
+  if (!explode || !frame) return part.position;
+  const direction = partPivot({ ...part, pivot: undefined }).sub(frame.center);
+  if (direction.length() < frame.reach * 0.1) direction.set(0, 0, 1);
   return vec(part.position)
-    .add(direction.normalize().multiplyScalar(explode * 0.45))
+    .addScaledVector(direction.normalize(), (explode / 100) * frame.reach)
     .toArray();
 }
 
@@ -47,12 +61,43 @@ export function selectionOrbitCenter(parts: Part[], selected: string[], explode 
   const selection = new Set(selected);
   const visible = parts.filter((part) => part.visible && selection.has(part.id));
   if (!visible.length) return null;
+  const frame = explode ? explodeFrame(parts) : undefined;
   const primary = visible.find((part) => part.id === selected[0]);
   if (primary?.pivot)
-    return partPivot({ ...primary, position: displayedPosition(primary, explode) });
+    return partPivot({ ...primary, position: displayedPosition(primary, explode, frame) });
   return sceneBounds(
-    visible.map((part) => ({ ...part, position: displayedPosition(part, explode) })),
+    visible.map((part) => ({ ...part, position: displayedPosition(part, explode, frame) })),
   ).getCenter(new Vector3());
+}
+
+function visibleHeight(camera: PerspectiveCamera | OrthographicCamera, target: Vector3) {
+  return camera instanceof OrthographicCamera
+    ? (camera.top - camera.bottom) / camera.zoom
+    : 2 * camera.position.distanceTo(target) * Math.tan(MathUtils.degToRad(camera.fov / 2));
+}
+
+/** Carry a view between projections, keeping its direction, pivot, and apparent size. */
+export function transferView(
+  from: PerspectiveCamera | OrthographicCamera,
+  to: PerspectiveCamera | OrthographicCamera,
+  fromTarget: Vector3,
+  toTarget: Vector3,
+) {
+  const height = visibleHeight(from, fromTarget);
+  const direction = from.position.clone().sub(fromTarget).normalize();
+  toTarget.copy(fromTarget);
+  to.up.copy(from.up);
+  if (to instanceof OrthographicCamera) {
+    to.position.copy(from.position);
+    to.zoom = (to.top - to.bottom) / height;
+  } else {
+    to.position
+      .copy(fromTarget)
+      .addScaledVector(direction, height / (2 * Math.tan(MathUtils.degToRad(to.fov / 2))));
+  }
+  to.updateProjectionMatrix();
+  to.lookAt(fromTarget);
+  to.updateMatrixWorld();
 }
 
 /** Recenter without changing the view direction, orbit distance, or orthographic zoom. */
@@ -107,10 +152,7 @@ export function stepCamera(
     rotateOrbitOffset(camera, target, pivot, previousRotation);
   } else {
     // A tenth of the visible height gives comparable steps at every zoom level.
-    const height =
-      camera instanceof OrthographicCamera
-        ? (camera.top - camera.bottom) / camera.zoom
-        : 2 * camera.position.distanceTo(target) * Math.tan(MathUtils.degToRad(camera.fov / 2));
+    const height = visibleHeight(camera, target);
     camera.updateMatrixWorld();
     const delta = new Vector3()
       .setFromMatrixColumn(camera.matrixWorld, 0)

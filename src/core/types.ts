@@ -114,6 +114,15 @@ export interface SerializedGeometry {
   positions: number[];
   indices?: number[];
   colors?: number[];
+  normals?: number[];
+}
+
+/** Typed-array form for IndexedDB and workers. Scene files always use SerializedGeometry. */
+export interface BinaryGeometry {
+  positions: Float32Array;
+  indices?: Uint16Array | Uint32Array;
+  colors?: Float32Array;
+  normals?: Float32Array;
 }
 
 export interface SceneFile {

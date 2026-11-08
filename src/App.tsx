@@ -40,17 +40,16 @@ import {
   X,
 } from 'lucide-react';
 import { useEditor } from './core/store';
-import { editorCommands, executeEditorCommand } from './core/commands';
+import { editorCommands, executeEditorCommand, saveCurrentScene } from './core/commands';
 import type { CommandId } from './core/commands';
 import { isEditableTarget } from './core/context-menu';
 import { EditorContextMenu } from './components/EditorContextMenu';
 import { parseScene } from './core/scene-file';
-import { saveSceneFile } from './core/files';
 import { useKeyboard, useRecovery } from './hooks/useWorkbench';
 import { PartsPanel } from './components/PartsPanel';
 import { Inspector } from './components/Inspector';
 import { Dialogs } from './components/Dialogs';
-import { IconButton, Keyboard, Logo, Modal } from './components/ui';
+import { IconButton, Keyboard, Logo, Modal, useDismiss } from './components/ui';
 import type { SceneDocument, Tool } from './core/types';
 
 const Viewport = lazy(() =>
@@ -70,14 +69,10 @@ function Header({ openScene }: { openScene: () => void }) {
   const [menu, setMenu] = useState<string | null>(null),
     [editing, setEditing] = useState(false),
     [draft, setDraft] = useState(name);
-  const headerRef = useRef<HTMLElement>(null);
-  useEffect(() => {
-    const close = (e: PointerEvent) => {
-      if (!headerRef.current?.contains(e.target as Node)) setMenu(null);
-    };
-    document.addEventListener('pointerdown', close);
-    return () => document.removeEventListener('pointerdown', close);
-  }, []);
+  const menus = useRef<HTMLElement>(null);
+  const cancelRename = useRef(false);
+  const closeMenu = useCallback(() => setMenu(null), []);
+  useDismiss(menus, !!menu, closeMenu);
   const act = (action: () => void) => {
     action();
     setMenu(null);
@@ -95,7 +90,7 @@ function Header({ openScene }: { openScene: () => void }) {
     </button>
   );
   return (
-    <header className="topbar" ref={headerRef}>
+    <header className="topbar">
       <div className="brand">
         <Logo />
         <span>
@@ -103,11 +98,13 @@ function Header({ openScene }: { openScene: () => void }) {
         </span>
       </div>
       <div className="header-divider" />
-      <nav className="app-menus" aria-label="Editor menus">
+      <nav className="app-menus" aria-label="Editor menus" ref={menus}>
         {['File', 'Edit', 'View'].map((label) => (
           <div key={label} className="app-menu">
             <button
               className={menu === label ? 'active' : ''}
+              aria-haspopup="true"
+              aria-expanded={menu === label}
               onClick={() => setMenu(menu === label ? null : label)}
             >
               {label}
@@ -194,12 +191,13 @@ function Header({ openScene }: { openScene: () => void }) {
             aria-label="Assembly name"
             onChange={(e) => setDraft(e.target.value)}
             onBlur={() => {
-              useEditor.getState().renameScene(draft);
+              if (!cancelRename.current) useEditor.getState().renameScene(draft);
+              cancelRename.current = false;
               setEditing(false);
             }}
             onKeyDown={(e) => {
-              if (e.key === 'Enter') e.currentTarget.blur();
-              if (e.key === 'Escape') setEditing(false);
+              if (e.key === 'Escape') cancelRename.current = true;
+              if (e.key === 'Enter' || e.key === 'Escape') e.currentTarget.blur();
             }}
           />
         ) : (
@@ -256,7 +254,7 @@ function Toolbar({
 }) {
   const tool = useEditor((s) => s.tool),
     view = useEditor((s) => s.view),
-    past = useEditor((s) => s.past),
+    canUndo = useEditor((s) => s.past.length > 0 || s.paintHistory.length > 0),
     future = useEditor((s) => s.future),
     selected = useEditor((s) => s.selected);
   const pivotPicking = useEditor((s) => s.pivotPicking);
@@ -277,8 +275,8 @@ function Toolbar({
         <div className="history-tools">
           <IconButton
             label="Undo (Ctrl/⌘ Z)"
-            disabled={!past.length}
-            onClick={() => useEditor.getState().undo()}
+            disabled={!canUndo}
+            onClick={() => executeEditorCommand('undo')}
           >
             <Undo2 size={15} />
           </IconButton>
@@ -496,7 +494,8 @@ export default function App() {
   const fileInput = useRef<HTMLInputElement>(null),
     dragDepth = useRef(0);
   const tool = useEditor((s) => s.tool),
-    view = useEditor((s) => s.view);
+    view = useEditor((s) => s.view),
+    modal = useEditor((s) => s.modal);
   const openScene = useCallback(() => fileInput.current?.click(), []);
   const searchParts = useCallback(() => {
     setLeft(true);
@@ -533,6 +532,10 @@ export default function App() {
     if (tool === 'align' || tool === 'joint') setRight(true);
   }, [tool]);
   useEffect(() => {
+    // Dropped files belong to one import dialog, not to the next one opened from a menu.
+    if (modal !== 'import') setImportFiles([]);
+  }, [modal]);
+  useEffect(() => {
     const onResize = () => {
       if (window.innerWidth < 760) {
         setLeft(false);
@@ -546,8 +549,13 @@ export default function App() {
     if (!files.length) return;
     if (files.length === 1 && files[0].name.toLowerCase().endsWith('.kitbash')) {
       try {
-        const scene = parseScene(JSON.parse(await files[0].text()));
-        setPendingScene(scene);
+        let data: unknown;
+        try {
+          data = JSON.parse(await files[0].text());
+        } catch {
+          throw new Error('This file could not be read as a Kitbasher scene.');
+        }
+        setPendingScene(parseScene(data));
       } catch (error) {
         useEditor.getState().notify((error as Error).message, 'error');
       }
@@ -690,11 +698,7 @@ export default function App() {
       <StatusBar />
       <Toast />
       <Dialogs
-        key={
-          useEditor((s) => s.modal) === 'import'
-            ? importFiles.map((f) => f.name).join('|')
-            : 'dialogs'
-        }
+        key={modal === 'import' ? importFiles.map((f) => f.name).join('|') : 'dialogs'}
         importFiles={importFiles}
       />
       {pendingScene ? (
@@ -713,13 +717,7 @@ export default function App() {
             </div>
           </div>
           <div className="modal-footer">
-            <button
-              className="button secondary"
-              onClick={() => {
-                saveSceneFile(useEditor.getState().scene);
-                useEditor.getState().markSaved();
-              }}
-            >
+            <button className="button secondary" onClick={saveCurrentScene}>
               Save current scene
             </button>
             <button

@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import { Quaternion } from 'three';
+import type { BufferGeometry } from 'three';
 import { quat, uid, worldPoint } from './geometry';
 import {
   anchorError,
@@ -20,7 +21,7 @@ import type { NavigationMode } from './navigation';
 import { createSample } from './sample';
 import { captureComponents, instantiateComponents } from './clipboard';
 import type { ComponentClipboard } from './clipboard';
-import { resolvePart } from './references';
+import { referencePlanes, resolvePart } from './references';
 import type {
   AssemblyOperation,
   BrushPlaneSettings,
@@ -60,6 +61,10 @@ const blankOperation = (mode: AssemblyOperation['mode'] = 'point'): AssemblyOper
   rotationLocks: [true, false, true],
   keepConnected: true,
 });
+const hasOperationWork = (op: AssemblyOperation) =>
+  op.pairs.length > 0 ||
+  !!op.pending ||
+  op.surfacePairs.some((pair) => pair.source?.faces.length || pair.target?.faces.length);
 const initialScene = createSample();
 const historyLimit = 40;
 
@@ -133,8 +138,7 @@ interface EditorState {
     checkpoint?: boolean,
     moveConnected?: boolean,
   ) => void;
-  beginTransform: () => void;
-  patchParts: (ids: string[], patch: Partial<Part>) => void;
+  patchParts: (ids: string[], patch: Partial<Part>, checkpoint?: boolean) => void;
   addParts: (parts: Part[]) => void;
   deleteSelected: () => void;
   duplicateSelected: () => void;
@@ -158,6 +162,16 @@ const changed = (state: EditorState, scene: SceneDocument, checkpoint = true) =>
     ? { past: [...state.past.slice(-(historyLimit - 1)), state.scene], future: [] }
     : {}),
 });
+
+/** Picks on a removed part can never be completed, so restart the active tool. */
+const withoutRemovedParts = (state: EditorState, ids: string[]) => {
+  const op = state.operation;
+  const stale = [op.sourceId, op.targetId].some((id) => id && ids.includes(id));
+  return {
+    measurement: state.measurement.filter((point) => !ids.includes(point.partId)),
+    ...(stale ? { operation: blankOperation(op.mode), painting: false, paintHistory: [] } : {}),
+  };
+};
 
 export const useEditor = create<EditorState>((set, get) => ({
   scene: initialScene,
@@ -287,6 +301,9 @@ export const useEditor = create<EditorState>((set, get) => ({
   closeContextMenu: () => set({ contextMenu: null }),
   setTool: (tool) =>
     set((state) => {
+      // Re-selecting the active tool must not discard picks or painted patches.
+      if (tool === state.tool && hasOperationWork(state.operation))
+        return { navigationMode: null, pivotPicking: false };
       const mode = tool === 'joint' ? 'point' : state.operation.mode;
       const pair = mode === 'surface' ? emptySurfacePair() : null;
       return {
@@ -412,6 +429,11 @@ export const useEditor = create<EditorState>((set, get) => ({
       (!begin && !state.painting)
     )
       return false;
+    if (state.view.explode) {
+      // Patches are hidden in the exploded view, so painting there would be blind.
+      if (begin) state.notify('Reset the exploded view before painting surfaces.', 'info');
+      return false;
+    }
     const pair = op.surfacePairs.find((pair) => pair.id === active.pairId);
     if (!pair) return false;
     const expected = active.side === 'source' ? op.sourceId : op.targetId;
@@ -487,22 +509,28 @@ export const useEditor = create<EditorState>((set, get) => ({
     if (get().painting) set({ painting: false });
   },
   undoPaintStroke: () =>
-    set((state) =>
-      state.paintHistory.length
-        ? {
-            painting: false,
-            paintHistory: state.paintHistory.slice(0, -1),
-            operation: {
-              ...state.operation,
-              surfacePairs: state.paintHistory.at(-1)!,
-              activeSurface: null,
-            },
-          }
-        : {},
-    ),
+    set((state) => {
+      const surfacePairs = state.paintHistory.at(-1);
+      if (!surfacePairs) return {};
+      const active = state.operation.activeSurface;
+      return {
+        painting: false,
+        paintHistory: state.paintHistory.slice(0, -1),
+        operation: {
+          ...state.operation,
+          surfacePairs,
+          // Keep the brush on the same patch so painting can continue after an undo.
+          activeSurface: surfacePairs.some((pair) => pair.id === active?.pairId) ? active : null,
+        },
+      };
+    }),
   setOperation: (patch) =>
     set((state) => {
-      const reset = 'mode' in patch || 'sourceId' in patch || 'targetId' in patch;
+      const op = state.operation;
+      const reset =
+        (patch.mode !== undefined && patch.mode !== op.mode) ||
+        ('sourceId' in patch && patch.sourceId !== op.sourceId) ||
+        ('targetId' in patch && patch.targetId !== op.targetId);
       const mode = patch.mode ?? state.operation.mode;
       const target = patch.targetId === undefined ? state.operation.targetId : patch.targetId;
       const targetId =
@@ -550,8 +578,9 @@ export const useEditor = create<EditorState>((set, get) => ({
       return;
     }
     const operation = state.operation;
+    const onReferencePlane = referencePlanes.some((plane) => plane.id === point.partId);
     if (!operation.pending) {
-      if (operation.sourceId && point.partId !== operation.sourceId) {
+      if (onReferencePlane || (operation.sourceId && point.partId !== operation.sourceId)) {
         state.notify('Pick a surface on the moving part.', 'info');
         return;
       }
@@ -563,6 +592,10 @@ export const useEditor = create<EditorState>((set, get) => ({
     } else {
       if (point.partId === operation.sourceId) {
         state.notify('Now pick a surface on a different, target part.', 'info');
+        return;
+      }
+      if (onReferencePlane && state.tool === 'joint') {
+        state.notify('Joints connect two parts. Pick a surface on the target part.', 'info');
         return;
       }
       if (operation.targetId && point.partId !== operation.targetId) {
@@ -831,15 +864,21 @@ export const useEditor = create<EditorState>((set, get) => ({
         ? {}
         : changed(state, { ...state.scene, parts }, checkpoint);
     }),
-  beginTransform: () =>
-    set((state) => ({ past: [...state.past.slice(-(historyLimit - 1)), state.scene], future: [] })),
-  patchParts: (ids, patch) =>
-    set((state) =>
-      changed(state, {
-        ...state.scene,
-        parts: state.scene.parts.map((p) => (ids.includes(p.id) ? { ...p, ...patch } : p)),
-      }),
-    ),
+  patchParts: (ids, patch, checkpoint = true) =>
+    set((state) => {
+      const keys = Object.keys(patch) as (keyof Part)[];
+      const differs = (part: Part) =>
+        ids.includes(part.id) && keys.some((key) => part[key] !== patch[key]);
+      if (!state.scene.parts.some(differs)) return {};
+      return changed(
+        state,
+        {
+          ...state.scene,
+          parts: state.scene.parts.map((p) => (ids.includes(p.id) ? { ...p, ...patch } : p)),
+        },
+        checkpoint,
+      );
+    }),
   addParts: (parts) =>
     set((state) => ({
       ...changed(state, { ...state.scene, parts: [...state.scene.parts, ...parts] }),
@@ -863,6 +902,7 @@ export const useEditor = create<EditorState>((set, get) => ({
             (c) => !ids.includes(c.sourceId) && !ids.includes(c.targetId),
           ),
         }),
+        ...withoutRemovedParts(state, ids),
         selected: [],
       };
     }),
@@ -893,6 +933,7 @@ export const useEditor = create<EditorState>((set, get) => ({
           (c) => !ids.includes(c.sourceId) && !ids.includes(c.targetId),
         ),
       }),
+      ...withoutRemovedParts(state, ids),
       selected: [part.id],
     })),
   setScene: (scene, recovered = false) =>
@@ -910,6 +951,7 @@ export const useEditor = create<EditorState>((set, get) => ({
       pivotPicking: false,
       painting: false,
       paintHistory: [],
+      measurement: [],
       operation: blankOperation(),
       modal: null,
       contextMenu: null,
@@ -917,7 +959,10 @@ export const useEditor = create<EditorState>((set, get) => ({
       focusRequest: { id: state.focusRequest.id + 1, all: true },
     })),
   renameScene: (name) =>
-    set((state) => changed(state, { ...state.scene, name: name.trim() || 'Untitled assembly' })),
+    set((state) => {
+      const next = name.trim() || 'Untitled assembly';
+      return next === state.scene.name ? {} : changed(state, { ...state.scene, name: next });
+    }),
   undo: () =>
     set((state) =>
       state.past.length
@@ -935,6 +980,7 @@ export const useEditor = create<EditorState>((set, get) => ({
             pivotPicking: false,
             painting: false,
             paintHistory: [],
+            measurement: [],
           }
         : {},
     ),
@@ -953,6 +999,7 @@ export const useEditor = create<EditorState>((set, get) => ({
             pivotPicking: false,
             painting: false,
             paintHistory: [],
+            measurement: [],
           }
         : {},
     ),
@@ -969,6 +1016,34 @@ export const useEditor = create<EditorState>((set, get) => ({
     set((state) => ({ focusRequest: { id: state.focusRequest.id + 1, view, all } })),
   markSaved: () => set((state) => ({ savedRevision: state.revision })),
 }));
+
+function reachableGeometries(state: EditorState) {
+  const geometries = new Set<BufferGeometry>();
+  for (const parts of [
+    state.scene.parts,
+    ...state.past.map((scene) => scene.parts),
+    ...state.future.map((scene) => scene.parts),
+    state.clipboard?.parts ?? [],
+  ])
+    for (const part of parts) geometries.add(part.geometry);
+  return geometries;
+}
+
+// The renderer keeps GPU buffers until a geometry is disposed. Undo history and the
+// clipboard share geometry with the scene, so release it only when nothing can restore it.
+let trackedGeometries = reachableGeometries(useEditor.getState());
+useEditor.subscribe((state, previous) => {
+  if (
+    state.past === previous.past &&
+    state.future === previous.future &&
+    state.clipboard === previous.clipboard &&
+    state.scene.parts.length === previous.scene.parts.length
+  )
+    return;
+  const reachable = reachableGeometries(state);
+  for (const geometry of trackedGeometries) if (!reachable.has(geometry)) geometry.dispose();
+  trackedGeometries = reachable;
+});
 
 export function measureDistance() {
   const state = useEditor.getState();

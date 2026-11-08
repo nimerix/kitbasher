@@ -79,17 +79,13 @@ export function SurfacePaintControls({
       </div>
       <label className="brush-radius">
         <span>Brush radius</span>
-        <input
-          aria-label="Brush radius"
-          type="number"
+        <NumericInput
+          label="Brush radius"
+          value={radius}
           min={0.05}
           max={100}
           step={0.5}
-          value={radius}
-          onChange={(event) => {
-            const value = event.target.valueAsNumber;
-            if (Number.isFinite(value)) useEditor.getState().setBrush({ radius: value });
-          }}
+          onCommit={(value) => useEditor.getState().setBrush({ radius: value })}
         />
         <small>mm</small>
       </label>

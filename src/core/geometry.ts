@@ -13,6 +13,7 @@ import { Matrix, SingularValueDecomposition } from 'ml-matrix';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import type {
   AssemblyOperation,
+  BinaryGeometry,
   Part,
   Quat,
   SerializedGeometry,
@@ -20,7 +21,12 @@ import type {
   Vec3,
 } from './types';
 
-export const uid = () => crypto.randomUUID();
+/** randomUUID needs a secure context; plain-HTTP LAN hosts still offer getRandomValues. */
+export const uid = () =>
+  crypto.randomUUID?.() ??
+  Array.from(crypto.getRandomValues(new Uint8Array(16)), (byte) =>
+    byte.toString(16).padStart(2, '0'),
+  ).join('');
 export const radians = (value: number) => (value * Math.PI) / 180;
 export const degrees = (value: number) => (value * 180) / Math.PI;
 export const vec = (value: Vec3) => new Vector3(...value);
@@ -86,47 +92,106 @@ export function sceneBounds(parts: Part[]): Box3 {
   return bounds.isEmpty() ? new Box3(new Vector3(-30, 0, -30), new Vector3(30, 80, 30)) : bounds;
 }
 
+function vectorList(geometry: BufferGeometry, name: string, digits: number) {
+  const attribute = geometry.getAttribute(name);
+  if (!attribute) return undefined;
+  const values: number[] = [];
+  for (let i = 0; i < attribute.count; i++)
+    values.push(
+      Number(attribute.getX(i).toPrecision(digits)),
+      Number(attribute.getY(i).toPrecision(digits)),
+      Number(attribute.getZ(i).toPrecision(digits)),
+    );
+  return values;
+}
+
 export function serializeGeometry(geometry: BufferGeometry): SerializedGeometry {
-  const position = geometry.getAttribute('position');
-  const color = geometry.getAttribute('color');
-  const positions: number[] = [],
-    colors: number[] = [];
-  for (let i = 0; i < position.count; i++)
-    positions.push(position.getX(i), position.getY(i), position.getZ(i));
-  if (color)
-    for (let i = 0; i < color.count; i++) colors.push(color.getX(i), color.getY(i), color.getZ(i));
   return {
-    positions,
+    // Nine significant digits restore every Float32 value exactly and shrink scene files.
+    positions: vectorList(geometry, 'position', 9)!,
     indices: geometry.index ? Array.from(geometry.index.array) : undefined,
-    colors: color ? colors : undefined,
+    colors: vectorList(geometry, 'color', 9),
+    // Normals only affect shading, and six digits are far below a visible difference.
+    normals: vectorList(geometry, 'normal', 6),
   };
 }
 
-export function deserializeGeometry(data: SerializedGeometry): BufferGeometry {
+function vectorArray(geometry: BufferGeometry, name: string) {
+  const attribute = geometry.getAttribute(name);
+  if (!attribute) return undefined;
   if (
-    !Array.isArray(data.positions) ||
-    data.positions.length < 9 ||
-    data.positions.length % 3 !== 0 ||
-    !data.positions.every(Number.isFinite)
+    attribute instanceof BufferAttribute &&
+    attribute.itemSize === 3 &&
+    attribute.array instanceof Float32Array
+  )
+    return attribute.array;
+  const values = new Float32Array(attribute.count * 3);
+  for (let i = 0; i < attribute.count; i++) {
+    values[i * 3] = attribute.getX(i);
+    values[i * 3 + 1] = attribute.getY(i);
+    values[i * 3 + 2] = attribute.getZ(i);
+  }
+  return values;
+}
+
+/** Shares the live buffers; structured clone copies them without boxing every number. */
+export function binaryGeometry(geometry: BufferGeometry): BinaryGeometry {
+  return {
+    positions: vectorArray(geometry, 'position')!,
+    indices: geometry.index?.array as BinaryGeometry['indices'],
+    colors: vectorArray(geometry, 'color'),
+    normals: vectorArray(geometry, 'normal'),
+  };
+}
+
+const isNumberList = (value: unknown): value is ArrayLike<number> =>
+  Array.isArray(value) || (ArrayBuffer.isView(value) && !(value instanceof DataView));
+
+function allFinite(values: ArrayLike<number>) {
+  for (let i = 0; i < values.length; i++) if (!Number.isFinite(values[i])) return false;
+  return true;
+}
+
+const floatAttribute = (values: ArrayLike<number>) =>
+  new BufferAttribute(values instanceof Float32Array ? values : new Float32Array(values), 3);
+
+export function deserializeGeometry(data: SerializedGeometry | BinaryGeometry): BufferGeometry {
+  const positions = data?.positions as ArrayLike<number> | undefined;
+  if (
+    !isNumberList(positions) ||
+    positions.length < 9 ||
+    positions.length % 3 !== 0 ||
+    !allFinite(positions)
   ) {
     throw new Error('The mesh has invalid vertex positions.');
   }
   const geometry = new BufferGeometry();
-  geometry.setAttribute('position', new BufferAttribute(new Float32Array(data.positions), 3));
+  geometry.setAttribute('position', floatAttribute(positions));
+  const vertexCount = positions.length / 3;
   if (data.indices) {
-    if (
-      data.indices.length % 3 ||
-      data.indices.some((i) => !Number.isInteger(i) || i < 0 || i >= data.positions.length / 3)
-    )
-      throw new Error('The mesh has invalid triangle indices.');
-    geometry.setIndex(data.indices);
-  } else if (data.positions.length % 9) throw new Error('The mesh has incomplete triangles.');
-  if (data.colors) {
-    if (data.colors.length !== data.positions.length || !data.colors.every(Number.isFinite))
-      throw new Error('The mesh has invalid vertex colors.');
-    geometry.setAttribute('color', new BufferAttribute(new Float32Array(data.colors), 3));
+    const indices: ArrayLike<number> = data.indices;
+    let valid = isNumberList(indices) && indices.length % 3 === 0;
+    for (let i = 0; valid && i < indices.length; i++)
+      valid = Number.isInteger(indices[i]) && indices[i] >= 0 && indices[i] < vertexCount;
+    if (!valid) throw new Error('The mesh has invalid triangle indices.');
+    geometry.setIndex(
+      new BufferAttribute(
+        vertexCount > 65535 ? new Uint32Array(indices) : new Uint16Array(indices),
+        1,
+      ),
+    );
+  } else if (positions.length % 9) throw new Error('The mesh has incomplete triangles.');
+  for (const [name, values] of [
+    ['color', data.colors],
+    ['normal', data.normals],
+  ] as const) {
+    if (!values) continue;
+    if (!isNumberList(values) || values.length !== positions.length || !allFinite(values))
+      throw new Error(`The mesh has invalid vertex ${name}s.`);
+    geometry.setAttribute(name, floatAttribute(values));
   }
-  geometry.computeVertexNormals();
+  // Scenes saved before normals were stored fall back to computed shading.
+  if (!data.normals) geometry.computeVertexNormals();
   geometry.computeBoundingSphere();
   return geometry;
 }
@@ -215,11 +280,13 @@ export function alignmentTransform(source: Part, target: Part, operation: Assemb
   return { matrix, rms: 0 };
 }
 
+export const isMirrored = (part: Part) => part.scale[0] * part.scale[1] * part.scale[2] < 0;
+
 export function bakedPartGeometry(part: Part) {
   const geometry = (
     part.geometry.index ? part.geometry.toNonIndexed() : part.geometry.clone()
   ).applyMatrix4(partMatrix(part));
-  if (part.scale[0] * part.scale[1] * part.scale[2] < 0) {
+  if (isMirrored(part)) {
     // A baked reflection needs its triangle winding reversed as well.
     for (const attribute of Object.values(geometry.attributes)) {
       for (let i = 0; i < attribute.count; i += 3)
@@ -252,7 +319,6 @@ export function combineParts(parts: Part[]): BufferGeometry {
   const combined = mergeGeometries(geometries);
   geometries.forEach((g) => g.dispose());
   if (!combined) throw new Error('These mesh attributes could not be combined.');
-  combined.computeVertexNormals();
   return combined;
 }
 

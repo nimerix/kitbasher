@@ -1,10 +1,74 @@
-import { useEffect, useRef, useState } from 'react';
-import type { ButtonHTMLAttributes, ReactNode } from 'react';
+import { Component, useEffect, useRef, useState } from 'react';
+import type { ButtonHTMLAttributes, ErrorInfo, ReactNode, RefObject } from 'react';
 import { ChevronDown, X } from 'lucide-react';
+import { clearRecovery } from '../core/scene-file';
+
+/** The last autosave survives a render failure, so offer a way back to it. */
+export class AppBoundary extends Component<{ children: ReactNode }, { error: string | null }> {
+  state = { error: null as string | null };
+  static getDerivedStateFromError(error: Error) {
+    return { error: error.message };
+  }
+  componentDidCatch(error: Error, info: ErrorInfo) {
+    console.error('Kitbasher:', error, info.componentStack);
+  }
+  render() {
+    if (this.state.error === null) return this.props.children;
+    return (
+      <div className="app-crash" role="alert">
+        <h1>Something went wrong</h1>
+        <p>Reloading restores your last local save. Recent changes may need to be repeated.</p>
+        <code>{this.state.error}</code>
+        <div>
+          <button className="button primary" onClick={() => location.reload()}>
+            Reload Kitbasher
+          </button>
+          {/* A recovered scene that keeps failing would otherwise lock the user out. */}
+          <button
+            className="button secondary"
+            onClick={() => {
+              void clearRecovery()
+                .catch(() => {})
+                .finally(() => location.reload());
+            }}
+          >
+            Discard local save and reload
+          </button>
+        </div>
+      </div>
+    );
+  }
+}
+
+/** Close a floating menu on an outside press or Escape, before tool shortcuts see the key. */
+export function useDismiss(
+  container: RefObject<HTMLElement | null>,
+  open: boolean,
+  dismiss: () => void,
+) {
+  useEffect(() => {
+    if (!open) return;
+    const press = (event: PointerEvent) => {
+      if (!container.current?.contains(event.target as Node)) dismiss();
+    };
+    const key = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return;
+      event.preventDefault();
+      event.stopPropagation();
+      dismiss();
+    };
+    document.addEventListener('pointerdown', press, true);
+    document.addEventListener('keydown', key, true);
+    return () => {
+      document.removeEventListener('pointerdown', press, true);
+      document.removeEventListener('keydown', key, true);
+    };
+  }, [container, open, dismiss]);
+}
 
 export function IconButton({
   label,
-  active = false,
+  active,
   children,
   ...props
 }: ButtonHTMLAttributes<HTMLButtonElement> & { label: string; active?: boolean }) {

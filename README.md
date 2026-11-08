@@ -25,9 +25,11 @@ npm run test:e2e     # Interaction and WebGL tests in installed Google Chrome
 npm run format       # Format source and tests
 ```
 
-Deploy the `dist/` directory to any static web host. Fonts and application assets
-are bundled locally. This is a browser application; native desktop installers
-are not included.
+Deploy the `dist/` directory to any static web host, at the site root or under a
+subpath such as a GitHub Pages project site. It also runs over plain HTTP on a local
+network, for example when testing on a tablet. Fonts and application assets are
+bundled locally. This is a browser application; native desktop installers are not
+included.
 
 ## Assemble
 
@@ -184,11 +186,14 @@ pair. Exploded view is disabled until inspection is closed.
 ## Save and export
 
 **Save scene** downloads a self-contained `.kitbash` file, including geometry,
-vertex colors, part transforms, names, visibility, fixed locks, joints, and editable
-plane constraints.
+surface normals, vertex colors, part transforms, names, visibility, fixed locks,
+joints, and editable plane constraints. A scene too large for the browser to write
+as one text file (about 512 MB in Chrome) reports an error; export it as GLB instead.
 **File → Open scene** restores it. Changes also recover through IndexedDB in the
 same browser and origin. Recovery is not a replacement for a downloaded scene;
 clearing browser storage removes it. View/camera preferences are not in scene files.
+If the editor ever hits an unexpected error, it offers to reload from that local
+save, or to discard the save if it keeps failing.
 
 | Format         | Contents                                                                                                  |
 | -------------- | --------------------------------------------------------------------------------------------------------- |
@@ -212,7 +217,8 @@ Painted plane constraints are retained as metadata in GLB and the Blender packag
 their current solved placement is exported, while live plane solving remains in
 Kitbasher. Older scenes without plane constraints open normally.
 
-Export all, visible, or selected parts. GLB uses meters as required by glTF. 3MF
+Export all, visible, or selected parts. Joints and plane constraints are kept only
+when both of their parts are included. GLB uses meters as required by glTF. 3MF
 retains separate objects but does not store colors or joints in this exporter.
 STL contains no names, colors, or joint data and does not automatically union
 overlapping geometry.
@@ -222,6 +228,9 @@ overlapping geometry.
 Use `⌘` on macOS or `Ctrl` on Windows/Linux for the standard shortcuts below.
 Both modifiers are accepted in the workbench. Text fields retain native selection,
 copy, cut, paste, and undo behavior; Save and Open also work while editing a field.
+Controls reached with `Tab` activate with `Space` and `Enter` as usual. Pressing a
+tool's shortcut again keeps unfinished picks and painted patches; `Esc` discards them.
+During contact painting, undo removes the last brush stroke before scene changes.
 
 | Action                                | Control                                                                          |
 | ------------------------------------- | -------------------------------------------------------------------------------- |

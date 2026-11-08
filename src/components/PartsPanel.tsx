@@ -130,7 +130,11 @@ export function PartsPanel({ onClose }: { onClose: () => void }) {
                   </div>
                 ))
               : null}
-            {!filtered.length ? <div className="panel-empty">No matching parts</div> : null}
+            {!filtered.length ? (
+              <div className="panel-empty">
+                {scene.parts.length ? 'No matching parts' : 'No parts yet'}
+              </div>
+            ) : null}
           </>
         ) : tab === 'constraints' ? (
           <ConstraintList query={query} />

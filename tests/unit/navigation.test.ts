@@ -9,6 +9,7 @@ import {
 } from 'three';
 import {
   displayedPosition,
+  explodeFrame,
   selectionOrbitCenter,
   setOrbitCenter,
   stepCamera,
@@ -54,8 +55,12 @@ describe('camera navigation', () => {
     );
     expect(selectionOrbitCenter([a, hidden], ['missing', 'hidden'])).toBeNull();
     close(
-      selectionOrbitCenter([a], ['a'], 60)!,
-      centerA.add(new Vector3(...displayedPosition(a, 60)).sub(new Vector3(...a.position))),
+      selectionOrbitCenter([a, b], ['a'], 60)!,
+      centerA.add(
+        new Vector3(...displayedPosition(a, 60, explodeFrame([a, b]))).sub(
+          new Vector3(...a.position),
+        ),
+      ),
     );
   });
 

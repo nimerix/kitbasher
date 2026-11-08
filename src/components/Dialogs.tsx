@@ -20,7 +20,7 @@ import {
   X,
 } from 'lucide-react';
 import { useEditor } from '../core/store';
-import { primaryShortcut } from '../core/commands';
+import { primaryShortcut, saveCurrentScene } from '../core/commands';
 import {
   download,
   export3mf,
@@ -30,12 +30,11 @@ import {
   importModels,
   modelDimensions,
   safeFilename,
-  saveSceneFile,
 } from '../core/files';
 import type { ImportOptions } from '../core/files';
 import { mergeParts } from '../core/merge';
 import { createSample } from '../core/sample';
-import { serializeScene } from '../core/scene-file';
+import { sceneSubset, serializeScene } from '../core/scene-file';
 import { Modal } from './ui';
 
 export type ExportFormat = 'glb' | '3mf' | 'stl' | 'kitbash' | 'blender';
@@ -104,13 +103,7 @@ function ExportDialog() {
     setError('');
     try {
       const filename = safeFilename(name),
-        document = {
-          ...scene,
-          parts,
-          joints: scene.joints.filter(
-            (j) => parts.some((p) => p.id === j.parentId) && parts.some((p) => p.id === j.childId),
-          ),
-        };
+        document = sceneSubset(scene, parts);
       if (format === 'glb')
         download(await exportGlb(document, parts), `${filename}.glb`, 'model/gltf-binary');
       if (format === 'blender')
@@ -308,6 +301,8 @@ export function ImportDialog({ initialFiles = [] }: { initialFiles?: File[] }) {
         onChange={(e) => {
           setFiles(Array.from(e.target.files ?? []));
           setError('');
+          // Otherwise choosing a file again after removing it fires no change event.
+          e.target.value = '';
         }}
       />
       <button
@@ -318,6 +313,7 @@ export function ImportDialog({ initialFiles = [] }: { initialFiles?: File[] }) {
           e.preventDefault();
           e.stopPropagation();
           setFiles(Array.from(e.dataTransfer.files));
+          setError('');
         }}
       >
         <div className="drop-area-icon">
@@ -728,14 +724,7 @@ function NewDialog() {
         <button className="button secondary" onClick={() => useEditor.getState().setModal(null)}>
           Cancel
         </button>
-        <button
-          className="button secondary"
-          onClick={() => {
-            saveSceneFile(useEditor.getState().scene);
-            useEditor.getState().markSaved();
-            useEditor.getState().notify('Scene file downloaded');
-          }}
-        >
+        <button className="button secondary" onClick={saveCurrentScene}>
           <ArrowDownToLine size={14} />
           Save current scene
         </button>

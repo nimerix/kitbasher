@@ -1,11 +1,11 @@
 # Verification
 
-Verified locally on November 7, 2026.
+Verified locally on November 8, 2026.
 
 ## Automated checks
 
 - `npm run build`: TypeScript checks and production compilation pass.
-- `npm test`: **87 tests pass**, covering Kabsch registration, non-collinear
+- `npm test`: **117 tests pass**, covering Kabsch registration, non-collinear
   point selection, reflection prevention, all four alignment methods, axis locks,
   anchor coincidence, descendant propagation, capture of the current pose when
   locking an axis, invalid joint graphs, scene round trips, mesh combination,
@@ -15,7 +15,10 @@ Verified locally on November 7, 2026.
   includes continuous transform precision, edge connectivity, seeded plane
   filters, area-weighted plane fits, all four plane relationships, multiple
   equations and dependency chains, joint conflicts, suppression, and persistence.
-- `npm run test:e2e`: **46 browser tests pass** in headless installed Google Chrome.
+  `tests/unit/regressions.test.ts` adds lossless compact scene numbers, retained
+  normals, typed-array recovery, reopenable subset exports, mirrored STL facets,
+  geometry disposal, and projection-preserving camera transfer.
+- `npm run test:e2e`: **67 browser tests pass** in headless installed Google Chrome.
   Exercises real gizmo dragging, numeric edit cancellation, surface picking,
   joint creation, local recovery, save/open, STL import, combination/undo,
   GLB/3MF downloads and reimports, physical scale, Boolean worker volume and
@@ -27,7 +30,15 @@ Verified locally on November 7, 2026.
   point preservation, mid-drag Shift changes for both movement and rotation,
   interrupted gizmo cleanup, plane filter clipping, disconnected coplanar patches,
   and mate creation/editing/suppression followed by target motion and save/reopen.
+  `tests/e2e/regressions.spec.ts` covers hidden-part picking, camera stability across
+  resize and projection changes, keyboard activation of focused controls, retained
+  paint and pick work, undo history, menu dismissal, and the crash recovery screen.
 - `npm run format:check` and `git diff --check`: clean.
+
+The production build was also served from a `/kitbasher/` subpath, and both the
+Boolean and inspection workers, fonts, and favicon loaded without errors. It was then
+opened over plain HTTP on a LAN address, where `isSecureContext` is false and
+`crypto.randomUUID` is absent. Duplicate, import, autosave, and recovery all worked.
 
 The full suite and production build passed after the camera, precision, connected
 painting, and plane-constraint update. Current browser checks use the local Vite

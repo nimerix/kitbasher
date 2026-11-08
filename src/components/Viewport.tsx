@@ -51,10 +51,11 @@ import { PrecisionDrag } from '../core/precision';
 import { isJointConnected, translationIsPinned } from '../core/constraints';
 import { referencePlanes, resolvePart } from '../core/references';
 import type { Part, SurfacePoint } from '../core/types';
-import { IconButton } from './ui';
+import { IconButton, useDismiss } from './ui';
 import { CameraNavigation, CameraRig } from './CameraNavigation';
 import { PaintCursor, SurfacePaintOverlay } from './SurfacePainter';
-import { displayedPosition } from '../core/navigation';
+import { displayedPosition, explodeFrame } from '../core/navigation';
+import type { ExplodeFrame } from '../core/navigation';
 import { useInspection } from '../hooks/useInspection';
 import type { InspectionState } from '../hooks/useInspection';
 import { InspectionToggle, InspectionControls, InspectionOverlay } from './InterferenceInspection';
@@ -81,7 +82,11 @@ class ViewportBoundary extends Component<{ children: ReactNode }, { error: strin
   }
 }
 
-function PartMesh({ part }: { part: Part }) {
+const noRaycast = () => {};
+// A press on a gizmo handle also reaches whatever lies under it, but it is not a selection click.
+let gizmoPressed = false;
+
+function PartMesh({ part, frame }: { part: Part; frame?: ExplodeFrame }) {
   const selected = useEditor((s) => s.selected.includes(part.id));
   const inspection = useEditor((s) => s.view.inspection);
   const tool = useEditor((s) => s.tool),
@@ -100,10 +105,11 @@ function PartMesh({ part }: { part: Part }) {
       computeBoundsTree.call(part.geometry, { indirect: true, maxLeafSize: 10 });
     }
   }, [part.geometry]);
-  const exploded = useMemo(() => displayedPosition(part, explode), [part, explode]);
+  const exploded = useMemo(() => displayedPosition(part, explode, frame), [part, explode, frame]);
   const onClick = (event: ThreeEvent<MouseEvent>) => {
     if (event.button !== 0 || event.delta > 5) return;
     event.stopPropagation();
+    if (gizmoPressed) return;
     const state = useEditor.getState();
     if (state.navigationMode || state.temporaryOrbit) return;
     if (state.pivotPicking) {
@@ -134,7 +140,8 @@ function PartMesh({ part }: { part: Part }) {
         <mesh
           name={`part:${part.id}`}
           geometry={part.geometry}
-          raycast={acceleratedRaycast}
+          // Raycasting ignores Object3D.visible, so a hidden part would still catch clicks.
+          raycast={part.visible ? acceleratedRaycast : noRaycast}
           dispose={null}
           castShadow
           receiveShadow
@@ -257,7 +264,9 @@ function TransformGizmo() {
     dragging = useRef(false);
   const [dragVersion, setDragVersion] = useState(0);
   const [controlVersion, setControlVersion] = useState(0);
-  const start = useRef<{ motion: PrecisionDrag; parts: Part[] } | null>(null);
+  const start = useRef<{ motion: PrecisionDrag; parts: Part[]; checkpointed: boolean } | null>(
+    null,
+  );
   const invalidate = useThree((s) => s.invalidate);
   const getRoot = useThree((s) => s.get);
   const finishDrag = useCallback(() => {
@@ -341,10 +350,14 @@ function TransformGizmo() {
         rotationSnap={view.snap ? Math.PI / 12 : null}
         scaleSnap={view.snap ? 0.1 : null}
         onMouseDown={() => {
+          gizmoPressed = true;
           dragging.current = true;
           proxy.updateMatrixWorld(true);
-          start.current = { motion: new PrecisionDrag(proxy.matrixWorld), parts: movable };
-          useEditor.getState().beginTransform();
+          start.current = {
+            motion: new PrecisionDrag(proxy.matrixWorld),
+            parts: movable,
+            checkpointed: false,
+          };
         }}
         onObjectChange={() => {
           if (!dragging.current || !start.current) return;
@@ -358,8 +371,15 @@ function TransformGizmo() {
             id: part.id,
             patch: transformFromMatrix(part, delta.clone().multiply(partMatrix(part))),
           }));
-          if (patches.some((p) => p.patch.scale?.some((v) => v < 0.001))) return;
-          useEditor.getState().transformMany(patches, false, tool === 'translate');
+          // Mirrored parts legitimately have negative scale components.
+          if (patches.some((p) => p.patch.scale?.some((v) => Math.abs(v) < 0.001))) return;
+          // The first real change checkpoints the drag, so a press without motion
+          // adds no undo step and keeps redo available.
+          const before = useEditor.getState().scene;
+          useEditor
+            .getState()
+            .transformMany(patches, !start.current.checkpointed, tool === 'translate');
+          if (useEditor.getState().scene !== before) start.current.checkpointed = true;
         }}
       />
     </>
@@ -491,6 +511,8 @@ function Scene({ inspection }: { inspection: InspectionState }) {
     view = useEditor((s) => s.view),
     operation = useEditor((s) => s.operation),
     tool = useEditor((s) => s.tool);
+  const exploding = view.explode > 0;
+  const frame = useMemo(() => (exploding ? explodeFrame(parts) : undefined), [exploding, parts]);
   return (
     <>
       <color attach="background" args={['#272a2f']} />
@@ -550,7 +572,7 @@ function Scene({ inspection }: { inspection: InspectionState }) {
         frames={1}
       />
       {parts.map((part) => (
-        <PartMesh key={part.id} part={part} />
+        <PartMesh key={part.id} part={part} frame={frame} />
       ))}
       {referencePlanes
         .filter((p) => view.planes.includes(p.id) || operation.targetId === p.id)
@@ -616,6 +638,9 @@ export function Viewport() {
   const setView = useEditor((s) => s.setView),
     focus = useEditor((s) => s.focus);
   const [viewMenu, setViewMenu] = useState(false);
+  const viewSelector = useRef<HTMLDivElement>(null);
+  const closeViewMenu = useCallback(() => setViewMenu(false), []);
+  useDismiss(viewSelector, viewMenu, closeViewMenu);
   const picked = op.pairs.length;
   const distance = measurement.length === 2 ? measureDistance() : null;
   return (
@@ -623,10 +648,17 @@ export function Viewport() {
       className={`viewport ${navigationMode ? `is-camera-tool is-${navigationMode}` : pivotPicking || ['align', 'joint', 'measure'].includes(tool) ? 'is-picking' : ''}`}
       aria-label="3D assembly viewport"
       tabIndex={0}
+      onPointerDownCapture={() => {
+        gizmoPressed = false;
+      }}
     >
       <div className="viewport-top">
-        <div className="view-selector">
-          <button onClick={() => setViewMenu(!viewMenu)}>
+        <div className="view-selector" ref={viewSelector}>
+          <button
+            aria-haspopup="true"
+            aria-expanded={viewMenu}
+            onClick={() => setViewMenu(!viewMenu)}
+          >
             <span className="view-dot" />
             {view.projection === 'perspective' ? 'Perspective' : 'Orthographic'}
             <ChevronDown size={12} />
@@ -676,6 +708,7 @@ export function Viewport() {
               if (
                 event.type === 'click' &&
                 event.button === 0 &&
+                !gizmoPressed &&
                 !useEditor.getState().temporaryOrbit &&
                 !useEditor.getState().navigationMode &&
                 !useEditor.getState().pivotPicking &&
