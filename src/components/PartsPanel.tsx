@@ -80,10 +80,12 @@ export function PartsPanel({ onClose }: { onClose: () => void }) {
               ? filtered.map((part) => (
                   <div
                     key={part.id}
+                    data-part-id={part.id}
                     className={`part-row ${selected.includes(part.id) ? 'selected' : ''} ${!part.visible ? 'muted' : ''}`}
                   >
                     <button
                       className="part-select"
+                      aria-haspopup="menu"
                       onClick={(e) => select(part.id, e.shiftKey || e.metaKey || e.ctrlKey)}
                       onDoubleClick={() => useEditor.getState().focus()}
                       title={part.name}

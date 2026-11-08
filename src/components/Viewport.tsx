@@ -127,6 +127,16 @@ function PartMesh({ part }: { part: Part }) {
           dispose={null}
           castShadow
           receiveShadow
+          onContextMenu={(event) => {
+            event.nativeEvent.preventDefault();
+            event.stopPropagation();
+            useEditor.getState().openContextMenu({
+              x: event.nativeEvent.clientX,
+              y: event.nativeEvent.clientY,
+              partId: part.id,
+              point: toSurface(event),
+            });
+          }}
           onClick={onClick}
           onPointerDown={(event) => {
             const state = useEditor.getState();
@@ -555,6 +565,7 @@ export function Viewport() {
     <main
       className={`viewport ${navigationMode ? `is-camera-tool is-${navigationMode}` : pivotPicking || ['align', 'joint', 'measure'].includes(tool) ? 'is-picking' : ''}`}
       aria-label="3D assembly viewport"
+      tabIndex={0}
     >
       <div className="viewport-top">
         <div className="view-selector">

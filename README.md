@@ -181,23 +181,60 @@ retains separate objects but does not store colors or joints in this exporter.
 STL contains no names, colors, or joint data and does not automatically union
 overlapping geometry.
 
-## Navigation
+## Navigation and shortcuts
 
-| Action                           | Control                                           |
-| -------------------------------- | ------------------------------------------------- |
-| Orbit                            | Left drag; one-finger drag                        |
-| Pan                              | Right drag; Shift + left drag; two-finger gesture |
-| Zoom                             | Scroll, pinch, or viewport buttons                |
-| Select multiple                  | Shift + click                                     |
-| Focus / frame all                | `F` / `Home`                                      |
-| Select / move / rotate / scale   | `V` / `G` / `R` / `S`                             |
-| Align / joint / measure          | `A` / `J` / `D`                                   |
-| Front / right / top / projection | `1` / `3` / `7` / `5`                             |
-| Save / open                      | `Ctrl/⌘ S` / `Ctrl/⌘ O`                           |
-| Undo / redo                      | `Ctrl/⌘ Z` / `Ctrl/⌘ Shift Z`                     |
-| Duplicate                        | `Ctrl/⌘ D`                                        |
-| Delete unlocked selection        | `Delete` / `Backspace`                            |
-| Apply / cancel active operation  | `Enter` / `Esc`                                   |
+Use `⌘` on macOS or `Ctrl` on Windows/Linux for the standard shortcuts below.
+Both modifiers are accepted in the workbench. Text fields retain native selection,
+copy, cut, paste, and undo behavior; Save and Open also work while editing a field.
+
+| Action                                | Control                                           |
+| ------------------------------------- | ------------------------------------------------- |
+| Orbit                                 | Left drag; one-finger drag                        |
+| Pan                                   | Right drag; Shift + left drag; two-finger gesture |
+| Zoom                                  | Scroll, pinch, or viewport buttons                |
+| Select multiple                       | Shift / Ctrl / ⌘ + click                          |
+| Focus / frame all                     | `F` / `Home`                                      |
+| Center orbit / toggle orbit selection | `.` / `Shift + .`                                 |
+| Select / move / rotate / scale        | `V` / `G` / `R` / `S`                             |
+| Align / joint / measure               | `A` / `J` / `D`                                   |
+| Paint contacts / pick pivot           | `B` / `P`                                         |
+| Front / right / top / projection      | `1` / `3` / `7` / `5`                             |
+| Apply / cancel active operation       | `Enter` / `Esc`                                   |
+| Context menu                          | Right-click / `Shift + F10` / Menu key            |
+| Keyboard shortcut help                | `F1` / `?`                                        |
+
+| Standard action                | Shortcut                                        |
+| ------------------------------ | ----------------------------------------------- |
+| Select all components          | `Ctrl/⌘ + A`                                    |
+| Deselect all                   | `Ctrl/⌘ + Shift + A`; `Esc` in Select mode      |
+| Copy / cut / paste components  | `Ctrl/⌘ + C` / `X` / `V`                        |
+| Duplicate selected             | `Ctrl/⌘ + D`                                    |
+| Rename one component           | `F2`                                            |
+| Delete unlocked selection      | `Delete` / `Backspace`                          |
+| Undo / redo                    | `Ctrl/⌘ + Z` / `Ctrl/⌘ + Shift + Z`; `Ctrl + Y` |
+| New assembly / import parts    | `Ctrl/⌘ + N` / `Ctrl/⌘ + I`                     |
+| Save / save another scene copy | `Ctrl/⌘ + S` / `Ctrl/⌘ + Shift + S`             |
+| Open scene                     | `Ctrl/⌘ + O`                                    |
+| Export assembly                | `Ctrl/⌘ + Shift + E`                            |
+| Find a component               | `Ctrl/⌘ + F`                                    |
+
+Select All includes hidden and locked components. Moving, cutting, and deleting
+still respect part locks. Component copy/cut/paste uses a clipboard within the
+open editor, which survives opening another scene and clears on page reload.
+It retains geometry, colors, transforms, pivots, and joints between copied parts;
+joints to parts outside the copied selection are detached. Copies paste with a
+12 mm X offset, with an additional 12 mm for each paste. The first paste after a
+cut restores the original placement. Pasted parts are visible, unlocked, and
+selected, and scene changes can be undone.
+
+Right-click a component in the viewport or Parts panel for transform, clipboard,
+rename/delete, alignment, contact painting, joint, merge, interface inspection,
+visibility, and lock actions. Right-clicking a selected part retains the whole
+selection; right-clicking another part selects it. A model surface menu also
+offers **Set pivot here** at the clicked point. Right-drag continues to pan the
+camera. The menu supports arrow keys, Home/End, typing an action name, Enter/Space,
+and Escape, and fits within small windows. Editable fields keep their native
+context menu. The File and Edit menus expose the same commands and shortcuts.
 
 ## Scope and limitations
 

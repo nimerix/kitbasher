@@ -8,6 +8,10 @@ import {
   ChevronDown,
   CircleHelp,
   Copy,
+  ClipboardPaste,
+  Scissors,
+  Pencil,
+  BoxSelect,
   Crosshair,
   Paintbrush,
   FilePlus2,
@@ -36,6 +40,10 @@ import {
   X,
 } from 'lucide-react';
 import { useEditor } from './core/store';
+import { editorCommands, executeEditorCommand } from './core/commands';
+import type { CommandId } from './core/commands';
+import { isEditableTarget } from './core/context-menu';
+import { EditorContextMenu } from './components/EditorContextMenu';
 import { parseScene } from './core/scene-file';
 import { saveSceneFile } from './core/files';
 import { useKeyboard, useRecovery } from './hooks/useWorkbench';
@@ -53,6 +61,12 @@ function Header({ openScene }: { openScene: () => void }) {
   const name = useEditor((s) => s.scene.name),
     revision = useEditor((s) => s.revision),
     savedRevision = useEditor((s) => s.savedRevision);
+  useEditor((state) => state.past);
+  useEditor((state) => state.future);
+  useEditor((state) => state.selected);
+  useEditor((state) => state.clipboard);
+  useEditor((state) => state.busy);
+  useEditor((state) => state.paintHistory);
   const [menu, setMenu] = useState<string | null>(null),
     [editing, setEditing] = useState(false),
     [draft, setDraft] = useState(name);
@@ -68,12 +82,18 @@ function Header({ openScene }: { openScene: () => void }) {
     action();
     setMenu(null);
   };
-  const save = () => {
-    const state = useEditor.getState();
-    saveSceneFile(state.scene);
-    state.markSaved();
-    state.notify('Scene file downloaded');
-  };
+  const save = () => executeEditorCommand('save');
+  const commands = editorCommands({ openScene });
+  const commandItem = (id: CommandId, Icon: typeof Copy) => (
+    <button
+      disabled={!commands[id].enabled}
+      onClick={() => act(() => executeEditorCommand(id, { openScene }))}
+    >
+      <Icon size={14} />
+      {commands[id].label}
+      {commands[id].shortcut ? <kbd>{commands[id].shortcut}</kbd> : null}
+    </button>
+  );
   return (
     <header className="topbar" ref={headerRef}>
       <div className="brand">
@@ -96,53 +116,28 @@ function Header({ openScene }: { openScene: () => void }) {
               <div className="dropdown-menu">
                 {label === 'File' ? (
                   <>
-                    <button onClick={() => act(() => useEditor.getState().setModal('new'))}>
-                      <FilePlus2 size={14} />
-                      New assembly
-                    </button>
-                    <button onClick={() => act(openScene)}>
-                      <FolderOpen size={14} />
-                      Open scene<kbd>⌘ O</kbd>
-                    </button>
-                    <button onClick={() => act(() => useEditor.getState().setModal('import'))}>
-                      <Import size={14} />
-                      Import parts
-                    </button>
+                    {commandItem('new', FilePlus2)}
+                    {commandItem('open', FolderOpen)}
+                    {commandItem('import', Import)}
                     <hr />
-                    <button onClick={() => act(save)}>
-                      <Save size={14} />
-                      Save scene<kbd>⌘ S</kbd>
-                    </button>
-                    <button onClick={() => act(() => useEditor.getState().setModal('export'))}>
-                      <ArrowDownToLine size={14} />
-                      Export assembly
-                    </button>
+                    {commandItem('save', Save)}
+                    {commandItem('export', ArrowDownToLine)}
                   </>
                 ) : label === 'Edit' ? (
                   <>
-                    <button
-                      disabled={!useEditor.getState().past.length}
-                      onClick={() => act(() => useEditor.getState().undo())}
-                    >
-                      <Undo2 size={14} />
-                      Undo<kbd>⌘ Z</kbd>
-                    </button>
-                    <button
-                      disabled={!useEditor.getState().future.length}
-                      onClick={() => act(() => useEditor.getState().redo())}
-                    >
-                      <Redo2 size={14} />
-                      Redo<kbd>⇧ ⌘ Z</kbd>
-                    </button>
+                    {commandItem('undo', Undo2)}
+                    {commandItem('redo', Redo2)}
                     <hr />
-                    <button onClick={() => act(() => useEditor.getState().duplicateSelected())}>
-                      <Copy size={14} />
-                      Duplicate selected
-                    </button>
-                    <button onClick={() => act(() => useEditor.getState().deleteSelected())}>
-                      <X size={14} />
-                      Delete unlocked parts
-                    </button>
+                    {commandItem('cut', Scissors)}
+                    {commandItem('copy', Copy)}
+                    {commandItem('paste', ClipboardPaste)}
+                    {commandItem('duplicate', Copy)}
+                    <hr />
+                    {commandItem('rename', Pencil)}
+                    {commandItem('delete', X)}
+                    <hr />
+                    {commandItem('selectAll', BoxSelect)}
+                    {commandItem('deselect', X)}
                   </>
                 ) : (
                   <>
@@ -501,8 +496,18 @@ export default function App() {
   const tool = useEditor((s) => s.tool),
     view = useEditor((s) => s.view);
   const openScene = useCallback(() => fileInput.current?.click(), []);
+  const searchParts = useCallback(() => {
+    setLeft(true);
+    requestAnimationFrame(() => {
+      document.querySelector<HTMLButtonElement>('.panel-tabs button')?.click();
+      const search = document.querySelector<HTMLInputElement>('[aria-label="Search parts"]');
+      search?.focus();
+      search?.select();
+    });
+  }, []);
+  const contextGesture = useRef({ x: 0, y: 0, moved: false });
   useRecovery();
-  useKeyboard(openScene);
+  useKeyboard(openScene, searchParts);
   useEffect(() => {
     if (tool === 'align' || tool === 'joint') setRight(true);
   }, [tool]);
@@ -533,6 +538,36 @@ export default function App() {
   return (
     <div
       className={`workbench ${left ? 'show-parts' : ''} ${right ? 'show-inspector' : ''}`}
+      onPointerDownCapture={(event) => {
+        contextGesture.current = { x: event.clientX, y: event.clientY, moved: false };
+      }}
+      onPointerMoveCapture={(event) => {
+        const gesture = contextGesture.current;
+        if (Math.hypot(event.clientX - gesture.x, event.clientY - gesture.y) > 5)
+          gesture.moved = true;
+      }}
+      onContextMenuCapture={(event) => {
+        if ((event.button === 2 || event.ctrlKey) && contextGesture.current.moved) {
+          event.preventDefault();
+          event.stopPropagation();
+        }
+      }}
+      onContextMenu={(event) => {
+        const target = event.target;
+        if (
+          event.defaultPrevented ||
+          isEditableTarget(target) ||
+          useEditor.getState().modal ||
+          !(target instanceof Element) ||
+          target.closest('[role="dialog"]')
+        )
+          return;
+        event.preventDefault();
+        const partId = target.closest<HTMLElement>('[data-part-id]')?.dataset.partId;
+        useEditor
+          .getState()
+          .openContextMenu({ x: event.clientX, y: event.clientY, ...(partId ? { partId } : {}) });
+      }}
       onDragEnter={(e) => {
         e.preventDefault();
         if (e.dataTransfer.types.includes('Files')) {
@@ -675,6 +710,7 @@ export default function App() {
           </div>
         </Modal>
       ) : null}
+      <EditorContextMenu openScene={openScene} searchParts={searchParts} />
       {dragging ? (
         <div className="global-drop-overlay">
           <Import size={42} />

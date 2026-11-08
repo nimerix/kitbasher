@@ -20,6 +20,7 @@ import {
   X,
 } from 'lucide-react';
 import { useEditor } from '../core/store';
+import { primaryShortcut } from '../core/commands';
 import {
   download,
   export3mf,
@@ -526,6 +527,55 @@ function MergeDialog() {
   );
 }
 
+function RenameDialog() {
+  const part = useEditor((state) =>
+    state.scene.parts.find((part) => part.id === state.selected[0]),
+  );
+  const [name, setName] = useState(part?.name ?? '');
+  const input = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    input.current?.focus();
+    input.current?.select();
+  }, []);
+  const close = () => useEditor.getState().setModal(null);
+  return (
+    <Modal
+      title="Rename component"
+      subtitle="Give this part a name that is easy to find."
+      onClose={close}
+    >
+      <form
+        onSubmit={(event) => {
+          event.preventDefault();
+          if (!part || !name.trim()) return;
+          useEditor.getState().patchParts([part.id], { name: name.trim() });
+          close();
+        }}
+      >
+        <div className="modal-body">
+          <label className="form-field">
+            Component name
+            <input
+              ref={input}
+              aria-label="Component name"
+              value={name}
+              onChange={(event) => setName(event.target.value)}
+            />
+          </label>
+        </div>
+        <div className="modal-footer">
+          <button type="button" className="button secondary" onClick={close}>
+            Cancel
+          </button>
+          <button type="submit" className="button primary" disabled={!part || !name.trim()}>
+            Rename component
+          </button>
+        </div>
+      </form>
+    </Modal>
+  );
+}
+
 function HelpDialog() {
   const controls = [
     ['Orbit tool', 'O · left drag or direction buttons'],
@@ -533,7 +583,16 @@ function HelpDialog() {
     ['Orbit', 'Left drag on empty space'],
     ['Pan', 'Right drag or Shift + left drag'],
     ['Zoom', 'Scroll / pinch'],
-    ['Select multiple', 'Shift + click'],
+    ['Select multiple', 'Shift / Ctrl / ⌘ + click'],
+    ['Select all components', primaryShortcut('A')],
+    ['Deselect all', primaryShortcut('A', true) + ' / Esc'],
+    [
+      'Copy / Cut / Paste components',
+      `${primaryShortcut('C')} / ${primaryShortcut('X')} / ${primaryShortcut('V')}`,
+    ],
+    ['Rename component', 'F2'],
+    ['Find a component', primaryShortcut('F')],
+    ['Context menu', 'Right-click / Shift + F10'],
     ['Center orbit on selection', '. (keeps zoom)'],
     ['Orbit selection by default', 'Shift + .'],
     ['Focus selection', 'F (frames selection)'],
@@ -545,9 +604,11 @@ function HelpDialog() {
     ['Align / Joint / Measure', 'A / J / D'],
     ['Front / Right / Top', '1 / 3 / 7'],
     ['Toggle projection', '5'],
-    ['Undo / Redo', '⌘ or Ctrl + Z / Shift + Z'],
-    ['Save / Open', '⌘ or Ctrl + S / O'],
-    ['Duplicate', '⌘ or Ctrl + D'],
+    ['Undo / Redo', `${primaryShortcut('Z')} / ${primaryShortcut('Z', true)} / Ctrl+Y`],
+    ['Save / Open', `${primaryShortcut('S')} / ${primaryShortcut('O')}`],
+    ['New assembly / Import', `${primaryShortcut('N')} / ${primaryShortcut('I')}`],
+    ['Export', primaryShortcut('E', true)],
+    ['Duplicate', primaryShortcut('D')],
     ['Delete unlocked parts', 'Delete / Backspace'],
     ['Finish / Cancel tool', 'Enter / Esc'],
     ['Exit camera tool', 'Esc (keeps picked pairs)'],
@@ -678,5 +739,6 @@ export function Dialogs({ importFiles }: { importFiles: File[] }) {
   if (modal === 'merge') return <MergeDialog />;
   if (modal === 'help') return <HelpDialog />;
   if (modal === 'new') return <NewDialog />;
+  if (modal === 'rename') return <RenameDialog />;
   return null;
 }

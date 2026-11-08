@@ -4104,3 +4104,102 @@ optgroup {
   color: #edba7f;
   font-size: 9px;
 }
+
+.editor-context-menu {
+  position: fixed;
+  z-index: 250;
+  width: min(292px, calc(100vw - 16px));
+  max-height: calc(100dvh - 16px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 6px;
+  border: 1px solid #494c52;
+  border-radius: 9px;
+  background: var(--panel);
+  color: var(--text);
+  box-shadow:
+    0 12px 38px #0008,
+    0 2px 6px #0005;
+  user-select: none;
+}
+.context-heading {
+  padding: 8px 9px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.context-heading > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+  font-weight: 650;
+}
+.context-heading small {
+  color: var(--muted);
+  font-size: 10px;
+}
+.context-action {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  min-height: 29px;
+  padding: 5px 9px;
+  border-radius: 4px;
+  gap: 9px;
+  text-align: left;
+  font-size: 11px;
+}
+.context-action > span {
+  flex: 1;
+}
+.context-action svg {
+  color: var(--muted);
+}
+.context-action kbd {
+  color: var(--muted);
+  font-size: 9px;
+  white-space: nowrap;
+}
+.context-action:not(:disabled):hover,
+.context-action:focus,
+.context-tool:not(:disabled):hover,
+.context-tool:focus {
+  background: var(--raised);
+}
+.context-action:focus-visible,
+.context-tool:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: -1px;
+}
+.context-action.danger:not(:disabled) {
+  color: #fb8192;
+}
+.context-action.danger:not(:disabled) svg {
+  color: inherit;
+}
+.context-separator {
+  height: 1px;
+  margin: 5px 3px;
+  background: var(--border);
+}
+.context-tools {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 4px;
+}
+.context-tool {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 34px;
+  padding: 6px;
+  gap: 6px;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+  font-size: 10px;
+}
+.viewport:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: -1px;
+}

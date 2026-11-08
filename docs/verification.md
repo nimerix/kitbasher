@@ -5,20 +5,28 @@ Verified locally on November 7, 2026.
 ## Automated checks
 
 - `npm run build`: TypeScript checks and production compilation pass.
-- `npm test`: **19 tests pass**, covering Kabsch registration, non-collinear
+- `npm test`: **68 tests pass**, covering Kabsch registration, non-collinear
   point selection, reflection prevention, all four alignment methods, axis locks,
   anchor coincidence, descendant propagation, capture of the current pose when
   locking an axis, invalid joint graphs, scene round trips, mesh combination,
-  manifold input checks, 3MF structure, STL up axis, and undo/redo.
-- `npm run test:e2e`: **11 browser tests pass** in headless installed Google Chrome.
+  manifold input checks, 3MF structure, STL up axis, undo/redo, surface contact fitting, camera
+  navigation, interference analysis, standard shortcuts, and component clipboard
+  behavior including joint preservation and locked-part handling.
+- `npm run test:e2e`: **39 browser tests pass** in headless installed Google Chrome.
   Exercises real gizmo dragging, numeric edit cancellation, surface picking,
   joint creation, local recovery, save/open, STL import, combination/undo,
   GLB/3MF downloads and reimports, physical scale, Boolean worker volume and
-  vertex colors, narrow-screen controls, and a 43,200-triangle imported mesh.
+  vertex colors, narrow-screen controls, a 43,200-triangle imported mesh,
+  surface painting, custom pivots, panned camera orbit, interference layers,
+  Ctrl/Command selection and clipboard commands, rename, native text editing,
+  keyboard context menus, surface-specific actions, and right-drag panning.
 - `npm run format:check` and `git diff --check`: clean.
 
-After the final inspector layout repair, the alignment, joint, and narrow-screen
-interaction tests were rerun and passed. The production build was rebuilt.
+The full suite and production build passed after the shortcut and context-menu
+update. Current browser checks use the local Vite development server. The custom
+menu was visually reviewed at 1440 × 1000 and 390 × 844, including keyboard focus
+and viewport clamping. Context menus reposition on window resize, and right-clicks
+on component icons and mesh surfaces target the appropriate component.
 
 ## Native Blender verification
 

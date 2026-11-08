@@ -1,6 +1,6 @@
 import { create } from 'zustand';
-import { Quaternion, Vector3 } from 'three';
-import { quat, uid, vec, worldPoint } from './geometry';
+import { Quaternion } from 'three';
+import { quat, uid, worldPoint } from './geometry';
 import {
   anchorError,
   constrainPart,
@@ -13,6 +13,8 @@ import { completedSurfacePairs, facesUnderBrush } from './surfaces';
 import { readOrbitPreference, saveOrbitPreference } from './navigation';
 import type { NavigationMode } from './navigation';
 import { createSample } from './sample';
+import { captureComponents, instantiateComponents } from './clipboard';
+import type { ComponentClipboard } from './clipboard';
 import { resolvePart } from './references';
 import type {
   AssemblyOperation,
@@ -26,7 +28,13 @@ import type {
   ViewSettings,
 } from './types';
 
-export type Modal = 'export' | 'import' | 'merge' | 'help' | 'new' | null;
+export type Modal = 'export' | 'import' | 'merge' | 'help' | 'new' | 'rename' | null;
+export interface EditorContextMenu {
+  x: number;
+  y: number;
+  partId?: string;
+  point?: SurfacePoint;
+}
 type Toast = { id: string; message: string; kind: 'success' | 'error' | 'info' };
 const emptySurfacePair = (): SurfacePair => ({ id: uid(), source: null, target: null });
 const blankOperation = (mode: AssemblyOperation['mode'] = 'point'): AssemblyOperation => ({
@@ -48,6 +56,8 @@ const historyLimit = 40;
 interface EditorState {
   scene: SceneDocument;
   selected: string[];
+  clipboard: ComponentClipboard | null;
+  contextMenu: EditorContextMenu | null;
   tool: Tool;
   navigationMode: NavigationMode | null;
   pivotRequest: number;
@@ -73,6 +83,12 @@ interface EditorState {
   };
   measurement: SurfacePoint[];
   select: (id: string | null, additive?: boolean) => void;
+  selectAll: () => void;
+  isolateSelected: () => void;
+  copySelected: (cut?: boolean) => void;
+  pasteClipboard: () => void;
+  openContextMenu: (menu: EditorContextMenu) => void;
+  closeContextMenu: () => void;
   setTool: (tool: Tool) => void;
   setNavigationMode: (mode: NavigationMode | null) => void;
   centerOrbit: () => void;
@@ -127,6 +143,8 @@ const changed = (state: EditorState, scene: SceneDocument, checkpoint = true) =>
 export const useEditor = create<EditorState>((set, get) => ({
   scene: initialScene,
   selected: ['torso'],
+  clipboard: null,
+  contextMenu: null,
   tool: 'select',
   navigationMode: null,
   pivotRequest: 0,
@@ -177,6 +195,70 @@ export const useEditor = create<EditorState>((set, get) => ({
           : [id]
         : [],
     })),
+  selectAll: () => set((state) => ({ selected: state.scene.parts.map((part) => part.id) })),
+  isolateSelected: () =>
+    set((state) => {
+      if (!state.selected.length) return {};
+      const ids = new Set(state.selected);
+      if (!state.scene.parts.some((part) => part.visible !== ids.has(part.id))) return {};
+      return changed(state, {
+        ...state.scene,
+        parts: state.scene.parts.map((part) => ({ ...part, visible: ids.has(part.id) })),
+      });
+    }),
+  copySelected: (cut = false) => {
+    const state = get();
+    const clipboard = captureComponents(state.scene, state.selected, cut);
+    if (!clipboard.parts.length) return;
+    const ids = new Set(clipboard.parts.map((part) => part.id));
+    set({
+      clipboard,
+      ...(cut
+        ? {
+            ...changed(state, {
+              ...state.scene,
+              parts: state.scene.parts.filter((part) => !ids.has(part.id)),
+              joints: state.scene.joints.filter(
+                (joint) => !ids.has(joint.parentId) && !ids.has(joint.childId),
+              ),
+            }),
+            selected: state.selected.filter((id) => !ids.has(id)),
+            operation: blankOperation(),
+            paintHistory: [],
+          }
+        : {}),
+    });
+    const count = clipboard.parts.length;
+    const skipped = cut && state.selected.length > count ? ' · locked parts kept' : '';
+    state.notify(
+      `${count} ${count === 1 ? 'component' : 'components'} ${cut ? 'cut' : 'copied'}${skipped}`,
+    );
+  },
+  pasteClipboard: () => {
+    const state = get();
+    if (!state.clipboard?.parts.length) return;
+    const copies = instantiateComponents(state.clipboard, state.scene.parts);
+    set({
+      ...changed(state, {
+        ...state.scene,
+        parts: [...state.scene.parts, ...copies.parts],
+        joints: [...state.scene.joints, ...copies.joints],
+      }),
+      selected: copies.parts.map((part) => part.id),
+      clipboard: { ...state.clipboard, nextOffset: state.clipboard.nextOffset + 1 },
+      operation: blankOperation(),
+      paintHistory: [],
+    });
+  },
+  openContextMenu: (contextMenu) =>
+    set((state) => ({
+      contextMenu,
+      selected:
+        contextMenu.partId && !state.selected.includes(contextMenu.partId)
+          ? [contextMenu.partId]
+          : state.selected,
+    })),
+  closeContextMenu: () => set({ contextMenu: null }),
   setTool: (tool) =>
     set((state) => {
       const mode = tool === 'joint' ? 'point' : state.operation.mode;
@@ -654,23 +736,17 @@ export const useEditor = create<EditorState>((set, get) => ({
     }),
   duplicateSelected: () =>
     set((state) => {
-      const parts = state.scene.parts
-        .filter((p) => state.selected.includes(p.id))
-        .map((p) => ({
-          ...p,
-          id: uid(),
-          name: `${p.name} copy`,
-          position: vec(p.position)
-            .add(new Vector3(12, 0, 0))
-            .toArray(),
-          locked: false,
-        }));
-      return parts.length
-        ? {
-            ...changed(state, { ...state.scene, parts: [...state.scene.parts, ...parts] }),
-            selected: parts.map((p) => p.id),
-          }
-        : {};
+      const clipboard = captureComponents(state.scene, state.selected);
+      if (!clipboard.parts.length) return {};
+      const copies = instantiateComponents(clipboard, state.scene.parts);
+      return {
+        ...changed(state, {
+          ...state.scene,
+          parts: [...state.scene.parts, ...copies.parts],
+          joints: [...state.scene.joints, ...copies.joints],
+        }),
+        selected: copies.parts.map((part) => part.id),
+      };
     }),
   replaceWithMerged: (part, ids) =>
     set((state) => ({
@@ -698,6 +774,7 @@ export const useEditor = create<EditorState>((set, get) => ({
       paintHistory: [],
       operation: blankOperation(),
       modal: null,
+      contextMenu: null,
       view: { ...state.view, explode: 0 },
       focusRequest: { id: state.focusRequest.id + 1, all: true },
     })),
@@ -747,7 +824,7 @@ export const useEditor = create<EditorState>((set, get) => ({
       view: { ...state.view, ...patch },
     }));
   },
-  setModal: (modal) => set({ modal }),
+  setModal: (modal) => set({ modal, contextMenu: null }),
   setBusy: (busy) => set({ busy }),
   notify: (message, kind = 'success') => set({ toast: { id: uid(), message, kind } }),
   focus: (view, all = false) =>

@@ -1,7 +1,8 @@
 import { useEffect, useRef } from 'react';
 import { useEditor } from '../core/store';
 import { readRecovery, saveRecovery } from '../core/scene-file';
-import { saveSceneFile } from '../core/files';
+import { executeEditorCommand, shortcutCommand } from '../core/commands';
+import { isEditableTarget, keyboardContextMenu } from '../core/context-menu';
 
 export function useRecovery() {
   const scene = useEditor((s) => s.scene),
@@ -52,54 +53,31 @@ export function useRecovery() {
   }, []);
 }
 
-export function useKeyboard(openScene: () => void) {
+export function useKeyboard(openScene: () => void, searchParts: () => void) {
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
-      const target = event.target as HTMLElement;
+      if (event.defaultPrevented || event.isComposing) return;
+      const target = event.target instanceof HTMLElement ? event.target : document.body;
       const state = useEditor.getState();
       if (state.modal || target.closest('[role=dialog]')) return;
-      const cmd = event.metaKey || event.ctrlKey,
-        key = event.key.toLowerCase();
-      if (cmd && key === 's') {
+      const cmd = event.metaKey || event.ctrlKey;
+      const key = event.key.toLowerCase();
+      const command = shortcutCommand(event);
+      const editable = isEditableTarget(target);
+      if (command && (!editable || command === 'save' || command === 'open')) {
         event.preventDefault();
-        if (target.tagName === 'INPUT') target.blur();
-        const current = useEditor.getState();
-        saveSceneFile(current.scene);
-        current.markSaved();
-        current.notify('Scene file downloaded');
+        if (event.repeat) return;
+        if (editable) target.blur();
+        executeEditorCommand(command, { openScene, searchParts });
         return;
       }
-      if (cmd && key === 'o') {
+      if (editable) return;
+      if (key === 'contextmenu' || (key === 'f10' && event.shiftKey)) {
         event.preventDefault();
-        openScene();
+        state.openContextMenu(keyboardContextMenu(target));
         return;
       }
-      if (['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName) || target.isContentEditable)
-        return;
-      if (cmd) {
-        if (key === 'z') {
-          event.preventDefault();
-          if (
-            !event.shiftKey &&
-            state.tool === 'align' &&
-            state.operation.mode === 'surface' &&
-            state.paintHistory.length
-          ) {
-            state.undoPaintStroke();
-            return;
-          }
-          event.shiftKey ? state.redo() : state.undo();
-        }
-        if (key === 'y') {
-          event.preventDefault();
-          state.redo();
-        }
-        if (key === 'd') {
-          event.preventDefault();
-          state.duplicateSelected();
-        }
-        return;
-      }
+      if (target.closest('[role=menu]') || cmd || event.altKey) return;
       const tools = {
         v: 'select',
         g: 'translate',
@@ -163,12 +141,14 @@ export function useKeyboard(openScene: () => void) {
           state.setNavigationMode(null);
           return;
         }
+        const wasSelecting = state.tool === 'select';
         state.setTool('select');
         state.resetPicks();
+        if (wasSelecting) state.select(null);
       }
       if (key === 'delete' || key === 'backspace') {
         event.preventDefault();
-        state.deleteSelected();
+        executeEditorCommand('delete');
       }
       if (key === 'enter' && ['align', 'joint'].includes(state.tool)) {
         event.preventDefault();
@@ -185,5 +165,5 @@ export function useKeyboard(openScene: () => void) {
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [openScene]);
+  }, [openScene, searchParts]);
 }
