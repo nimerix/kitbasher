@@ -1,4 +1,5 @@
 import type { BufferGeometry } from 'three';
+import type { InspectionSettings } from './inspection-types';
 
 export type Vec3 = [number, number, number];
 export type Quat = [number, number, number, number];
@@ -93,6 +94,7 @@ export interface SceneFile {
 }
 
 export interface ViewSettings {
+  inspection: InspectionSettings;
   orbitSelection: boolean;
   grid: boolean;
   joints: boolean;

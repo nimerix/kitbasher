@@ -102,6 +102,27 @@ describe('camera navigation', () => {
       expect(camera.position.distanceTo(target)).toBeCloseTo(distance, 7);
     });
 
+    it(`preserves a panned ${projection} view while orbiting a separate selected pivot`, () => {
+      const camera = createCamera();
+      const target = new Vector3(70, 90, -30);
+      const pivot = new Vector3(5, 40, 10);
+      camera.position.set(200, 150, 300);
+      camera.lookAt(target);
+      camera.updateProjectionMatrix();
+      camera.updateMatrixWorld();
+      const projected = pivot.clone().project(camera);
+      const distance = camera.position.distanceTo(pivot);
+      const offset = target.distanceTo(pivot);
+      const zoom = camera.zoom;
+      for (const direction of ['right', 'up', 'left', 'down'] as const) {
+        stepCamera(camera, target, { mode: 'orbit', direction }, pivot);
+        close(pivot.clone().project(camera), projected);
+        expect(camera.position.distanceTo(pivot)).toBeCloseTo(distance, 7);
+        expect(target.distanceTo(pivot)).toBeCloseTo(offset, 7);
+        expect(camera.zoom).toBe(zoom);
+      }
+    });
+
     it(`pans the ${projection} camera and pivot together without rotating or zooming`, () => {
       const camera = createCamera();
       const target = new Vector3(0, 30, 0);

@@ -61,7 +61,9 @@ for an empty workbench or to reload the sample.
    decimal) to center the orbit on the selection once, keeping the current zoom
    and view direction. **F** frames the selection; **Home** frames everything.
    Camera tools work with perspective and orthographic views. Panning moves the
-   camera freely; orbiting again returns to the selection when the preference is on.
+   camera freely. Orbiting then carries the panned view around the selection without
+   snapping it back to the center. This also works with clicked custom pivots and
+   the directional buttons; only explicit centering or framing recenters the view.
 
 3. Choose **Align** and a method. Click a source surface and its matching target.
    Targets can be another part or a world reference plane:
@@ -117,6 +119,35 @@ for an empty workbench or to reload the sample.
 World reference planes, wireframe, an exploded view, distance measurement,
 orthographic views, framing, visibility, and fixed part locks are included.
 Larger meshes use BVH-accelerated picking; rendering pauses when the view is idle.
+
+## Inspect contact and interference
+
+Click **Interference** beside the projection selector to inspect the assembled
+positions. The view shows **red solid overlap volumes** and **amber surfaces near
+another part**. Set **Within distance** in millimeters and press Enter or leave the
+field to update the band. For example, 0.5 mm highlights surfaces no more than
+about half a millimeter from the other part's surface, including near an interface.
+
+- Compare **All visible parts**, or select two or more parts and choose
+  **Selected parts (2+)** to focus on their interfaces.
+- Toggle **Solid overlap** and **Nearby surfaces** separately. Turn off **Show
+  surrounding parts** to isolate the inspection geometry.
+- **Closest-point markers** show the nearest pair of surface points and their gap
+  for every pair within the distance threshold.
+- Part movement, alignment, undo/redo, and visibility changes update the analysis.
+  Superseded analysis is canceled and its old overlays are cleared. Camera tools
+  remain available; the inspection panel can be collapsed for more viewport space.
+
+This inspection preserves the editable source meshes and scene history. It uses a
+background worker, with a short pause after dragging before recalculating. The
+near-surface band is an adaptive sampled estimate; its approximate detail is shown
+in the panel. A detail budget prevents extremely dense contact bands from growing
+without bound and is explicitly reported if reached. Solid overlap uses mesh
+intersection and assumes closed, consistently wound geometry. Open or non-manifold
+scans show a partial-analysis warning and retain proximity checks. Self-intersecting
+or incorrectly wound scans can affect solid results. Reported overlap volume is
+summed **per pair**, so a region shared by three parts is counted in each relevant
+pair. Exploded view is disabled until inspection is closed.
 
 ## Save and export
 

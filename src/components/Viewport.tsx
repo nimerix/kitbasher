@@ -44,6 +44,9 @@ import { IconButton } from './ui';
 import { CameraNavigation, CameraRig } from './CameraNavigation';
 import { PaintCursor, SurfacePaintOverlay } from './SurfacePainter';
 import { displayedPosition } from '../core/navigation';
+import { useInspection } from '../hooks/useInspection';
+import type { InspectionState } from '../hooks/useInspection';
+import { InspectionToggle, InspectionControls, InspectionOverlay } from './InterferenceInspection';
 
 class ViewportBoundary extends Component<{ children: ReactNode }, { error: string | null }> {
   state = { error: null as string | null };
@@ -69,6 +72,7 @@ class ViewportBoundary extends Component<{ children: ReactNode }, { error: strin
 
 function PartMesh({ part }: { part: Part }) {
   const selected = useEditor((s) => s.selected.includes(part.id));
+  const inspection = useEditor((s) => s.view.inspection);
   const tool = useEditor((s) => s.tool),
     wireframe = useEditor((s) => s.view.wireframe),
     explode = useEditor((s) => s.view.explode),
@@ -174,15 +178,22 @@ function PartMesh({ part }: { part: Part }) {
           }}
         >
           <meshStandardMaterial
-            color={part.color}
+            key={inspection.enabled ? 'inspection' : 'solid'}
+            color={inspection.enabled ? '#a4aab4' : part.color}
+            transparent={inspection.enabled}
+            opacity={inspection.enabled ? (inspection.context ? 0.12 : 0) : 1}
+            depthWrite={!inspection.enabled}
             roughness={0.64}
             metalness={0.2}
-            vertexColors={!!part.geometry.getAttribute('color')}
-            wireframe={wireframe}
-            emissive={selected ? '#c77c39' : '#000000'}
+            vertexColors={!inspection.enabled && !!part.geometry.getAttribute('color')}
+            wireframe={!inspection.enabled && wireframe}
+            emissive={selected && !inspection.enabled ? '#c77c39' : '#000000'}
             emissiveIntensity={selected ? 0.12 : 0}
           />
-          {selected && !wireframe && triangleCount(part.geometry) < 150000 ? (
+          {selected &&
+          !inspection.enabled &&
+          !wireframe &&
+          triangleCount(part.geometry) < 150000 ? (
             <Edges threshold={32} color="#e8aa6d" lineWidth={0.8} />
           ) : null}
         </mesh>
@@ -398,7 +409,7 @@ function AssemblyAnnotations() {
   );
 }
 
-function Scene() {
+function Scene({ inspection }: { inspection: InspectionState }) {
   useEffect(() => {
     const finish = () => useEditor.getState().endPaintStroke();
     window.addEventListener('pointerup', finish);
@@ -507,6 +518,7 @@ function Scene() {
             <Edges color={plane.color} transparent opacity={0.4} />
           </mesh>
         ))}
+      <InspectionOverlay inspection={inspection} />
       <SurfacePaintOverlay />
       <TransformGizmo />
       <AssemblyAnnotations />
@@ -525,6 +537,7 @@ function Scene() {
 }
 
 export function Viewport() {
+  const inspection = useInspection();
   const view = useEditor((s) => s.view),
     tool = useEditor((s) => s.tool),
     selected = useEditor((s) => s.selected),
@@ -576,6 +589,7 @@ export function Viewport() {
             </div>
           ) : null}
         </div>
+        <InspectionToggle inspection={inspection} />
         <span className="viewport-shading">
           Solid <span /> Studio
         </span>
@@ -602,11 +616,12 @@ export function Viewport() {
                 useEditor.getState().select(null);
             }}
           >
-            <Scene />
+            <Scene inspection={inspection} />
           </Canvas>
         </Suspense>
       </ViewportBoundary>
-      <div className="canvas-label">
+      <InspectionControls inspection={inspection} />
+      <div className="canvas-label" hidden={view.inspection.enabled}>
         <span className="canvas-label-line" />
         <span>ASSEMBLY SPACE</span>
         <span className="canvas-label-units">mm</span>

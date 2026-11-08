@@ -67,14 +67,31 @@ export function setOrbitCenter(
   camera.updateMatrixWorld();
 }
 
+/** Carry the panned view around a separate pivot without changing its screen position. */
+export function rotateOrbitOffset(
+  camera: PerspectiveCamera | OrthographicCamera,
+  target: Vector3,
+  pivot: Vector3,
+  previousRotation: Quaternion,
+) {
+  const rotation = camera.quaternion.clone().multiply(previousRotation.clone().invert());
+  const offset = target.clone().sub(pivot);
+  const correction = offset.clone().applyQuaternion(rotation).sub(offset);
+  camera.position.add(correction);
+  target.add(correction);
+  camera.updateMatrixWorld();
+}
+
 export function stepCamera(
   camera: PerspectiveCamera | OrthographicCamera,
   target: Vector3,
   step: CameraStep,
+  pivot = target,
 ) {
   const horizontal = step.direction === 'left' ? -1 : step.direction === 'right' ? 1 : 0;
   const vertical = step.direction === 'up' ? 1 : step.direction === 'down' ? -1 : 0;
   if (step.mode === 'orbit') {
+    const previousRotation = camera.quaternion.clone();
     const up = new Quaternion().setFromUnitVectors(camera.up, new Vector3(0, 1, 0));
     const offset = camera.position.clone().sub(target).applyQuaternion(up);
     const spherical = new Spherical().setFromVector3(offset);
@@ -87,6 +104,7 @@ export function stepCamera(
     offset.setFromSpherical(spherical).applyQuaternion(up.invert());
     camera.position.copy(target).add(offset);
     camera.lookAt(target);
+    rotateOrbitOffset(camera, target, pivot, previousRotation);
   } else {
     // A tenth of the visible height gives comparable steps at every zoom level.
     const height =

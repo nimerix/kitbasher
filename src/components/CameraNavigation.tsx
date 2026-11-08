@@ -2,10 +2,15 @@ import { useCallback, useEffect, useRef } from 'react';
 import { useThree } from '@react-three/fiber';
 import { OrbitControls } from '@react-three/drei';
 import type { OrbitControls as OrbitControlsImpl } from 'three-stdlib';
-import { MOUSE, TOUCH, Vector3 } from 'three';
+import { MOUSE, Quaternion, TOUCH, Vector3 } from 'three';
 import { ArrowDown, ArrowLeft, ArrowRight, ArrowUp, Crosshair, Hand, Orbit, X } from 'lucide-react';
 import { sceneBounds } from '../core/geometry';
-import { selectionOrbitCenter, setOrbitCenter, stepCamera } from '../core/navigation';
+import {
+  rotateOrbitOffset,
+  selectionOrbitCenter,
+  setOrbitCenter,
+  stepCamera,
+} from '../core/navigation';
 import type { CameraDirection, CameraStep } from '../core/navigation';
 import { useEditor } from '../core/store';
 import { IconButton } from './ui';
@@ -30,6 +35,22 @@ export function CameraRig() {
   const { camera, gl, invalidate, size } = useThree();
   const connected = useThree((state) => state.events.connected);
   const handledPivot = useRef(0);
+  const rotation = useRef<{ pivot: Vector3; previous: Quaternion } | null>(null);
+
+  const orbitPivot = useCallback(() => {
+    const state = useEditor.getState();
+    return state.view.orbitSelection ||
+      state.scene.parts.some((part) => state.selected.includes(part.id) && part.pivot)
+      ? selectionOrbitCenter(state.scene.parts, state.selected, state.view.explode)
+      : null;
+  }, []);
+
+  const carryPannedView = useCallback(() => {
+    const orbit = controls.current;
+    if (!orbit || !rotation.current) return;
+    rotateOrbitOffset(camera, orbit.target, rotation.current.pivot, rotation.current.previous);
+    rotation.current.previous.copy(camera.quaternion);
+  }, [camera]);
 
   const settle = useCallback(() => {
     const orbit = controls.current;
@@ -38,6 +59,7 @@ export function CameraRig() {
     orbit.enableDamping = false;
     orbit.update();
     orbit.enableDamping = damping;
+    rotation.current = null;
   }, []);
 
   const centerSelection = useCallback(() => {
@@ -116,29 +138,20 @@ export function CameraRig() {
       const orbit = controls.current;
       if (!orbit?.enabled) return;
       const detail = (event as CustomEvent<CameraStep>).detail;
-      if (detail.mode === 'orbit') {
-        const state = useEditor.getState();
-        if (
-          state.view.orbitSelection ||
-          state.scene.parts.some((part) => state.selected.includes(part.id) && part.pivot)
-        )
-          centerSelection();
-      }
       settle();
-      stepCamera(camera, orbit.target, detail);
+      stepCamera(camera, orbit.target, detail, orbitPivot() ?? orbit.target);
       orbit.update();
       invalidate();
     };
-    // Set the pivot only after a real orbit drag begins. Click selection and
-    // transform handles keep their original hit positions, and pan stays free.
-    let gesture: { id: number; x: number; y: number; orbit: boolean; prepared: boolean } | null =
-      null;
+    // OrbitControls rotates around its view target. Carry that entire view around
+    // the selection as well, retaining the screen offset introduced by panning.
     const down = (event: PointerEvent) => {
-      if (!event.isPrimary) {
-        gesture = null;
+      settle();
+      if (!event.isPrimary || !controls.current?.enabled) return;
+      const state = useEditor.getState();
+      if (state.tool === 'align' && state.operation.mode === 'surface' && !state.navigationMode)
         return;
-      }
-      const panMode = useEditor.getState().navigationMode === 'pan';
+      const panMode = state.navigationMode === 'pan';
       const modified = event.shiftKey || event.ctrlKey || event.metaKey;
       const orbit =
         event.pointerType === 'touch'
@@ -148,46 +161,25 @@ export function CameraRig() {
               ? modified
               : !modified
             : event.button === 2 && modified;
-      gesture = { id: event.pointerId, x: event.clientX, y: event.clientY, orbit, prepared: false };
-    };
-    const move = (event: PointerEvent) => {
-      if (!gesture || gesture.id !== event.pointerId || !gesture.orbit || gesture.prepared) return;
-      if (Math.hypot(event.clientX - gesture.x, event.clientY - gesture.y) <= 5) return;
-      gesture.prepared = true;
-      const state = useEditor.getState();
-      if (state.tool === 'align' && state.operation.mode === 'surface' && !state.navigationMode)
-        return;
-      if (
-        controls.current?.enabled &&
-        (state.view.orbitSelection ||
-          state.scene.parts.some((part) => state.selected.includes(part.id) && part.pivot))
-      )
-        centerSelection();
-    };
-    const up = () => {
-      gesture = null;
+      const pivot = orbit ? orbitPivot() : null;
+      if (pivot) rotation.current = { pivot, previous: camera.quaternion.clone() };
     };
     const canvas = connected instanceof HTMLElement ? connected : gl.domElement;
     canvas.addEventListener('pointerdown', down, true);
-    canvas.addEventListener('pointermove', move, true);
-    canvas.addEventListener('pointerup', up, true);
-    canvas.addEventListener('pointercancel', up, true);
     window.addEventListener('kitbasher:zoom', zoom);
     window.addEventListener(cameraStepEvent, step);
     return () => {
       canvas.removeEventListener('pointerdown', down, true);
-      canvas.removeEventListener('pointermove', move, true);
-      canvas.removeEventListener('pointerup', up, true);
-      canvas.removeEventListener('pointercancel', up, true);
       window.removeEventListener('kitbasher:zoom', zoom);
       window.removeEventListener(cameraStepEvent, step);
     };
-  }, [camera, connected, gl.domElement, invalidate, centerSelection, settle]);
+  }, [camera, connected, gl.domElement, invalidate, orbitPivot, settle]);
 
   return (
     <OrbitControls
       ref={controls}
       makeDefault
+      onChange={carryPannedView}
       enableRotate={!surfacePainting}
       enableDamping
       dampingFactor={0.12}
@@ -324,7 +316,7 @@ export function CameraNavigation() {
           aria-label="Orbit around selection by default"
           aria-checked={orbitSelection}
           className={`toggle ${orbitSelection ? 'on' : ''}`}
-          title="Use selected parts as the orbit center. Shift + . toggles this preference."
+          title="Orbit around selected parts while preserving pan. Shift + . toggles this preference."
           onClick={() => useEditor.getState().setView({ orbitSelection: !orbitSelection })}
         >
           <span />

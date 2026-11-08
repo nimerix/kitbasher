@@ -596,6 +596,12 @@ export default function App() {
           <div className="explode-control">
             <button
               className={view.explode ? 'active' : ''}
+              disabled={view.inspection.enabled}
+              title={
+                view.inspection.enabled
+                  ? 'Close interference view to explode the assembly'
+                  : 'Explode assembly'
+              }
               onClick={() => useEditor.getState().setView({ explode: view.explode ? 0 : 40 })}
             >
               <Box size={13} />
@@ -603,7 +609,12 @@ export default function App() {
             </button>
             <input
               aria-label="Exploded view amount"
-              title="Explode assembly"
+              title={
+                view.inspection.enabled
+                  ? 'Close interference view to explode the assembly'
+                  : 'Explode assembly'
+              }
+              disabled={view.inspection.enabled}
               type="range"
               min={0}
               max={100}

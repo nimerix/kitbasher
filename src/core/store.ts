@@ -137,6 +137,15 @@ export const useEditor = create<EditorState>((set, get) => ({
   paintHistory: [],
   operation: blankOperation(),
   view: {
+    inspection: {
+      enabled: false,
+      scope: 'all',
+      distance: 0.5,
+      overlap: true,
+      proximity: true,
+      closestPoints: false,
+      context: true,
+    },
     orbitSelection: readOrbitPreference(),
     grid: true,
     joints: false,
@@ -190,12 +199,10 @@ export const useEditor = create<EditorState>((set, get) => ({
       };
     }),
   setNavigationMode: (navigationMode) =>
-    set((state) => ({
+    set(() => ({
       navigationMode,
       pivotPicking: false,
       painting: false,
-      pivotRequest:
-        state.pivotRequest + (navigationMode === 'orbit' && state.view.orbitSelection ? 1 : 0),
     })),
   centerOrbit: () => {
     const state = get();
@@ -738,7 +745,6 @@ export const useEditor = create<EditorState>((set, get) => ({
     if (patch.orbitSelection !== undefined) saveOrbitPreference(patch.orbitSelection);
     set((state) => ({
       view: { ...state.view, ...patch },
-      pivotRequest: state.pivotRequest + (patch.orbitSelection === true ? 1 : 0),
     }));
   },
   setModal: (modal) => set({ modal }),

@@ -53,6 +53,27 @@ function close(a: number[], b: number[], precision = 5) {
   a.forEach((value, i) => expect(value).toBeCloseTo(b[i], precision));
 }
 
+function orbitsAround(
+  before: Awaited<ReturnType<typeof cameraState>>,
+  after: Awaited<ReturnType<typeof cameraState>>,
+  pivot: number[],
+) {
+  const rotation = new Quaternion(...after.quaternion).multiply(
+    new Quaternion(...before.quaternion).invert(),
+  );
+  for (const key of ['position', 'target'] as const)
+    close(
+      after[key],
+      new Vector3(...before[key])
+        .sub(new Vector3(...pivot))
+        .applyQuaternion(rotation)
+        .add(new Vector3(...pivot))
+        .toArray(),
+      4,
+    );
+  expect(after.distance).toBeCloseTo(before.distance, 4);
+}
+
 const torsoCenter = [0, 75.75, 1.375];
 
 test.beforeEach(async ({ page }) => {
@@ -69,7 +90,9 @@ test('orbits and pans with real left drags and buttons without moving or deselec
   page.on('pageerror', (error) => errors.push(error.message));
   const before = await cameraState(page);
   await page.getByRole('button', { name: 'Orbit tool (O)', exact: true }).click();
-  await expect.poll(async () => (await cameraState(page)).target).toEqual(torsoCenter);
+  close((await cameraState(page)).position, before.position);
+  close((await cameraState(page)).target, before.target);
+  await page.keyboard.press('.');
   const centered = await cameraState(page);
   await dragView(page);
   await page.keyboard.press('h'); // Settles any orbit damping before the pan begins.
@@ -111,7 +134,7 @@ test('orbits and pans with real left drags and buttons without moving or deselec
   const orbitBefore = await cameraState(page);
   await page.getByRole('button', { name: 'Orbit up', exact: true }).click();
   const orbitAfter = await cameraState(page);
-  close(orbitAfter.target, torsoCenter);
+  orbitsAround(orbitBefore, orbitAfter, torsoCenter);
   expect(orbitAfter.distance).toBeCloseTo(orbitBefore.distance, 5);
   expect(
     new Vector3(...orbitAfter.position).distanceTo(new Vector3(...orbitBefore.position)),
@@ -150,9 +173,19 @@ test('sets a selection pivot without zooming, toggles the default, and persists 
   await page.keyboard.press('o');
   const selected = await cameraState(page);
   expect(selected.selection).toEqual(['arm-L']);
-  expect(selected.target).not.toEqual(torsoCenter);
   await dragView(page, 60, 15);
-  close((await cameraState(page)).target, selected.target);
+  await page.keyboard.press('Escape');
+  const armPivot = await page.evaluate(async () => {
+    const resource = performance.getEntriesByType('resource').map((entry) => entry.name);
+    const store = (
+      await import(resource.find((url) => /\/src\/core\/store\.ts(?:\?.*)?$/.test(url))!)
+    ).useEditor.getState();
+    const navigation = await import(
+      resource.find((url) => /\/src\/core\/navigation\.ts(?:\?.*)?$/.test(url))!
+    );
+    return navigation.selectionOrbitCenter(store.scene.parts, store.selected).toArray();
+  });
+  orbitsAround(selected, await cameraState(page), armPivot);
 });
 
 test('navigates during alignment and returns to the same picked source', async ({ page }) => {
@@ -204,8 +237,12 @@ test('supports orthographic camera navigation and leaves shortcuts alone in text
   expect(panned.target).not.toEqual(centered.target);
   expect(panned.zoom).toBe(centered.zoom);
   await page.keyboard.press('o');
+  close((await cameraState(page)).position, panned.position);
+  close((await cameraState(page)).target, panned.target);
   await page.getByRole('button', { name: 'Orbit left', exact: true }).click();
-  expect((await cameraState(page)).zoom).toBe(centered.zoom);
+  const rotated = await cameraState(page);
+  orbitsAround(panned, rotated, torsoCenter);
+  expect(rotated.zoom).toBe(centered.zoom);
   await page.keyboard.press('Escape');
   const search = page.getByRole('textbox', { name: 'Search parts' });
   await search.fill('o.h');
@@ -249,9 +286,7 @@ test('keeps camera tools and selection controls accessible on a narrow screen', 
   expect(overflow).toBe(false);
 });
 
-test('uses the moved selection as the default drag pivot and lets right-drag pan freely', async ({
-  page,
-}) => {
+test('preserves pan when orbiting a moved selection with drags and buttons', async ({ page }) => {
   const x = page.getByRole('spinbutton', { name: 'Position X', exact: true });
   await x.fill('35');
   await x.press('Enter');
@@ -260,7 +295,7 @@ test('uses the moved selection as the default drag pivot and lets right-drag pan
   await page.keyboard.press('h'); // Settle damping, then return to normal selection.
   await page.keyboard.press('Escape');
   const orbited = await cameraState(page);
-  close(orbited.target, [35, 75.75, 1.375]);
+  orbitsAround(before, orbited, [35, 75.75, 1.375]);
   expect(orbited.selection).toEqual(['torso']);
   expect(orbited.parts).toEqual(before.parts);
   await dragView(page, 60, -10, 'right');
@@ -273,5 +308,33 @@ test('uses the moved selection as the default drag pivot and lets right-drag pan
   await dragView(page, -55, 5);
   await page.keyboard.press('h');
   await page.keyboard.press('Escape');
-  close((await cameraState(page)).target, [35, 75.75, 1.375]);
+  const afterDrag = await cameraState(page);
+  orbitsAround(panned, afterDrag, [35, 75.75, 1.375]);
+  await page.keyboard.press('o');
+  close((await cameraState(page)).position, afterDrag.position);
+  close((await cameraState(page)).target, afterDrag.target);
+  await page.getByRole('button', { name: 'Orbit right', exact: true }).click();
+  orbitsAround(afterDrag, await cameraState(page), [35, 75.75, 1.375]);
+});
+
+test('retains the panned view around a clicked surface pivot', async ({ page }) => {
+  await page.keyboard.press('p');
+  const box = (await page.locator('canvas').boundingBox())!;
+  await page.locator('canvas').click({ position: { x: box.width * 0.5, y: box.height * 0.43 } });
+  await expect(page.getByText(/Pivot set · orbit, rotate/)).toBeVisible();
+  const pivot = (await cameraState(page)).target;
+  await page.keyboard.press('h');
+  await page.getByRole('button', { name: 'Pan right', exact: true }).click();
+  const panned = await cameraState(page);
+  expect(panned.target).not.toEqual(pivot);
+  await page.keyboard.press('o');
+  close((await cameraState(page)).position, panned.position);
+  close((await cameraState(page)).target, panned.target);
+  await dragView(page, 40, -15);
+  await page.keyboard.press('Escape');
+  const afterDrag = await cameraState(page);
+  orbitsAround(panned, afterDrag, pivot);
+  await page.keyboard.press('o');
+  await page.getByRole('button', { name: 'Orbit down', exact: true }).click();
+  orbitsAround(afterDrag, await cameraState(page), pivot);
 });
