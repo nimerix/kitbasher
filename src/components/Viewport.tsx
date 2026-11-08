@@ -738,7 +738,9 @@ export function Viewport() {
         <div className="pick-prompt paint-prompt">
           <span>
             {op.activeSurface
-              ? `Paint the ${op.activeSurface.side === 'source' ? 'moving' : 'target'} patch · pair ${op.surfacePairs.findIndex((pair) => pair.id === op.activeSurface!.pairId) + 1}`
+              ? op.surfaceMethod === 'flush'
+                ? `Paint across both sides of seam ${op.surfacePairs.findIndex((pair) => pair.id === op.activeSurface!.pairId) + 1} · add seams to protect other connections`
+                : `Paint the ${op.activeSurface.side === 'source' ? 'moving' : 'target'} patch · pair ${op.surfacePairs.findIndex((pair) => pair.id === op.activeSurface!.pairId) + 1}`
               : 'Choose a patch to paint, add a pair, or fit'}
           </span>
           <small>Middle / Space: orbit · Right: pan</small>

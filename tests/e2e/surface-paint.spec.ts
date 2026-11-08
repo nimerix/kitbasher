@@ -1,5 +1,5 @@
 import { expect, test, type Page } from '@playwright/test';
-import { PlaneGeometry, Vector3 } from 'three';
+import { PlaneGeometry, Quaternion, Vector3 } from 'three';
 import { serializeGeometry } from '../../src/core/geometry';
 import { readSavedScene } from './saved-scene';
 
@@ -102,13 +102,13 @@ async function paintPair(page: Page, index: number, local: number[]) {
   await paint(page, 'target', local);
   await page.getByRole('button', { name: 'Finish pair', exact: true }).click();
 }
-async function openFixture(page: Page) {
+async function openFixture(page: Page, scene = fixture) {
   await page.goto('/');
   await expect(page.locator('canvas')).toBeVisible();
   await page.getByLabel('Open Kitbasher scene').setInputFiles({
     name: 'paint.kitbash',
     mimeType: 'application/json',
-    buffer: Buffer.from(JSON.stringify(fixture)),
+    buffer: Buffer.from(JSON.stringify(scene)),
   });
   await page.getByRole('button', { name: 'Open scene', exact: true }).click();
   await page.locator('.part-select[title="Moving plate"]').click();
@@ -117,6 +117,84 @@ async function openFixture(page: Page) {
   await expect(page.locator('.document-title')).toContainText(fixture.name);
   await expect(page).toHaveTitle('Kitbasher — Assembly workbench');
 }
+
+test('paints across gaps in either direction, previews all seams, and applies an undoable flush correction', async ({
+  page,
+}) => {
+  const scene = structuredClone(fixture);
+  scene.parts[0].position = [-17, 54, 0.8];
+  scene.parts[0].quaternion = new Quaternion()
+    .setFromAxisAngle(new Vector3(0, 1, 0), 0.08)
+    .toArray();
+  scene.parts[1].position = [17, 54, 0];
+  await openFixture(page, scene);
+  await page.keyboard.press('b');
+  await page.getByRole('combobox', { name: 'Surface relationship' }).selectOption('flush');
+  await expect(page.getByRole('button', { name: 'Apply flush fit', exact: true })).toBeDisabled();
+  await expect(
+    page.getByRole('switch', { name: 'Opposing face normals', exact: true }),
+  ).toHaveCount(0);
+  const before = await editorState(page);
+  for (const [index, height] of [-8, 8].entries()) {
+    if (index) await page.getByRole('button', { name: 'Add seam', exact: true }).click();
+    const moving = await screenPoint(page, 'moving', [12, height, 0]);
+    const target = await screenPoint(page, 'target', [-12, height, 0]);
+    const [start, end] = index ? [target, moving] : [moving, target];
+    await page.mouse.move(start.x, start.y);
+    await page.mouse.down();
+    await page.mouse.move(end.x, end.y, { steps: 24 });
+    await page.mouse.up();
+    const pair = (await editorState(page)).operation.surfacePairs[index];
+    expect(pair.source!.faces.length).toBeGreaterThan(0);
+    expect(pair.target!.faces.length).toBeGreaterThan(0);
+  }
+  await expect(page.getByLabel('Flush alignment residual')).toContainText('mm height RMS');
+  await expect(page.getByText(/Seam 2:.*mm height/)).toBeVisible();
+  expect((await editorState(page)).parts).toEqual(before.parts);
+  expect((await editorState(page)).camera).toEqual(before.camera);
+  const ghost = await page.evaluate(async () => {
+    const url = performance
+      .getEntriesByType('resource')
+      .map((entry) => entry.name)
+      .find((url) => url.includes('/@react-three_fiber.js'))!;
+    const fiber = await import(url);
+    return !!fiber._roots
+      .get(document.querySelector('canvas'))
+      .store.getState()
+      .scene.getObjectByName('flush-preview:moving');
+  });
+  expect(ghost).toBe(true);
+  await page.screenshot({ path: '/tmp/kitbasher-flush-preview.png' });
+  await page.getByRole('button', { name: 'Undo last paint stroke', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'Apply flush fit', exact: true })).toBeDisabled();
+  expect((await editorState(page)).operation.surfacePairs[1]).toMatchObject({
+    source: null,
+    target: null,
+  });
+  const moving = await screenPoint(page, 'moving', [12, 8, 0]);
+  const target = await screenPoint(page, 'target', [-12, 8, 0]);
+  await page.mouse.move(moving.x, moving.y);
+  await page.mouse.down();
+  await page.mouse.move(target.x, target.y, { steps: 24 });
+  await page.mouse.up();
+  await page.getByRole('button', { name: 'Apply flush fit', exact: true }).click();
+  await expect(page.getByText(/Flush fit applied · 2 seams/)).toBeVisible();
+  const applied = await editorState(page);
+  expect(applied.parts[1]).toEqual(before.parts[1]);
+  expect(Math.abs(applied.parts[0].position[0] + 17)).toBeLessThan(0.2);
+  expect(Math.abs(applied.parts[0].position[2])).toBeLessThan(0.01);
+  expect(new Quaternion(...applied.parts[0].quaternion).angleTo(new Quaternion())).toBeLessThan(
+    0.001,
+  );
+  await page.keyboard.press('Control+z');
+  expect((await editorState(page)).parts).toEqual(before.parts);
+  await page.keyboard.press('Control+Shift+z');
+  expect((await editorState(page)).parts).toEqual(applied.parts);
+  const download = page.waitForEvent('download');
+  await page.getByRole('button', { name: 'Save scene', exact: true }).click();
+  const saved = await readSavedScene((await (await download).path())!);
+  expect(saved.scene.parts[0].position).toEqual(applied.parts[0].position);
+});
 
 test('paints real paired patches, erases and undoes strokes, preserves them through navigation, and fits 4 pairs', async ({
   page,
@@ -243,4 +321,11 @@ test('keeps paint controls and pivot picking reachable on a narrow screen', asyn
   expect((await editorState(page)).operation.mode).toBe('surface');
   expect(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth)).toBe(false);
   expect(await page.locator('vite-error-overlay').count()).toBe(0);
+  await page.getByRole('button', { name: 'Show inspector', exact: true }).click();
+  await page.getByRole('combobox', { name: 'Surface relationship' }).selectOption('flush');
+  await expect(page.getByRole('button', { name: 'Apply flush fit', exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Apply flush fit', exact: true })).toBeDisabled();
+  await expect(page.getByRole('button', { name: 'Add seam', exact: true })).toBeVisible();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth)).toBe(false);
+  await page.screenshot({ path: '/tmp/kitbasher-flush-mobile.png' });
 });

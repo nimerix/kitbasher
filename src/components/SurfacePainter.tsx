@@ -1,9 +1,10 @@
 import { useEffect, useMemo } from 'react';
 import { Html } from '@react-three/drei';
-import { DoubleSide, Quaternion, Vector3 } from 'three';
+import { DoubleSide, MeshBasicMaterial, Quaternion, Vector3 } from 'three';
 import { useEditor } from '../core/store';
 import { contactColors, patchCenter, patchGeometry } from '../core/surfaces';
 import { worldNormal, worldPoint } from '../core/geometry';
+import { solveAlignment } from '../core/alignment';
 import type { Part, SurfacePatch, SurfacePoint } from '../core/types';
 
 function PaintedPatch({
@@ -58,6 +59,7 @@ export function SurfacePaintOverlay() {
   if (!visible) return null;
   return (
     <>
+      <FlushPreview />
       {pairs.flatMap((pair, index) =>
         (['source', 'target'] as const).map((side) => {
           const patch = pair[side],
@@ -73,6 +75,59 @@ export function SurfacePaintOverlay() {
           ) : null;
         }),
       )}
+    </>
+  );
+}
+
+function FlushPreview() {
+  const material = useMemo(
+    () =>
+      new MeshBasicMaterial({
+        color: '#63e5ec',
+        transparent: true,
+        opacity: 0.3,
+        depthWrite: false,
+        side: DoubleSide,
+      }),
+    [],
+  );
+  useEffect(() => () => material.dispose(), [material]);
+  const scene = useEditor((state) => state.scene),
+    operation = useEditor((state) => state.operation),
+    painting = useEditor((state) => state.painting);
+  const parts = useMemo(() => {
+    if (painting || operation.surfaceMethod !== 'flush') return [];
+    try {
+      return solveAlignment(scene, operation).parts.filter((part) => {
+        const original = scene.parts.find((entry) => entry.id === part.id)!;
+        return (
+          part.visible &&
+          [...part.position, ...part.quaternion].some(
+            (value, index) =>
+              Math.abs(value - [...original.position, ...original.quaternion][index]) > 1e-6,
+          )
+        );
+      });
+    } catch {
+      return [];
+    }
+  }, [scene, operation, painting]);
+  return (
+    <>
+      {parts.map((part) => (
+        <mesh
+          key={part.id}
+          name={`flush-preview:${part.id}`}
+          geometry={part.geometry}
+          material={material}
+          position={part.position}
+          quaternion={part.quaternion}
+          scale={part.scale}
+          raycast={() => {}}
+          renderOrder={4}
+          dispose={null}
+        />
+      ))}
     </>
   );
 }

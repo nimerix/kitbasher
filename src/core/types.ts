@@ -35,7 +35,7 @@ export interface Joint {
 }
 
 export type PlaneConstraintKind = 'mate' | 'parallel' | 'perpendicular' | 'angle';
-export type SurfaceMethod = 'contact' | PlaneConstraintKind;
+export type SurfaceMethod = 'contact' | 'flush' | PlaneConstraintKind;
 export interface PlaneFrame {
   point: Vec3;
   normal: Vec3;

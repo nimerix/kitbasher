@@ -112,6 +112,36 @@ for an empty workbench or to reload the sample.
    deform the scan or perform collision avoidance. Unfinished pairs must be
    completed or removed before fitting.
 
+   **Paint flush:** press **B**, then choose **Paint flush · across seams** in
+   **Surface relationship**. Choose the moving part and drag from its outer
+   surface across a gap onto the neighboring part. The stroke automatically
+   paints both sides, without a separate target-paint step. With the moving part
+   chosen, strokes can also start on the neighbor. Use **Add seam** for every
+   additional connection you want to keep aligned; each seam can reference a
+   different stationary neighbor. Repaint either side to extend it, or use
+   **Alt / Erase** and stroke undo to revise it.
+
+   Flush fitting balances all painted regions in one rigid rotation/translation,
+   matching local surface-plane height and outward normal direction rather than
+   pulling patch centers together. Free sideways spacing is preserved, and a
+   small motion penalty favors minimal corrections. This is a local adjustment,
+   limited to 30° from the starting orientation. Paint small, locally flat areas
+   near the seam; broad curved areas only supply approximate fitted planes.
+   The cyan ghost previews the result without moving the original geometry.
+   Per-seam height and tilt errors, plus overall height RMS / maximum tilt,
+   describe the achieved fit. Conflicting seams or existing constraints can
+   leave a compromise; residuals above 0.05 mm or 1° are flagged, not called exact.
+
+   **Apply flush fit** makes one undoable edit. All painted neighbors stay fixed,
+   and existing joints, locked parts, and retained plane constraints remain
+   authoritative. Connected descendants may follow the moving part. Unpainted
+   connections without joints or constraints are not automatically protected.
+   This does not scale, deform, weld, fill gaps, or check collisions. Painted
+   regions are temporary and reset on apply, cancel, or switching into/out of
+   flush mode; the applied transforms are saved normally with the scene. Use
+   retained plane constraints or joints for relationships that must persist
+   through future edits.
+
    For coarse placement, choose a **Surface relationship** using one or more
    complete painted pairs. Planes are fitted across each patch by triangle area,
    so dense scan tessellation does not bias the orientation:

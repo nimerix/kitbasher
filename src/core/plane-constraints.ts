@@ -99,7 +99,8 @@ export function constraintsFromPatches(
   if (!pairs.length || pairs.length !== operation.surfacePairs.length)
     throw new Error('Finish at least one painted plane pair, or remove incomplete pairs.');
   const kind = operation.surfaceMethod;
-  if (!kind || kind === 'contact') throw new Error('Choose a plane relationship.');
+  if (!kind || kind === 'contact' || kind === 'flush')
+    throw new Error('Choose a plane relationship.');
   return pairs.map((pair, i) => {
     if (pair.source!.partId !== source.id || pair.target!.partId !== target.id)
       throw new Error('Every plane pair must use the chosen moving and target parts.');

@@ -8,6 +8,7 @@ import {
 import { isJointConnected, transformAssembly } from './constraints';
 import { surfaceAlignment, surfaceResidual } from './surface-fit';
 import { resolvePart } from './references';
+import { solveFlushAlignment } from './flush-fit';
 import {
   constraintsFromPatches,
   planeConstraintResidual,
@@ -23,6 +24,8 @@ export function solveAlignment(scene: SceneDocument, operation: AssemblyOperatio
   if (source.locked) throw new Error('Unlock the moving part first.');
   if (operation.pending)
     throw new Error('Finish the pending target pick before applying alignment.');
+  if (operation.mode === 'surface' && operation.surfaceMethod === 'flush')
+    return solveFlushAlignment(scene, operation);
   const planar =
     operation.mode === 'surface' &&
     operation.surfaceMethod &&

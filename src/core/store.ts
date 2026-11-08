@@ -172,7 +172,11 @@ const changed = (state: EditorState, scene: SceneDocument, checkpoint = true) =>
 /** Picks on a removed part can never be completed, so restart the active tool. */
 const withoutRemovedParts = (state: EditorState, ids: string[]) => {
   const op = state.operation;
-  const stale = [op.sourceId, op.targetId].some((id) => id && ids.includes(id));
+  const stale = [
+    op.sourceId,
+    op.targetId,
+    ...op.surfacePairs.flatMap((pair) => [pair.source?.partId, pair.target?.partId]),
+  ].some((id) => id && ids.includes(id));
   return {
     measurement: state.measurement.filter((point) => !ids.includes(point.partId)),
     ...(stale ? { operation: blankOperation(op.mode), painting: false, paintHistory: [] } : {}),
@@ -424,8 +428,8 @@ export const useEditor = create<EditorState>((set, get) => ({
     })),
   paintSurface: (point, face, erase = false, begin = false) => {
     const state = get(),
-      op = state.operation,
-      active = op.activeSurface;
+      op = state.operation;
+    let active = op.activeSurface;
     if (
       state.tool !== 'align' ||
       op.mode !== 'surface' ||
@@ -441,11 +445,24 @@ export const useEditor = create<EditorState>((set, get) => ({
       if (begin) state.notify('Reset the exploded view before painting surfaces.', 'info');
       return false;
     }
+    const flush = op.surfaceMethod === 'flush';
+    if (flush)
+      active = {
+        pairId: active.pairId,
+        side: op.sourceId
+          ? point.partId === op.sourceId
+            ? 'source'
+            : 'target'
+          : point.partId === op.targetId
+            ? 'target'
+            : 'source',
+      };
     const pair = op.surfacePairs.find((pair) => pair.id === active.pairId);
     if (!pair) return false;
-    const expected = active.side === 'source' ? op.sourceId : op.targetId;
+    const expected =
+      active.side === 'source' ? op.sourceId : flush ? pair.target?.partId : op.targetId;
     let message = '';
-    if (active.side === 'target' && !pair.source?.faces.length)
+    if (!flush && active.side === 'target' && !pair.source?.faces.length)
       message = 'Paint the moving patch for this pair first.';
     else if (active.side === 'target' && point.partId === op.sourceId)
       message = 'Paint the matching patch on a different target part.';
@@ -497,8 +514,14 @@ export const useEditor = create<EditorState>((set, get) => ({
         ? {
             operation: {
               ...op,
+              activeSurface: active,
               sourceId: active.side === 'source' ? point.partId : op.sourceId,
-              targetId: active.side === 'target' ? point.partId : op.targetId,
+              targetId:
+                active.side === 'target'
+                  ? flush
+                    ? (op.targetId ?? point.partId)
+                    : point.partId
+                  : op.targetId,
               surfacePairs: op.surfacePairs.map((entry) =>
                 entry.id === pair.id
                   ? {
@@ -546,6 +569,9 @@ export const useEditor = create<EditorState>((set, get) => ({
       const op = state.operation;
       const reset =
         (patch.mode !== undefined && patch.mode !== op.mode) ||
+        (patch.surfaceMethod !== undefined &&
+          patch.surfaceMethod !== op.surfaceMethod &&
+          (patch.surfaceMethod === 'flush' || op.surfaceMethod === 'flush')) ||
         ('sourceId' in patch && patch.sourceId !== op.sourceId) ||
         ('targetId' in patch && patch.targetId !== op.targetId);
       const mode = patch.mode ?? state.operation.mode;
@@ -663,16 +689,27 @@ export const useEditor = create<EditorState>((set, get) => ({
         paintHistory: [],
       });
       state.notify(
-        (op.mode === 'surface' && op.surfaceMethod && op.surfaceMethod !== 'contact'
-          ? `${planeKindLabels[op.surfaceMethod]} applied${addedConstraints?.length ? ` · ${addedConstraints.length} active plane ${addedConstraints.length === 1 ? 'constraint' : 'constraints'}` : ''}`
-          : op.mode === 'surface'
-            ? `Fitted ${completedSurfacePairs(op.surfacePairs).length} surface pairs · ${rms.toFixed(3)} mm contact RMS`
-            : op.mode === 'multi'
-              ? `Aligned ${op.pairs.length} pairs · ${rms.toFixed(3)} mm RMS`
-              : anchored
-                ? `Parts aligned · ${rms.toFixed(3)} mm residual`
-                : 'Parts aligned') +
-          (constrained ? ' · limited by joint constraints' : anchored ? ' · anchor connected' : ''),
+        (op.mode === 'surface' && op.surfaceMethod === 'flush'
+          ? `Flush fit applied · ${completedSurfacePairs(op.surfacePairs).length} seams · ${rms.toFixed(3)} mm height RMS`
+          : op.mode === 'surface' &&
+              op.surfaceMethod &&
+              op.surfaceMethod !== 'contact' &&
+              op.surfaceMethod !== 'flush'
+            ? `${planeKindLabels[op.surfaceMethod]} applied${addedConstraints?.length ? ` · ${addedConstraints.length} active plane ${addedConstraints.length === 1 ? 'constraint' : 'constraints'}` : ''}`
+            : op.mode === 'surface'
+              ? `Fitted ${completedSurfacePairs(op.surfacePairs).length} surface pairs · ${rms.toFixed(3)} mm contact RMS`
+              : op.mode === 'multi'
+                ? `Aligned ${op.pairs.length} pairs · ${rms.toFixed(3)} mm RMS`
+                : anchored
+                  ? `Parts aligned · ${rms.toFixed(3)} mm residual`
+                  : 'Parts aligned') +
+          (constrained
+            ? op.surfaceMethod === 'flush'
+              ? ' · imperfect fit: review seam residuals, locks, and connections'
+              : ' · limited by joint constraints'
+            : anchored
+              ? ' · anchor connected'
+              : ''),
         constrained ? 'info' : 'success',
       );
     } catch (error) {

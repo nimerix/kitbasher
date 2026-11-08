@@ -530,9 +530,11 @@ function AssemblyInspector() {
     { id: 'multi', label: '3+ point fit' },
     { id: 'surface', label: 'Paint contact surfaces' },
   ];
-  const isPlaneSurface = isSurface && op.surfaceMethod && op.surfaceMethod !== 'contact';
+  const isFlush = isSurface && op.surfaceMethod === 'flush';
+  const isPlaneSurface =
+    isSurface && op.surfaceMethod && op.surfaceMethod !== 'contact' && !isFlush;
   const enoughPairs = isSurface
-    ? completedSurfacePairs(op.surfacePairs).length >= (isPlaneSurface ? 1 : 3) &&
+    ? completedSurfacePairs(op.surfacePairs).length >= (isPlaneSurface || isFlush ? 1 : 3) &&
       completedSurfacePairs(op.surfacePairs).length === op.surfacePairs.length
     : op.pairs.length >= (op.mode === 'multi' && !isJoint ? 3 : 1);
   const preview = useMemo(() => {
@@ -555,13 +557,21 @@ function AssemblyInspector() {
             {isJoint ? <Link2 size={22} /> : <ScanLine size={22} />}
           </div>
           <h2>
-            {isJoint ? 'Connect your parts' : isSurface ? 'Paint a closer fit' : 'A perfect fit'}
+            {isJoint
+              ? 'Connect your parts'
+              : isFlush
+                ? 'Paint seams flush'
+                : isSurface
+                  ? 'Paint a closer fit'
+                  : 'A perfect fit'}
           </h2>
           <p>
             {isJoint
               ? 'Pick two anchors. Keep them connected.'
               : isSurface
-                ? 'Mark the surfaces that belong together.'
+                ? isFlush
+                  ? 'Correct tilt and height, not sideways spacing.'
+                  : 'Mark the surfaces that belong together.'
                 : 'A little precision. Everything in place.'}
           </p>
         </div>
@@ -640,6 +650,11 @@ function AssemblyInspector() {
               rms={preview?.result?.rms}
               constrained={preview?.result?.constrained}
               angleError={preview?.result?.angleError}
+              regionErrors={
+                preview?.result && 'regionErrors' in preview.result
+                  ? preview.result.regionErrors
+                  : undefined
+              }
             />
           ) : (
             <>
@@ -738,6 +753,13 @@ function AssemblyInspector() {
               {preview.error}
             </p>
           ) : null}
+          {isFlush && preview?.result?.constrained ? (
+            <p className="field-help fit-error" role="status">
+              Some seams remain more than 0.05 mm or 1° out of alignment. Review the cyan preview
+              and each seam’s errors before applying this compromise. Conflicting regions, locks,
+              joints, or the 30° local correction limit can prevent a perfect fit.
+            </p>
+          ) : null}
           {sourceJoint && !isJoint ? (
             <p className="field-help">
               Keep connected is on. Alignment keeps the anchor and axis locks, and may carry
@@ -771,7 +793,9 @@ function AssemblyInspector() {
         ) : op.mode !== 'multi' ? (
           <Section title="Alignment options">
             {op.mode === 'plane' ||
-            (isSurface && (!isPlaneSurface || ['mate', 'parallel'].includes(op.surfaceMethod!))) ? (
+            (isSurface &&
+              !isFlush &&
+              (!isPlaneSurface || ['mate', 'parallel'].includes(op.surfaceMethod!))) ? (
               <div className="appearance-row">
                 <span>Opposing face normals</span>
                 <button
@@ -785,7 +809,7 @@ function AssemblyInspector() {
                 </button>
               </div>
             ) : null}
-            {!isPlaneSurface || op.surfaceMethod === 'mate' ? (
+            {(!isPlaneSurface && !isFlush) || op.surfaceMethod === 'mate' ? (
               <div className="offset-field">
                 <span>Surface offset</span>
                 <div>
@@ -829,17 +853,19 @@ function AssemblyInspector() {
               </div>
             ) : null}
             <p className="field-help">
-              {isPlaneSurface
-                ? op.surfaceMethod === 'mate'
-                  ? 'Seats fitted planes with the signed offset. Sliding within the plane and rotation around its normal remain free. Retained constraints are editable in the Constraints tab.'
-                  : 'Sets the angle between fitted plane normals. Translation and rotation that preserve this angle remain free. Retained constraints are editable in the Constraints tab.'
-                : isSurface
-                  ? 'Uses all painted patches in a rigid surface fit. Contact RMS measures sampled distance to the matching patches; joint constraints may limit the fit.'
-                  : op.mode === 'point-plane'
-                    ? 'Projects the source point onto the target plane without changing rotation.'
-                    : op.mode === 'plane'
-                      ? 'Uses the picked face normals to orient and seat the moving part.'
-                      : 'Moves the source point onto its matching target. Rotation stays unchanged.'}
+              {isFlush
+                ? 'Matches outward surface planes without pulling patch centers together. Uses the smallest practical local correction (up to 30°), keeps scale and mesh shape unchanged, and does not weld or fill gaps. Paint small, locally flat areas near each seam. Apply is undoable; paint regions are temporary.'
+                : isPlaneSurface
+                  ? op.surfaceMethod === 'mate'
+                    ? 'Seats fitted planes with the signed offset. Sliding within the plane and rotation around its normal remain free. Retained constraints are editable in the Constraints tab.'
+                    : 'Sets the angle between fitted plane normals. Translation and rotation that preserve this angle remain free. Retained constraints are editable in the Constraints tab.'
+                  : isSurface
+                    ? 'Uses all painted patches in a rigid surface fit. Contact RMS measures sampled distance to the matching patches; joint constraints may limit the fit.'
+                    : op.mode === 'point-plane'
+                      ? 'Projects the source point onto the target plane without changing rotation.'
+                      : op.mode === 'plane'
+                        ? 'Uses the picked face normals to orient and seat the moving part.'
+                        : 'Moves the source point onto its matching target. Rotation stays unchanged.'}
             </p>
           </Section>
         ) : null}
@@ -850,13 +876,15 @@ function AssemblyInspector() {
           aria-label={
             isJoint
               ? 'Create joint'
-              : isPlaneSurface
-                ? op.retainConstraint
-                  ? 'Create plane constraints'
-                  : `Apply ${planeKindLabels[op.surfaceMethod as keyof typeof planeKindLabels].toLowerCase()}`
-                : isSurface
-                  ? 'Fit contact surfaces'
-                  : 'Apply alignment'
+              : isFlush
+                ? 'Apply flush fit'
+                : isPlaneSurface
+                  ? op.retainConstraint
+                    ? 'Create plane constraints'
+                    : `Apply ${planeKindLabels[op.surfaceMethod as keyof typeof planeKindLabels].toLowerCase()}`
+                  : isSurface
+                    ? 'Fit contact surfaces'
+                    : 'Apply alignment'
           }
           disabled={!ready}
           onClick={() =>
@@ -866,13 +894,15 @@ function AssemblyInspector() {
           {isJoint ? <Link2 size={15} /> : <Check size={15} />}{' '}
           {isJoint
             ? 'Create joint'
-            : isPlaneSurface
-              ? op.retainConstraint
-                ? 'Create plane constraints'
-                : `Apply ${planeKindLabels[op.surfaceMethod as keyof typeof planeKindLabels].toLowerCase()}`
-              : isSurface
-                ? 'Fit contact surfaces'
-                : 'Apply alignment'}
+            : isFlush
+              ? 'Apply flush fit'
+              : isPlaneSurface
+                ? op.retainConstraint
+                  ? 'Create plane constraints'
+                  : `Apply ${planeKindLabels[op.surfaceMethod as keyof typeof planeKindLabels].toLowerCase()}`
+                : isSurface
+                  ? 'Fit contact surfaces'
+                  : 'Apply alignment'}
           <kbd>↵</kbd>
         </button>
         <button className="cancel-operation" onClick={() => useEditor.getState().setTool('select')}>
