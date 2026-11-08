@@ -580,7 +580,8 @@ function HelpDialog() {
   const controls = [
     ['Orbit tool', 'O · left drag or direction buttons'],
     ['Pan tool', 'H · left drag or direction buttons'],
-    ['Orbit', 'Left drag on empty space'],
+    ['Orbit while picking / painting', 'Middle drag / hold Space + drag'],
+    ['Fine move / rotate / scale', 'Hold Shift while dragging · 10× finer'],
     ['Pan', 'Right drag or Shift + left drag'],
     ['Zoom', 'Scroll / pinch'],
     ['Select multiple', 'Shift / Ctrl / ⌘ + click'],
@@ -651,8 +652,19 @@ function HelpDialog() {
             <li>For a 3+ point fit, add at least three pairs spread across a surface.</li>
             <li>
               For contact painting, paint a moving patch, then its matching target patch. Finish at
-              least three pairs and choose Fit contact surfaces. Use O or H to navigate between
-              strokes.
+              least three pairs and choose Fit contact surfaces. Middle-drag or hold Space to orbit,
+              or right-drag to pan, without losing your patches.
+            </li>
+            <li>
+              Paint stays on one connected surface. Enable Stay on seed plane to limit both face
+              angle and distance from your first hit. Use a separate pair for each disconnected
+              patch.
+            </li>
+            <li>
+              For coarse placement, choose Mate planes, Parallel, Perpendicular, or Angle with one
+              or more painted pairs. Keep constraint active saves the relationship; edit, suppress,
+              or delete it in the Constraints tab. Plane mates allow sliding and twisting; angle
+              constraints leave translation free.
             </li>
             <li>
               Press P and click a spot to set a saved pivot for orbit, rotation, and scale.

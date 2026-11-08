@@ -34,10 +34,31 @@ export interface Joint {
   keepConnected: boolean;
 }
 
+export type PlaneConstraintKind = 'mate' | 'parallel' | 'perpendicular' | 'angle';
+export type SurfaceMethod = 'contact' | PlaneConstraintKind;
+export interface PlaneFrame {
+  point: Vec3;
+  normal: Vec3;
+}
+export interface PlaneConstraint {
+  id: string;
+  name: string;
+  sourceId: string;
+  targetId: string;
+  sourcePlane: PlaneFrame;
+  targetPlane: PlaneFrame;
+  kind: PlaneConstraintKind;
+  angle: number;
+  offset: number;
+  opposed: boolean;
+  enabled: boolean;
+}
+
 export interface SceneDocument {
   name: string;
   parts: Part[];
   joints: Joint[];
+  constraints?: PlaneConstraint[];
 }
 
 export interface SurfacePoint {
@@ -56,6 +77,14 @@ export type SurfaceSide = 'source' | 'target';
 export interface SurfacePatch {
   partId: string;
   faces: number[];
+  /** Fixed first hit; painting must not walk its reference plane around a curve. */
+  seed?: SurfacePoint & { face: number };
+}
+
+export interface BrushPlaneSettings {
+  enabled: boolean;
+  angle: number;
+  distance: number;
 }
 
 export interface SurfacePair {
@@ -76,6 +105,9 @@ export interface AssemblyOperation {
   offset: number;
   rotationLocks: AxisLocks;
   keepConnected: boolean;
+  surfaceMethod?: SurfaceMethod;
+  planeAngle?: number;
+  retainConstraint?: boolean;
 }
 
 export interface SerializedGeometry {
@@ -91,6 +123,7 @@ export interface SceneFile {
   name: string;
   parts: (Omit<Part, 'geometry'> & { geometry: SerializedGeometry })[];
   joints: Joint[];
+  constraints?: PlaneConstraint[];
 }
 
 export interface ViewSettings {

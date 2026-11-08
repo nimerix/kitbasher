@@ -41,6 +41,9 @@ for an empty workbench or to reload the sample.
 2. Select parts in the viewport or the searchable part tree. Shift-click selects
    several parts. Move, rotate, and scale using gizmos or numeric fields. Snapping
    supports 0.1, 0.5, 1, and 5 mm translation increments and 15° rotation steps.
+   Hold **Shift** during a gizmo drag for one-tenth movement, rotation, or scale
+   sensitivity. Press or release it mid-drag without jumping; the whole drag is
+   one undo step.
    Gizmos sit on the visible geometry, including scans with distant scanner
    origins. Press **P** (or **Pick surface pivot** in the Camera panel), then click a
    spot on a model to set its rotation, scale, and orbit pivot. A visible marker
@@ -84,7 +87,18 @@ for an empty workbench or to reload the sample.
    at least three complete pairs. There is no fixed limit on the pair count.
    Brush radius is in millimeters; **[ / ]** resize it, **Erase** or **Alt** removes
    paint, and **Undo last paint stroke** (also Ctrl/⌘ Z) restores the last stroke.
-   Use **O** / **H** for camera navigation, then **Esc** to resume painting.
+   **Middle-drag** or hold **Space** and left-drag to orbit while keeping the paint
+   tool and all picks. **Right-drag** pans and the wheel zooms. These gestures also
+   work during point alignment. **O** / **H** select persistent camera tools;
+   **Esc** returns to the alignment workflow.
+
+   Each painted patch grows through shared mesh edges and stays contiguous,
+   including across separate strokes. Nearby disconnected coplanar surfaces are
+   excluded. Erasing a bridge keeps the seeded component, or the largest remaining
+   component if the seed was erased. Use a separate pair for each disconnected
+   contact area. Enable **Stay on seed plane** to limit face angles and distances
+   from the patch's first hit with tolerances in degrees and millimeters. Clear
+   the patch to start with a different seed plane.
 
    **Fit contact surfaces** seeds a rigid fit from the patch centers and normals,
    then refines symmetric closest-surface matches within each numbered pair.
@@ -95,6 +109,24 @@ for an empty workbench or to reload the sample.
    distinguish similar or symmetric surfaces. It preserves scale and does not
    deform the scan or perform collision avoidance. Unfinished pairs must be
    completed or removed before fitting.
+
+   For coarse placement, choose a **Surface relationship** using one or more
+   complete painted pairs. Planes are fitted across each patch by triangle area,
+   so dense scan tessellation does not bias the orientation:
+   - **Mate planes:** match the normal direction and seat the moving plane at a
+     signed offset. Sliding in the plane and twisting around its normal remain free.
+   - **Parallel:** orient the normals in the same or opposing direction.
+   - **Perpendicular:** set a 90° angle between the normals.
+   - **Angle:** set an explicit 0–180° normal angle.
+
+   The angle-only methods rotate around the painted moving patch and leave its
+   position free. Turn on **Keep constraint active** to retain these relationships
+   through moves, rotations, and later alignments. The **Constraints** tab lets
+   you rename, edit, suppress, or delete them and inspect their residual errors.
+   Targets drive moving parts; multiple compatible plane equations can reduce
+   the remaining movement freedom. Joints and fixed part locks also apply. A
+   conflicting or circular relationship produces an error and keeps the previous
+   scene. Suppress a constraint to position the part freely.
 
 4. Choose **Joint**, pick moving and target anchors, and choose rotation locks.
    **Keep connected** is available when creating the joint and in the child
@@ -152,14 +184,15 @@ pair. Exploded view is disabled until inspection is closed.
 ## Save and export
 
 **Save scene** downloads a self-contained `.kitbash` file, including geometry,
-vertex colors, part transforms, names, visibility, fixed locks, and joints.
+vertex colors, part transforms, names, visibility, fixed locks, joints, and editable
+plane constraints.
 **File → Open scene** restores it. Changes also recover through IndexedDB in the
 same browser and origin. Recovery is not a replacement for a downloaded scene;
 clearing browser storage removes it. View/camera preferences are not in scene files.
 
 | Format         | Contents                                                                                                  |
 | -------------- | --------------------------------------------------------------------------------------------------------- |
-| `.kitbash`     | Complete editable assembly and joint definitions                                                          |
+| `.kitbash`     | Complete editable assembly, joint definitions, and plane constraints                                      |
 | `.glb`         | Separate named meshes, colors, and transforms; opens in Blender                                           |
 | Blender `.zip` | GLB plus `import_assembly.py`, which rebuilds joint anchors and rotation locks and saves `assembly.blend` |
 | `.3mf`         | Separate mesh objects and placement at millimeter scale                                                   |
@@ -175,6 +208,9 @@ rotate around that pivot while its surface anchor stays connected; mesh
 transforms are fixed to the pivot. Joints with **Keep connected** off retain their
 metadata but are exported without constraint parenting, leaving their parts free.
 Existing `.kitbash` scenes without this toggle load with Keep connected on.
+Painted plane constraints are retained as metadata in GLB and the Blender package;
+their current solved placement is exported, while live plane solving remains in
+Kitbasher. Older scenes without plane constraints open normally.
 
 Export all, visible, or selected parts. GLB uses meters as required by glTF. 3MF
 retains separate objects but does not store colors or joints in this exporter.
@@ -187,21 +223,22 @@ Use `⌘` on macOS or `Ctrl` on Windows/Linux for the standard shortcuts below.
 Both modifiers are accepted in the workbench. Text fields retain native selection,
 copy, cut, paste, and undo behavior; Save and Open also work while editing a field.
 
-| Action                                | Control                                           |
-| ------------------------------------- | ------------------------------------------------- |
-| Orbit                                 | Left drag; one-finger drag                        |
-| Pan                                   | Right drag; Shift + left drag; two-finger gesture |
-| Zoom                                  | Scroll, pinch, or viewport buttons                |
-| Select multiple                       | Shift / Ctrl / ⌘ + click                          |
-| Focus / frame all                     | `F` / `Home`                                      |
-| Center orbit / toggle orbit selection | `.` / `Shift + .`                                 |
-| Select / move / rotate / scale        | `V` / `G` / `R` / `S`                             |
-| Align / joint / measure               | `A` / `J` / `D`                                   |
-| Paint contacts / pick pivot           | `B` / `P`                                         |
-| Front / right / top / projection      | `1` / `3` / `7` / `5`                             |
-| Apply / cancel active operation       | `Enter` / `Esc`                                   |
-| Context menu                          | Right-click / `Shift + F10` / Menu key            |
-| Keyboard shortcut help                | `F1` / `?`                                        |
+| Action                                | Control                                                                          |
+| ------------------------------------- | -------------------------------------------------------------------------------- |
+| Orbit                                 | Middle drag; hold Space + left drag; left drag outside painting; one-finger drag |
+| Pan                                   | Right drag; Shift + left drag; two-finger gesture                                |
+| Zoom                                  | Scroll, pinch, or viewport buttons                                               |
+| Fine gizmo adjustment                 | Hold `Shift` during move / rotate / scale (10× finer)                            |
+| Select multiple                       | Shift / Ctrl / ⌘ + click                                                         |
+| Focus / frame all                     | `F` / `Home`                                                                     |
+| Center orbit / toggle orbit selection | `.` / `Shift + .`                                                                |
+| Select / move / rotate / scale        | `V` / `G` / `R` / `S`                                                            |
+| Align / joint / measure               | `A` / `J` / `D`                                                                  |
+| Paint contacts / pick pivot           | `B` / `P`                                                                        |
+| Front / right / top / projection      | `1` / `3` / `7` / `5`                                                            |
+| Apply / cancel active operation       | `Enter` / `Esc`                                                                  |
+| Context menu                          | Right-click / `Shift + F10` / Menu key                                           |
+| Keyboard shortcut help                | `F1` / `?`                                                                       |
 
 | Standard action                | Shortcut                                        |
 | ------------------------------ | ----------------------------------------------- |
@@ -221,8 +258,8 @@ copy, cut, paste, and undo behavior; Save and Open also work while editing a fie
 Select All includes hidden and locked components. Moving, cutting, and deleting
 still respect part locks. Component copy/cut/paste uses a clipboard within the
 open editor, which survives opening another scene and clears on page reload.
-It retains geometry, colors, transforms, pivots, and joints between copied parts;
-joints to parts outside the copied selection are detached. Copies paste with a
+It retains geometry, colors, transforms, pivots, joints, and plane constraints
+between copied parts. Relationships to parts outside the selection are omitted. Copies paste with a
 12 mm X offset, with an additional 12 mm for each paste. The first paste after a
 cut restores the original placement. Pasted parts are visible, unlocked, and
 selected, and scene changes can be undone.
@@ -249,8 +286,14 @@ context menu. The File and Edit menus expose the same commands and shortcuts.
 - Joints use a parent/child constraint tree, not a physics solver. There are no
   closed-loop assemblies or joint angle limits. Turn Keep connected off to bypass
   a joint temporarily; alignment can also run with the joint active.
-- Alignment uses picked triangle face normals, not a fitted average plane.
-  Multi-point registration assumes the source and target share the same scale.
+- Point-based plane alignment uses the picked triangle's face normal. Painted
+  plane relationships use an area-weighted fitted plane; paint a flatter patch
+  when the surface does not define a stable plane. Multi-point registration
+  assumes the source and target share the same scale.
+- Plane constraints are an initial mesh assembly constraint system, with directed
+  dependencies and bounded projection. They do not provide a complete Fusion
+  sketch/B-rep solver or solve cyclic mechanisms. Angle-only constraints allow
+  translation; a single mate still allows planar sliding and twist.
 - Undo history retains the most recent 40 changes in the current session.
 
 ## Source

@@ -82,7 +82,7 @@ export function PaintCursor({ part, hit }: { part: Part; hit: SurfacePoint | nul
     erase = useEditor((s) => s.brushErase),
     op = useEditor((s) => s.operation),
     tool = useEditor((s) => s.tool),
-    navigationMode = useEditor((s) => s.navigationMode),
+    navigationMode = useEditor((s) => (s.temporaryOrbit ? 'orbit' : s.navigationMode)),
     pivotPicking = useEditor((s) => s.pivotPicking);
   if (
     !hit ||

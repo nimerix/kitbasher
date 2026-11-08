@@ -1,6 +1,7 @@
 import { deserializeGeometry, serializeGeometry } from './geometry';
 import { validateJoint } from './constraints';
-import type { Joint, SceneDocument, SceneFile } from './types';
+import { validatePlaneConstraints } from './plane-constraints';
+import type { Joint, PlaneConstraint, SceneDocument, SceneFile } from './types';
 
 export function serializeScene(scene: SceneDocument): SceneFile {
   return {
@@ -10,6 +11,7 @@ export function serializeScene(scene: SceneDocument): SceneFile {
     name: scene.name,
     parts: scene.parts.map((p) => ({ ...p, geometry: serializeGeometry(p.geometry) })),
     joints: scene.joints,
+    constraints: scene.constraints ?? [],
   };
 }
 
@@ -82,7 +84,37 @@ export function parseScene(value: unknown): SceneDocument {
     joints.push({ ...j, keepConnected: j.keepConnected ?? true });
     jointIds.add(j.id);
   }
-  return { name: data.name, parts, joints };
+  if (data.constraints !== undefined && !Array.isArray(data.constraints))
+    throw new Error('The scene contains invalid plane constraints.');
+  const constraints: PlaneConstraint[] = [],
+    constraintIds = new Set<string>();
+  for (const constraint of data.constraints ?? []) {
+    const planeValid = (frame: unknown) => {
+      const plane = frame as PlaneConstraint['sourcePlane'];
+      return (
+        plane &&
+        finiteTuple(plane.point, 3) &&
+        finiteTuple(plane.normal, 3) &&
+        Math.abs(Math.hypot(...plane.normal) - 1) < 0.01
+      );
+    };
+    if (
+      !constraint ||
+      typeof constraint.id !== 'string' ||
+      constraintIds.has(constraint.id) ||
+      typeof constraint.name !== 'string' ||
+      typeof constraint.enabled !== 'boolean' ||
+      typeof constraint.opposed !== 'boolean' ||
+      !planeValid(constraint.sourcePlane) ||
+      !planeValid(constraint.targetPlane)
+    )
+      throw new Error('The scene contains an invalid plane constraint.');
+    constraints.push(constraint);
+    constraintIds.add(constraint.id);
+  }
+  const scene = { name: data.name, parts, joints, constraints };
+  validatePlaneConstraints(scene);
+  return scene;
 }
 
 const dbName = 'kitbasher-workbench';

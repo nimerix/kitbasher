@@ -37,6 +37,20 @@ provide spatial context. Smaller screens use collapsible sidebars.
 - Keep move/rotate/scale gizmos on visible geometry even for legacy scans whose
   local origins are far away. Rebase new imports without changing world placement.
   Numeric rotation/scale and viewport tools use the same visible/anchor pivot.
+- Hold Shift for incremental one-tenth gizmo sensitivity, including mid-drag
+  changes. End interrupted drags cleanly so camera navigation always resumes.
+- Paint only edge-connected mesh patches; optional fixed seed-plane angle and
+  distance tolerances exclude adjacent bends and prevent plane drift across strokes.
+- Fit painted planes with area-weighted moments. Offer mate with signed offset,
+  parallel, perpendicular, and explicit normal-angle placement using 1+ pairs.
+  Keep contact best fit available with 3+ pairs.
+- Optionally retain plane relationships as directed CAD-style assembly constraints.
+  Project transforms through compatible equations and existing joints; reject
+  conflicts and cycles without modifying the scene. Preserve remaining freedom:
+  mates allow planar slide/twist and angle relationships allow translation.
+  The Constraints tab exposes names, parameters, residuals, suppression, and deletion.
+  Save/recovery and internal clipboard relationships retain these definitions;
+  Blender/GLB retain solved placement and plane metadata, with live solving in Kitbasher.
 - Allow any number of matching pairs after the third, show pending pair state,
   per-pair removal, and preview RMS using the same solver used on application.
 - Explicitly save and reopen a self-contained .kitbash scene, with IndexedDB
@@ -65,3 +79,12 @@ legacy scan origins. Pan remains free. The period key sets that pivot once
 without changing camera distance, direction, or orthographic zoom; F separately
 frames the selection. Missing or hidden selections keep the current pivot.
 Navigation never changes part transforms or document history.
+
+Middle-drag and held Space + left-drag orbit while point picking or painting;
+right-drag pans and the wheel zooms. Left paint gestures reserve the surface
+brush. Temporary orbit keeps the active workflow and returns on Space release,
+window blur, or pointer cancellation. Right-pan gestures dismiss an early native
+context-menu event and preserve the prior selection.
+
+The complete interaction and solver contract is in
+[cad-constraints-spec.md](cad-constraints-spec.md).

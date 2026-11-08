@@ -1,10 +1,11 @@
 import { Vector3 } from 'three';
 import { uid } from './geometry';
-import type { Joint, Part, SceneDocument } from './types';
+import type { Joint, Part, PlaneConstraint, SceneDocument } from './types';
 
 export interface ComponentClipboard {
   parts: Part[];
   joints: Joint[];
+  constraints: PlaneConstraint[];
   /** A cut is restored in place on its first paste. Copies start one step away. */
   nextOffset: number;
 }
@@ -29,6 +30,20 @@ function snapshotJoint(joint: Joint): Joint {
   };
 }
 
+function snapshotConstraint(constraint: PlaneConstraint): PlaneConstraint {
+  return {
+    ...constraint,
+    sourcePlane: {
+      point: [...constraint.sourcePlane.point],
+      normal: [...constraint.sourcePlane.normal],
+    },
+    targetPlane: {
+      point: [...constraint.targetPlane.point],
+      normal: [...constraint.targetPlane.normal],
+    },
+  };
+}
+
 export function captureComponents(
   scene: SceneDocument,
   ids: string[],
@@ -43,6 +58,9 @@ export function captureComponents(
     joints: scene.joints
       .filter((joint) => captured.has(joint.parentId) && captured.has(joint.childId))
       .map(snapshotJoint),
+    constraints: (scene.constraints ?? [])
+      .filter((c) => captured.has(c.sourceId) && captured.has(c.targetId))
+      .map(snapshotConstraint),
     nextOffset: cut ? 0 : 1,
   };
 }
@@ -74,5 +92,12 @@ export function instantiateComponents(clipboard: ComponentClipboard, existing: P
     parentId: ids.get(joint.parentId)!,
     childId: ids.get(joint.childId)!,
   }));
-  return { parts, joints };
+  const constraints = clipboard.constraints.map((c) => ({
+    ...snapshotConstraint(c),
+    id: uid(),
+    name: `${c.name} copy`,
+    sourceId: ids.get(c.sourceId)!,
+    targetId: ids.get(c.targetId)!,
+  }));
+  return { parts, joints, constraints };
 }

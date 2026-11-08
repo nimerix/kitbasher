@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import {
   Box,
   Check,
@@ -36,65 +36,8 @@ import { referencePlanes } from '../core/references';
 import type { AlignmentMode, AxisLocks, Part, Vec3 } from '../core/types';
 import { completedSurfacePairs } from '../core/surfaces';
 import { SurfacePaintControls } from './SurfacePaintControls';
-import { IconButton, Section } from './ui';
-
-function NumericInput({
-  value,
-  onCommit,
-  label,
-  disabled = false,
-  step = 1,
-  min,
-  max,
-}: {
-  value: number;
-  onCommit: (value: number) => void;
-  label: string;
-  disabled?: boolean;
-  step?: number;
-  min?: number;
-  max?: number;
-}) {
-  const [draft, setDraft] = useState(String(Number(value.toFixed(3))));
-  const cancelled = useRef(false);
-  useEffect(() => setDraft(String(Number(value.toFixed(3)))), [value]);
-  return (
-    <input
-      aria-label={label}
-      type="number"
-      value={draft}
-      disabled={disabled}
-      step={step}
-      min={min}
-      max={max}
-      onChange={(e) => setDraft(e.target.value)}
-      onBlur={() => {
-        if (cancelled.current) {
-          cancelled.current = false;
-          setDraft(String(Number(value.toFixed(3))));
-          return;
-        }
-        const next = Number(draft);
-        if (
-          draft !== '' &&
-          Number.isFinite(next) &&
-          (min === undefined || next >= min) &&
-          (max === undefined || next <= max)
-        ) {
-          if (next !== Number(value.toFixed(3))) onCommit(next);
-        } else setDraft(String(Number(value.toFixed(3))));
-      }}
-      onKeyDown={(e) => {
-        if (e.key === 'Enter') e.currentTarget.blur();
-        if (e.key === 'Escape') {
-          cancelled.current = true;
-          setDraft(String(Number(value.toFixed(3))));
-          e.currentTarget.blur();
-        }
-      }}
-    />
-  );
-}
+import { planeKindLabels } from '../core/plane-constraints';
+import { IconButton, NumericInput, Section } from './ui';
 
 function VectorFields({
   label,
@@ -565,8 +508,9 @@ function AssemblyInspector() {
     { id: 'multi', label: '3+ point fit' },
     { id: 'surface', label: 'Paint contact surfaces' },
   ];
+  const isPlaneSurface = isSurface && op.surfaceMethod && op.surfaceMethod !== 'contact';
   const enoughPairs = isSurface
-    ? completedSurfacePairs(op.surfacePairs).length >= 3 &&
+    ? completedSurfacePairs(op.surfacePairs).length >= (isPlaneSurface ? 1 : 3) &&
       completedSurfacePairs(op.surfacePairs).length === op.surfacePairs.length
     : op.pairs.length >= (op.mode === 'multi' && !isJoint ? 3 : 1);
   const preview = useMemo(() => {
@@ -673,6 +617,7 @@ function AssemblyInspector() {
             <SurfacePaintControls
               rms={preview?.result?.rms}
               constrained={preview?.result?.constrained}
+              angleError={preview?.result?.angleError}
             />
           ) : (
             <>
@@ -803,7 +748,8 @@ function AssemblyInspector() {
           </Section>
         ) : op.mode !== 'multi' ? (
           <Section title="Alignment options">
-            {op.mode === 'plane' || isSurface ? (
+            {op.mode === 'plane' ||
+            (isSurface && (!isPlaneSurface || ['mate', 'parallel'].includes(op.surfaceMethod!))) ? (
               <div className="appearance-row">
                 <span>Opposing face normals</span>
                 <button
@@ -817,26 +763,61 @@ function AssemblyInspector() {
                 </button>
               </div>
             ) : null}
-            <div className="offset-field">
-              <span>Surface offset</span>
-              <div>
-                <NumericInput
-                  label="Alignment offset"
-                  value={op.offset}
-                  onCommit={(offset) => setOperation({ offset })}
-                  step={0.1}
-                />
-                <small>mm</small>
+            {!isPlaneSurface || op.surfaceMethod === 'mate' ? (
+              <div className="offset-field">
+                <span>Surface offset</span>
+                <div>
+                  <NumericInput
+                    label="Alignment offset"
+                    value={op.offset}
+                    onCommit={(offset) => setOperation({ offset })}
+                    step={0.1}
+                  />
+                  <small>mm</small>
+                </div>
               </div>
-            </div>
+            ) : null}
+            {isPlaneSurface && op.surfaceMethod === 'angle' ? (
+              <div className="offset-field">
+                <span>Normal angle</span>
+                <div>
+                  <NumericInput
+                    label="Plane alignment angle"
+                    value={op.planeAngle ?? 0}
+                    min={0}
+                    max={180}
+                    onCommit={(planeAngle) => setOperation({ planeAngle })}
+                  />
+                  <small>°</small>
+                </div>
+              </div>
+            ) : null}
+            {isPlaneSurface ? (
+              <div className="appearance-row">
+                <span>Keep constraint active</span>
+                <button
+                  role="switch"
+                  aria-label="Keep plane constraints active"
+                  aria-checked={op.retainConstraint ?? false}
+                  className={`toggle ${op.retainConstraint ? 'on' : ''}`}
+                  onClick={() => setOperation({ retainConstraint: !op.retainConstraint })}
+                >
+                  <span />
+                </button>
+              </div>
+            ) : null}
             <p className="field-help">
-              {isSurface
-                ? 'Uses all painted patches in a rigid surface fit. Contact RMS measures sampled distance to the matching patches; joint constraints may limit the fit.'
-                : op.mode === 'point-plane'
-                  ? 'Projects the source point onto the target plane without changing rotation.'
-                  : op.mode === 'plane'
-                    ? 'Uses the picked face normals to orient and seat the moving part.'
-                    : 'Moves the source point onto its matching target. Rotation stays unchanged.'}
+              {isPlaneSurface
+                ? op.surfaceMethod === 'mate'
+                  ? 'Seats fitted planes with the signed offset. Sliding within the plane and rotation around its normal remain free. Retained constraints are editable in the Constraints tab.'
+                  : 'Sets the angle between fitted plane normals. Translation and rotation that preserve this angle remain free. Retained constraints are editable in the Constraints tab.'
+                : isSurface
+                  ? 'Uses all painted patches in a rigid surface fit. Contact RMS measures sampled distance to the matching patches; joint constraints may limit the fit.'
+                  : op.mode === 'point-plane'
+                    ? 'Projects the source point onto the target plane without changing rotation.'
+                    : op.mode === 'plane'
+                      ? 'Uses the picked face normals to orient and seat the moving part.'
+                      : 'Moves the source point onto its matching target. Rotation stays unchanged.'}
             </p>
           </Section>
         ) : null}
@@ -845,7 +826,15 @@ function AssemblyInspector() {
         <button
           className="button primary full-width"
           aria-label={
-            isJoint ? 'Create joint' : isSurface ? 'Fit contact surfaces' : 'Apply alignment'
+            isJoint
+              ? 'Create joint'
+              : isPlaneSurface
+                ? op.retainConstraint
+                  ? 'Create plane constraints'
+                  : `Apply ${planeKindLabels[op.surfaceMethod as keyof typeof planeKindLabels].toLowerCase()}`
+                : isSurface
+                  ? 'Fit contact surfaces'
+                  : 'Apply alignment'
           }
           disabled={!ready}
           onClick={() =>
@@ -853,7 +842,15 @@ function AssemblyInspector() {
           }
         >
           {isJoint ? <Link2 size={15} /> : <Check size={15} />}{' '}
-          {isJoint ? 'Create joint' : isSurface ? 'Fit contact surfaces' : 'Apply alignment'}
+          {isJoint
+            ? 'Create joint'
+            : isPlaneSurface
+              ? op.retainConstraint
+                ? 'Create plane constraints'
+                : `Apply ${planeKindLabels[op.surfaceMethod as keyof typeof planeKindLabels].toLowerCase()}`
+              : isSurface
+                ? 'Fit contact surfaces'
+                : 'Apply alignment'}
           <kbd>↵</kbd>
         </button>
         <button className="cancel-operation" onClick={() => useEditor.getState().setTool('select')}>

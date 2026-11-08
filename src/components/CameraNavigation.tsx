@@ -23,13 +23,16 @@ export function CameraRig() {
   const focusRequest = useEditor((state) => state.focusRequest);
   const projection = useEditor((state) => state.view.projection);
   const pivotRequest = useEditor((state) => state.pivotRequest);
-  const navigationMode = useEditor((state) => state.navigationMode);
+  const navigationMode = useEditor((state) =>
+    state.temporaryOrbit ? 'orbit' : state.navigationMode,
+  );
   const pivotPicking = useEditor((state) => state.pivotPicking);
   const surfacePainting = useEditor(
     (state) =>
       state.tool === 'align' &&
       state.operation.mode === 'surface' &&
       !state.navigationMode &&
+      !state.temporaryOrbit &&
       !state.pivotPicking,
   );
   const { camera, gl, invalidate, size } = useThree();
@@ -149,9 +152,14 @@ export function CameraRig() {
       settle();
       if (!event.isPrimary || !controls.current?.enabled) return;
       const state = useEditor.getState();
-      if (state.tool === 'align' && state.operation.mode === 'surface' && !state.navigationMode)
-        return;
-      const panMode = state.navigationMode === 'pan';
+      const painting =
+        state.tool === 'align' &&
+        state.operation.mode === 'surface' &&
+        !state.navigationMode &&
+        !state.temporaryOrbit &&
+        !state.pivotPicking;
+      if (painting && event.button === 0) return;
+      const panMode = !state.temporaryOrbit && state.navigationMode === 'pan';
       const modified = event.shiftKey || event.ctrlKey || event.metaKey;
       const orbit =
         event.pointerType === 'touch'
@@ -160,7 +168,9 @@ export function CameraRig() {
             ? panMode
               ? modified
               : !modified
-            : event.button === 2 && modified;
+            : event.button === 1
+              ? !modified
+              : event.button === 2 && modified;
       const pivot = orbit ? orbitPivot() : null;
       if (pivot) rotation.current = { pivot, previous: camera.quaternion.clone() };
     };
@@ -180,7 +190,7 @@ export function CameraRig() {
       ref={controls}
       makeDefault
       onChange={carryPannedView}
-      enableRotate={!surfacePainting}
+      enableRotate
       enableDamping
       dampingFactor={0.12}
       minDistance={1}
@@ -188,8 +198,8 @@ export function CameraRig() {
       target={initialOrbitTarget}
       screenSpacePanning
       mouseButtons={{
-        LEFT: navigationMode === 'pan' ? MOUSE.PAN : MOUSE.ROTATE,
-        MIDDLE: MOUSE.DOLLY,
+        LEFT: surfacePainting ? undefined : navigationMode === 'pan' ? MOUSE.PAN : MOUSE.ROTATE,
+        MIDDLE: MOUSE.ROTATE,
         RIGHT: MOUSE.PAN,
       }}
       touches={{ ONE: navigationMode === 'pan' ? TOUCH.PAN : TOUCH.ROTATE, TWO: TOUCH.DOLLY_PAN }}
@@ -308,6 +318,7 @@ export function CameraNavigation() {
           Reset custom pivot
         </button>
       ) : null}
+      <p className="camera-gesture-hint">Middle / Space + drag: orbit · Right-drag: pan</p>
       <label className="orbit-selection-setting">
         <span>Orbit selection</span>
         <button

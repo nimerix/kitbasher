@@ -21,6 +21,7 @@ import { useEditor } from '../core/store';
 import { referencePlanes } from '../core/references';
 import { triangleCount } from '../core/geometry';
 import { IconButton } from './ui';
+import { ConstraintList } from './ConstraintList';
 
 export function PartsPanel({ onClose }: { onClose: () => void }) {
   const scene = useEditor((s) => s.scene),
@@ -29,7 +30,7 @@ export function PartsPanel({ onClose }: { onClose: () => void }) {
   const select = useEditor((s) => s.select),
     patchParts = useEditor((s) => s.patchParts),
     setView = useEditor((s) => s.setView);
-  const [tab, setTab] = useState<'parts' | 'joints'>('parts'),
+  const [tab, setTab] = useState<'parts' | 'joints' | 'constraints'>('parts'),
     [query, setQuery] = useState(''),
     [expanded, setExpanded] = useState(true);
   const filtered = scene.parts.filter((p) => p.name.toLowerCase().includes(query.toLowerCase()));
@@ -43,6 +44,12 @@ export function PartsPanel({ onClose }: { onClose: () => void }) {
         <button className={tab === 'joints' ? 'active' : ''} onClick={() => setTab('joints')}>
           Joints <span>{scene.joints.length}</span>
         </button>
+        <button
+          className={tab === 'constraints' ? 'active' : ''}
+          onClick={() => setTab('constraints')}
+        >
+          Constraints <span>{scene.constraints?.length ?? 0}</span>
+        </button>
         <IconButton
           label="Close parts panel"
           className="mobile-panel-close icon-button"
@@ -55,7 +62,13 @@ export function PartsPanel({ onClose }: { onClose: () => void }) {
         <Search size={14} />
         <input
           aria-label="Search parts"
-          placeholder={tab === 'parts' ? 'Find a part…' : 'Find a joint…'}
+          placeholder={
+            tab === 'parts'
+              ? 'Find a part…'
+              : tab === 'joints'
+                ? 'Find a joint…'
+                : 'Find a constraint…'
+          }
           value={query}
           onChange={(e) => setQuery(e.target.value)}
         />
@@ -119,6 +132,8 @@ export function PartsPanel({ onClose }: { onClose: () => void }) {
               : null}
             {!filtered.length ? <div className="panel-empty">No matching parts</div> : null}
           </>
+        ) : tab === 'constraints' ? (
+          <ConstraintList query={query} />
         ) : (
           <div className="joint-list">
             {scene.joints

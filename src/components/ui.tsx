@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { ButtonHTMLAttributes, ReactNode } from 'react';
 import { ChevronDown, X } from 'lucide-react';
 
@@ -154,4 +154,64 @@ export function Logo({ small = false }: { small?: boolean }) {
 
 export function Keyboard({ children }: { children: ReactNode }) {
   return <kbd>{children}</kbd>;
+}
+
+export function NumericInput({
+  value,
+  onCommit,
+  label,
+  disabled = false,
+  step = 1,
+  min,
+  max,
+}: {
+  value: number;
+  onCommit: (value: number) => void;
+  label: string;
+  disabled?: boolean;
+  step?: number;
+  min?: number;
+  max?: number;
+}) {
+  const [draft, setDraft] = useState(String(Number(value.toFixed(3))));
+  const cancelled = useRef(false);
+  useEffect(() => setDraft(String(Number(value.toFixed(3)))), [value]);
+  return (
+    <input
+      aria-label={label}
+      type="number"
+      value={draft}
+      disabled={disabled}
+      step={step}
+      min={min}
+      max={max}
+      onChange={(e) => setDraft(e.target.value)}
+      onBlur={() => {
+        if (cancelled.current) {
+          cancelled.current = false;
+          setDraft(String(Number(value.toFixed(3))));
+          return;
+        }
+        const next = Number(draft);
+        if (
+          draft !== '' &&
+          Number.isFinite(next) &&
+          (min === undefined || next >= min) &&
+          (max === undefined || next <= max)
+        ) {
+          if (next !== Number(value.toFixed(3))) onCommit(next);
+        }
+        // A rejected constraint edit leaves the committed value unchanged.
+        setDraft(String(Number(value.toFixed(3))));
+      }}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter') e.currentTarget.blur();
+        if (e.key === 'Escape') {
+          cancelled.current = true;
+          setDraft(String(Number(value.toFixed(3))));
+          e.currentTarget.blur();
+        }
+      }}
+    />
+  );
 }

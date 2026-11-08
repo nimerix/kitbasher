@@ -8,6 +8,11 @@ import {
 import { isJointConnected, transformAssembly } from './constraints';
 import { surfaceAlignment, surfaceResidual } from './surface-fit';
 import { resolvePart } from './references';
+import {
+  constraintsFromPatches,
+  planeConstraintResidual,
+  solvePlaneConstraints,
+} from './plane-constraints';
 import type { AssemblyOperation, SceneDocument } from './types';
 
 /** Preview and application share the same solver, including active anchors and fixed targets. */
@@ -18,18 +23,42 @@ export function solveAlignment(scene: SceneDocument, operation: AssemblyOperatio
   if (source.locked) throw new Error('Unlock the moving part first.');
   if (operation.pending)
     throw new Error('Finish the pending target pick before applying alignment.');
+  const planar =
+    operation.mode === 'surface' &&
+    operation.surfaceMethod &&
+    operation.surfaceMethod !== 'contact';
+  if (planar) {
+    const created = constraintsFromPatches(scene, operation);
+    const parts = solvePlaneConstraints(
+      { ...scene, constraints: [...(scene.constraints ?? []), ...created] },
+      scene.parts,
+      [target.id],
+    );
+    const residuals = created.map((c) => planeConstraintResidual(parts, c));
+    return {
+      parts,
+      rms: Math.sqrt(residuals.reduce((sum, r) => sum + r.distance ** 2, 0) / residuals.length),
+      angleError: (Math.max(...residuals.map((r) => r.angle)) * 180) / Math.PI,
+      constrained: false,
+      anchored: scene.joints.some(
+        (joint) => joint.childId === source.id && isJointConnected(joint),
+      ),
+      addedConstraints: operation.retainConstraint ? created : [],
+    };
+  }
   const { matrix } =
     operation.mode === 'surface'
       ? surfaceAlignment(source, target, operation)
       : alignmentTransform(source, target, operation);
   const desired = matrix.multiply(partMatrix(source));
-  const parts = transformAssembly(
+  const jointPlacement = transformAssembly(
     scene.parts,
     scene.joints,
     source.id,
     transformFromMatrix(source, desired),
     { moveConnected: true, stationaryIds: [target.id] },
   );
+  const parts = solvePlaneConstraints(scene, jointPlacement, [target.id]);
   const placed = parts.find((part) => part.id === source.id)!;
   const errors = operation.pairs.map((pair) => {
     const from = worldPoint(placed, pair.source);

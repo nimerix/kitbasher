@@ -5,14 +5,17 @@ Verified locally on November 7, 2026.
 ## Automated checks
 
 - `npm run build`: TypeScript checks and production compilation pass.
-- `npm test`: **68 tests pass**, covering Kabsch registration, non-collinear
+- `npm test`: **87 tests pass**, covering Kabsch registration, non-collinear
   point selection, reflection prevention, all four alignment methods, axis locks,
   anchor coincidence, descendant propagation, capture of the current pose when
   locking an axis, invalid joint graphs, scene round trips, mesh combination,
   manifold input checks, 3MF structure, STL up axis, undo/redo, surface contact fitting, camera
   navigation, interference analysis, standard shortcuts, and component clipboard
-  behavior including joint preservation and locked-part handling.
-- `npm run test:e2e`: **39 browser tests pass** in headless installed Google Chrome.
+  behavior including joint preservation and locked-part handling. New coverage
+  includes continuous transform precision, edge connectivity, seeded plane
+  filters, area-weighted plane fits, all four plane relationships, multiple
+  equations and dependency chains, joint conflicts, suppression, and persistence.
+- `npm run test:e2e`: **46 browser tests pass** in headless installed Google Chrome.
   Exercises real gizmo dragging, numeric edit cancellation, surface picking,
   joint creation, local recovery, save/open, STL import, combination/undo,
   GLB/3MF downloads and reimports, physical scale, Boolean worker volume and
@@ -20,16 +23,24 @@ Verified locally on November 7, 2026.
   surface painting, custom pivots, panned camera orbit, interference layers,
   Ctrl/Command selection and clipboard commands, rename, native text editing,
   keyboard context menus, surface-specific actions, and right-drag panning.
+  New real-pointer tests exercise middle/Space orbit over painted models, pending
+  point preservation, mid-drag Shift changes for both movement and rotation,
+  interrupted gizmo cleanup, plane filter clipping, disconnected coplanar patches,
+  and mate creation/editing/suppression followed by target motion and save/reopen.
 - `npm run format:check` and `git diff --check`: clean.
 
-The full suite and production build passed after the shortcut and context-menu
-update. Current browser checks use the local Vite development server. The custom
-menu was visually reviewed at 1440 × 1000 and 390 × 844, including keyboard focus
-and viewport clamping. Context menus reposition on window resize, and right-clicks
-on component icons and mesh surfaces target the appropriate component.
+The full suite and production build passed after the camera, precision, connected
+painting, and plane-constraint update. Current browser checks use the local Vite
+development server. New plane controls and constraint cards were visually reviewed
+at 1440 × 1000 and 390 × 844. Browser tests assert no page/console errors or Vite
+error overlay, preserve native field editing, and verify no horizontal overflow.
+Context menus reposition on resize, and early right-button menus dismiss when a
+surface gesture becomes a camera pan.
 
-## Native Blender verification
+## Earlier native Blender verification
 
+The joint-export verification below predates the plane-constraint update; live
+painted-plane solving is native to Kitbasher and is not rebuilt in Blender.
 The Blender ZIP was downloaded through the production editor's Export dialog.
 Its Python script was run in **Blender 5.2.2 LTS** with factory startup. The script
 created `assembly.blend`; the saved file was reopened before validation.

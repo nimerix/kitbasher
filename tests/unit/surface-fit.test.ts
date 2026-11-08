@@ -11,7 +11,7 @@ import {
 import { MeshBVH } from 'three-mesh-bvh';
 import { partMatrix, partPivot, poseAtPivot, transformFromMatrix } from '../../src/core/geometry';
 import { surfaceAlignment, surfaceResidual } from '../../src/core/surface-fit';
-import { facesUnderBrush } from '../../src/core/surfaces';
+import { facesUnderBrush, readFace } from '../../src/core/surfaces';
 import { solveAlignment } from '../../src/core/alignment';
 import { anchorError } from '../../src/core/constraints';
 import { selectionOrbitCenter } from '../../src/core/navigation';
@@ -223,7 +223,21 @@ describe('surface paint brush', () => {
       source = part('a', geometry);
     source.scale = [2, 0.5, 1];
     const hit = { partId: 'a', point: [0, 0, 0.05] as Vec3, normal: [0, 0, 1] as Vec3 };
-    const faces = facesUnderBrush(source, hit, 1.2, 600);
+    // Use the actual triangle hit on the front, rather than an unrelated back face.
+    let seed = 0;
+    for (let i = 0; i < geometry.index!.count / 3; i++) {
+      const triangle = readFace(geometry, i);
+      if (
+        triangle.getNormal(new Vector3()).z > 0.9 &&
+        triangle
+          .closestPointToPoint(new Vector3(...hit.point), new Vector3())
+          .distanceTo(new Vector3(...hit.point)) < 1e-6
+      ) {
+        seed = i;
+        break;
+      }
+    }
+    const faces = facesUnderBrush(source, hit, 1.2, seed);
     expect(faces.length).toBeGreaterThan(4);
     const normal = new Vector3(),
       tri = new Triangle();
@@ -236,7 +250,7 @@ describe('surface paint brush', () => {
       expect(tri.getNormal(normal).z).toBeGreaterThan(0.9);
     }
     geometry.boundsTree = new MeshBVH(geometry, { indirect: true });
-    expect(facesUnderBrush(source, hit, 1.2, 600)).toEqual(faces);
+    expect(facesUnderBrush(source, hit, 1.2, seed)).toEqual(faces);
   });
   it('paints and erases actual triangle sets, and restores a whole stroke', () => {
     const { source, target } = setup();

@@ -1,5 +1,15 @@
-import { Component, Suspense, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import type { ErrorInfo, ReactNode } from 'react';
+import {
+  Component,
+  Suspense,
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
+import type { ComponentProps, ErrorInfo, ReactNode } from 'react';
+import type { TransformControls as TransformControlsImpl } from 'three-stdlib';
 import { Canvas, useThree } from '@react-three/fiber';
 import type { ThreeEvent } from '@react-three/fiber';
 import {
@@ -14,7 +24,7 @@ import {
   PerspectiveCamera,
   TransformControls,
 } from '@react-three/drei';
-import { DoubleSide, Group, Matrix4, Mesh, Object3D, Quaternion, Vector3 } from 'three';
+import { DoubleSide, Group, Mesh, Object3D, Quaternion, Vector3 } from 'three';
 import {
   ChevronDown,
   Focus,
@@ -37,6 +47,7 @@ import {
   worldPoint,
 } from '../core/geometry';
 import { measureDistance, useEditor } from '../core/store';
+import { PrecisionDrag } from '../core/precision';
 import { isJointConnected, translationIsPinned } from '../core/constraints';
 import { referencePlanes, resolvePart } from '../core/references';
 import type { Part, SurfacePoint } from '../core/types';
@@ -76,7 +87,7 @@ function PartMesh({ part }: { part: Part }) {
   const tool = useEditor((s) => s.tool),
     wireframe = useEditor((s) => s.view.wireframe),
     explode = useEditor((s) => s.view.explode),
-    navigationMode = useEditor((s) => s.navigationMode);
+    navigationMode = useEditor((s) => (s.temporaryOrbit ? 'orbit' : s.navigationMode));
   const group = useRef<Group>(null);
   const [brushHit, setBrushHit] = useState<SurfacePoint | null>(null);
   const toSurface = (event: ThreeEvent<PointerEvent | MouseEvent>): SurfacePoint => ({
@@ -91,10 +102,10 @@ function PartMesh({ part }: { part: Part }) {
   }, [part.geometry]);
   const exploded = useMemo(() => displayedPosition(part, explode), [part, explode]);
   const onClick = (event: ThreeEvent<MouseEvent>) => {
-    if (event.delta > 5) return;
+    if (event.button !== 0 || event.delta > 5) return;
     event.stopPropagation();
     const state = useEditor.getState();
-    if (state.navigationMode) return;
+    if (state.navigationMode || state.temporaryOrbit) return;
     if (state.pivotPicking) {
       state.setPartPivot(toSurface(event));
       return;
@@ -152,6 +163,7 @@ function PartMesh({ part }: { part: Part }) {
               state.tool === 'align' &&
               state.operation.mode === 'surface' &&
               !state.navigationMode &&
+              !state.temporaryOrbit &&
               !state.pivotPicking
             ) {
               event.stopPropagation();
@@ -164,6 +176,7 @@ function PartMesh({ part }: { part: Part }) {
               state.tool !== 'align' ||
               state.operation.mode !== 'surface' ||
               state.navigationMode ||
+              state.temporaryOrbit ||
               state.pivotPicking ||
               event.faceIndex == null
             )
@@ -213,19 +226,62 @@ function PartMesh({ part }: { part: Part }) {
   );
 }
 
+function ManagedTransformControls({
+  onFinishDrag,
+  ...props
+}: ComponentProps<typeof TransformControls> & { onFinishDrag: () => void }) {
+  const controls = useRef<TransformControlsImpl>(null);
+  const gl = useThree((s) => s.gl);
+  const connected = useThree((s) => s.events.connected);
+  useEffect(() => {
+    const current = controls.current;
+    current?.connect(connected instanceof HTMLElement ? connected : gl.domElement);
+    return () => {
+      // The controls keep document-level pointer listeners while dragging.
+      current?.dispose();
+      onFinishDrag();
+    };
+  }, [onFinishDrag, gl.domElement, connected]);
+  return <TransformControls ref={controls} {...props} onMouseUp={onFinishDrag} />;
+}
+
 function TransformGizmo() {
   const selected = useEditor((s) => s.selected),
     tool = useEditor((s) => s.tool),
     parts = useEditor((s) => s.scene.parts),
     joints = useEditor((s) => s.scene.joints),
     view = useEditor((s) => s.view),
-    navigationMode = useEditor((s) => s.navigationMode),
+    navigationMode = useEditor((s) => (s.temporaryOrbit ? 'orbit' : s.navigationMode)),
     pivotPicking = useEditor((s) => s.pivotPicking);
   const proxy = useMemo(() => new Object3D(), []),
     dragging = useRef(false);
   const [dragVersion, setDragVersion] = useState(0);
-  const start = useRef<{ inverse: Matrix4; parts: Part[] } | null>(null);
+  const [controlVersion, setControlVersion] = useState(0);
+  const start = useRef<{ motion: PrecisionDrag; parts: Part[] } | null>(null);
   const invalidate = useThree((s) => s.invalidate);
+  const getRoot = useThree((s) => s.get);
+  const finishDrag = useCallback(() => {
+    if (!dragging.current) return;
+    dragging.current = false;
+    start.current = null;
+    const cameraControls = getRoot().controls;
+    if (cameraControls && 'enabled' in cameraControls) cameraControls.enabled = true;
+    setDragVersion((version) => version + 1);
+    invalidate();
+  }, [getRoot, invalidate]);
+  useEffect(() => {
+    const cancel = () => {
+      if (!dragging.current) return;
+      finishDrag();
+      setControlVersion((version) => version + 1);
+    };
+    window.addEventListener('blur', cancel);
+    window.addEventListener('pointercancel', cancel);
+    return () => {
+      window.removeEventListener('blur', cancel);
+      window.removeEventListener('pointercancel', cancel);
+    };
+  }, [finishDrag]);
   const movable = parts.filter((p) => selected.includes(p.id) && p.visible && !p.locked);
   const singleJoint =
     movable.length === 1
@@ -271,7 +327,9 @@ function TransformGizmo() {
   return (
     <>
       <primitive object={proxy} />
-      <TransformControls
+      <ManagedTransformControls
+        key={controlVersion}
+        onFinishDrag={finishDrag}
         object={proxy}
         mode={tool as 'translate' | 'rotate' | 'scale'}
         space={singleJoint ? 'local' : view.space}
@@ -285,25 +343,23 @@ function TransformGizmo() {
         onMouseDown={() => {
           dragging.current = true;
           proxy.updateMatrixWorld(true);
-          start.current = { inverse: proxy.matrixWorld.clone().invert(), parts: movable };
+          start.current = { motion: new PrecisionDrag(proxy.matrixWorld), parts: movable };
           useEditor.getState().beginTransform();
         }}
         onObjectChange={() => {
           if (!dragging.current || !start.current) return;
           proxy.updateMatrixWorld(true);
-          const delta = new Matrix4().multiplyMatrices(proxy.matrixWorld, start.current.inverse);
+          const delta = start.current.motion.update(
+            proxy.matrixWorld,
+            useEditor.getState().precision ? 0.1 : 1,
+          );
+          if (!delta) return;
           const patches = start.current.parts.map((part) => ({
             id: part.id,
             patch: transformFromMatrix(part, delta.clone().multiply(partMatrix(part))),
           }));
           if (patches.some((p) => p.patch.scale?.some((v) => v < 0.001))) return;
           useEditor.getState().transformMany(patches, false, tool === 'translate');
-        }}
-        onMouseUp={() => {
-          dragging.current = false;
-          start.current = null;
-          setDragVersion((version) => version + 1);
-          invalidate();
         }}
       />
     </>
@@ -505,12 +561,13 @@ function Scene({ inspection }: { inspection: InspectionState }) {
             onClick={(event) => {
               if (
                 useEditor.getState().navigationMode ||
+                useEditor.getState().temporaryOrbit ||
                 (tool === 'align' && useEditor.getState().operation.mode === 'surface') ||
                 !['align', 'joint', 'measure'].includes(tool)
               )
                 return;
               event.stopPropagation();
-              if (event.delta > 5) return;
+              if (event.button !== 0 || event.delta > 5) return;
               useEditor.getState().pick({
                 partId: plane.id,
                 point: event.point.toArray(),
@@ -554,7 +611,7 @@ export function Viewport() {
     parts = useEditor((s) => s.scene.parts),
     op = useEditor((s) => s.operation),
     measurement = useEditor((s) => s.measurement),
-    navigationMode = useEditor((s) => s.navigationMode),
+    navigationMode = useEditor((s) => (s.temporaryOrbit ? 'orbit' : s.navigationMode)),
     pivotPicking = useEditor((s) => s.pivotPicking);
   const setView = useEditor((s) => s.setView),
     focus = useEditor((s) => s.focus);
@@ -618,6 +675,8 @@ export function Viewport() {
             onPointerMissed={(event) => {
               if (
                 event.type === 'click' &&
+                event.button === 0 &&
+                !useEditor.getState().temporaryOrbit &&
                 !useEditor.getState().navigationMode &&
                 !useEditor.getState().pivotPicking &&
                 tool !== 'align' &&
@@ -650,7 +709,7 @@ export function Viewport() {
               ? `Paint the ${op.activeSurface.side === 'source' ? 'moving' : 'target'} patch · pair ${op.surfacePairs.findIndex((pair) => pair.id === op.activeSurface!.pairId) + 1}`
               : 'Choose a patch to paint, add a pair, or fit'}
           </span>
-          <small>O orbit · H pan</small>
+          <small>Middle / Space: orbit · Right: pan</small>
         </div>
       ) : !navigationMode && ['align', 'joint'].includes(tool) ? (
         <div className="pick-prompt">
@@ -664,6 +723,7 @@ export function Viewport() {
                   ? `Pick the source for pair ${picked + 1}`
                   : 'Pick a surface on the moving part'}
           </span>
+          <small>Middle / Space: orbit</small>
           <span className={`pick-step ${op.pending ? 'current' : ''}`}>2</span>
           {picked ? (
             <span className="pair-count">

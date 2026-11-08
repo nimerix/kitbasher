@@ -184,7 +184,13 @@ export async function exportGlb(scene: SceneDocument, parts: Part[]): Promise<Ar
   const root = meshGroup(parts);
   root.name = scene.name;
   root.scale.setScalar(0.001);
-  root.userData = { units: 'meters', kitbasherJoints: scene.joints };
+  root.userData = {
+    units: 'meters',
+    kitbasherJoints: scene.joints,
+    kitbasherPlaneConstraints: (scene.constraints ?? []).filter(
+      (c) => parts.some((p) => p.id === c.sourceId) && parts.some((p) => p.id === c.targetId),
+    ),
+  };
   try {
     const result = await new GLTFExporter().parseAsync(root, { binary: true, onlyVisible: false });
     if (!(result instanceof ArrayBuffer))
@@ -344,7 +350,7 @@ bpy.ops.wm.save_as_mainfile(filepath=os.path.join(folder, "assembly.blend"))
 print("Saved", bpy.data.filepath)
 `;
   const readme =
-    'KITBASHER → BLENDER\n\nImport assembly.glb in Blender for separate meshes at real-world scale.\nTo also reconstruct joint parenting and rotation locks: extract this ZIP,\nopen import_assembly.py in Blender’s Scripting workspace, and run it.\nThe script saves assembly.blend in this folder.\n\nTo pose a connected part, select its named joint empty (for example, Neck pivot)\nand rotate around an unlocked local axis. Only joints with Keep connected on\nare rebuilt as pivots; disabled joints retain metadata and leave meshes free.\nThe mesh follows the pivot with\nits original anchor connected. Connected mesh transforms are locked.\n\nGLB retains names and colors; multipart 3MF retains geometry and placement.\nThe .kitbash scene is the authoritative editable scene with all joint data.\n';
+    'KITBASHER → BLENDER\n\nImport assembly.glb in Blender for separate meshes at real-world scale.\nTo also reconstruct joint parenting and rotation locks: extract this ZIP,\nopen import_assembly.py in Blender’s Scripting workspace, and run it.\nThe script saves assembly.blend in this folder.\n\nTo pose a connected part, select its named joint empty (for example, Neck pivot)\nand rotate around an unlocked local axis. Only joints with Keep connected on\nare rebuilt as pivots; disabled joints retain metadata and leave meshes free.\nThe mesh follows the pivot with\nits original anchor connected. Connected mesh transforms are locked.\n\nGLB retains names and colors; multipart 3MF retains geometry and placement.\nPlane constraints are exported as solved placement and GLB metadata. They do not become live Blender constraints.\nThe .kitbash scene is the authoritative editable scene with all joint and plane constraint data.\n';
   return zipSync(
     {
       'assembly.glb': new Uint8Array(glb),

@@ -72,6 +72,13 @@ export function useKeyboard(openScene: () => void, searchParts: () => void) {
         return;
       }
       if (editable) return;
+      if (key === 'shift') useEditor.setState({ precision: true });
+      if (event.code === 'Space' && !cmd && !event.altKey && !target.closest('[role=menu]')) {
+        event.preventDefault();
+        state.endPaintStroke();
+        useEditor.setState({ temporaryOrbit: true });
+        return;
+      }
       if (key === 'contextmenu' || (key === 'f10' && event.shiftKey)) {
         event.preventDefault();
         state.openContextMenu(keyboardContextMenu(target));
@@ -163,7 +170,23 @@ export function useKeyboard(openScene: () => void, searchParts: () => void) {
         });
       if (key === '?') state.setModal('help');
     };
+    const up = (event: KeyboardEvent) => {
+      if (event.key === 'Shift') useEditor.setState({ precision: false });
+      if (event.code === 'Space' && useEditor.getState().temporaryOrbit) {
+        event.preventDefault();
+        useEditor.setState({ temporaryOrbit: false });
+      }
+    };
+    const blur = () => useEditor.setState({ temporaryOrbit: false, precision: false });
     window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
+    window.addEventListener('keyup', up);
+    window.addEventListener('blur', blur);
+    window.addEventListener('pointercancel', blur);
+    return () => {
+      window.removeEventListener('keydown', onKey);
+      window.removeEventListener('keyup', up);
+      window.removeEventListener('blur', blur);
+      window.removeEventListener('pointercancel', blur);
+    };
   }, [openScene, searchParts]);
 }

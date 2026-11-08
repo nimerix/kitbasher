@@ -9,7 +9,12 @@ import {
   validateJoint,
 } from './constraints';
 import { solveAlignment } from './alignment';
-import { completedSurfacePairs, facesUnderBrush } from './surfaces';
+import {
+  planeKindLabels,
+  solvePlaneConstraints,
+  validatePlaneConstraints,
+} from './plane-constraints';
+import { completedSurfacePairs, contiguousRemainder, facesUnderBrush } from './surfaces';
 import { readOrbitPreference, saveOrbitPreference } from './navigation';
 import type { NavigationMode } from './navigation';
 import { createSample } from './sample';
@@ -18,7 +23,9 @@ import type { ComponentClipboard } from './clipboard';
 import { resolvePart } from './references';
 import type {
   AssemblyOperation,
+  BrushPlaneSettings,
   Joint,
+  PlaneConstraint,
   Part,
   SceneDocument,
   SurfacePoint,
@@ -47,6 +54,9 @@ const blankOperation = (mode: AssemblyOperation['mode'] = 'point'): AssemblyOper
   pending: null,
   flipNormal: true,
   offset: 0,
+  surfaceMethod: 'contact',
+  planeAngle: 0,
+  retainConstraint: false,
   rotationLocks: [true, false, true],
   keepConnected: true,
 });
@@ -60,11 +70,14 @@ interface EditorState {
   contextMenu: EditorContextMenu | null;
   tool: Tool;
   navigationMode: NavigationMode | null;
+  temporaryOrbit: boolean;
+  precision: boolean;
   pivotRequest: number;
   pivotPicking: boolean;
   painting: boolean;
   brushRadius: number;
   brushErase: boolean;
+  brushPlane: BrushPlaneSettings;
   paintHistory: SurfacePair[][];
   operation: AssemblyOperation;
   view: ViewSettings;
@@ -95,7 +108,11 @@ interface EditorState {
   setPivotPicking: (enabled: boolean) => void;
   setPartPivot: (point: SurfacePoint) => void;
   clearPartPivot: (id: string) => void;
-  setBrush: (patch: { radius?: number; erase?: boolean }) => void;
+  setBrush: (patch: {
+    radius?: number;
+    erase?: boolean;
+    plane?: Partial<BrushPlaneSettings>;
+  }) => void;
   addSurfacePair: () => void;
   chooseSurface: (pairId: string, side: SurfaceSide) => void;
   paintSurface: (point: SurfacePoint, face: number, erase?: boolean, begin?: boolean) => boolean;
@@ -108,6 +125,8 @@ interface EditorState {
   createJoint: () => void;
   updateJoint: (id: string, patch: Partial<Joint>) => void;
   removeJoint: (id: string) => void;
+  updateConstraint: (id: string, patch: Partial<PlaneConstraint>) => void;
+  removeConstraint: (id: string) => void;
   transform: (id: string, patch: Partial<Part>, checkpoint?: boolean) => void;
   transformMany: (
     patches: { id: string; patch: Partial<Part> }[],
@@ -147,11 +166,14 @@ export const useEditor = create<EditorState>((set, get) => ({
   contextMenu: null,
   tool: 'select',
   navigationMode: null,
+  temporaryOrbit: false,
+  precision: false,
   pivotRequest: 0,
   pivotPicking: false,
   painting: false,
   brushRadius: 3,
   brushErase: false,
+  brushPlane: { enabled: false, angle: 20, distance: 0.5 },
   paintHistory: [],
   operation: blankOperation(),
   view: {
@@ -221,6 +243,9 @@ export const useEditor = create<EditorState>((set, get) => ({
               joints: state.scene.joints.filter(
                 (joint) => !ids.has(joint.parentId) && !ids.has(joint.childId),
               ),
+              constraints: state.scene.constraints?.filter(
+                (c) => !ids.has(c.sourceId) && !ids.has(c.targetId),
+              ),
             }),
             selected: state.selected.filter((id) => !ids.has(id)),
             operation: blankOperation(),
@@ -243,6 +268,7 @@ export const useEditor = create<EditorState>((set, get) => ({
         ...state.scene,
         parts: [...state.scene.parts, ...copies.parts],
         joints: [...state.scene.joints, ...copies.joints],
+        constraints: [...(state.scene.constraints ?? []), ...copies.constraints],
       }),
       selected: copies.parts.map((part) => part.id),
       clipboard: { ...state.clipboard, nextOffset: state.clipboard.nextOffset + 1 },
@@ -340,6 +366,15 @@ export const useEditor = create<EditorState>((set, get) => ({
           ? state.brushRadius
           : Math.max(0.05, Math.min(100, patch.radius)),
       brushErase: patch.erase ?? state.brushErase,
+      brushPlane: {
+        enabled: patch.plane?.enabled ?? state.brushPlane.enabled,
+        angle: Number.isFinite(patch.plane?.angle)
+          ? Math.max(0, Math.min(90, patch.plane!.angle!))
+          : state.brushPlane.angle,
+        distance: Number.isFinite(patch.plane?.distance)
+          ? Math.max(0, Math.min(100, patch.plane!.distance!))
+          : state.brushPlane.distance,
+      },
     })),
   addSurfacePair: () =>
     set((state) => {
@@ -371,6 +406,7 @@ export const useEditor = create<EditorState>((set, get) => ({
       state.tool !== 'align' ||
       op.mode !== 'surface' ||
       state.navigationMode ||
+      state.temporaryOrbit ||
       state.pivotPicking ||
       !active ||
       (!begin && !state.painting)
@@ -396,13 +432,21 @@ export const useEditor = create<EditorState>((set, get) => ({
       if (begin) state.notify(message, 'info');
       return false;
     }
-    const faces = facesUnderBrush(part, point, state.brushRadius, face);
+    const erasing = erase || state.brushErase;
+    const previousPatch = pair[active.side];
+    const faces = facesUnderBrush(part, point, state.brushRadius, face, {
+      plane: erasing ? undefined : state.brushPlane,
+      patch: previousPatch ?? undefined,
+    });
     if (!faces.length) return false;
-    const previous = pair[active.side]?.faces ?? [],
-      erasing = erase || state.brushErase;
+    const previous = previousPatch?.faces ?? [];
     const touched = new Set(faces),
       result = erasing
-        ? previous.filter((face) => !touched.has(face))
+        ? contiguousRemainder(
+            part.geometry,
+            previous.filter((face) => !touched.has(face)),
+            previousPatch?.seed?.face,
+          )
         : [...new Set([...previous, ...faces])].sort((a, b) => a - b);
     const same =
       previous.length === result.length && previous.every((face, i) => face === result[i]);
@@ -418,7 +462,19 @@ export const useEditor = create<EditorState>((set, get) => ({
               targetId: active.side === 'target' ? point.partId : op.targetId,
               surfacePairs: op.surfacePairs.map((entry) =>
                 entry.id === pair.id
-                  ? { ...entry, [active.side]: { partId: point.partId, faces: result } }
+                  ? {
+                      ...entry,
+                      [active.side]: {
+                        partId: point.partId,
+                        faces: result,
+                        seed: result.length
+                          ? ((previous.length ? previousPatch?.seed : undefined) ?? {
+                              ...point,
+                              face,
+                            })
+                          : undefined,
+                      },
+                    }
                   : entry,
               ),
             },
@@ -537,9 +593,18 @@ export const useEditor = create<EditorState>((set, get) => ({
       return;
     }
     try {
-      const { parts, rms, constrained, anchored } = solveAlignment(state.scene, op);
+      const { parts, rms, constrained, anchored, addedConstraints } = solveAlignment(
+        state.scene,
+        op,
+      );
       set({
-        ...changed(state, { ...state.scene, parts }),
+        ...changed(state, {
+          ...state.scene,
+          parts,
+          ...(addedConstraints?.length
+            ? { constraints: [...(state.scene.constraints ?? []), ...addedConstraints] }
+            : {}),
+        }),
         tool: 'select',
         navigationMode: null,
         selected: [source.id],
@@ -548,13 +613,15 @@ export const useEditor = create<EditorState>((set, get) => ({
         paintHistory: [],
       });
       state.notify(
-        (op.mode === 'surface'
-          ? `Fitted ${completedSurfacePairs(op.surfacePairs).length} surface pairs · ${rms.toFixed(3)} mm contact RMS`
-          : op.mode === 'multi'
-            ? `Aligned ${op.pairs.length} pairs · ${rms.toFixed(3)} mm RMS`
-            : anchored
-              ? `Parts aligned · ${rms.toFixed(3)} mm residual`
-              : 'Parts aligned') +
+        (op.mode === 'surface' && op.surfaceMethod && op.surfaceMethod !== 'contact'
+          ? `${planeKindLabels[op.surfaceMethod]} applied${addedConstraints?.length ? ` · ${addedConstraints.length} active plane ${addedConstraints.length === 1 ? 'constraint' : 'constraints'}` : ''}`
+          : op.mode === 'surface'
+            ? `Fitted ${completedSurfacePairs(op.surfacePairs).length} surface pairs · ${rms.toFixed(3)} mm contact RMS`
+            : op.mode === 'multi'
+              ? `Aligned ${op.pairs.length} pairs · ${rms.toFixed(3)} mm RMS`
+              : anchored
+                ? `Parts aligned · ${rms.toFixed(3)} mm residual`
+                : 'Parts aligned') +
           (constrained ? ' · limited by joint constraints' : anchored ? ' · anchor connected' : ''),
         constrained ? 'info' : 'success',
       );
@@ -595,7 +662,16 @@ export const useEditor = create<EditorState>((set, get) => ({
       };
       // Seat the selected anchors once even when the persistent connection is off.
       const constrained = constrainPart(child, parent, { ...joint, keepConnected: true });
-      const parts = transformAssembly(state.scene.parts, state.scene.joints, child.id, constrained);
+      const proposed = transformAssembly(
+        state.scene.parts,
+        state.scene.joints,
+        child.id,
+        constrained,
+      );
+      const parts = solvePlaneConstraints(
+        { ...state.scene, joints: [...state.scene.joints, joint] },
+        proposed,
+      );
       if (anchorError(parts, joint) > 1e-5)
         throw new Error('A fixed connected part prevents seating this joint. Unlock it first.');
       set({
@@ -638,7 +714,13 @@ export const useEditor = create<EditorState>((set, get) => ({
       );
       const joint = joints.find((j) => j.id === id)!;
       const child = state.scene.parts.find((p) => p.id === joint.childId)!;
-      const parts = transformAssembly(state.scene.parts, joints, child.id, child);
+      let parts = transformAssembly(state.scene.parts, joints, child.id, child);
+      try {
+        parts = solvePlaneConstraints({ ...state.scene, joints }, parts);
+      } catch (error) {
+        get().notify((error as Error).message, 'error');
+        return {};
+      }
       if (isJointConnected(joint) && anchorError(parts, joint) > 1e-5) {
         get().notify(
           'A fixed connected part prevents reconnecting this anchor. Unlock it first.',
@@ -652,17 +734,57 @@ export const useEditor = create<EditorState>((set, get) => ({
     set((state) =>
       changed(state, { ...state.scene, joints: state.scene.joints.filter((j) => j.id !== id) }),
     ),
+  updateConstraint: (id, patch) =>
+    set((state) => {
+      const previous = state.scene.constraints?.find((c) => c.id === id);
+      if (!previous) return {};
+      const next = {
+        ...previous,
+        ...patch,
+        id: previous.id,
+        sourceId: previous.sourceId,
+        targetId: previous.targetId,
+        sourcePlane: previous.sourcePlane,
+        targetPlane: previous.targetPlane,
+      };
+      const scene = {
+        ...state.scene,
+        constraints: state.scene.constraints!.map((c) => (c.id === id ? next : c)),
+      };
+      try {
+        validatePlaneConstraints(scene);
+        const parts = solvePlaneConstraints(scene, scene.parts);
+        return changed(state, { ...scene, parts });
+      } catch (error) {
+        get().notify((error as Error).message, 'error');
+        return {};
+      }
+    }),
+  removeConstraint: (id) =>
+    set((state) =>
+      changed(state, {
+        ...state.scene,
+        constraints: state.scene.constraints?.filter((c) => c.id !== id),
+      }),
+    ),
   transform: (id, patch, checkpoint = true) =>
     set((state) => {
       const part = state.scene.parts.find((p) => p.id === id);
       if (!part || part.locked) return {};
-      const parts = transformAssembly(
+      let parts = transformAssembly(
         state.scene.parts,
         state.scene.joints,
         id,
         { ...part, ...patch },
         { moveConnected: !!patch.position && !patch.quaternion && !patch.scale },
       );
+      try {
+        parts = solvePlaneConstraints(state.scene, parts);
+      } catch (error) {
+        const message = (error as Error).message;
+        if (get().toast?.message !== message) get().notify(message, 'error');
+        return {};
+      }
       return parts === state.scene.parts
         ? {}
         : changed(state, { ...state.scene, parts }, checkpoint);
@@ -698,6 +820,13 @@ export const useEditor = create<EditorState>((set, get) => ({
             { moveConnected },
           );
       }
+      try {
+        parts = solvePlaneConstraints(state.scene, parts);
+      } catch (error) {
+        const message = (error as Error).message;
+        if (get().toast?.message !== message) get().notify(message, 'error');
+        return {};
+      }
       return parts === state.scene.parts
         ? {}
         : changed(state, { ...state.scene, parts }, checkpoint);
@@ -730,6 +859,9 @@ export const useEditor = create<EditorState>((set, get) => ({
           joints: state.scene.joints.filter(
             (j) => !ids.includes(j.parentId) && !ids.includes(j.childId),
           ),
+          constraints: state.scene.constraints?.filter(
+            (c) => !ids.includes(c.sourceId) && !ids.includes(c.targetId),
+          ),
         }),
         selected: [],
       };
@@ -744,6 +876,7 @@ export const useEditor = create<EditorState>((set, get) => ({
           ...state.scene,
           parts: [...state.scene.parts, ...copies.parts],
           joints: [...state.scene.joints, ...copies.joints],
+          constraints: [...(state.scene.constraints ?? []), ...copies.constraints],
         }),
         selected: copies.parts.map((part) => part.id),
       };
@@ -755,6 +888,9 @@ export const useEditor = create<EditorState>((set, get) => ({
         parts: [...state.scene.parts.filter((p) => !ids.includes(p.id)), part],
         joints: state.scene.joints.filter(
           (j) => !ids.includes(j.parentId) && !ids.includes(j.childId),
+        ),
+        constraints: state.scene.constraints?.filter(
+          (c) => !ids.includes(c.sourceId) && !ids.includes(c.targetId),
         ),
       }),
       selected: [part.id],
@@ -769,6 +905,8 @@ export const useEditor = create<EditorState>((set, get) => ({
       savedRevision: recovered ? state.revision : state.revision + 1,
       tool: 'select',
       navigationMode: null,
+      temporaryOrbit: false,
+      precision: false,
       pivotPicking: false,
       painting: false,
       paintHistory: [],

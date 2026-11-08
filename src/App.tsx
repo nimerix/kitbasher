@@ -407,13 +407,13 @@ function StatusBar() {
     surfacePainting = useEditor((s) => s.tool === 'align' && s.operation.mode === 'surface');
   const recovery = useEditor((s) => s.recoveryStatus),
     tool = useEditor((s) => s.tool),
-    navigationMode = useEditor((s) => s.navigationMode);
+    navigationMode = useEditor((s) => (s.temporaryOrbit ? 'orbit' : s.navigationMode));
   return (
     <footer className="statusbar">
       <div className="navigation-hints">
         <span>
           <MousePointer2 size={11} />
-          Orbit <kbd>Drag</kbd>
+          Orbit <kbd>Middle / Space</kbd>
         </span>
         <span>
           <Hand size={11} />
@@ -428,12 +428,14 @@ function StatusBar() {
             : pivotPicking
               ? 'Click a model surface to set its pivot · P or Esc to cancel'
               : surfacePainting
-                ? 'Drag to paint · Alt erases · [ / ] brush size · O orbit · H pan'
+                ? 'Drag to paint · Alt erases · [ / ] brush size · Middle / Space orbits'
                 : tool === 'align'
-                  ? 'Pick source → target surfaces'
+                  ? 'Pick source → target · Middle / Space orbits'
                   : tool === 'joint'
                     ? 'Pick anchors to connect parts'
-                    : 'Shift + click to select multiple'}
+                    : ['translate', 'rotate', 'scale'].includes(tool)
+                      ? 'Hold Shift while dragging for 10× finer adjustment'
+                      : 'Shift + click to select multiple'}
         </span>
       </div>
       <div className="local-save-status">
@@ -505,9 +507,28 @@ export default function App() {
       search?.select();
     });
   }, []);
-  const contextGesture = useRef({ x: 0, y: 0, moved: false });
+  const contextGesture = useRef({ x: 0, y: 0, moved: false, selection: [] as string[] });
   useRecovery();
   useKeyboard(openScene, searchParts);
+  useEffect(() => {
+    // Some platforms emit contextmenu on right-button down. Close that early
+    // menu once the gesture becomes a pan, even if the pointer is over its portal.
+    const move = (event: PointerEvent) => {
+      const gesture = contextGesture.current;
+      if (
+        !(event.buttons & 2) ||
+        Math.hypot(event.clientX - gesture.x, event.clientY - gesture.y) <= 5
+      )
+        return;
+      gesture.moved = true;
+      if (useEditor.getState().contextMenu) {
+        useEditor.setState({ contextMenu: null, selected: gesture.selection });
+        document.querySelector<HTMLElement>('.viewport')?.focus({ preventScroll: true });
+      }
+    };
+    window.addEventListener('pointermove', move, true);
+    return () => window.removeEventListener('pointermove', move, true);
+  }, []);
   useEffect(() => {
     if (tool === 'align' || tool === 'joint') setRight(true);
   }, [tool]);
@@ -539,7 +560,12 @@ export default function App() {
     <div
       className={`workbench ${left ? 'show-parts' : ''} ${right ? 'show-inspector' : ''}`}
       onPointerDownCapture={(event) => {
-        contextGesture.current = { x: event.clientX, y: event.clientY, moved: false };
+        contextGesture.current = {
+          x: event.clientX,
+          y: event.clientY,
+          moved: false,
+          selection: useEditor.getState().selected,
+        };
       }}
       onPointerMoveCapture={(event) => {
         const gesture = contextGesture.current;
