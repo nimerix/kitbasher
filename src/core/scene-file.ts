@@ -1,0 +1,126 @@
+import { deserializeGeometry, serializeGeometry } from './geometry';
+import { validateJoint } from './constraints';
+import type { Joint, SceneDocument, SceneFile } from './types';
+
+export function serializeScene(scene: SceneDocument): SceneFile {
+  return {
+    format: 'kitbasher',
+    version: 1,
+    units: 'mm',
+    name: scene.name,
+    parts: scene.parts.map((p) => ({ ...p, geometry: serializeGeometry(p.geometry) })),
+    joints: scene.joints,
+  };
+}
+
+function finiteTuple(value: unknown, size: number): value is number[] {
+  return Array.isArray(value) && value.length === size && value.every(Number.isFinite);
+}
+
+export function parseScene(value: unknown): SceneDocument {
+  const data = value as SceneFile;
+  if (
+    !data ||
+    data.format !== 'kitbasher' ||
+    data.version !== 1 ||
+    data.units !== 'mm' ||
+    !Array.isArray(data.parts) ||
+    !Array.isArray(data.joints) ||
+    typeof data.name !== 'string'
+  ) {
+    throw new Error('This is not a supported Kitbasher scene.');
+  }
+  const ids = new Set<string>();
+  const parts = data.parts.map((p) => {
+    if (
+      !p ||
+      typeof p.id !== 'string' ||
+      ids.has(p.id) ||
+      typeof p.name !== 'string' ||
+      !finiteTuple(p.position, 3) ||
+      !finiteTuple(p.quaternion, 4) ||
+      !finiteTuple(p.scale, 3) ||
+      (p.pivot !== undefined && !finiteTuple(p.pivot, 3)) ||
+      p.scale.some((n) => Math.abs(n) < 1e-6) ||
+      Math.abs(Math.hypot(...p.quaternion) - 1) > 0.01 ||
+      typeof p.color !== 'string' ||
+      !/^#[\da-f]{6}$/i.test(p.color) ||
+      typeof p.visible !== 'boolean' ||
+      typeof p.locked !== 'boolean'
+    ) {
+      throw new Error('The scene contains invalid part data.');
+    }
+    ids.add(p.id);
+    return {
+      ...p,
+      source: typeof p.source === 'string' ? p.source : 'Scene',
+      geometry: deserializeGeometry(p.geometry),
+    };
+  });
+  const jointIds = new Set<string>(),
+    joints: Joint[] = [];
+  for (const j of data.joints) {
+    if (
+      !j ||
+      typeof j.id !== 'string' ||
+      jointIds.has(j.id) ||
+      typeof j.name !== 'string' ||
+      !ids.has(j.parentId) ||
+      !ids.has(j.childId) ||
+      !finiteTuple(j.parentAnchor, 3) ||
+      !finiteTuple(j.childAnchor, 3) ||
+      !finiteTuple(j.restRotation, 4) ||
+      Math.abs(Math.hypot(...j.restRotation) - 1) > 0.01 ||
+      !Array.isArray(j.rotationLocks) ||
+      j.rotationLocks.length !== 3 ||
+      !j.rotationLocks.every((b) => typeof b === 'boolean') ||
+      (j.keepConnected !== undefined && typeof j.keepConnected !== 'boolean')
+    ) {
+      throw new Error('The scene contains an invalid joint.');
+    }
+    validateJoint(joints, j.parentId, j.childId);
+    joints.push({ ...j, keepConnected: j.keepConnected ?? true });
+    jointIds.add(j.id);
+  }
+  return { name: data.name, parts, joints };
+}
+
+const dbName = 'kitbasher-workbench';
+async function recoveryDatabase(): Promise<IDBDatabase> {
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open(dbName, 1);
+    request.onupgradeneeded = () => request.result.createObjectStore('scenes');
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+}
+
+export async function saveRecovery(scene: SceneDocument) {
+  const file = serializeScene(scene),
+    db = await recoveryDatabase();
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const transaction = db.transaction('scenes', 'readwrite');
+      transaction.objectStore('scenes').put(file, 'current');
+      transaction.oncomplete = () => resolve();
+      transaction.onerror = () => reject(transaction.error);
+      transaction.onabort = () => reject(transaction.error);
+    });
+  } finally {
+    db.close();
+  }
+}
+
+export async function readRecovery(): Promise<SceneDocument | null> {
+  const db = await recoveryDatabase();
+  try {
+    const data = await new Promise<unknown>((resolve, reject) => {
+      const request = db.transaction('scenes', 'readonly').objectStore('scenes').get('current');
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    return data ? parseScene(data) : null;
+  } finally {
+    db.close();
+  }
+}
