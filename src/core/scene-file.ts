@@ -1,31 +1,246 @@
-import { binaryGeometry, deserializeGeometry, serializeGeometry } from './geometry';
+import type { BufferGeometry } from 'three';
+import { binaryGeometry, deserializeGeometry } from './geometry';
 import { validateJoint } from './constraints';
 import { validatePlaneConstraints } from './plane-constraints';
-import type { Joint, Part, PlaneConstraint, SceneDocument, SceneFile } from './types';
+import type {
+  BinaryGeometry,
+  BinarySceneHeader,
+  GeometryLayout,
+  GeometrySection,
+  Joint,
+  Part,
+  PlaneConstraint,
+  SceneDocument,
+  SceneFile,
+} from './types';
 
-const sceneHeader = (scene: SceneDocument) =>
+// Layout and rationale: docs/scene-format.md
+const sceneVersion = 2;
+const fileMagic = new Uint8Array([0x4b, 0x49, 0x54, 0x42, 0x41, 0x53, 0x48, 0x1a]);
+const prefixLength = 24;
+const sectionAlignment = 4;
+// Chrome rejects a Blob part over 2 GiB and cannot read that much in one call.
+const blobChunkBytes = 64 * 2 ** 20;
+const unreadable = 'This file could not be read as a Kitbasher scene.';
+const incomplete =
+  'This scene file is incomplete or damaged. It may not have finished downloading.';
+
+export const sceneMetadata = (scene: SceneDocument) =>
   ({
     format: 'kitbasher',
-    version: 1,
+    version: sceneVersion,
     units: 'mm',
     name: scene.name,
     joints: scene.joints,
     constraints: scene.constraints ?? [],
   }) as const;
 
-export function serializeScene(scene: SceneDocument): SceneFile {
-  return {
-    ...sceneHeader(scene),
-    parts: scene.parts.map((p) => ({ ...p, geometry: serializeGeometry(p.geometry) })),
-  };
+export function blobParts(values: ArrayBufferView) {
+  const parts: Uint8Array<ArrayBuffer>[] = [];
+  for (let done = 0; done < values.byteLength; done += blobChunkBytes)
+    parts.push(
+      new Uint8Array(
+        values.buffer as ArrayBuffer,
+        values.byteOffset + done,
+        Math.min(blobChunkBytes, values.byteLength - done),
+      ),
+    );
+  return parts;
 }
 
-/** Autosave runs after every edit, so it stores typed arrays instead of number lists. */
-export function serializeRecovery(scene: SceneDocument) {
-  return {
-    ...sceneHeader(scene),
-    parts: scene.parts.map((p) => ({ ...p, geometry: binaryGeometry(p.geometry) })),
+/** Queues a mesh's buffers as Blob parts, so no single allocation holds the whole scene. */
+export function appendGeometry(geometry: BufferGeometry, body: BlobPart[], start: number) {
+  const data = binaryGeometry(geometry);
+  let end = start;
+  const append = (values: ArrayBufferView): GeometrySection => {
+    const section = { offset: end, length: values.byteLength };
+    body.push(...blobParts(values));
+    end += values.byteLength;
+    const padding = (sectionAlignment - (end % sectionAlignment)) % sectionAlignment;
+    if (padding) {
+      body.push(new Uint8Array(padding));
+      end += padding;
+    }
+    return section;
   };
+  const layout: GeometryLayout = {
+    vertices: data.positions.length / 3,
+    positions: append(data.positions),
+  };
+  if (data.normals) layout.normals = append(data.normals);
+  if (data.colors) layout.colors = append(data.colors);
+  if (data.indices) {
+    // glTF can supply 8-bit indices, which the file format does not store.
+    const indices =
+      data.indices instanceof Uint16Array || data.indices instanceof Uint32Array
+        ? data.indices
+        : Uint32Array.from(data.indices);
+    layout.indices = {
+      ...append(indices),
+      type: indices instanceof Uint16Array ? 'u16' : 'u32',
+    };
+  }
+  return { layout, end };
+}
+
+export function sceneFileBlob(scene: SceneDocument): Blob {
+  const body: BlobPart[] = [];
+  const indexes = new Map<BufferGeometry, number>();
+  const geometries: GeometryLayout[] = [];
+  let bodyLength = 0;
+  const parts = scene.parts.map((part) => {
+    // Copies share one mesh in memory, and they stay shared in the file.
+    let index = indexes.get(part.geometry);
+    if (index === undefined) {
+      const { layout, end } = appendGeometry(part.geometry, body, bodyLength);
+      index = geometries.push(layout) - 1;
+      indexes.set(part.geometry, index);
+      bodyLength = end;
+    }
+    return { ...part, geometry: index };
+  });
+  const header: BinarySceneHeader = { ...sceneMetadata(scene), parts, geometries, bodyLength };
+  const encoded = new TextEncoder().encode(JSON.stringify(header));
+  // JSON allows trailing spaces, which keep the body aligned.
+  const headerLength =
+    prefixLength +
+    encoded.length +
+    ((sectionAlignment - (encoded.length % sectionAlignment)) % sectionAlignment);
+  const headerBytes = new Uint8Array(headerLength).fill(0x20);
+  headerBytes.set(fileMagic);
+  const prefix = new DataView(headerBytes.buffer);
+  prefix.setUint32(8, sceneVersion, true);
+  prefix.setUint32(12, 0, true);
+  prefix.setBigUint64(16, BigInt(headerLength - prefixLength), true);
+  headerBytes.set(encoded, prefixLength);
+  return new Blob([headerBytes, ...body], { type: 'application/octet-stream' });
+}
+
+/**
+ * A browser that cannot hold a Blob, such as a private window past its memory limit, still
+ * creates it and only fails on use. Download and IndexedDB can then accept it silently.
+ */
+export async function assertReadable(blob: Blob) {
+  await blob.slice(Math.max(0, blob.size - 1)).arrayBuffer();
+}
+
+/** Rejects layouts that could overlap or read past the data, then returns where they end. */
+export function validateLayout(value: unknown, start: number, end: number) {
+  const layout = value as GeometryLayout;
+  const invalid = () => new Error('The scene contains invalid mesh data.');
+  if (!layout || !Number.isSafeInteger(layout.vertices) || layout.vertices < 3) throw invalid();
+  let cursor = start;
+  const section = (entry: GeometrySection, length?: number) => {
+    if (
+      !entry ||
+      !Number.isSafeInteger(entry.offset) ||
+      !Number.isSafeInteger(entry.length) ||
+      entry.offset < cursor ||
+      entry.length < 0 ||
+      entry.offset + entry.length > end ||
+      (length !== undefined && entry.length !== length)
+    )
+      throw invalid();
+    cursor = entry.offset + entry.length;
+  };
+  section(layout.positions, layout.vertices * 12);
+  if (layout.normals) section(layout.normals, layout.vertices * 12);
+  if (layout.colors) section(layout.colors, layout.vertices * 12);
+  if (layout.indices) {
+    const width = layout.indices.type === 'u16' ? 2 : layout.indices.type === 'u32' ? 4 : 0;
+    section(layout.indices);
+    if (!width || layout.indices.length % width) throw invalid();
+  }
+  return cursor;
+}
+
+/** Chrome fails to read 2.2 GiB in one call, and can read any size in pieces. */
+export async function readBytes(
+  source: Blob,
+  start = 0,
+  length = source.size,
+  onBytes?: (length: number) => void,
+) {
+  const data = new Uint8Array(length);
+  for (let done = 0; done < length; done += blobChunkBytes) {
+    const end = Math.min(done + blobChunkBytes, length);
+    data.set(new Uint8Array(await source.slice(start + done, start + end).arrayBuffer()), done);
+    onBytes?.(end - done);
+  }
+  return data.buffer;
+}
+
+export async function readGeometry(
+  source: Blob,
+  layout: GeometryLayout,
+  base = 0,
+  onBytes?: (length: number) => void,
+) {
+  const bytes = ({ offset, length }: GeometrySection) =>
+    readBytes(source, base + offset, length, onBytes);
+  const data: BinaryGeometry = { positions: new Float32Array(await bytes(layout.positions)) };
+  if (layout.normals) data.normals = new Float32Array(await bytes(layout.normals));
+  if (layout.colors) data.colors = new Float32Array(await bytes(layout.colors));
+  if (layout.indices) {
+    const buffer = await bytes(layout.indices);
+    data.indices =
+      layout.indices.type === 'u16' ? new Uint16Array(buffer) : new Uint32Array(buffer);
+  }
+  return deserializeGeometry(data);
+}
+
+/** Opens binary scenes and the JSON scene files saved by earlier versions. */
+export async function readSceneFile(
+  file: Blob,
+  onProgress?: (fraction: number) => void,
+): Promise<SceneDocument> {
+  const prefix = await file.slice(0, prefixLength).arrayBuffer();
+  const prefixBytes = new Uint8Array(prefix);
+  if (!fileMagic.every((byte, i) => prefixBytes[i] === byte)) {
+    let data: unknown;
+    try {
+      data = JSON.parse(await file.text());
+    } catch {
+      throw new Error(unreadable);
+    }
+    return parseScene(data);
+  }
+  if (file.size < prefixLength) throw new Error(incomplete);
+  const view = new DataView(prefix);
+  const version = view.getUint32(8, true);
+  if (version > sceneVersion)
+    throw new Error('This scene was saved by a newer version of Kitbasher.');
+  if (version !== sceneVersion) throw new Error(unreadable);
+  const bodyStart = prefixLength + Number(view.getBigUint64(16, true));
+  if (bodyStart > file.size) throw new Error(incomplete);
+  let header: BinarySceneHeader;
+  try {
+    header = JSON.parse(
+      new TextDecoder().decode(await file.slice(prefixLength, bodyStart).arrayBuffer()),
+    );
+  } catch {
+    throw new Error(unreadable);
+  }
+  if (!header || !Number.isSafeInteger(header.bodyLength) || !Array.isArray(header.geometries))
+    throw new Error(unreadable);
+  if (bodyStart + header.bodyLength !== file.size) throw new Error(incomplete);
+  let cursor = 0;
+  for (const layout of header.geometries)
+    cursor = validateLayout(layout, cursor, header.bodyLength);
+  let read = 0;
+  const geometries: BufferGeometry[] = [];
+  for (const layout of header.geometries)
+    geometries.push(
+      await readGeometry(file, layout, bodyStart, (length) => {
+        read += length;
+        onProgress?.(header.bodyLength ? read / header.bodyLength : 1);
+      }),
+    );
+  return parseSceneDocument(header, sceneVersion, (reference) => {
+    const geometry = Number.isInteger(reference) ? geometries[reference as number] : undefined;
+    if (!geometry) throw new Error('The scene contains invalid part data.');
+    return geometry;
+  });
 }
 
 /** Relationships to excluded parts would make the resulting scene file invalid. */
@@ -43,12 +258,23 @@ function finiteTuple(value: unknown, size: number): value is number[] {
   return Array.isArray(value) && value.length === size && value.every(Number.isFinite);
 }
 
+/** Parses the JSON scene document written by earlier versions. */
 export function parseScene(value: unknown): SceneDocument {
+  return parseSceneDocument(value, 1, (geometry) =>
+    deserializeGeometry(geometry as SceneFile['parts'][number]['geometry']),
+  );
+}
+
+export function parseSceneDocument(
+  value: unknown,
+  version: number,
+  geometryOf: (reference: unknown) => BufferGeometry,
+): SceneDocument {
   const data = value as SceneFile;
   if (
     !data ||
     data.format !== 'kitbasher' ||
-    data.version !== 1 ||
+    data.version !== version ||
     data.units !== 'mm' ||
     !Array.isArray(data.parts) ||
     !Array.isArray(data.joints) ||
@@ -80,7 +306,7 @@ export function parseScene(value: unknown): SceneDocument {
     return {
       ...p,
       source: typeof p.source === 'string' ? p.source : 'Scene',
-      geometry: deserializeGeometry(p.geometry),
+      geometry: geometryOf(p.geometry),
     };
   });
   const jointIds = new Set<string>(),
@@ -139,59 +365,4 @@ export function parseScene(value: unknown): SceneDocument {
   const scene = { name: data.name, parts, joints, constraints };
   validatePlaneConstraints(scene);
   return scene;
-}
-
-const dbName = 'kitbasher-workbench';
-async function recoveryDatabase(): Promise<IDBDatabase> {
-  return new Promise((resolve, reject) => {
-    const request = indexedDB.open(dbName, 1);
-    request.onupgradeneeded = () => request.result.createObjectStore('scenes');
-    request.onsuccess = () => resolve(request.result);
-    request.onerror = () => reject(request.error);
-  });
-}
-
-export async function clearRecovery() {
-  const db = await recoveryDatabase();
-  try {
-    await new Promise<void>((resolve, reject) => {
-      const transaction = db.transaction('scenes', 'readwrite');
-      transaction.objectStore('scenes').delete('current');
-      transaction.oncomplete = () => resolve();
-      transaction.onerror = () => reject(transaction.error);
-      transaction.onabort = () => reject(transaction.error);
-    });
-  } finally {
-    db.close();
-  }
-}
-
-export async function saveRecovery(scene: SceneDocument) {
-  const file = serializeRecovery(scene),
-    db = await recoveryDatabase();
-  try {
-    await new Promise<void>((resolve, reject) => {
-      const transaction = db.transaction('scenes', 'readwrite');
-      transaction.objectStore('scenes').put(file, 'current');
-      transaction.oncomplete = () => resolve();
-      transaction.onerror = () => reject(transaction.error);
-      transaction.onabort = () => reject(transaction.error);
-    });
-  } finally {
-    db.close();
-  }
-}
-
-export async function readRecovery(): Promise<SceneDocument | null> {
-  const db = await recoveryDatabase();
-  try {
-    const data = await new Promise<unknown>((resolve, reject) => {
-      const request = db.transaction('scenes', 'readonly').objectStore('scenes').get('current');
-      request.onsuccess = () => resolve(request.result);
-      request.onerror = () => reject(request.error);
-    });
-    return data ? parseScene(data) : null;
-  } finally {
-    db.close();
-  }
 }

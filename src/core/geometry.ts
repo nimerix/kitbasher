@@ -79,6 +79,17 @@ export function worldNormal(part: Part, surface: SurfacePoint): Vector3 {
     .normalize();
 }
 
+// Chrome rejects a larger WebGL buffer with a console error, and the mesh silently does not draw.
+export const maxBufferBytes = 2 ** 31 - 1;
+export const drawLimit =
+  'One mesh can use at most 2 GB per GPU buffer, about 59 million triangles in STL or OBJ.';
+
+export function exceedsDrawLimit(geometry: BufferGeometry) {
+  return [geometry.index, ...Object.values(geometry.attributes)].some(
+    (attribute) => attribute && attribute.array.byteLength > maxBufferBytes,
+  );
+}
+
 export function triangleCount(geometry: BufferGeometry) {
   return (geometry.index?.count ?? geometry.getAttribute('position').count) / 3;
 }
@@ -134,7 +145,7 @@ function vectorArray(geometry: BufferGeometry, name: string) {
   return values;
 }
 
-/** Shares the live buffers; structured clone copies them without boxing every number. */
+/** Shares the live buffers, which never change once a mesh is in a scene. */
 export function binaryGeometry(geometry: BufferGeometry): BinaryGeometry {
   return {
     positions: vectorArray(geometry, 'position')!,
@@ -176,7 +187,11 @@ export function deserializeGeometry(data: SerializedGeometry | BinaryGeometry): 
     if (!valid) throw new Error('The mesh has invalid triangle indices.');
     geometry.setIndex(
       new BufferAttribute(
-        vertexCount > 65535 ? new Uint32Array(indices) : new Uint16Array(indices),
+        indices instanceof Uint16Array || indices instanceof Uint32Array
+          ? indices
+          : vertexCount > 65535
+            ? new Uint32Array(indices)
+            : new Uint16Array(indices),
         1,
       ),
     );

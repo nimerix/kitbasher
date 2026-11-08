@@ -2157,6 +2157,29 @@ optgroup {
   font-size: 12px;
   color: #9aaab9;
 }
+/* Blocks input at once, but only appears if the wait is long enough to notice. */
+.busy-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 150;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #10121480;
+  color: #d5d9df;
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  animation: fade-in 0.15s ease-out 0.25s both;
+}
+.busy-overlay > div {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 16px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #202226;
+}
 .modal-backdrop {
   position: fixed;
   inset: 0;

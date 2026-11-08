@@ -1,4 +1,6 @@
 import {
+  Box3,
+  BufferAttribute,
   BufferGeometry,
   Color,
   Group,
@@ -6,10 +8,9 @@ import {
   Mesh,
   MeshStandardMaterial,
   Object3D,
+  Sphere,
   Vector3,
 } from 'three';
-import { STLLoader } from 'three/addons/loaders/STLLoader.js';
-import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { ThreeMFLoader } from 'three/addons/loaders/3MFLoader.js';
 import { GLTFExporter } from 'three/addons/exporters/GLTFExporter.js';
@@ -17,6 +18,8 @@ import { STLExporter } from 'three/addons/exporters/STLExporter.js';
 import { strFromU8, strToU8, unzipSync, zipSync } from 'fflate';
 import {
   bakedPartGeometry,
+  drawLimit,
+  exceedsDrawLimit,
   isMirrored,
   partMatrix,
   sceneBounds,
@@ -25,7 +28,8 @@ import {
   triangleCount,
   uid,
 } from './geometry';
-import { sceneSubset, serializeScene } from './scene-file';
+import { ImportLimit, readObj, readStl } from './model-readers';
+import { assertReadable, blobParts, readBytes, sceneFileBlob, sceneSubset } from './scene-file';
 import type { Part, SceneDocument } from './types';
 
 export const safeFilename = (name: string) =>
@@ -36,24 +40,35 @@ const xml = (s: string) =>
     (c) => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;', "'": '&apos;' })[c]!,
   );
 
-export function download(data: BlobPart, filename: string, type = 'application/octet-stream') {
-  const url = URL.createObjectURL(new Blob([data], { type }));
+export async function download(
+  data: Blob | ArrayBuffer | ArrayBufferView,
+  filename: string,
+  type = 'application/octet-stream',
+) {
+  const file =
+    data instanceof Blob
+      ? data
+      : new Blob(blobParts(data instanceof ArrayBuffer ? new Uint8Array(data) : data), { type });
+  try {
+    await assertReadable(file);
+  } catch {
+    throw new Error(
+      'The browser could not prepare a file this large. Private windows keep files in memory, so use a normal window, or free up disk space.',
+    );
+  }
+  const url = URL.createObjectURL(file);
   const link = document.createElement('a');
   link.href = url;
   link.download = filename;
   document.body.appendChild(link);
   link.click();
   link.remove();
-  window.setTimeout(() => URL.revokeObjectURL(url), 10000);
+  // Leave time for a large file to start, or for a browser's save dialog to be answered.
+  window.setTimeout(() => URL.revokeObjectURL(url), 60000);
 }
 
-export function saveSceneFile(scene: SceneDocument) {
-  download(
-    JSON.stringify(serializeScene(scene)),
-    `${safeFilename(scene.name)}.kitbash`,
-    'application/json',
-  );
-}
+export const downloadScene = (scene: SceneDocument, name = scene.name) =>
+  download(sceneFileBlob(scene), `${safeFilename(name)}.kitbash`);
 
 export interface ImportOptions {
   units: 'auto' | 'mm' | 'cm' | 'm' | 'in';
@@ -61,79 +76,190 @@ export interface ImportOptions {
   center: boolean;
 }
 
-export async function importModels(files: File[], options: ImportOptions): Promise<Part[]> {
+// Chrome returns an empty string from TextDecoder past this length, rather than failing.
+const maxTextBytes = 0x1fffffe8;
+const threeMfUnits: Record<string, number> = {
+  micron: 0.001,
+  millimeter: 1,
+  centimeter: 10,
+  inch: 25.4,
+  foot: 304.8,
+  meter: 1000,
+};
+
+/** Lets a status show before work that holds the main thread. */
+const nextPaint = () => new Promise((resolve) => setTimeout(resolve, 30));
+
+const failedAllocation = (error: unknown) =>
+  error instanceof RangeError &&
+  /allocation failed|invalid (typed )?array( buffer)? length/i.test(error.message);
+
+async function read3mf(file: File, onBytes: (length: number) => void) {
+  const buffer = await readBytes(file, 0, file.size, onBytes);
+  await nextPaint();
+  let unit = 'millimeter';
+  const models = unzipSync(new Uint8Array(buffer), {
+    filter: ({ name, originalSize }) => {
+      if (!name.toLowerCase().endsWith('.model')) return false;
+      if (originalSize > maxTextBytes)
+        throw new ImportLimit(
+          `holds ${Math.round(originalSize / 2 ** 20)} MB of model text, more than a browser can parse as 3MF. Export it as STL, OBJ, or GLB instead.`,
+        );
+      return true;
+    },
+  });
+  const model = Object.values(models)[0];
+  if (model) {
+    // The attribute is on the root element, so this need not decode the whole model.
+    unit =
+      strFromU8(model.subarray(0, 4096)).match(
+        /<model\b[^>]*\bunit\s*=\s*["']([^"']+)["']/i,
+      )?.[1] ?? unit;
+  }
+  return { root: new ThreeMFLoader().parse(buffer), factor: threeMfUnits[unit] ?? 1 };
+}
+
+async function readGltf(file: File, onBytes: (length: number) => void) {
+  if (file.name.toLowerCase().endsWith('.glb')) {
+    const buffer = await readBytes(file, 0, file.size, onBytes);
+    return (await new GLTFLoader().parseAsync(buffer, '')).scene;
+  }
+  if (file.size > maxTextBytes)
+    throw new ImportLimit(
+      'is too large for a browser to read as text. Convert it to GLB, which has no such limit.',
+    );
+  const text = new TextDecoder().decode(await readBytes(file, 0, file.size, onBytes));
+  return (await new GLTFLoader().parseAsync(text, '')).scene;
+}
+
+/**
+ * Moves a mesh's center to its origin, so large scanner coordinates baked into vertices do not
+ * make its local transforms useless, and returns where the center was.
+ */
+function rebaseGeometry(geometry: BufferGeometry, fileName: string) {
+  const invalid = () => new Error(`${fileName} contains invalid vertices.`);
+  const position = geometry.getAttribute('position');
+  if (!(position instanceof BufferAttribute) || !(position.array instanceof Float32Array)) {
+    for (let i = 0; i < position.count; i++)
+      if (!Number.isFinite(position.getX(i) + position.getY(i) + position.getZ(i))) throw invalid();
+    geometry.computeBoundingBox();
+    const center = geometry.boundingBox!.getCenter(new Vector3());
+    geometry.translate(-center.x, -center.y, -center.z);
+    return center;
+  }
+  // Three's per-vertex accessors and bounds took 4 s here on 48 million triangles.
+  const values = position.array;
+  let minX = Infinity;
+  let minY = Infinity;
+  let minZ = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  let maxZ = -Infinity;
+  for (let i = 0; i < values.length; i += 3) {
+    const x = values[i];
+    const y = values[i + 1];
+    const z = values[i + 2];
+    if (!Number.isFinite(x + y + z)) throw invalid();
+    if (x < minX) minX = x;
+    if (x > maxX) maxX = x;
+    if (y < minY) minY = y;
+    if (y > maxY) maxY = y;
+    if (z < minZ) minZ = z;
+    if (z > maxZ) maxZ = z;
+  }
+  const center = new Vector3((minX + maxX) / 2, (minY + maxY) / 2, (minZ + maxZ) / 2);
+  let radiusSquared = 0;
+  for (let i = 0; i < values.length; i += 3) {
+    const x = (values[i] -= center.x);
+    const y = (values[i + 1] -= center.y);
+    const z = (values[i + 2] -= center.z);
+    const distance = x * x + y * y + z * z;
+    if (distance > radiusSquared) radiusSquared = distance;
+  }
+  geometry.boundingBox = new Box3(
+    new Vector3(minX, minY, minZ).sub(center),
+    new Vector3(maxX, maxY, maxZ).sub(center),
+  );
+  geometry.boundingSphere = new Sphere(new Vector3(), Math.sqrt(radiusSquared));
+  return center;
+}
+
+export async function importModels(
+  files: File[],
+  options: ImportOptions,
+  onStatus?: (status: string) => void,
+): Promise<Part[]> {
   const results: Part[] = [];
+  const totalBytes = files.reduce((total, file) => total + file.size, 0);
+  let doneBytes = 0;
   for (const file of files) {
-    if (file.size > 250 * 1024 * 1024)
-      throw new Error(`${file.name} exceeds the 250 MB per-file limit.`);
-    const ext = file.name.split('.').pop()?.toLowerCase(),
-      buffer = await file.arrayBuffer();
+    const ext = file.name.split('.').pop()?.toLowerCase();
     if (!['stl', 'obj', 'glb', 'gltf', '3mf'].includes(ext ?? ''))
       throw new Error(`${file.name}: supported formats are STL, OBJ, GLB, embedded GLTF, and 3MF.`);
+    const onBytes = (length: number) => {
+      doneBytes += length;
+      onStatus?.(`Importing ${file.name}… ${Math.round((doneBytes / totalBytes) * 100)}%`);
+    };
+    onStatus?.(`Importing ${file.name}…`);
+    await nextPaint();
     let root: Object3D;
+    let declaredFactor: number | undefined;
+    // Only these formats can share one buffer across meshes, which the rebasing below edits.
+    const ownsBuffers = ext === 'stl' || ext === 'obj';
     try {
       if (ext === 'stl') {
         root = new Mesh(
-          new STLLoader().parse(buffer),
+          await readStl(file, onBytes),
           new MeshStandardMaterial({ color: '#c5c2b8' }),
         );
-      } else if (ext === 'obj') root = new OBJLoader().parse(new TextDecoder().decode(buffer));
-      else if (ext === '3mf') root = new ThreeMFLoader().parse(buffer);
-      else {
-        const gltf = await new GLTFLoader().parseAsync(
-          ext === 'glb' ? buffer : new TextDecoder().decode(buffer),
-          '',
-        );
-        root = gltf.scene;
-      }
+      } else if (ext === 'obj') root = await readObj(file, onBytes);
+      else if (ext === '3mf') {
+        const model = await read3mf(file, onBytes);
+        root = model.root;
+        declaredFactor = model.factor;
+      } else root = await readGltf(file, onBytes);
     } catch (error) {
+      if (failedAllocation(error))
+        throw new Error(
+          `There is not enough memory to import ${file.name}. Close other tabs or free up memory, then try again.`,
+        );
+      if (error instanceof ImportLimit) throw new Error(`${file.name} ${error.message}`);
       // Loader errors describe parser internals, such as out-of-bounds reads.
       throw new Error(
         `${file.name} could not be read. The file may be damaged. (${(error as Error).message})`,
       );
     }
+    onStatus?.(`Preparing ${file.name}…`);
+    await nextPaint();
     const unit =
       options.units === 'auto' ? (ext === 'glb' || ext === 'gltf' ? 'm' : 'mm') : options.units;
     const up = options.up === 'auto' ? (ext === 'glb' || ext === 'gltf' ? 'y' : 'z') : options.up;
-    let factor = { mm: 1, cm: 10, m: 1000, in: 25.4 }[unit];
-    if (ext === '3mf' && options.units === 'auto') {
-      const entries = unzipSync(new Uint8Array(buffer));
-      const model = Object.entries(entries).find(([name]) => name.toLowerCase().endsWith('.model'));
-      if (model) {
-        const declared =
-          strFromU8(model[1]).match(/<model\b[^>]*\bunit\s*=\s*["']([^"']+)["']/i)?.[1] ??
-          'millimeter';
-        factor =
-          (
-            {
-              micron: 0.001,
-              millimeter: 1,
-              centimeter: 10,
-              inch: 25.4,
-              foot: 304.8,
-              meter: 1000,
-            } as Record<string, number>
-          )[declared] ?? 1;
-      }
-    }
+    const factor =
+      options.units === 'auto' && declaredFactor !== undefined
+        ? declaredFactor
+        : { mm: 1, cm: 10, m: 1000, in: 25.4 }[unit];
     const correction = new Matrix4().makeScale(factor, factor, factor);
     if (up === 'z') correction.multiply(new Matrix4().makeRotationX(-Math.PI / 2));
     root.updateMatrixWorld(true);
     let meshIndex = 0;
+    // Instances of one mesh stay one mesh, as a GLB of 10,000 bolts could not fit otherwise.
+    const rebased = new Map<BufferGeometry, { geometry: BufferGeometry; center: Vector3 }>();
     root.traverse((object) => {
       if (!(object instanceof Mesh) || !object.geometry?.getAttribute('position')) return;
       // An empty part could never be reopened: scene files reject meshes without triangles.
       if (triangleCount(object.geometry) < 1) return;
-      const geometry: BufferGeometry = object.geometry.clone();
-      if (!geometry.getAttribute('normal')) geometry.computeVertexNormals();
-      const positions = geometry.getAttribute('position');
-      for (let i = 0; i < positions.count; i++)
-        if (
-          !Number.isFinite(positions.getX(i)) ||
-          !Number.isFinite(positions.getY(i)) ||
-          !Number.isFinite(positions.getZ(i))
-        )
-          throw new Error(`${file.name} contains invalid vertices.`);
+      let prepared = rebased.get(object.geometry);
+      if (!prepared) {
+        if (exceedsDrawLimit(object.geometry))
+          throw new Error(
+            `${file.name} is too large for a browser to draw. ${drawLimit} Split or decimate it first.`,
+          );
+        const geometry: BufferGeometry = ownsBuffers ? object.geometry : object.geometry.clone();
+        if (!geometry.getAttribute('normal')) geometry.computeVertexNormals();
+        prepared = { geometry, center: rebaseGeometry(geometry, file.name) };
+        rebased.set(object.geometry, prepared);
+      }
+      const { geometry, center } = prepared;
       const material = Array.isArray(object.material) ? object.material[0] : object.material;
       const color =
         material && 'color' in material ? (material.color as Color).getHexString() : 'c5c2b8';
@@ -153,11 +279,6 @@ export async function importModels(files: File[], options: ImportOptions): Promi
         locked: false,
         source: file.name,
       };
-      // Scans often bake large scanner coordinates into vertices. Rebase each
-      // mesh without changing its world placement so local transforms stay useful.
-      geometry.computeBoundingBox();
-      const center = geometry.boundingBox!.getCenter(new Vector3());
-      geometry.translate(-center.x, -center.y, -center.z);
       results.push(
         transformFromMatrix(
           part,
@@ -200,7 +321,25 @@ function meshGroup(parts: Part[]) {
   return group;
 }
 
+// Three's exporter reads its result back from a Blob. Past 2 GiB that fails inside a callback,
+// so its promise never settles and the export would wait forever.
+const maxGlbBytes = 2 ** 31 - 64 * 2 ** 20;
+
+function assertGlbFits(parts: Part[]) {
+  let bytes = 0;
+  // The exporter writes a mesh shared by several parts once.
+  for (const geometry of new Set(parts.map((part) => part.geometry)))
+    for (const attribute of [geometry.index, ...Object.values(geometry.attributes)])
+      if (attribute)
+        bytes += attribute.count * attribute.itemSize * attribute.array.BYTES_PER_ELEMENT;
+  if (bytes > maxGlbBytes)
+    throw new Error(
+      'This assembly is too large to export as GLB, which a browser can only build up to 2 GB. Export fewer parts, or use STL or a Kitbasher scene.',
+    );
+}
+
 export async function exportGlb(scene: SceneDocument, parts: Part[]): Promise<ArrayBuffer> {
+  assertGlbFits(parts);
   const root = meshGroup(parts);
   const included = sceneSubset(scene, parts);
   root.name = scene.name;
@@ -247,6 +386,13 @@ export function exportStl(parts: Part[]): ArrayBuffer {
 }
 
 export function export3mf(scene: SceneDocument, parts: Part[]): Uint8Array {
+  // The shortest possible text for each element. Building past the limit takes 24 s to fail.
+  const shortestText = parts.reduce(
+    (bytes, { geometry }) =>
+      bytes + geometry.getAttribute('position').count * 27 + triangleCount(geometry) * 32,
+    0,
+  );
+  if (shortestText > maxTextBytes) throw new RangeError('Too much text for a 3MF model.');
   const resources = parts.map((part, index) => {
     const data = serializeGeometry(part.geometry),
       indices = data.indices ?? Array.from({ length: data.positions.length / 3 }, (_, i) => i);
@@ -382,7 +528,8 @@ print("Saved", bpy.data.filepath)
     'KITBASHER → BLENDER\n\nImport assembly.glb in Blender for separate meshes at real-world scale.\nTo also reconstruct joint parenting and rotation locks: extract this ZIP,\nopen import_assembly.py in Blender’s Scripting workspace, and run it.\nThe script saves assembly.blend in this folder.\n\nTo pose a connected part, select its named joint empty (for example, Neck pivot)\nand rotate around an unlocked local axis. Only joints with Keep connected on\nare rebuilt as pivots; disabled joints retain metadata and leave meshes free.\nThe mesh follows the pivot with\nits original anchor connected. Connected mesh transforms are locked.\n\nGLB retains names and colors; multipart 3MF retains geometry and placement.\nPlane constraints are exported as solved placement and GLB metadata. They do not become live Blender constraints.\nThe .kitbash scene is the authoritative editable scene with all joint and plane constraint data.\n';
   return zipSync(
     {
-      'assembly.glb': new Uint8Array(glb),
+      // Compressing 1.7 GB held the main thread for 25 s.
+      'assembly.glb': [new Uint8Array(glb), { level: glb.byteLength > 2 ** 28 ? 0 : 6 }],
       'import_assembly.py': strToU8(script),
       'README.txt': strToU8(readme),
     },

@@ -5,12 +5,22 @@ import {
   binaryGeometry,
   combineParts,
   deserializeGeometry,
+  drawLimit,
+  exceedsDrawLimit,
+  triangleCount,
   uid,
 } from './geometry';
 import type { BinaryGeometry, Part } from './types';
 
+// The check below holds the main thread for 14 s at this size, and fails by 24 million.
+const maxUnionTriangles = 10_000_000;
+
 /** Reject open/non-manifold inputs before attempting a solid Boolean. */
 export function assertClosed(part: Part) {
+  if (triangleCount(part.geometry) > maxUnionTriangles)
+    throw new Error(
+      `${part.name} has too many triangles for a Boolean union. The limit is 10 million per part. Use Combine meshes instead.`,
+    );
   const geometry = part.geometry.clone();
   for (const name of Object.keys(geometry.attributes))
     if (name !== 'position') geometry.deleteAttribute(name);
@@ -79,6 +89,12 @@ export async function mergeParts(
     } finally {
       worker.terminate();
     }
+  }
+  if (exceedsDrawLimit(geometry)) {
+    geometry.dispose();
+    throw new Error(
+      `The merged mesh would be too large for a browser to draw. ${drawLimit} Merge fewer parts.`,
+    );
   }
   // Recenter the local origin without moving the surface in world space.
   geometry.computeBoundingBox();

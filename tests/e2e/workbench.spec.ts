@@ -1,7 +1,9 @@
 import { expect, test, type Page } from '@playwright/test';
 import { readFile } from 'node:fs/promises';
 import { BoxGeometry, Mesh, Matrix4, Quaternion, Vector3 } from 'three';
-import type { SceneFile } from '../../src/core/types';
+import type { SceneDocument } from '../../src/core/types';
+import { readSavedScene } from './saved-scene';
+import { serializeScene } from '../helpers/legacy-scene';
 import { STLExporter } from 'three/addons/exporters/STLExporter.js';
 import { serializeGeometry } from '../../src/core/geometry';
 
@@ -31,10 +33,10 @@ test('positions an assembly, preserves joints, undoes, saves and recovers', asyn
   await page.getByRole('button', { name: 'Save scene', exact: true }).click();
   const saved = await downloadPromise;
   expect(saved.suggestedFilename()).toMatch(/\.kitbash$/);
-  const file = JSON.parse(await readFile((await saved.path())!, 'utf8'));
+  const { scene: file, bytes } = await readSavedScene((await saved.path())!);
   expect(file.parts).toHaveLength(15);
   expect(file.joints).toHaveLength(2);
-  expect(file.parts.find((p: { id: string }) => p.id === 'torso').position[0]).toBe(12);
+  expect(file.parts.find((p) => p.id === 'torso')!.position[0]).toBe(12);
   await expect(page.getByText('Saved locally', { exact: true })).toBeVisible();
   await page.reload();
   await expect(page.getByText('Recovered your local assembly')).toBeVisible();
@@ -42,8 +44,8 @@ test('positions an assembly, preserves joints, undoes, saves and recovers', asyn
   await expect(page.getByRole('spinbutton', { name: 'Position X', exact: true })).toHaveValue('12');
   await page.getByLabel('Open Kitbasher scene').setInputFiles({
     name: 'Restored.kitbash',
-    mimeType: 'application/json',
-    buffer: Buffer.from(JSON.stringify(file)),
+    mimeType: 'application/octet-stream',
+    buffer: bytes,
   });
   await page.getByRole('button', { name: 'Open scene', exact: true }).click();
   await page.locator('.part-select[title="Torso shell"]').click();
@@ -317,7 +319,7 @@ test('picks a dense imported mesh using the accelerated viewport path', async ({
   await expect(page.getByText('Now click the matching target surface.')).toBeVisible();
 });
 
-function expectConnectedAnchors(scene: SceneFile) {
+function expectConnectedAnchors(scene: SceneDocument) {
   for (const joint of scene.joints.filter((j) => j.keepConnected !== false)) {
     const anchor = (id: string, point: [number, number, number]) => {
       const part = scene.parts.find((p) => p.id === id)!;
@@ -337,11 +339,11 @@ function expectConnectedAnchors(scene: SceneFile) {
   }
 }
 
-async function downloadedScene(page: Page): Promise<SceneFile> {
+async function downloadedScene(page: Page): Promise<SceneDocument> {
   const downloading = page.waitForEvent('download');
   await page.getByRole('button', { name: 'Save scene', exact: true }).click();
   const download = await downloading;
-  return JSON.parse(await readFile((await download.path())!, 'utf8'));
+  return (await readSavedScene((await download.path())!)).scene;
 }
 
 async function openFixture(page: Page, scene: unknown) {
@@ -421,7 +423,7 @@ test('toggles the persistent joint anchor, moves connected parts, and restores p
   await x.press('Enter');
   await page.locator('.part-select[title="Optics & head"]').click();
   await expect(x).toHaveValue('45');
-  await openFixture(page, paused);
+  await openFixture(page, serializeScene(paused));
   await page.locator('.part-select[title="Optics & head"]').click();
   await expect(keep).toHaveAttribute('aria-checked', 'false');
   await expect(x).toHaveValue('45');
@@ -472,7 +474,9 @@ test('imports an offset-origin scan with usable transform coordinates', async ({
   await expect(ry).toHaveValue('30');
   const scene = await downloadedScene(page),
     imported = scene.parts.find((p: { source: string }) => p.source === 'offset-scan.stl')!;
-  expect(Math.max(...imported.geometry.positions.map((p: number) => Math.abs(p)))).toBeLessThan(16);
+  expect(
+    Math.max(...Array.from(imported.geometry.getAttribute('position').array, Math.abs)),
+  ).toBeLessThan(16);
 });
 
 test('drags move and rotate gizmos on a legacy scan whose origin is far outside the view', async ({
@@ -513,7 +517,7 @@ test('drags move and rotate gizmos on a legacy scan whose origin is far outside 
   await page.mouse.up();
   await expect(x).not.toHaveValue('-1200');
   const moved = await downloadedScene(page);
-  const pivot = (part: SceneFile['parts'][number]) =>
+  const pivot = (part: SceneDocument['parts'][number]) =>
     new Vector3(1200, 800, -600).applyMatrix4(
       new Matrix4().compose(
         new Vector3(...part.position),

@@ -17,12 +17,8 @@ import {
 import { saveCurrentScene } from '../../src/core/commands';
 import { exportStl, importModels } from '../../src/core/files';
 import { displayedPosition, explodeFrame, transferView } from '../../src/core/navigation';
-import {
-  parseScene,
-  sceneSubset,
-  serializeRecovery,
-  serializeScene,
-} from '../../src/core/scene-file';
+import { parseScene, sceneSubset } from '../../src/core/scene-file';
+import { serializeScene } from '../helpers/legacy-scene';
 import { useEditor } from '../../src/core/store';
 import type { Part, PlaneConstraint, SceneDocument, Vec3 } from '../../src/core/types';
 
@@ -104,18 +100,19 @@ describe('scene files', () => {
     expect(deserializeGeometry(legacy).getAttribute('normal').count).toBe(24);
   });
 
-  it('round trips the typed-array recovery format and its validation', () => {
+  it('still opens autosaves that hold typed arrays inside the scene record', () => {
     const source = part('a', [1, 2, 3]);
-    const stored = serializeRecovery({ name: 'Recovered', parts: [source], joints: [] });
-    expect(stored.parts[0].geometry.positions).toBeInstanceOf(Float32Array);
-    const cloned = structuredClone(stored);
-    const restored = parseScene(cloned).parts[0].geometry;
+    const stored = structuredClone({
+      ...serializeScene({ name: 'Recovered', parts: [], joints: [] }),
+      parts: [{ ...source, geometry: binaryGeometry(source.geometry) }],
+    });
+    const restored = parseScene(stored).parts[0].geometry;
     expect(restored.getAttribute('position').array).toEqual(
       source.geometry.getAttribute('position').array,
     );
     expect(restored.index!.array).toEqual(source.geometry.index!.array);
-    cloned.parts[0].geometry.positions[0] = NaN;
-    expect(() => parseScene(cloned)).toThrow('invalid vertex positions');
+    stored.parts[0].geometry.positions[0] = NaN;
+    expect(() => parseScene(stored)).toThrow('invalid vertex positions');
   });
 
   it('reports a readable error for a part with no mesh data', () => {
@@ -156,29 +153,35 @@ describe('scene files', () => {
     expect(() => parseScene(serializeScene(lone))).not.toThrow();
   });
 
-  it('reports a failed save instead of throwing out of the command', () => {
+  it('reports a failed save instead of throwing out of the command', async () => {
     open([part('a')]);
-    const revision = useEditor.getState().revision;
     useEditor.getState().renameScene('Unsaved');
-    saveCurrentScene();
+    const { revision, savedRevision } = useEditor.getState();
+    await saveCurrentScene();
     const state = useEditor.getState();
     // Node has no document, which stands in for any failure while writing the file.
     expect(state.toast?.kind).toBe('error');
-    expect(state.savedRevision).toBeLessThanOrEqual(revision);
+    expect(state.revision).toBe(revision);
+    expect(state.savedRevision).toBe(savedRevision);
+    expect(state.busy).toBeNull();
   });
 
-  it('explains when a scene is too large to write as one file', () => {
+  it('does not report success for a file the browser cannot hold', async () => {
     open([part('a')]);
-    const stringify = vi.spyOn(JSON, 'stringify').mockImplementation(() => {
-      throw new RangeError('Invalid string length');
-    });
+    useEditor.getState().renameScene('Unsaved');
+    const { savedRevision } = useEditor.getState();
+    const read = vi
+      .spyOn(Blob.prototype, 'arrayBuffer')
+      .mockRejectedValue(new DOMException('Too large', 'NotReadableError'));
     try {
-      saveCurrentScene();
+      await saveCurrentScene();
     } finally {
-      stringify.mockRestore();
+      read.mockRestore();
     }
-    expect(useEditor.getState().toast?.kind).toBe('error');
-    expect(useEditor.getState().toast?.message).toContain('too large');
+    const state = useEditor.getState();
+    expect(state.toast?.kind).toBe('error');
+    expect(state.toast?.message).toContain('could not prepare a file this large');
+    expect(state.savedRevision).toBe(savedRevision);
   });
 });
 
@@ -227,7 +230,7 @@ describe('meshes', () => {
     }
   });
 
-  it('shares live buffers with workers and recovery instead of copying', () => {
+  it('shares live buffers with workers and scene files instead of copying', () => {
     const geometry = new BoxGeometry(1, 1, 1);
     const data = binaryGeometry(geometry);
     expect(data.positions).toBe(geometry.getAttribute('position').array);

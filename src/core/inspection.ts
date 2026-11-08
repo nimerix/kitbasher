@@ -213,7 +213,7 @@ export function inspectMeshes(request: InspectionRequest): InspectionResult {
     );
     result.resolution = Math.max(request.distance / 4, maxSize / 2048, 0.0001);
     const bvh = geometries.map(
-      (geometry) => new MeshBVH(geometry, { indirect: true, maxLeafSize: 8 }),
+      (geometry) => new MeshBVH(geometry, { indirect: true, targetLeafSize: 8 }),
     );
     geometries.forEach((geometry, i) => {
       geometry.boundsTree = bvh[i];

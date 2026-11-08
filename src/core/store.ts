@@ -1,7 +1,7 @@
 import { create } from 'zustand';
 import { Quaternion } from 'three';
 import type { BufferGeometry } from 'three';
-import { quat, uid, worldPoint } from './geometry';
+import { quat, triangleCount, uid, worldPoint } from './geometry';
 import {
   anchorError,
   constrainPart,
@@ -15,7 +15,12 @@ import {
   solvePlaneConstraints,
   validatePlaneConstraints,
 } from './plane-constraints';
-import { completedSurfacePairs, contiguousRemainder, facesUnderBrush } from './surfaces';
+import {
+  completedSurfacePairs,
+  contiguousRemainder,
+  facesUnderBrush,
+  maxPaintTriangles,
+} from './surfaces';
 import { readOrbitPreference, saveOrbitPreference } from './navigation';
 import type { NavigationMode } from './navigation';
 import { createSample } from './sample';
@@ -94,6 +99,7 @@ interface EditorState {
   modal: Modal;
   toast: Toast | null;
   busy: string | null;
+  indexingMeshes: number;
   focusRequest: {
     id: number;
     view?: 'front' | 'back' | 'right' | 'left' | 'top' | 'bottom' | 'iso';
@@ -152,7 +158,7 @@ interface EditorState {
   setBusy: (busy: string | null) => void;
   notify: (message: string, kind?: Toast['kind']) => void;
   focus: (view?: EditorState['focusRequest']['view'], all?: boolean) => void;
-  markSaved: () => void;
+  markSaved: (revision: number) => void;
 }
 
 const changed = (state: EditorState, scene: SceneDocument, checkpoint = true) => ({
@@ -219,6 +225,7 @@ export const useEditor = create<EditorState>((set, get) => ({
   modal: null,
   toast: null,
   busy: null,
+  indexingMeshes: 0,
   focusRequest: { id: 0, all: true },
   measurement: [],
   select: (id, additive = false) =>
@@ -450,16 +457,26 @@ export const useEditor = create<EditorState>((set, get) => ({
     if (!part?.visible) return false;
     if (active.side === 'source' && part.locked)
       message = 'Unlock the moving part before painting its contact surfaces.';
+    if (triangleCount(part.geometry) > maxPaintTriangles)
+      message = `${part.name} has too many triangles for contact paint. The limit is 10 million.`;
     if (message) {
       if (begin) state.notify(message, 'info');
       return false;
     }
     const erasing = erase || state.brushErase;
     const previousPatch = pair[active.side];
-    const faces = facesUnderBrush(part, point, state.brushRadius, face, {
-      plane: erasing ? undefined : state.brushPlane,
-      patch: previousPatch ?? undefined,
-    });
+    let faces: number[];
+    try {
+      faces = facesUnderBrush(part, point, state.brushRadius, face, {
+        plane: erasing ? undefined : state.brushPlane,
+        patch: previousPatch ?? undefined,
+      });
+    } catch (error) {
+      // Unconnected triangles reach the browser's limit on map size sooner than a closed mesh.
+      if (!(error instanceof RangeError)) throw error;
+      if (begin) state.notify(`${part.name} has too many edges for contact paint.`, 'error');
+      return false;
+    }
     if (!faces.length) return false;
     const previous = previousPatch?.faces ?? [];
     const touched = new Set(faces),
@@ -1014,7 +1031,7 @@ export const useEditor = create<EditorState>((set, get) => ({
   notify: (message, kind = 'success') => set({ toast: { id: uid(), message, kind } }),
   focus: (view, all = false) =>
     set((state) => ({ focusRequest: { id: state.focusRequest.id + 1, view, all } })),
-  markSaved: () => set((state) => ({ savedRevision: state.revision })),
+  markSaved: (revision) => set({ savedRevision: revision }),
 }));
 
 function reachableGeometries(state: EditorState) {

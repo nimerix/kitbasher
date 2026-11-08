@@ -152,7 +152,9 @@ for an empty workbench or to reload the sample.
 
 World reference planes, wireframe, an exploded view, distance measurement,
 orthographic views, framing, visibility, and fixed part locks are included.
-Larger meshes use BVH-accelerated picking; rendering pauses when the view is idle.
+Larger meshes use BVH-accelerated picking; rendering pauses when the view is idle. Above a
+million triangles, picking is prepared in the background: the mesh draws and can be selected
+in the parts list straight away, and can be clicked when the status bar notice clears.
 
 ## Inspect contact and interference
 
@@ -187,11 +189,16 @@ pair. Exploded view is disabled until inspection is closed.
 
 **Save scene** downloads a self-contained `.kitbash` file, including geometry,
 surface normals, vertex colors, part transforms, names, visibility, fixed locks,
-joints, and editable plane constraints. A scene too large for the browser to write
-as one text file (about 512 MB in Chrome) reports an error; export it as GLB instead.
+joints, and editable plane constraints. Files are binary, so scene size is limited by
+device memory rather than a file format limit; in testing, a 4 GiB scene saved and
+opened in about 5 seconds each. Pasted copies share one mesh, in memory and in the file. Private windows
+cannot hold files above roughly 1.5 to 2 GiB and report an error; use a normal window for
+larger scenes. Scene files from earlier versions still open. See the
+[scene format](docs/scene-format.md).
 **File → Open scene** restores it. Changes also recover through IndexedDB in the
-same browser and origin. Recovery is not a replacement for a downloaded scene;
-clearing browser storage removes it. View/camera preferences are not in scene files.
+same browser and origin. Each mesh is stored once, so edits stay fast at any scene size.
+Recovery is not a replacement for a downloaded scene; clearing browser storage removes
+it. View/camera preferences are not in scene files.
 If the editor ever hits an unexpected error, it offers to reload from that local
 save, or to discard the save if it keeps failing.
 
@@ -219,7 +226,9 @@ Kitbasher. Older scenes without plane constraints open normally.
 
 Export all, visible, or selected parts. Joints and plane constraints are kept only
 when both of their parts are included. GLB uses meters as required by glTF. 3MF
-retains separate objects but does not store colors or joints in this exporter.
+retains separate objects but does not store colors or joints in this exporter. 3MF
+is XML text, so very dense assemblies report an error (one of 5 million triangles did
+in testing); use GLB or STL for those.
 STL contains no names, colors, or joint data and does not automatically union
 overlapping geometry.
 
@@ -282,13 +291,46 @@ camera. The menu supports arrow keys, Home/End, typing an action name, Enter/Spa
 and Escape, and fits within small windows. Editable fields keep their native
 context menu. The File and Edit menus expose the same commands and shortcuts.
 
+## Large files
+
+Imports have no fixed size limit. STL and OBJ are read in pieces into typed arrays, so
+they are not bound by the browser's limits on strings or its JavaScript heap. An import
+shows its progress, and failing for lack of memory reports that instead of a damaged file.
+
+These were measured once in Chrome on an Apple M4 Max with 36 GB of memory:
+
+| File                   | Triangles | Import | Clickable after | Orbit  |
+| ---------------------- | --------- | ------ | --------------- | ------ |
+| Binary STL, 1.1 GiB    | 24M       | 1.6 s  | 2.5 s           | 60 fps |
+| OBJ, 1.9 GiB           | 48M       | 13.5 s | 8.2 s           | 30 fps |
+| Binary STL, 2.8 GiB    | 59M       | 4.5 s  | 10.6 s          | 30 fps |
+| GLB (indexed), 3.4 GiB | 150M      | 7.4 s  | parts list only | 30 fps |
+
+Limits that remain, each reported with an explanation:
+
+- **One mesh:** a browser accepts at most 2 GB in one GPU buffer, about 59 million triangles
+  in STL or OBJ. Indexed GLB meshes share vertices, so they go further.
+- **Text formats:** embedded `.gltf` files and the model text inside a `.3mf` are limited to
+  512 MiB. A 3MF near that limit holds the interface for about 26 seconds. Prefer GLB.
+- **Contact paint and Boolean union:** 10 million triangles per part. The first paint stroke
+  on a mesh near that limit holds the interface for about 13 seconds.
+- **Clicking a mesh:** preparing one failed at 150 million triangles (120 million worked).
+  It still draws, and can be selected in the parts list.
+- **GLB export:** 2 GB of mesh data, about 29 million triangles of STL or OBJ. STL and `.kitbash`
+  exports have no such limit.
+- **3MF export:** about 2 million triangles of STL or OBJ, because the format is XML text.
+
+Interference inspection reports a partial analysis on very dense meshes, and Combine holds
+the interface for about 15 seconds at 48 million triangles. These limits were not measured in
+Firefox or Safari.
+
 ## Scope and limitations
 
 - Geometry, vertex colors, and material tints are retained. Texture maps,
   animation, rigging, and advanced glTF compression are not retained/supported.
   Use self-contained GLB files; external `.gltf` resources are not bundled.
-- Import has a 250 MB per-file limit. Capacity depends on device memory and GPU;
-  this is not an out-of-core mesh editor.
+- There is no fixed limit on file size, but this is not an out-of-core mesh editor: every
+  mesh stays in memory and on the GPU while open. See [large files](#large-files).
 - Boolean union expects repaired closed, consistently oriented inputs without
   self-intersections. It does not repair scans or guarantee print watertightness.
   The original scene remains unchanged on failure; jobs time out after 90 seconds.

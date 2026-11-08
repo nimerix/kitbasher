@@ -23,6 +23,7 @@ import { useEditor } from '../core/store';
 import { primaryShortcut, saveCurrentScene } from '../core/commands';
 import {
   download,
+  downloadScene,
   export3mf,
   exportBlenderPackage,
   exportGlb,
@@ -34,7 +35,7 @@ import {
 import type { ImportOptions } from '../core/files';
 import { mergeParts } from '../core/merge';
 import { createSample } from '../core/sample';
-import { sceneSubset, serializeScene } from '../core/scene-file';
+import { sceneSubset } from '../core/scene-file';
 import { Modal } from './ui';
 
 export type ExportFormat = 'glb' | '3mf' | 'stl' | 'kitbash' | 'blender';
@@ -105,28 +106,28 @@ function ExportDialog() {
       const filename = safeFilename(name),
         document = sceneSubset(scene, parts);
       if (format === 'glb')
-        download(await exportGlb(document, parts), `${filename}.glb`, 'model/gltf-binary');
+        await download(await exportGlb(document, parts), `${filename}.glb`, 'model/gltf-binary');
       if (format === 'blender')
-        download(
-          (await exportBlenderPackage(document, parts)).slice().buffer,
+        await download(
+          await exportBlenderPackage(document, parts),
           `${filename}-blender.zip`,
           'application/zip',
         );
       if (format === '3mf')
-        download(export3mf(document, parts).slice().buffer, `${filename}.3mf`, 'model/3mf');
-      if (format === 'stl') download(exportStl(parts), `${filename}.stl`, 'model/stl');
-      if (format === 'kitbash')
-        download(
-          JSON.stringify(serializeScene(document)),
-          `${filename}.kitbash`,
-          'application/json',
-        );
+        await download(export3mf(document, parts), `${filename}.3mf`, 'model/3mf');
+      if (format === 'stl') await download(exportStl(parts), `${filename}.stl`, 'model/stl');
+      if (format === 'kitbash') await downloadScene(document, name);
       notify(
         `Exported ${parts.length} ${parts.length === 1 ? 'part' : 'parts'} · ${options.find((o) => o.id === format)!.ext}`,
       );
       useEditor.getState().setModal(null);
     } catch (error) {
-      setError((error as Error).message);
+      // 3MF is XML text, so a dense assembly can exceed the browser's string limit.
+      setError(
+        error instanceof RangeError
+          ? 'This assembly is too large for this format. Export it as STL or a Kitbasher scene.'
+          : (error as Error).message,
+      );
     } finally {
       setBusy(false);
     }
@@ -273,8 +274,9 @@ export function ImportDialog({ initialFiles = [] }: { initialFiles?: File[] }) {
   const doImport = async () => {
     setBusy(true);
     setError('');
+    const { setBusy: setStatus } = useEditor.getState();
     try {
-      const parts = await importModels(files, options);
+      const parts = await importModels(files, options, setStatus);
       const state = useEditor.getState();
       state.addParts(parts);
       state.setModal(null);
@@ -282,6 +284,7 @@ export function ImportDialog({ initialFiles = [] }: { initialFiles?: File[] }) {
     } catch (error) {
       setError((error as Error).message);
     } finally {
+      setStatus(null);
       setBusy(false);
     }
   };

@@ -14,6 +14,9 @@ export function readFace(geometry: BufferGeometry, face: number, triangle = new 
   return triangle;
 }
 
+// Finding connected faces holds the main thread for 12.6 s at this size, and fails by 24 million.
+export const maxPaintTriangles = 10_000_000;
+
 /** Weld duplicate scan vertices only at shared edges, never by brush proximity. */
 const adjacencyCache = new WeakMap<BufferGeometry, number[][]>();
 export function faceAdjacency(geometry: BufferGeometry) {

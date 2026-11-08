@@ -1,7 +1,7 @@
 import { expect, test, type Page } from '@playwright/test';
-import { readFile } from 'node:fs/promises';
 import { PlaneGeometry, Vector3 } from 'three';
 import { serializeGeometry } from '../../src/core/geometry';
+import { readSavedScene } from './saved-scene';
 
 // Browser plugin not available; validate the local editor with regular Playwright.
 // Flow: paint 3+ matching patches -> fit; click a surface pivot -> transform -> save/reopen.
@@ -212,12 +212,12 @@ test('clicks a persistent custom pivot used by transforms and actual orbit contr
   expect((await editorState(page)).parts[0].pivot).toEqual(localPivot);
   const downloaded = page.waitForEvent('download');
   await page.getByRole('button', { name: 'Save scene', exact: true }).click();
-  const file = JSON.parse(await readFile((await (await downloaded).path())!, 'utf8'));
+  const { scene: file, bytes } = await readSavedScene((await (await downloaded).path())!);
   expect(file.parts[0].pivot).toEqual(localPivot);
   await page.getByLabel('Open Kitbasher scene').setInputFiles({
     name: 'pivot.kitbash',
-    mimeType: 'application/json',
-    buffer: Buffer.from(JSON.stringify(file)),
+    mimeType: 'application/octet-stream',
+    buffer: bytes,
   });
   await page.getByRole('button', { name: 'Open scene', exact: true }).click();
   await page.locator('.part-select[title="Moving plate"]').click();

@@ -1,4 +1,4 @@
-import { saveSceneFile } from './files';
+import { downloadScene } from './files';
 import { useEditor } from './store';
 import type { SurfacePoint } from './types';
 
@@ -7,20 +7,19 @@ export function primaryShortcut(key: string, shift = false) {
   return `${apple ? '⌘' : 'Ctrl'}${shift ? '+Shift' : ''}+${key}`;
 }
 
-/** Very large scenes can exceed the browser's string limit, so report that failure. */
-export function saveCurrentScene() {
+export async function saveCurrentScene() {
   const state = useEditor.getState();
+  if (state.busy) return;
+  const { revision } = state;
+  state.setBusy('Preparing scene file…');
   try {
-    saveSceneFile(state.scene);
-    state.markSaved();
+    await downloadScene(state.scene);
+    state.markSaved(revision);
     state.notify('Scene file downloaded');
   } catch (error) {
-    state.notify(
-      error instanceof RangeError
-        ? 'This scene is too large for a .kitbash file. Export it as GLB, or merge or remove dense parts.'
-        : `The scene could not be saved: ${(error as Error).message}`,
-      'error',
-    );
+    state.notify(`The scene could not be saved. ${(error as Error).message}`, 'error');
+  } finally {
+    state.setBusy(null);
   }
 }
 

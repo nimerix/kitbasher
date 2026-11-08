@@ -22,7 +22,8 @@ import {
   transformAssembly,
   validateJoint,
 } from '../../src/core/constraints';
-import { parseScene, serializeScene } from '../../src/core/scene-file';
+import { parseScene } from '../../src/core/scene-file';
+import { serializeScene } from '../helpers/legacy-scene';
 import { export3mf, exportStl, importModels } from '../../src/core/files';
 import { solveAlignment } from '../../src/core/alignment';
 import { STLExporter } from 'three/addons/exporters/STLExporter.js';

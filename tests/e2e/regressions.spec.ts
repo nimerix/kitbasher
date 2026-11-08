@@ -1,7 +1,7 @@
 import { expect, test, type Page } from '@playwright/test';
-import { readFile } from 'node:fs/promises';
 import { BoxGeometry, Vector3 } from 'three';
 import { serializeGeometry } from '../../src/core/geometry';
+import { readSavedScene } from './saved-scene';
 
 const box = serializeGeometry(new BoxGeometry(16, 16, 16));
 const part = (id: string, name: string, position: number[], extra: object = {}) => ({
@@ -331,13 +331,13 @@ test('exporting selected parts writes a scene that can be reopened', async ({ pa
   await page.getByRole('combobox', { name: 'Export scope', exact: true }).selectOption('selected');
   const download = page.waitForEvent('download');
   await page.getByRole('button', { name: 'Export assembly' }).click();
-  const file = JSON.parse(await readFile((await (await download).path())!, 'utf8'));
+  const { scene: file, bytes } = await readSavedScene((await (await download).path())!);
   expect(file.parts.map((p: { id: string }) => p.id)).toEqual(['a']);
   expect(file.constraints).toEqual([]);
   await page.getByLabel('Open Kitbasher scene').setInputFiles({
     name: 'subset.kitbash',
-    mimeType: 'application/json',
-    buffer: Buffer.from(JSON.stringify(file)),
+    mimeType: 'application/octet-stream',
+    buffer: bytes,
   });
   await expect(page.getByRole('button', { name: 'Open scene', exact: true })).toBeVisible();
   await expect(page.locator('.toast-error')).toHaveCount(0);

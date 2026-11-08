@@ -1,7 +1,7 @@
 import { Component, useEffect, useRef, useState } from 'react';
 import type { ButtonHTMLAttributes, ErrorInfo, ReactNode, RefObject } from 'react';
 import { ChevronDown, X } from 'lucide-react';
-import { clearRecovery } from '../core/scene-file';
+import { clearRecovery } from '../core/recovery';
 
 /** The last autosave survives a render failure, so offer a way back to it. */
 export class AppBoundary extends Component<{ children: ReactNode }, { error: string | null }> {

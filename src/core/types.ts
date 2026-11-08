@@ -110,6 +110,7 @@ export interface AssemblyOperation {
   retainConstraint?: boolean;
 }
 
+/** Number lists, used by the JSON scene files of earlier versions and 3MF export. */
 export interface SerializedGeometry {
   positions: number[];
   indices?: number[];
@@ -117,7 +118,7 @@ export interface SerializedGeometry {
   normals?: number[];
 }
 
-/** Typed-array form for IndexedDB and workers. Scene files always use SerializedGeometry. */
+/** Typed-array form used by workers and binary scene files. */
 export interface BinaryGeometry {
   positions: Float32Array;
   indices?: Uint16Array | Uint32Array;
@@ -125,6 +126,32 @@ export interface BinaryGeometry {
   normals?: Float32Array;
 }
 
+export interface GeometrySection {
+  offset: number;
+  length: number;
+}
+
+export interface GeometryLayout {
+  vertices: number;
+  positions: GeometrySection;
+  normals?: GeometrySection;
+  colors?: GeometrySection;
+  indices?: GeometrySection & { type: 'u16' | 'u32' };
+}
+
+export interface BinarySceneHeader {
+  format: 'kitbasher';
+  version: 2;
+  units: 'mm';
+  name: string;
+  parts: (Omit<Part, 'geometry'> & { geometry: number })[];
+  joints: Joint[];
+  constraints: PlaneConstraint[];
+  geometries: GeometryLayout[];
+  bodyLength: number;
+}
+
+/** The JSON scene document written by earlier versions. */
 export interface SceneFile {
   format: 'kitbasher';
   version: 1;

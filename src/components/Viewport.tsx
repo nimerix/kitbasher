@@ -35,7 +35,7 @@ import {
   ZoomIn,
   ZoomOut,
 } from 'lucide-react';
-import { acceleratedRaycast, computeBoundsTree } from 'three-mesh-bvh';
+import { pickRaycast, prepareForPicking } from '../core/bvh';
 import {
   partMatrix,
   partPivot,
@@ -101,10 +101,9 @@ function PartMesh({ part, frame }: { part: Part; frame?: ExplodeFrame }) {
     normal: event.face?.normal.toArray() ?? [0, 1, 0],
   });
   useEffect(() => {
-    if (triangleCount(part.geometry) > 30000 && !part.geometry.boundsTree) {
-      computeBoundsTree.call(part.geometry, { indirect: true, maxLeafSize: 10 });
-    }
-  }, [part.geometry]);
+    // Hidden parts cannot be picked, so a dense one need not pay for this until shown.
+    if (part.visible) prepareForPicking(part.geometry);
+  }, [part.geometry, part.visible]);
   const exploded = useMemo(() => displayedPosition(part, explode, frame), [part, explode, frame]);
   const onClick = (event: ThreeEvent<MouseEvent>) => {
     if (event.button !== 0 || event.delta > 5) return;
@@ -141,7 +140,7 @@ function PartMesh({ part, frame }: { part: Part; frame?: ExplodeFrame }) {
           name={`part:${part.id}`}
           geometry={part.geometry}
           // Raycasting ignores Object3D.visible, so a hidden part would still catch clicks.
-          raycast={part.visible ? acceleratedRaycast : noRaycast}
+          raycast={part.visible ? pickRaycast : noRaycast}
           dispose={null}
           castShadow
           receiveShadow

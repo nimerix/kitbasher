@@ -5,7 +5,7 @@ Verified locally on November 8, 2026.
 ## Automated checks
 
 - `npm run build`: TypeScript checks and production compilation pass.
-- `npm test`: **117 tests pass**, covering Kabsch registration, non-collinear
+- `npm test`: **188 tests pass**, covering Kabsch registration, non-collinear
   point selection, reflection prevention, all four alignment methods, axis locks,
   anchor coincidence, descendant propagation, capture of the current pose when
   locking an axis, invalid joint graphs, scene round trips, mesh combination,
@@ -18,7 +18,7 @@ Verified locally on November 8, 2026.
   `tests/unit/regressions.test.ts` adds lossless compact scene numbers, retained
   normals, typed-array recovery, reopenable subset exports, mirrored STL facets,
   geometry disposal, and projection-preserving camera transfer.
-- `npm run test:e2e`: **67 browser tests pass** in headless installed Google Chrome.
+- `npm run test:e2e`: **80 browser tests pass** in headless installed Google Chrome.
   Exercises real gizmo dragging, numeric edit cancellation, surface picking,
   joint creation, local recovery, save/open, STL import, combination/undo,
   GLB/3MF downloads and reimports, physical scale, Boolean worker volume and
@@ -33,12 +33,22 @@ Verified locally on November 8, 2026.
   `tests/e2e/regressions.spec.ts` covers hidden-part picking, camera stability across
   resize and projection changes, keyboard activation of focused controls, retained
   paint and pick work, undo history, menu dismissal, and the crash recovery screen.
+  `tests/e2e/large-scenes.spec.ts` round trips a 3-million-triangle scene and checks
+  that autosave writes each mesh once, survives failed writes, and upgrades old saves.
+  `tests/unit/scene-format.test.ts` covers the binary layout and damaged or crafted files.
+  `tests/e2e/large-imports.spec.ts` imports an OBJ of the size that used to crash the tab and a
+  text STL past the browser's string limit, and checks that a dense mesh stays usable while
+  picking is prepared in a worker. `tests/unit/model-readers.test.ts` compares the streaming OBJ
+  and STL readers against three.js's loaders, value for value.
+  `tests/unit/import-limits.test.ts` covers each import and export limit.
 - `npm run format:check` and `git diff --check`: clean.
 
 The production build was also served from a `/kitbasher/` subpath, and both the
 Boolean and inspection workers, fonts, and favicon loaded without errors. It was then
 opened over plain HTTP on a LAN address, where `isSecureContext` is false and
-`crypto.randomUUID` is absent. Duplicate, import, autosave, and recovery all worked.
+`crypto.randomUUID` is absent. Duplicate, import, autosave, and recovery all worked. The
+worker that prepares dense meshes for clicking was checked in the same two setups: it loaded
+without errors, and a click selected a 1.2-million-triangle part.
 
 The full suite and production build passed after the camera, precision, connected
 painting, and plane-constraint update. Current browser checks use the local Vite
@@ -47,6 +57,71 @@ at 1440 × 1000 and 390 × 844. Browser tests assert no page/console errors or V
 error overlay, preserve native field editing, and verify no horizontal overflow.
 Context menus reposition on resize, and early right-button menus dismiss when a
 surface gesture becomes a camera pan.
+
+## Large scenes
+
+Measured once in headless Chrome on an Apple M4 Max with 36 GB of memory, using a
+real profile that can page blobs to disk and the real GPU (`ANGLE Metal Renderer: Apple M4 Max`).
+Mesh contents were compared by checksum after each round trip and were identical. These sizes
+are too large for the regular test suite. Firefox and Safari were not tested. The parts in
+this first table were hidden, so it measures file handling alone.
+
+| Scene                   | Operation                 | Time  |
+| ----------------------- | ------------------------- | ----- |
+| 60M triangles, 4.03 GiB | Save scene                | 5.4 s |
+| 60M triangles, 4.03 GiB | Open scene                | 4.7 s |
+| 30M triangles, 2.0 GiB  | First autosave            | 3.3 s |
+| 30M triangles, 2.0 GiB  | Autosave after an edit    | 0.5 s |
+| 30M triangles, 2.0 GiB  | Reload and recover        | 2.7 s |
+| 3M triangles, shown     | Longest main-thread stall | 0.4 s |
+
+The largest buffer in the first two rows was 2.01 GiB. Before the binary format, a
+3-million-triangle scene could not be saved at all. With a 5-million-triangle scene, STL
+exported in 0.5 s and GLB in 1.1 s, while 3MF reported its text limit after 15 s.
+A private window reported a clear error for a 2.7 GiB scene.
+
+### Imports
+
+Each file was imported through the dialog in a fresh browser, then framed and orbited in view.
+"Longest stall" is the longest main-thread task up to the end of the import.
+
+| File                          | Triangles | Import | Longest stall | Clickable after | Orbit  | Peak memory |
+| ----------------------------- | --------- | ------ | ------------- | --------------- | ------ | ----------- |
+| Binary STL, 1.1 GiB           | 24M       | 1.6 s  | 0.4 s         | 2.5 s           | 60 fps | 5.0 GiB     |
+| OBJ, 1.9 GiB                  | 48M       | 13.5 s | 1.4 s         | 8.2 s           | 30 fps | 6.9 GiB     |
+| Binary STL, 2.8 GiB           | 59M       | 4.5 s  | 1.6 s         | 10.6 s          | 30 fps | 6.9 GiB     |
+| GLB, 3.4 GiB (indexed)        | 150M      | 7.4 s  | 2.7 s         | parts list only | 30 fps | 6.9 GiB     |
+| 3MF, 61 MiB (478 MiB of text) | 7M        | 28.5 s | 26 s          | 0.5 s           | 60 fps | 5.9 GiB     |
+
+Before this work, a 405 MiB OBJ crashed the tab, a 636 MiB OBJ reported that it held no meshes
+(`TextDecoder` returns an empty string past 512 MiB instead of failing), and a 1.1 GiB STL held
+the main thread for 5.6 s. A 64-million-triangle STL is now refused in 0.03 s, before it is read;
+`bufferData` otherwise rejects it with `size more than 32-bit`, and the part silently does not
+draw. A 24-million-triangle STL and a 50-million-triangle GLB were each taken through import,
+autosave, reload, save, and reopen. Their checksums stayed identical, and clicks selected the
+right part at every stage.
+
+### Tools on dense meshes
+
+| Tool            | Triangles | Result                                                  |
+| --------------- | --------- | ------------------------------------------------------- |
+| Contact paint   | 5M, 10M   | Works. First stroke holds the main thread 5.9 s, 12.6 s |
+| Contact paint   | 24M       | Refused immediately. Previously 22 s, then no paint     |
+| Boolean union   | 5M, 10M   | Manifold check holds the main thread 6.2 s, 14 s        |
+| Boolean union   | 24M       | Refused immediately. Previously failed in the check     |
+| Combine         | 24M, 48M  | Works. Holds the main thread 7.3 s, 14.6 s              |
+| Interference    | 24M       | 20 s in its worker. Reports a partial analysis          |
+| STL export      | 48M       | 7.5 s, 2.29 GiB. Header matches the file size           |
+| GLB export      | 24M       | 6.9 s, 1.6 GiB                                          |
+| GLB export      | 30M       | Refused immediately. Previously never finished          |
+| Blender package | 24M       | 9.3 s, stored uncompressed. Previously 30 s, 25 s held  |
+| 3MF export      | 2M        | Works. Holds the main thread 11.2 s                     |
+| 3MF export      | 3M        | Fails with a clear error after 9.6 s                    |
+| 3MF export      | 24M       | Refused immediately. Previously took 24 s to fail       |
+
+The GLB exporter's limit was located by bisection: 2,036 MiB of output works and 2,060 MiB does
+not. Preparing a mesh for clicking took 19 s at 120 million triangles and failed at 150 million
+with `Array buffer allocation failed`.
 
 ## Earlier native Blender verification
 

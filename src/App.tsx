@@ -44,7 +44,7 @@ import { editorCommands, executeEditorCommand, saveCurrentScene } from './core/c
 import type { CommandId } from './core/commands';
 import { isEditableTarget } from './core/context-menu';
 import { EditorContextMenu } from './components/EditorContextMenu';
-import { parseScene } from './core/scene-file';
+import { readSceneFile } from './core/scene-file';
 import { useKeyboard, useRecovery } from './hooks/useWorkbench';
 import { PartsPanel } from './components/PartsPanel';
 import { Inspector } from './components/Inspector';
@@ -405,7 +405,8 @@ function StatusBar() {
     surfacePainting = useEditor((s) => s.tool === 'align' && s.operation.mode === 'surface');
   const recovery = useEditor((s) => s.recoveryStatus),
     tool = useEditor((s) => s.tool),
-    navigationMode = useEditor((s) => (s.temporaryOrbit ? 'orbit' : s.navigationMode));
+    navigationMode = useEditor((s) => (s.temporaryOrbit ? 'orbit' : s.navigationMode)),
+    indexing = useEditor((s) => s.indexingMeshes > 0);
   return (
     <footer className="statusbar">
       <div className="navigation-hints">
@@ -421,19 +422,21 @@ function StatusBar() {
           Zoom <kbd>Scroll</kbd>
         </span>
         <span className="status-context">
-          {navigationMode
-            ? `${navigationMode === 'pan' ? 'Pan' : 'Orbit'} tool · Drag to navigate · Esc to return`
-            : pivotPicking
-              ? 'Click a model surface to set its pivot · P or Esc to cancel'
-              : surfacePainting
-                ? 'Drag to paint · Alt erases · [ / ] brush size · Middle / Space orbits'
-                : tool === 'align'
-                  ? 'Pick source → target · Middle / Space orbits'
-                  : tool === 'joint'
-                    ? 'Pick anchors to connect parts'
-                    : ['translate', 'rotate', 'scale'].includes(tool)
-                      ? 'Hold Shift while dragging for 10× finer adjustment'
-                      : 'Shift + click to select multiple'}
+          {indexing
+            ? 'Preparing a dense mesh · It can be clicked when this finishes'
+            : navigationMode
+              ? `${navigationMode === 'pan' ? 'Pan' : 'Orbit'} tool · Drag to navigate · Esc to return`
+              : pivotPicking
+                ? 'Click a model surface to set its pivot · P or Esc to cancel'
+                : surfacePainting
+                  ? 'Drag to paint · Alt erases · [ / ] brush size · Middle / Space orbits'
+                  : tool === 'align'
+                    ? 'Pick source → target · Middle / Space orbits'
+                    : tool === 'joint'
+                      ? 'Pick anchors to connect parts'
+                      : ['translate', 'rotate', 'scale'].includes(tool)
+                        ? 'Hold Shift while dragging for 10× finer adjustment'
+                        : 'Shift + click to select multiple'}
         </span>
       </div>
       <div className="local-save-status">
@@ -456,6 +459,18 @@ function StatusBar() {
       </div>
     </footer>
   );
+}
+
+function BusyOverlay() {
+  const busy = useEditor((s) => s.busy);
+  return busy ? (
+    <div className="busy-overlay" role="status">
+      <div>
+        <LoaderCircle className="spin" size={18} />
+        <span>{busy}</span>
+      </div>
+    </div>
+  ) : null;
 }
 
 function Toast() {
@@ -546,18 +561,20 @@ export default function App() {
     return () => window.removeEventListener('resize', onResize);
   }, []);
   const acceptFiles = async (files: File[]) => {
-    if (!files.length) return;
+    const editor = useEditor.getState();
+    if (!files.length || editor.busy) return;
     if (files.length === 1 && files[0].name.toLowerCase().endsWith('.kitbash')) {
+      editor.setBusy('Opening scene…');
       try {
-        let data: unknown;
-        try {
-          data = JSON.parse(await files[0].text());
-        } catch {
-          throw new Error('This file could not be read as a Kitbasher scene.');
-        }
-        setPendingScene(parseScene(data));
+        setPendingScene(
+          await readSceneFile(files[0], (fraction) =>
+            editor.setBusy(`Opening scene… ${Math.round(fraction * 100)}%`),
+          ),
+        );
       } catch (error) {
-        useEditor.getState().notify((error as Error).message, 'error');
+        editor.notify((error as Error).message, 'error');
+      } finally {
+        editor.setBusy(null);
       }
     } else {
       setImportFiles(files);
@@ -696,6 +713,7 @@ export default function App() {
         <Inspector onClose={() => setRight(false)} />
       </div>
       <StatusBar />
+      <BusyOverlay />
       <Toast />
       <Dialogs
         key={modal === 'import' ? importFiles.map((f) => f.name).join('|') : 'dialogs'}

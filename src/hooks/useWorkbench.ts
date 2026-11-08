@@ -1,6 +1,6 @@
 import { useEffect, useRef } from 'react';
 import { useEditor } from '../core/store';
-import { readRecovery, saveRecovery } from '../core/scene-file';
+import { readRecovery, saveRecovery } from '../core/recovery';
 import { executeEditorCommand, shortcutCommand } from '../core/commands';
 import { isEditableTarget, keyboardContextMenu } from '../core/context-menu';
 
@@ -10,6 +10,7 @@ export function useRecovery() {
   const ready = useRef(false);
   useEffect(() => {
     let active = true;
+    useEditor.getState().setBusy('Restoring your local assembly…');
     readRecovery()
       .then((saved) => {
         if (!active) return;
@@ -17,10 +18,12 @@ export function useRecovery() {
           useEditor.getState().setScene(saved, true);
           useEditor.getState().notify('Recovered your local assembly', 'info');
         }
+        useEditor.getState().setBusy(null);
         ready.current = true;
         return saveRecovery(useEditor.getState().scene);
       })
       .catch(() => {
+        if (active) useEditor.getState().setBusy(null);
         ready.current = true;
         useEditor.setState({ recoveryStatus: 'error' });
       });

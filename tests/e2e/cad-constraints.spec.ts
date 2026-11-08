@@ -1,5 +1,4 @@
 import { expect, test, type Page } from '@playwright/test';
-import { readFile } from 'node:fs/promises';
 import {
   BoxGeometry,
   BufferAttribute,
@@ -10,6 +9,7 @@ import {
 } from 'three';
 import { serializeGeometry } from '../../src/core/geometry';
 import type { SceneFile } from '../../src/core/types';
+import { readSavedScene } from './saved-scene';
 
 // Browser plugin not available; use local Playwright.
 // Flow: preserve paint/picks while orbiting -> precisely transform -> retain and edit plane mates.
@@ -342,13 +342,13 @@ test('paints one plane pair, retains its mate, edits and suppresses it, and rest
   expect((await state(page)).parts[0].position[2]).toBeCloseTo(14, 5);
   const download = page.waitForEvent('download');
   await page.getByRole('button', { name: 'Save scene', exact: true }).click();
-  const file = JSON.parse(await readFile((await (await download).path())!, 'utf8'));
+  const { scene: file, bytes } = await readSavedScene((await (await download).path())!);
   expect(file.constraints).toHaveLength(1);
-  expect(file.constraints[0].offset).toBe(2);
+  expect(file.constraints![0].offset).toBe(2);
   await page.getByLabel('Open Kitbasher scene').setInputFiles({
     name: 'saved.kitbash',
-    mimeType: 'application/json',
-    buffer: Buffer.from(JSON.stringify(file)),
+    mimeType: 'application/octet-stream',
+    buffer: bytes,
   });
   await page.getByRole('button', { name: 'Open scene', exact: true }).click();
   expect((await state(page)).constraints).toEqual(file.constraints);

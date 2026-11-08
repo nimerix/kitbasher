@@ -24,7 +24,8 @@ import {
 } from '../../src/core/plane-constraints';
 import { anchorError } from '../../src/core/constraints';
 import { PrecisionDrag } from '../../src/core/precision';
-import { parseScene, serializeScene } from '../../src/core/scene-file';
+import { parseScene } from '../../src/core/scene-file';
+import { serializeScene } from '../helpers/legacy-scene';
 import { captureComponents, instantiateComponents } from '../../src/core/clipboard';
 import { solveAlignment } from '../../src/core/alignment';
 import { partMatrix } from '../../src/core/geometry';

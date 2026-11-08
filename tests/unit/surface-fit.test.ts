@@ -15,7 +15,8 @@ import { facesUnderBrush, readFace } from '../../src/core/surfaces';
 import { solveAlignment } from '../../src/core/alignment';
 import { anchorError } from '../../src/core/constraints';
 import { selectionOrbitCenter } from '../../src/core/navigation';
-import { parseScene, serializeScene } from '../../src/core/scene-file';
+import { parseScene } from '../../src/core/scene-file';
+import { serializeScene } from '../helpers/legacy-scene';
 import { useEditor } from '../../src/core/store';
 import type { AssemblyOperation, Part, SurfacePair, Vec3 } from '../../src/core/types';
 
