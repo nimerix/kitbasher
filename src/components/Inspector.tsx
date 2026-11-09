@@ -22,6 +22,7 @@ import {
 } from 'lucide-react';
 import { Euler, Quaternion, Vector3 } from 'three';
 import { useEditor } from '../core/store';
+import { useShortcut } from '../core/preferences';
 import { isJointConnected, translationIsPinned } from '../core/constraints';
 import { solveAlignment } from '../core/alignment';
 import {
@@ -177,6 +178,8 @@ function PartColorInput({ part }: { part: Part }) {
 }
 
 function PartProperties({ part }: { part: Part }) {
+  const pivotKey = useShortcut('pivot'),
+    jointKey = useShortcut('joint');
   const joints = useEditor((s) => s.scene.joints),
     parts = useEditor((s) => s.scene.parts),
     view = useEditor((s) => s.view),
@@ -311,7 +314,7 @@ function PartProperties({ part }: { part: Part }) {
             className="button secondary full-width"
             onClick={() => useEditor.getState().setPivotPicking(true)}
           >
-            Pick pivot on model <kbd>P</kbd>
+            Pick pivot on model {pivotKey ? <kbd>{pivotKey}</kbd> : null}
           </button>
           {part.pivot ? (
             <button
@@ -411,7 +414,7 @@ function PartProperties({ part }: { part: Part }) {
           onClick={() => useEditor.getState().setTool('joint')}
         >
           <PlusJointIcon />
-          Create joint<span className="shortcut-text">J</span>
+          Create joint{jointKey ? <span className="shortcut-text">{jointKey}</span> : null}
         </button>
       </Section>
       <Section title="Appearance">
@@ -516,6 +519,8 @@ function AlignmentDiagram({ mode }: { mode: AlignmentMode }) {
 }
 
 function AssemblyInspector() {
+  const applyKey = useShortcut('apply'),
+    cancelKey = useShortcut('cancel');
   const tool = useEditor((s) => s.tool),
     op = useEditor((s) => s.operation),
     scene = useEditor((s) => s.scene),
@@ -904,10 +909,10 @@ function AssemblyInspector() {
                 : isSurface
                   ? 'Fit contact surfaces'
                   : 'Apply alignment'}
-          <kbd>↵</kbd>
+          {applyKey ? <kbd>{applyKey === 'Enter' ? '↵' : applyKey}</kbd> : null}
         </button>
         <button className="cancel-operation" onClick={() => useEditor.getState().setTool('select')}>
-          Cancel <kbd>Esc</kbd>
+          Cancel {cancelKey ? <kbd>{cancelKey}</kbd> : null}
         </button>
       </div>
     </div>
@@ -915,6 +920,8 @@ function AssemblyInspector() {
 }
 
 export function Inspector({ onClose }: { onClose: () => void }) {
+  const focusKey = useShortcut('focus'),
+    frameAllKey = useShortcut('frameAll');
   const selected = useEditor((s) => s.selected),
     scene = useEditor((s) => s.scene),
     tool = useEditor((s) => s.tool);
@@ -1005,11 +1012,11 @@ export function Inspector({ onClose }: { onClose: () => void }) {
             </div>
             <div>
               <span>Focus selection</span>
-              <kbd>F</kbd>
+              <kbd>{focusKey || '—'}</kbd>
             </div>
             <div>
               <span>Frame everything</span>
-              <kbd>Home</kbd>
+              <kbd>{frameAllKey || '—'}</kbd>
             </div>
           </div>
         )}

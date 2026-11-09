@@ -86,5 +86,23 @@ brush. Temporary orbit keeps the active workflow and returns on Space release,
 window blur, or pointer cancellation. Right-pan gestures dismiss an early native
 context-menu event and preserve the prior selection.
 
+The wheel and zoom buttons glide toward each step, with time-constant smoothing that
+lands within a few hundred milliseconds. Any gesture that settles the camera lands an
+unfinished glide first. Ctrl + wheel without a held Control key is a trackpad pinch and
+follows the gesture directly. Distance limits stop a glide instead of letting it push.
+
+## Preferences
+
+A non-modal side panel over the inspector, so the viewport stays usable while settings
+change. Preferences live in local storage, are validated and clamped on load, and sync
+across tabs. Keybinding overrides store only differences from the defaults, so later
+default changes still reach users who customized other keys.
+
+Point markers are drawn in a DOM layer over the canvas, positioned each rendered frame
+from the canvas camera, so their size is in screen pixels. Callout labels keep the
+point's screen x, with a vertical leader. They sit a clearance above the projected box
+of the visible model, or at a fixed leader length, and stack outward on overlap. Labels near
+the top edge hang below their point instead.
+
 The complete interaction and solver contract is in
 [cad-constraints-spec.md](cad-constraints-spec.md).

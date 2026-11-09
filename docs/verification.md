@@ -5,7 +5,7 @@ Verified locally on November 9, 2026.
 ## Automated checks
 
 - `npm run build`: TypeScript checks and production compilation pass.
-- `npm test`: **427 tests pass**, covering Kabsch registration, non-collinear
+- `npm test`: **448 tests pass**, covering Kabsch registration, non-collinear
   point selection, reflection prevention, all four alignment methods, axis locks,
   anchor coincidence, descendant propagation, capture of the current pose when
   locking an axis, invalid joint graphs, scene round trips, mesh combination,
@@ -18,7 +18,10 @@ Verified locally on November 9, 2026.
   `tests/unit/regressions.test.ts` adds lossless compact scene numbers, retained
   normals, typed-array recovery, reopenable subset exports, mirrored STL facets,
   geometry disposal, and projection-preserving camera transfer.
-- `npm run test:e2e`: **89 browser tests pass** in headless installed Google Chrome.
+  `tests/unit/preferences.test.ts` covers key matching across layouts, Alt, Shift-implied
+  symbols, and Num Lock off, binding capture and conflicts, stored preference validation,
+  wheel zoom response, pinch, smoothing that lands, and callout placement and stacking.
+- `npm run test:e2e`: **93 browser tests pass** in headless installed Google Chrome.
   Exercises real gizmo dragging, numeric edit cancellation, surface picking,
   joint creation, local recovery, save/open, STL import, combination/undo,
   GLB/3MF downloads and reimports, physical scale, Boolean worker volume and
@@ -33,6 +36,10 @@ Verified locally on November 9, 2026.
   `tests/e2e/regressions.spec.ts` covers hidden-part picking, camera stability across
   resize and projection changes, keyboard activation of focused controls, retained
   paint and pick work, undo history, menu dismissal, and the crash recovery screen.
+  `tests/e2e/preferences.spec.ts` checks that the non-modal Preferences panel leaves the
+  viewport zoomable, that wheel zoom glides and follows sensitivity and smoothing, that a
+  rebound key works, updates labels, survives a reload, and resets, and that markers keep
+  their pixel size while callouts stay straight above their point through an orbit.
   `tests/e2e/large-scenes.spec.ts` round trips a 3-million-triangle scene and checks
   that autosave writes each mesh once, survives failed writes, and upgrades old saves.
   `tests/unit/scene-format.test.ts` covers the binary layout and damaged or crafted files.

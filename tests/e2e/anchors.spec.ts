@@ -113,9 +113,9 @@ test('picks surface anchors, fits numerically, undoes, and saves/reopens the unc
   expect(fitted.parts[0].anchors.slice(0, 2)).toEqual(before.parts[0].anchors.slice(0, 2));
   expect(fitted.parts[0].scale).toEqual(before.parts[0].scale);
   expect(fitted.parts[0].vertices).toEqual(before.parts[0].vertices);
-  await page.getByRole('button', { name: 'Undo (Ctrl/⌘ Z)', exact: true }).click();
+  await page.getByRole('button', { name: /^Undo \((⌘|Ctrl)\+Z\)$/ }).click();
   expect((await state(page)).parts).toEqual(before.parts);
-  await page.getByRole('button', { name: 'Redo (Ctrl/⌘ Shift Z)', exact: true }).click();
+  await page.getByRole('button', { name: /^Redo \((⌘|Ctrl)\+Shift\+Z\)$/ }).click();
   expect((await state(page)).parts).toEqual(fitted.parts);
   const downloaded = page.waitForEvent('download');
   await page.getByRole('button', { name: 'Save scene', exact: true }).click();
@@ -160,7 +160,7 @@ test('drags an anchor handle as one undo step, with Shift precision and camera r
   const delta = coarse.parts[0].anchors[2].target[0] - before.parts[0].anchors[2].target[0];
   expect(Math.abs(delta)).toBeGreaterThan(0.1);
   expect(coarse.parts[0].anchors).toHaveLength(3);
-  await page.getByRole('button', { name: 'Undo (Ctrl/⌘ Z)', exact: true }).click();
+  await page.getByRole('button', { name: /^Undo \((⌘|Ctrl)\+Z\)$/ }).click();
   expect((await state(page)).parts).toEqual(before.parts);
   await page.keyboard.press('k');
   await drag(true);

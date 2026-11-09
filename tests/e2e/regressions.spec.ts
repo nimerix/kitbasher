@@ -349,7 +349,7 @@ test('no-op renames leave history alone and Escape cancels them', async ({ page 
   const x = page.getByRole('spinbutton', { name: 'Position X', exact: true });
   await x.fill('5');
   await x.press('Enter');
-  await page.getByRole('button', { name: 'Undo (Ctrl/⌘ Z)', exact: true }).click();
+  await page.getByRole('button', { name: /^Undo \((⌘|Ctrl)\+Z\)$/ }).click();
   const before = await state(page);
   expect(before.future).toBe(1);
 
@@ -401,9 +401,9 @@ test('one color picker session is one undo step', async ({ page }) => {
   await pick(['#445566', '#556677']);
   current = await state(page);
   expect(current.past).toBe(before.past + 2);
-  await page.getByRole('button', { name: 'Undo (Ctrl/⌘ Z)', exact: true }).click();
+  await page.getByRole('button', { name: /^Undo \((⌘|Ctrl)\+Z\)$/ }).click();
   expect((await state(page)).parts[0].color).toBe('#334455');
-  await page.getByRole('button', { name: 'Undo (Ctrl/⌘ Z)', exact: true }).click();
+  await page.getByRole('button', { name: /^Undo \((⌘|Ctrl)\+Z\)$/ }).click();
   expect((await state(page)).parts[0].color).toBe('#c7a48c');
 });
 
@@ -415,7 +415,7 @@ test('toolbar undo reverts the last paint stroke like the shortcut', async ({ pa
   await settled(page);
   await paint(page, 'a', [0, 0, 8]);
   expect((await state(page)).painted).toBeGreaterThan(0);
-  const undo = page.getByRole('button', { name: 'Undo (Ctrl/⌘ Z)', exact: true });
+  const undo = page.getByRole('button', { name: /^Undo \((⌘|Ctrl)\+Z\)$/ });
   await expect(undo).toBeEnabled();
   await undo.click();
   const current = await state(page);
@@ -428,7 +428,7 @@ test('pressing the gizmo without dragging leaves history and redo intact', async
   const x = page.getByRole('spinbutton', { name: 'Position X', exact: true });
   await x.fill('12');
   await x.press('Enter');
-  await page.getByRole('button', { name: 'Undo (Ctrl/⌘ Z)', exact: true }).click();
+  await page.getByRole('button', { name: /^Undo \((⌘|Ctrl)\+Z\)$/ }).click();
   await expect(x).toHaveValue('0');
   await page.getByRole('button', { name: 'Move (G)', exact: true }).click();
   await settled(page);
@@ -451,7 +451,7 @@ test('pressing the gizmo without dragging leaves history and redo intact', async
   current = await state(page);
   expect(current.past).toBe(before.past + 1);
   expect(current.future).toBe(0);
-  await page.getByRole('button', { name: 'Undo (Ctrl/⌘ Z)', exact: true }).click();
+  await page.getByRole('button', { name: /^Undo \((⌘|Ctrl)\+Z\)$/ }).click();
   await expect(x).toHaveValue('0');
 });
 

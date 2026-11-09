@@ -290,7 +290,8 @@ overlapping geometry.
 ## Navigation and shortcuts
 
 Use `⌘` on macOS or `Ctrl` on Windows/Linux for the standard shortcuts below.
-Both modifiers are accepted in the workbench. Text fields retain native selection,
+Both modifiers are accepted in the workbench. These are the defaults; every key can
+be changed in [Preferences](#preferences), and menus, tooltips, and help follow. Text fields retain native selection,
 copy, cut, paste, and undo behavior; Save and Open also work while editing a field.
 Controls reached with `Tab` activate with `Space` and `Enter` as usual. Pressing a
 tool's shortcut again keeps unfinished picks and painted patches; `Esc` discards them.
@@ -300,7 +301,7 @@ During contact painting, undo removes the last brush stroke before scene changes
 | ------------------------------------- | -------------------------------------------------------------------------------- |
 | Orbit                                 | Middle drag; hold Space + left drag; left drag outside painting; one-finger drag |
 | Pan                                   | Right drag; Shift + left drag; two-finger gesture                                |
-| Zoom                                  | Scroll, pinch, or viewport buttons                                               |
+| Zoom                                  | Scroll, pinch, or viewport buttons; tune it in Preferences                       |
 | Fine gizmo adjustment                 | Hold `Shift` during move / rotate / scale (10× finer)                            |
 | Select multiple                       | Shift / Ctrl / ⌘ + click                                                         |
 | Focus / frame all                     | `F` / `Home`                                                                     |
@@ -312,6 +313,7 @@ During contact painting, undo removes the last brush stroke before scene changes
 | Apply / cancel active operation       | `Enter` / `Esc`                                                                  |
 | Context menu                          | Right-click / `Shift + F10` / Menu key                                           |
 | Keyboard shortcut help                | `F1` / `?`                                                                       |
+| Preferences                           | `Ctrl/⌘ + ,`                                                                     |
 
 | Standard action                | Shortcut                                        |
 | ------------------------------ | ----------------------------------------------- |
@@ -345,6 +347,32 @@ offers **Set pivot here** at the clicked point. Right-drag continues to pan the
 camera. The menu supports arrow keys, Home/End, typing an action name, Enter/Space,
 and Escape, and fits within small windows. Editable fields keep their native
 context menu. The File and Edit menus expose the same commands and shortcuts.
+
+## Preferences
+
+Open Preferences from the gear in the top bar, **File ▸ Preferences…**, or `Ctrl/⌘ + ,`.
+It opens as a side panel rather than a dialog, so the viewport stays usable and each
+change can be tried immediately. Settings are saved in this browser, apply to every
+scene, and sync between open tabs.
+
+- **Scroll zoom.** The wheel glides smoothly toward each step instead of jumping.
+  _Sensitivity_ scales every step. _Response curve_ shapes how wheel distance becomes
+  zoom: below 1, small and large steps zoom more evenly (useful on macOS, where slow
+  wheel notches are reported as tiny scrolls); 1 follows scroll distance exactly, which
+  suits trackpads; above 1, fast scrolling accelerates. A chart shows the zoom for one
+  notch and for a fine step. _Smoothing_ sets how long the glide lasts, or turns it off.
+  The direction can be inverted. A trackpad pinch always follows your fingers.
+- **Orbit.** The same _Orbit around selection_ preference as the Camera panel.
+- **Point markers.** Anchors, pivots, picked points, measurements, joints, and painted
+  patches share one size, set in screen pixels, so they stay the same size at any zoom.
+  Labels can sit beside their point or appear as CAD-style callouts: the label sits
+  away from the model with a leader line back to the point, always straight above it on
+  screen. Callouts can stay a set clearance above the model's outline or use a fixed
+  leader length, and overlapping labels stack outward instead of covering each other.
+- **Keyboard.** Every tool, camera, editing, and file shortcut can be changed, given a
+  second key, removed, or reset. A key belongs to one action at a time, so assigning it
+  moves it and says where it came from. Bindings use the physical key when a layout or
+  `Alt` changes the typed character.
 
 ## Build with an agent
 

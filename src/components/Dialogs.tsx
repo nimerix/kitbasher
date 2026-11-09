@@ -15,12 +15,16 @@ import {
   Package,
   Plus,
   ScanLine,
+  Settings2,
   ShieldCheck,
   Upload,
   X,
 } from 'lucide-react';
 import { useEditor } from '../core/store';
-import { primaryShortcut, saveCurrentScene } from '../core/commands';
+import { saveCurrentScene } from '../core/commands';
+import { bindingsFor, formatBindings } from '../core/keybindings';
+import type { KeyActionId } from '../core/keybindings';
+import { usePreferences } from '../core/preferences';
 import {
   download,
   downloadScene,
@@ -576,43 +580,44 @@ function RenameDialog() {
 }
 
 function HelpDialog() {
+  const overrides = usePreferences((state) => state.keybindings);
+  const key = (id: KeyActionId) => formatBindings(bindingsFor(id, overrides)) || '—';
+  const keys = (...ids: KeyActionId[]) => ids.map(key).join(' / ');
   const controls = [
-    ['Orbit tool', 'O · left drag or direction buttons'],
-    ['Pan tool', 'H · left drag or direction buttons'],
-    ['Orbit while picking / painting', 'Middle drag / hold Space + drag'],
+    ['Orbit tool', `${key('orbitTool')} · left drag or direction buttons`],
+    ['Pan tool', `${key('panTool')} · left drag or direction buttons`],
+    ['Orbit while picking / painting', `Middle drag / hold ${key('holdOrbit')} + drag`],
     ['Fine move / rotate / scale', 'Hold Shift while dragging · 10× finer'],
     ['Pan', 'Right drag or Shift + left drag'],
-    ['Zoom', 'Scroll / pinch'],
+    ['Zoom', 'Scroll / pinch · tune in Preferences'],
     ['Select multiple', 'Shift / Ctrl / ⌘ + click'],
-    ['Select all components', primaryShortcut('A')],
-    ['Deselect all', primaryShortcut('A', true) + ' / Esc'],
-    [
-      'Copy / Cut / Paste components',
-      `${primaryShortcut('C')} / ${primaryShortcut('X')} / ${primaryShortcut('V')}`,
-    ],
-    ['Rename component', 'F2'],
-    ['Find a component', primaryShortcut('F')],
+    ['Select all components', key('selectAll')],
+    ['Deselect all', keys('deselect', 'cancel')],
+    ['Copy / Cut / Paste components', keys('copy', 'cut', 'paste')],
+    ['Rename component', key('rename')],
+    ['Find a component', key('search')],
     ['Context menu', 'Right-click / Shift + F10'],
-    ['Center orbit on selection', '. (keeps zoom)'],
-    ['Orbit selection by default', 'Shift + .'],
-    ['Focus selection', 'F (frames selection)'],
-    ['Frame all parts', 'Home'],
-    ['Move / Rotate / Scale', 'G / R / S'],
-    ['Paint contact surfaces', 'B · drag to paint'],
-    ['Paint brush size / Erase', '[ and ] / hold Alt'],
-    ['Rigid anchor fit', 'K · add surface anchors, then drag a target'],
-    ['Pick pivot on model', 'P · click a surface'],
-    ['Align / Joint / Measure', 'A / J / D'],
-    ['Front / Right / Top', '1 / 3 / 7'],
-    ['Toggle projection', '5'],
-    ['Undo / Redo', `${primaryShortcut('Z')} / ${primaryShortcut('Z', true)} / Ctrl+Y`],
-    ['Save / Open', `${primaryShortcut('S')} / ${primaryShortcut('O')}`],
-    ['New assembly / Import', `${primaryShortcut('N')} / ${primaryShortcut('I')}`],
-    ['Export', primaryShortcut('E', true)],
-    ['Duplicate', primaryShortcut('D')],
-    ['Delete unlocked parts', 'Delete / Backspace'],
-    ['Finish / Cancel tool', 'Enter / Esc'],
-    ['Exit camera tool', 'Esc (keeps picked pairs)'],
+    ['Center orbit on selection', `${key('centerOrbit')} (keeps zoom)`],
+    ['Orbit selection by default', key('orbitSelection')],
+    ['Focus selection', `${key('focus')} (frames selection)`],
+    ['Frame all parts', key('frameAll')],
+    ['Move / Rotate / Scale', keys('move', 'rotate', 'scale')],
+    ['Paint contact surfaces', `${key('paint')} · drag to paint`],
+    ['Paint brush size / Erase', `${key('brushSmaller')} and ${key('brushLarger')} / hold Alt`],
+    ['Rigid anchor fit', `${key('anchors')} · add surface anchors, then drag a target`],
+    ['Pick pivot on model', `${key('pivot')} · click a surface`],
+    ['Align / Joint / Measure', keys('align', 'joint', 'measure')],
+    ['Front / Right / Top', keys('viewFront', 'viewRight', 'viewTop')],
+    ['Toggle projection', key('projection')],
+    ['Undo / Redo', keys('undo', 'redo')],
+    ['Save / Open', keys('save', 'open')],
+    ['New assembly / Import', keys('new', 'import')],
+    ['Export', key('export')],
+    ['Duplicate', key('duplicate')],
+    ['Delete unlocked parts', key('delete')],
+    ['Finish / Cancel tool', keys('apply', 'cancel')],
+    ['Exit camera tool', `${key('cancel')} (keeps picked pairs)`],
+    ['Preferences', key('preferences')],
   ];
   return (
     <Modal
@@ -626,6 +631,16 @@ function HelpDialog() {
           <h3>
             <MousePointer2 size={16} />
             Navigation & shortcuts
+            <button
+              className="help-customize"
+              onClick={() => {
+                useEditor.getState().setModal(null);
+                usePreferences.getState().openPanel('keyboard');
+              }}
+            >
+              <Settings2 size={12} />
+              Customize
+            </button>
           </h3>
           <div className="shortcut-list">
             {controls.map(([name, key]) => (

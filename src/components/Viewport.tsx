@@ -18,7 +18,6 @@ import {
   GizmoHelper,
   GizmoViewcube,
   Grid,
-  Html,
   Line,
   OrthographicCamera,
   PerspectiveCamera,
@@ -51,6 +50,8 @@ import { PrecisionDrag } from '../core/precision';
 import { isJointConnected, translationIsPinned } from '../core/constraints';
 import { referencePlanes, resolvePart } from '../core/references';
 import type { Part, SurfacePoint, FitAnchor, SceneDocument } from '../core/types';
+import { useShortcut, withShortcut } from '../core/preferences';
+import { AnnotationLayer, ProjectionTracker, ViewProjection } from './Annotations';
 import { IconButton, useDismiss } from './ui';
 import { CameraNavigation, CameraRig } from './CameraNavigation';
 import { PaintCursor, SurfacePaintOverlay } from './SurfacePainter';
@@ -476,43 +477,22 @@ function AnchorOverlay() {
   if (tool !== 'anchors' || explode || !part?.visible) return null;
   const anchors = part.anchors ?? [];
   const current = anchors.find((a) => a.id === active) ?? anchors[0];
+  // The markers and their number labels are drawn by the annotation layer.
   return (
     <>
-      {anchors.map((anchor, index) => {
+      {anchors.map((anchor) => {
         const actual = vec(anchor.point).applyMatrix4(partMatrix(part));
         const target = vec(anchor.target);
-        const color = current?.id === anchor.id ? '#ffbd7a' : '#7ce1d1';
-        return (
-          <group key={anchor.id}>
-            {actual.distanceToSquared(target) > 1e-12 && (
-              <Line
-                points={[actual, target]}
-                color={color}
-                lineWidth={1.5}
-                depthTest={false}
-                raycast={noRaycast}
-              />
-            )}
-            <mesh position={actual} renderOrder={10} raycast={noRaycast}>
-              <sphereGeometry args={[0.35, 12, 8]} />
-              <meshBasicMaterial color={color} depthTest={false} depthWrite={false} />
-            </mesh>
-            <Html position={target} center zIndexRange={[30, 20]}>
-              <button
-                className={`anchor-marker ${current?.id === anchor.id ? 'active' : ''}`}
-                aria-label={`Select anchor ${index + 1} target`}
-                disabled={navigating}
-                onPointerDown={(e) => e.stopPropagation()}
-                onClick={(e) => {
-                  e.stopPropagation();
-                  useEditor.setState({ activeAnchor: anchor.id, anchorPicking: false });
-                }}
-              >
-                {index + 1}
-              </button>
-            </Html>
-          </group>
-        );
+        return actual.distanceToSquared(target) > 1e-12 ? (
+          <Line
+            key={anchor.id}
+            points={[actual, target]}
+            color={current?.id === anchor.id ? '#ffbd7a' : '#7ce1d1'}
+            lineWidth={1.5}
+            depthTest={false}
+            raycast={noRaycast}
+          />
+        ) : null;
       })}
       {current && !part.locked && !picking && !navigating && (
         <AnchorHandle key={`${part.id}:${current.id}`} part={part} anchor={current} />
@@ -521,116 +501,57 @@ function AnchorOverlay() {
   );
 }
 
-function Marker({ point, color, label }: { point: SurfacePoint; color: string; label?: string }) {
-  const part = useEditor((s) => resolvePart(s.scene, point.partId));
-  if (!part) return null;
-  const position = worldPoint(part, point);
-  return (
-    <group position={position}>
-      <mesh renderOrder={10}>
-        <sphereGeometry args={[0.9, 16, 12]} />
-        <meshBasicMaterial color={color} depthTest={false} />
-      </mesh>
-      {label ? (
-        <Html position={[0, 3, 0]} center style={{ pointerEvents: 'none' }}>
-          <span className="surface-pick-label" style={{ color }}>
-            {label}
-          </span>
-        </Html>
-      ) : null}
-    </group>
-  );
-}
-
+/** Lines between picked points. The points and labels are drawn by the annotation layer. */
 function AssemblyAnnotations() {
   const scene = useEditor((s) => s.scene),
     op = useEditor((s) => s.operation),
-    showJoints = useEditor((s) => s.view.joints),
     explode = useEditor((s) => s.view.explode),
     measurement = useEditor((s) => s.measurement);
   if (explode) return null;
+  const measured =
+    measurement.length === 2
+      ? [resolvePart(scene, measurement[0].partId), resolvePart(scene, measurement[1].partId)]
+      : null;
   return (
     <>
-      {scene.parts
-        .filter(
-          (part) => part.visible && part.pivot && useEditor.getState().selected.includes(part.id),
-        )
-        .map((part) => (
-          <group key={`pivot-${part.id}`} position={partPivot(part)}>
-            <mesh raycast={() => {}} renderOrder={15}>
-              <sphereGeometry args={[0.55, 12, 8]} />
-              <meshBasicMaterial color="#c9dcf8" depthTest={false} />
-            </mesh>
-            <mesh raycast={() => {}} renderOrder={15}>
-              <torusGeometry args={[1.6, 0.09, 8, 32]} />
-              <meshBasicMaterial color="#c9dcf8" depthTest={false} />
-            </mesh>
-            <Html position={[0, 3, 0]} center style={{ pointerEvents: 'none' }}>
-              <span className="surface-pick-label pivot-label">Pivot</span>
-            </Html>
-          </group>
-        ))}
       {op.pairs.map((pair, i) => {
         const source = resolvePart(scene, pair.source.partId),
           target = resolvePart(scene, pair.target.partId);
-        return (
-          <group key={i}>
-            <Marker point={pair.source} color="#eda763" label={`S${i + 1}`} />
-            <Marker point={pair.target} color="#9ccec6" label={`T${i + 1}`} />
-            {source && target ? (
-              <Line
-                points={[worldPoint(source, pair.source), worldPoint(target, pair.target)]}
-                color="#dda165"
-                dashed
-                dashSize={1.2}
-                gapSize={0.7}
-                lineWidth={1.2}
-              />
-            ) : null}
-          </group>
-        );
+        return source && target ? (
+          <Line
+            key={i}
+            points={[worldPoint(source, pair.source), worldPoint(target, pair.target)]}
+            color="#dda165"
+            dashed
+            dashSize={1.2}
+            gapSize={0.7}
+            lineWidth={1.2}
+            raycast={noRaycast}
+          />
+        ) : null;
       })}
-      {op.pending ? <Marker point={op.pending} color="#eda763" label="source" /> : null}
-      {measurement.map((point, i) => (
-        <Marker key={i} point={point} color="#a2cec4" />
-      ))}
-      {measurement.length === 2
-        ? (() => {
-            const a = resolvePart(scene, measurement[0].partId),
-              b = resolvePart(scene, measurement[1].partId);
-            return a && b ? (
-              <Line
-                points={[worldPoint(a, measurement[0]), worldPoint(b, measurement[1])]}
-                color="#a2cec4"
-                lineWidth={1.5}
-              />
-            ) : null;
-          })()
-        : null}
-      {showJoints
-        ? scene.joints.filter(isJointConnected).map((joint) => {
-            const parent = scene.parts.find((p) => p.id === joint.parentId);
-            if (!parent?.visible) return null;
-            const position = vec(joint.parentAnchor).applyMatrix4(partMatrix(parent));
-            return (
-              <group key={joint.id} position={position}>
-                <mesh rotation={[Math.PI / 2, 0, 0]} renderOrder={9}>
-                  <torusGeometry args={[2, 0.3, 8, 24]} />
-                  <meshBasicMaterial color="#9ac4bb" depthTest={false} />
-                </mesh>
-                <mesh>
-                  <sphereGeometry args={[0.65, 10, 8]} />
-                  <meshBasicMaterial color="#9ac4bb" depthTest={false} />
-                </mesh>
-              </group>
-            );
-          })
-        : null}
+      {measured?.[0] && measured[1] ? (
+        <Line
+          points={[
+            worldPoint(measured[0], measurement[0]),
+            worldPoint(measured[1], measurement[1]),
+          ]}
+          color="#a2cec4"
+          lineWidth={1.5}
+          raycast={noRaycast}
+        />
+      ) : null}
     </>
   );
 }
 
-function Scene({ inspection }: { inspection: InspectionState }) {
+function Scene({
+  inspection,
+  projection,
+}: {
+  inspection: InspectionState;
+  projection: ViewProjection;
+}) {
   useEffect(() => {
     const finish = () => useEditor.getState().endPaintStroke();
     window.addEventListener('pointerup', finish);
@@ -747,6 +668,7 @@ function Scene({ inspection }: { inspection: InspectionState }) {
       <TransformGizmo />
       <AnchorOverlay />
       <AssemblyAnnotations />
+      <ProjectionTracker projection={projection} />
       <GizmoHelper alignment="top-right" margin={[62, 66]}>
         <GizmoViewcube
           font="12px sans-serif"
@@ -775,6 +697,15 @@ export function Viewport() {
     focus = useEditor((s) => s.focus);
   const [viewMenu, setViewMenu] = useState(false);
   const viewSelector = useRef<HTMLDivElement>(null);
+  const projection = useMemo(() => new ViewProjection(), []);
+  const keys = {
+    projection: useShortcut('projection'),
+    pivot: useShortcut('pivot'),
+    hold: useShortcut('holdOrbit'),
+    focus: useShortcut('focus'),
+    frameAll: useShortcut('frameAll'),
+  };
+  const orbitHint = `Middle${keys.hold ? ` / ${keys.hold}` : ''}: orbit`;
   const closeViewMenu = useCallback(() => setViewMenu(false), []);
   useDismiss(viewSelector, viewMenu, closeViewMenu);
   const picked = op.pairs.length;
@@ -820,7 +751,7 @@ export function Viewport() {
                   setViewMenu(false);
                 }}
               >
-                Toggle projection <kbd>5</kbd>
+                Toggle projection {keys.projection ? <kbd>{keys.projection}</kbd> : null}
               </button>
             </div>
           ) : null}
@@ -855,10 +786,11 @@ export function Viewport() {
                 useEditor.getState().select(null);
             }}
           >
-            <Scene inspection={inspection} />
+            <Scene inspection={inspection} projection={projection} />
           </Canvas>
         </Suspense>
       </ViewportBoundary>
+      <AnnotationLayer projection={projection} />
       <InspectionControls inspection={inspection} />
       <div className="canvas-label" hidden={view.inspection.enabled}>
         <span className="canvas-label-line" />
@@ -868,7 +800,7 @@ export function Viewport() {
       {pivotPicking ? (
         <div className="pick-prompt">
           <span>Click a spot on a model to set its pivot</span>
-          <kbd>P</kbd>
+          {keys.pivot ? <kbd>{keys.pivot}</kbd> : null}
           <button onClick={() => useEditor.getState().setPivotPicking(false)}>Cancel</button>
         </div>
       ) : !navigationMode && tool === 'align' && op.mode === 'surface' ? (
@@ -880,7 +812,7 @@ export function Viewport() {
                 : `Paint the ${op.activeSurface.side === 'source' ? 'moving' : 'target'} patch · pair ${op.surfacePairs.findIndex((pair) => pair.id === op.activeSurface!.pairId) + 1}`
               : 'Choose a patch to paint, add a pair, or fit'}
           </span>
-          <small>Middle / Space: orbit · Right: pan</small>
+          <small>{orbitHint} · Right: pan</small>
         </div>
       ) : !navigationMode && ['align', 'joint'].includes(tool) ? (
         <div className="pick-prompt">
@@ -894,7 +826,7 @@ export function Viewport() {
                   ? `Pick the source for pair ${picked + 1}`
                   : 'Pick a surface on the moving part'}
           </span>
-          <small>Middle / Space: orbit</small>
+          <small>{orbitHint}</small>
           <span className={`pick-step ${op.pending ? 'current' : ''}`}>2</span>
           {picked ? (
             <span className="pair-count">
@@ -965,10 +897,13 @@ export function Viewport() {
           >
             <ZoomIn size={16} />
           </IconButton>
-          <IconButton label="Focus selection (F)" onClick={() => focus()}>
+          <IconButton label={withShortcut('Focus selection', keys.focus)} onClick={() => focus()}>
             <Focus size={17} />
           </IconButton>
-          <IconButton label="Frame all (Home)" onClick={() => focus(undefined, true)}>
+          <IconButton
+            label={withShortcut('Frame all', keys.frameAll)}
+            onClick={() => focus(undefined, true)}
+          >
             <Maximize size={16} />
           </IconButton>
         </div>
