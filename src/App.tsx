@@ -797,6 +797,28 @@ export default function App() {
         <Inspector onClose={() => setRight(false)} />
       </div>
       <StatusBar />
+      <footer className="site-footer">
+        <span>© 2026 Michael Pearce</span>
+        <nav aria-label="Project links">
+          <a href="https://github.com/nimerix/kitbasher" target="_blank" rel="noopener noreferrer">
+            GitHub
+          </a>
+          <a
+            href="https://github.com/nimerix/kitbasher/issues"
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            Report an issue
+          </a>
+          <a
+            href="https://github.com/nimerix/kitbasher/blob/main/LICENSE"
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            MIT License
+          </a>
+        </nav>
+      </footer>
       <BusyOverlay />
       <Toast />
       <Dialogs
