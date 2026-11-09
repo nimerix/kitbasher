@@ -1,34 +1,11 @@
 /// <reference lib="webworker" />
-import { Brush, Evaluator, ADDITION } from 'three-bvh-csg';
-import { binaryGeometry, deserializeGeometry } from './geometry';
+import { evaluateBoolean } from './boolean';
 import type { BinaryGeometry } from './types';
 
 self.onmessage = (event: MessageEvent<{ meshes: BinaryGeometry[] }>) => {
-  const brushes: Brush[] = [];
   try {
-    const evaluator = new Evaluator();
-    evaluator.attributes = ['position', 'normal', 'color'];
-    evaluator.useGroups = false;
-    for (const data of event.data.meshes) {
-      const geometry = deserializeGeometry(data);
-      geometry.clearGroups();
-      const brush = new Brush(geometry);
-      brush.updateMatrixWorld(true);
-      brushes.push(brush);
-    }
-    let result = brushes[0];
-    for (let i = 1; i < brushes.length; i++) {
-      const next = evaluator.evaluate(result, brushes[i], ADDITION);
-      if (!brushes.includes(result)) result.geometry.dispose();
-      result = next;
-    }
-    const geometry = result.geometry;
-    if (!geometry.getAttribute('position')?.count)
-      throw new Error('The union produced an empty mesh. Check that the meshes are closed.');
-    self.postMessage({ result: binaryGeometry(geometry) });
+    self.postMessage({ result: evaluateBoolean(event.data.meshes) });
   } catch (error) {
     self.postMessage({ error: (error as Error).message });
-  } finally {
-    brushes.forEach((b) => b.geometry.dispose());
   }
 };

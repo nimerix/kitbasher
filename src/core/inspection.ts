@@ -294,7 +294,7 @@ export function inspectMeshes(request: InspectionRequest): InspectionResult {
             points: [one.point.toArray(), two.point.toArray()],
           });
         }
-        if (one.distance <= request.distance + 1e-7) {
+        if (request.surfaces !== false && one.distance <= request.distance + 1e-7) {
           for (const value of surfaceBand(
             geometryA,
             bvh[b],

@@ -16,6 +16,18 @@ export interface CameraStep {
   direction: CameraDirection;
 }
 
+/** From the view's target toward its camera, with Y up. */
+export const viewDirections = {
+  front: [0, 0, 1],
+  back: [0, 0, -1],
+  right: [1, 0, 0],
+  left: [-1, 0, 0],
+  top: [0, 1, 0.001],
+  bottom: [0, -1, 0.001],
+  iso: [1, 0.65, 1.3],
+} as const;
+export type ViewName = keyof typeof viewDirections;
+
 const orbitPreferenceKey = 'kitbasher.orbit-selection';
 
 export function readOrbitPreference() {

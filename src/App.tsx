@@ -45,7 +45,7 @@ import type { CommandId } from './core/commands';
 import { isEditableTarget } from './core/context-menu';
 import { EditorContextMenu } from './components/EditorContextMenu';
 import { readSceneFile } from './core/scene-file';
-import { useKeyboard, useRecovery } from './hooks/useWorkbench';
+import { useKeyboard, useLiveFollow, useRecovery } from './hooks/useWorkbench';
 import { PartsPanel } from './components/PartsPanel';
 import { Inspector } from './components/Inspector';
 import { Dialogs } from './components/Dialogs';
@@ -415,7 +415,8 @@ function StatusBar() {
   const recovery = useEditor((s) => s.recoveryStatus),
     tool = useEditor((s) => s.tool),
     navigationMode = useEditor((s) => (s.temporaryOrbit ? 'orbit' : s.navigationMode)),
-    indexing = useEditor((s) => s.indexingMeshes > 0);
+    indexing = useEditor((s) => s.indexingMeshes > 0),
+    live = useEditor((s) => s.liveStatus);
   return (
     <footer className="statusbar">
       <div className="navigation-hints">
@@ -451,20 +452,35 @@ function StatusBar() {
         </span>
       </div>
       <div className="local-save-status">
-        {recovery === 'saving' ? (
-          <LoaderCircle size={11} className="spin" />
-        ) : recovery === 'error' ? (
-          <span className="status-dot warning" />
+        {live ? (
+          <>
+            <span className={`status-dot${live === 'connected' ? '' : ' warning'}`} />
+            <span>
+              {live === 'connected'
+                ? 'Following agent · Its next change replaces edits made here'
+                : live === 'connecting'
+                  ? 'Connecting to agent…'
+                  : 'Agent disconnected · Save scene to keep this copy'}
+            </span>
+          </>
         ) : (
-          <CheckCircle2 size={11} />
+          <>
+            {recovery === 'saving' ? (
+              <LoaderCircle size={11} className="spin" />
+            ) : recovery === 'error' ? (
+              <span className="status-dot warning" />
+            ) : (
+              <CheckCircle2 size={11} />
+            )}
+            <span>
+              {recovery === 'saving'
+                ? 'Saving locally…'
+                : recovery === 'error'
+                  ? 'Recovery unavailable · save a scene file'
+                  : 'Saved locally'}
+            </span>
+          </>
         )}
-        <span>
-          {recovery === 'saving'
-            ? 'Saving locally…'
-            : recovery === 'error'
-              ? 'Recovery unavailable · save a scene file'
-              : 'Saved locally'}
-        </span>
         <span className="statusbar-divider" />
         <span className="unit-label">mm</span>
       </div>
@@ -540,6 +556,7 @@ export default function App() {
     pending: null as { target: Element; event: MouseEvent } | null,
   });
   useRecovery();
+  useLiveFollow();
   useKeyboard(openScene, searchParts);
   useEffect(() => {
     // Keep press-time context menus out of the DOM until we know this is a click.

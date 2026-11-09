@@ -1,14 +1,21 @@
 import { useEffect, useRef } from 'react';
-import { useEditor } from '../core/store';
+import { followLiveScene } from '../core/live';
+import { liveFollow, useEditor } from '../core/store';
 import { readRecovery, saveRecovery } from '../core/recovery';
 import { executeEditorCommand, shortcutCommand } from '../core/commands';
 import { isEditableTarget, keyboardContextMenu } from '../core/context-menu';
+
+export function useLiveFollow() {
+  useEffect(() => (liveFollow ? followLiveScene() : undefined), []);
+}
 
 export function useRecovery() {
   const scene = useEditor((s) => s.scene),
     revision = useEditor((s) => s.revision);
   const ready = useRef(false);
   useEffect(() => {
+    // The agent's server holds a followed scene. Leaving ready unset also stops autosaving it.
+    if (liveFollow) return;
     let active = true;
     useEditor.getState().setBusy('Restoring your local assembly…');
     readRecovery()

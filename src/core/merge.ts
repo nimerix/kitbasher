@@ -1,4 +1,5 @@
 import { Vector3 } from 'three';
+import type { BufferGeometry } from 'three';
 import { mergeVertices } from 'three/addons/utils/BufferGeometryUtils.js';
 import {
   bakedPartGeometry,
@@ -90,13 +91,21 @@ export async function mergeParts(
       worker.terminate();
     }
   }
+  return mergedPart(
+    geometry,
+    name,
+    `${mode === 'union' ? 'Boolean union' : 'Combined'} · ${parts.length} parts`,
+  );
+}
+
+/** Wraps world-space merged geometry in a part, without moving the surface. */
+export function mergedPart(geometry: BufferGeometry, name: string, source: string): Part {
   if (exceedsDrawLimit(geometry)) {
     geometry.dispose();
     throw new Error(
       `The merged mesh would be too large for a browser to draw. ${drawLimit} Merge fewer parts.`,
     );
   }
-  // Recenter the local origin without moving the surface in world space.
   geometry.computeBoundingBox();
   const center = geometry.boundingBox!.getCenter(new Vector3());
   geometry.translate(-center.x, -center.y, -center.z);
@@ -110,6 +119,6 @@ export async function mergeParts(
     color: '#ffffff',
     visible: true,
     locked: false,
-    source: `${mode === 'union' ? 'Boolean union' : 'Combined'} · ${parts.length} parts`,
+    source,
   };
 }

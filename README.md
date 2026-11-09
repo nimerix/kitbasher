@@ -18,7 +18,7 @@ npm run dev
 Open the local URL printed by Vite, usually http://localhost:5173.
 
 ```sh
-npm run build        # TypeScript checks + static production build
+npm run build        # TypeScript checks, static production build, and MCP server
 npm run preview      # Serve the production build locally
 npm test             # Geometry, constraints, scene and export tests
 npm run test:e2e     # Interaction and WebGL tests in installed Google Chrome
@@ -346,6 +346,20 @@ camera. The menu supports arrow keys, Home/End, typing an action name, Enter/Spa
 and Escape, and fits within small windows. Editable fields keep their native
 context menu. The File and Edit menus expose the same commands and shortcuts.
 
+## Build with an agent
+
+Coding agents can build models directly through the included MCP server. It adds, places, and
+joins parts, checks them for interference, renders views the agent can see, and saves `.kitbash`
+files that open here. It runs locally, without a browser or GPU.
+
+```sh
+npm run build
+claude mcp add --scope user kitbasher -- node "$PWD/dist-mcp/kitbasher-mcp.js"
+codex mcp add kitbasher -- node "$PWD/dist-mcp/kitbasher-mcp.js"
+```
+
+See [Building with agents](docs/mcp.md) for the tools, the live view, and limits.
+
 ## Large files
 
 Imports have no fixed size limit. STL and OBJ are read in pieces into typed arrays, so
@@ -407,6 +421,7 @@ Firefox or Safari.
 `src/core/` owns geometry, rigid registration, constraints, serialization, imports,
 exports, and the Boolean worker. `src/components/` owns the viewport, part tree,
 inspector, and dialogs. `src/hooks/` owns keyboard controls and local recovery.
-State lives in a typed Zustand store. Tests are in `tests/unit/` and `tests/e2e/`.
+State lives in a typed Zustand store. `mcp/` holds the [MCP server](docs/mcp.md), which reuses
+`src/core/`. Tests are in `tests/unit/` and `tests/e2e/`.
 
 See [design specification](docs/design.md) and [verification notes](docs/verification.md).
