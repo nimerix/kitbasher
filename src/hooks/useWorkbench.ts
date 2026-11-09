@@ -1,12 +1,12 @@
 import { useEffect, useRef } from 'react';
-import { followLiveScene } from '../core/live';
-import { liveFollow, useEditor } from '../core/store';
+import { joinLiveSession } from '../core/live';
+import { liveSession, useEditor } from '../core/store';
 import { readRecovery, saveRecovery } from '../core/recovery';
 import { executeEditorCommand, shortcutCommand } from '../core/commands';
 import { isEditableTarget, keyboardContextMenu } from '../core/context-menu';
 
-export function useLiveFollow() {
-  useEffect(() => (liveFollow ? followLiveScene() : undefined), []);
+export function useLiveSession() {
+  useEffect(() => (liveSession ? joinLiveSession() : undefined), []);
 }
 
 export function useRecovery() {
@@ -14,8 +14,8 @@ export function useRecovery() {
     revision = useEditor((s) => s.revision);
   const ready = useRef(false);
   useEffect(() => {
-    // The agent's server holds a followed scene. Leaving ready unset also stops autosaving it.
-    if (liveFollow) return;
+    // The agent's server holds a shared scene. Leaving ready unset also stops autosaving it.
+    if (liveSession) return;
     let active = true;
     useEditor.getState().setBusy('Restoring your local assembly…');
     readRecovery()

@@ -5,19 +5,22 @@ import { join } from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { expect, test } from '@playwright/test';
+import type { Page } from '@playwright/test';
 
 // These drive the bundle a client would really start, over real stdio, with the real app.
 let folder: string;
 let client: Client;
 let transport: StdioClientTransport;
 
+/** Calls a tool, returning its JSON with any note about changes made in a tab. */
 const call = async (name: string, args: Record<string, unknown> = {}) => {
   const result = await client.callTool({ name, arguments: args });
-  const text = (result.content as { type: string; text?: string }[]).find(
-    (entry) => entry.type === 'text',
-  )!.text!;
-  if (result.isError) throw new Error(`${name}: ${text}`);
-  return JSON.parse(text);
+  const texts = (result.content as { type: string; text?: string }[])
+    .filter((entry) => entry.type === 'text')
+    .map((entry) => entry.text!);
+  if (result.isError) throw new Error(`${name}: ${texts.join('\n')}`);
+  const notes = texts.slice(1).map((text) => JSON.parse(text).user_changes);
+  return notes.length ? { ...JSON.parse(texts[0]), user_changes: notes[0] } : JSON.parse(texts[0]);
 };
 
 const model = [
@@ -86,7 +89,7 @@ test('a scene saved through MCP opens in the app', async ({ page }) => {
   expect(errors).toEqual([]);
 });
 
-test('the live view follows the agent in the real app', async ({ page }) => {
+test('the live view shows the agent’s changes in the real app', async ({ page }) => {
   const errors: string[] = [];
   page.on('pageerror', (error) => errors.push(error.message));
   const meshes: string[] = [];
@@ -98,7 +101,7 @@ test('the live view follows the agent in the real app', async ({ page }) => {
   expect(viewers).toBe(0);
 
   await page.goto(url);
-  await expect(page.getByText('Following agent')).toBeVisible();
+  await expect(page.getByText('Shared with agent')).toBeVisible();
   await expect(page.locator('.part-row')).toHaveCount(0);
 
   await call('add_parts', { parts: [model[0]] });
@@ -128,7 +131,7 @@ test('the live view follows the agent in the real app', async ({ page }) => {
   await expect(page.locator('.part-row')).toHaveCount(3);
   expect(meshes.length).toBe(before);
 
-  // A followed scene belongs to the server, so the tab leaves its own autosave alone.
+  // A shared scene belongs to the server, so the tab leaves its own autosave alone.
   const saved = await page.evaluate(
     () =>
       new Promise<unknown>((resolve, reject) => {
@@ -189,4 +192,106 @@ test('the live view frames a new scene, then leaves a moved camera alone', async
   await page.waitForTimeout(400);
   const after = await page.locator('canvas').first().screenshot();
   expect(after.equals(zoomed)).toBe(true);
+});
+
+const tetrahedron = Buffer.from(
+  'solid tetra\nfacet normal 0 0 -1\nouter loop\nvertex 0 0 0\nvertex 0 10 0\nvertex 10 0 0\nendloop\nendfacet\nfacet normal 0 -1 0\nouter loop\nvertex 0 0 0\nvertex 10 0 0\nvertex 0 0 10\nendloop\nendfacet\nfacet normal -1 0 0\nouter loop\nvertex 0 0 0\nvertex 0 0 10\nvertex 0 10 0\nendloop\nendfacet\nfacet normal 1 1 1\nouter loop\nvertex 10 0 0\nvertex 0 10 0\nvertex 0 0 10\nendloop\nendfacet\nendsolid tetra',
+);
+
+test('tabs and the agent edit one scene, each with its own view', async ({ browser }) => {
+  await call('add_parts', { parts: model });
+  const { url } = await call('open_live_view', { open_browser: false });
+  const context = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
+  const first = await context.newPage();
+  const second = await context.newPage();
+  const errors: string[] = [];
+  const edits = new Map<Page, number>();
+  const uploads: string[] = [];
+  for (const page of [first, second]) {
+    edits.set(page, 0);
+    page.on('pageerror', (error) => errors.push(error.message));
+    page.on('request', (request) => {
+      if (request.url().endsWith('/live/edit')) edits.set(page, edits.get(page)! + 1);
+      if (request.method() === 'POST' && request.url().includes('/live/geometry/'))
+        uploads.push(request.url());
+    });
+    await page.goto(url);
+    await expect(page.getByText('Shared with agent')).toBeVisible();
+    await expect(page.locator('.part-row')).toHaveCount(2);
+  }
+  const field = (page: Page, axis: string) =>
+    page.getByRole('spinbutton', { name: `Position ${axis}`, exact: true });
+  const positionOf = (scene: { parts: { id: string; position: number[] }[] }, id: string) =>
+    scene.parts.find((p) => p.id === id)!.position;
+
+  // A change in one tab reaches the other tab and the agent, which is told about it.
+  await first.locator(part('Agent column')).click();
+  await field(first, 'X').fill('25');
+  await field(first, 'X').press('Enter');
+  await second.locator(part('Agent column')).click();
+  await expect(field(second, 'X')).toHaveValue('25');
+  const seen = await call('get_scene');
+  expect(positionOf(seen, 'agent-column')).toEqual([25, 40, 0]);
+  expect(seen.user_changes).toEqual({ parts_changed: ['agent-column'] });
+
+  // Looking around in one tab sends nothing, and moves no other view.
+  const sent = [...edits.values()];
+  const otherView = await second.locator('canvas').first().screenshot();
+  const canvas = first.locator('canvas').first();
+  const box = (await canvas.boundingBox())!;
+  await canvas.hover();
+  await first.mouse.wheel(0, 500);
+  await first.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+  await first.mouse.down({ button: 'middle' });
+  await first.mouse.move(box.x + box.width / 2 + 140, box.y + box.height / 2 + 50, { steps: 8 });
+  await first.mouse.up({ button: 'middle' });
+  await first.waitForTimeout(400);
+  expect([...edits.values()]).toEqual(sent);
+  expect((await second.locator('canvas').first().screenshot()).equals(otherView)).toBe(true);
+  expect((await call('get_scene')).user_changes).toBeUndefined();
+
+  // The agent's change reaches both tabs, whatever each has selected.
+  await second.locator(part('Agent base')).click();
+  await call('update_parts', { updates: [{ id: 'agent-base', translate: [0, 0, 30] }] });
+  await expect(field(second, 'Z')).toHaveValue('30');
+  await expect(field(first, 'X')).toHaveValue('25');
+
+  // Undo in a tab reverts that tab's change, and the agent's undo reverts the agent's.
+  await first.getByRole('button', { name: 'Undo (Ctrl/⌘ Z)', exact: true }).click();
+  await expect(field(first, 'X')).toHaveValue('0');
+  const undone = await call('get_scene');
+  expect(positionOf(undone, 'agent-column')).toEqual([0, 40, 0]);
+  expect(positionOf(undone, 'agent-base')).toEqual([0, 5, 30]);
+  await call('undo');
+  await expect(field(second, 'Z')).toHaveValue('0');
+  await expect(field(first, 'X')).toHaveValue('0');
+  await first.locator(part('Agent column')).click();
+  await first.keyboard.press('ControlOrMeta+Shift+z');
+  await expect(field(first, 'X')).toHaveValue('25');
+  await expect(first.getByRole('button', { name: 'Redo (Ctrl/⌘ Shift Z)' })).toBeDisabled();
+
+  // A model imported in a tab sends its mesh once, and the agent can work with it.
+  await first.getByRole('button', { name: 'Import parts', exact: true }).click();
+  await first.getByLabel('Choose model files').setInputFiles({
+    name: 'tetra.stl',
+    mimeType: 'model/stl',
+    buffer: tetrahedron,
+  });
+  await first
+    .getByRole('dialog')
+    .getByRole('button', { name: 'Import parts', exact: true })
+    .click();
+  await expect(second.locator('.part-row')).toHaveCount(3);
+  expect(uploads).toHaveLength(1);
+  const imported = await call('get_scene');
+  expect(imported.user_changes.parts_added).toHaveLength(1);
+  const [id] = imported.user_changes.parts_added;
+  const placed = await call('place_parts', {
+    placements: [{ id, target: 'agent-base', side: '+y' }],
+  });
+  expect(placed.placed[0].bounds.min[1]).toBeCloseTo(10, 4);
+  await second.locator('.part-select[title="tetra"]').click();
+  await expect(field(second, 'Y')).not.toHaveValue('0');
+  expect(errors).toEqual([]);
+  await context.close();
 });

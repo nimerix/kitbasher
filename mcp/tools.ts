@@ -6,6 +6,7 @@ import { z } from 'zod';
 import { viewDirections } from '../src/core/navigation';
 import type { ViewName } from '../src/core/navigation';
 import type { Vec3 } from '../src/core/types';
+import { agent, sharedDocument } from './document';
 import { LiveView, openInBrowser } from './live';
 import { renderScene } from './render';
 import { Session, faces, requirePart } from './session';
@@ -21,7 +22,9 @@ Working well:
 2. Use place_parts to stack or seat parts by their actual bounds rather than computing coordinates by hand. duplicate_parts makes mirrors and arrays.
 3. Look at the result: call render_view after each stage. Coordinates that seem right can still look wrong. Then call inspect_interference, which reports overlaps, gaps, and parts floating free of everything else.
 4. Use create_joint for parts that pivot and create_plane_constraint for relationships that must survive later moves. Joints, plane constraints, and locks stay in force through every later move, so a result marked constrained did not reach the requested pose.
-5. Nothing is written to disk until save_scene or export_scene. Every tool call is one undo step, and a call that fails changes nothing. open_live_view shows the scene in the real Kitbasher app as it changes.`;
+5. Nothing is written to disk until save_scene or export_scene. Every tool call is one undo step, and a call that fails changes nothing.
+
+Working with the user: open_live_view opens this scene in the Kitbasher app, where the user can watch and edit it too. Changes merge, so their edits and yours both stand. A result with user_changes lists what they changed since your previous call: re-read those parts with get_scene before relying on earlier values, and build on their work rather than reverting it. undo reverts only your own changes.`;
 
 const vector = (description: string) => z.array(z.number()).length(3).describe(description);
 const ids = (description: string) => z.array(z.string()).describe(description);
@@ -158,6 +161,7 @@ export function createServer(session = new Session(), live = new LiveView()) {
 
   // A client can send calls in parallel, but each one must see the previous call's finished scene.
   let queue: Promise<unknown> = Promise.resolve();
+  let seen = sharedDocument.version;
   const inOrder = <T>(run: () => Promise<T> | T) => {
     const next = queue.then(run, run);
     queue = next.catch(() => {});
@@ -175,15 +179,22 @@ export function createServer(session = new Session(), live = new LiveView()) {
       args: z.infer<z.ZodObject<Shape>>,
     ) =>
       inOrder(async () => {
+        let result: CallToolResult;
         try {
-          const result = await run(args);
-          return (result as CallToolResult)?.content ? result : json(result);
+          const value = await run(args);
+          result = (value as CallToolResult)?.content ? (value as CallToolResult) : json(value);
         } catch (error) {
-          return {
+          result = {
             isError: true,
             content: [{ type: 'text', text: (error as Error).message }],
           };
         }
+        // The agent's picture of the scene may be out of date if someone edited it in the live view.
+        const changes = sharedDocument.changesSince(seen, agent);
+        seen = sharedDocument.version;
+        if (changes)
+          result.content.push({ type: 'text', text: JSON.stringify({ user_changes: changes }) });
+        return result;
       })) as never);
 
   tool(
@@ -577,7 +588,7 @@ export function createServer(session = new Session(), live = new LiveView()) {
 
   tool(
     'open_live_view',
-    'Opens the scene in the real Kitbasher app in a browser tab, which follows every change as it is made. Use it when the user wants to watch. The tab can inspect and save, but its own edits are replaced by the next change here. It needs the app to be built with npm run build.',
+    'Opens this scene in the Kitbasher app in a browser tab, for the user to watch or work on with you. Changes made here or in any tab appear everywhere within a moment, and each tab has its own camera and selection. Use it when the user wants to see or edit the model. It needs the app to be built with npm run build.',
     edits,
     { open_browser: z.boolean().optional().describe('Default true. false only returns the URL.') },
     async ({ open_browser }) => {

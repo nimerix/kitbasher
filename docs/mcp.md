@@ -84,7 +84,7 @@ The server gives connecting agents these conventions, along with a suggested way
 | `new_scene`, `open_scene`, `save_scene`              | Start, open, and save `.kitbash` scenes                                                                                       |
 | `export_scene`                                       | Write GLB, STL, 3MF, or a Blender package, chosen by file extension                                                           |
 | `undo`, `redo`                                       | Step through the most recent 40 changes                                                                                       |
-| `open_live_view`                                     | Show the scene in the real app as it changes                                                                                  |
+| `open_live_view`                                     | Open the scene in the app, where you and the agent edit it together                                                           |
 
 ## Behavior
 
@@ -112,21 +112,47 @@ carry an axis triad and a true scale bar, so proportions and misalignment can be
 Back faces are hidden, as in the app, so an inside-out mesh looks wrong here too. The renderer has
 no shadows or materials: for a final look, use the app or export to Blender.
 
-`open_live_view` serves the built app on a private local address and opens it in your browser. The
-tab follows every change and keeps the model in view, until you move the camera yourself.
+## Working on one scene together
 
-- It follows in one direction. You can orbit, select, inspect, and save a copy from the tab, but the
-  agent's next change replaces any edits made there. To keep editing by hand, open a saved
-  `.kitbash` file in the normal app.
-- It keeps no local autosave, and does not touch the autosave of the normal app.
-- If the agent's session ends, the tab keeps the last scene and says so. Use **Save scene** to keep it.
+`open_live_view` serves the built app on a private local address and opens it in your browser. The
+tab and the agent edit the same scene, and changes made in either appear in the other within a
+moment. Open the address in more tabs or windows to look from several angles at once.
+
+**Each tab has its own view.** Camera, selection, active tool, alignment picks, paint, interference
+view, and view settings stay in that tab. Looking around sends nothing, so it never affects the agent
+or another tab. Anything saved in a scene file is shared, including part visibility, locks, and custom
+pivots: hiding a part hides it for the agent's renders too.
+
+**Edits combine rather than overwrite.** They are merged by part and by property, so you can recolor a
+part while the agent moves it, and both changes stay. When two edits move the same part at once, the
+later one wins. Joints and plane constraints are then applied again, so connected parts stay
+connected. A change that cannot be combined, such as giving a part a second parent, is refused, and
+the tab undoes it and says why.
+
+**Undo is your own.** In a tab, undo and redo step through that tab's changes only, and the agent's
+`undo` steps through its own. A value someone else has changed since stays as they left it. A tab keeps
+its history across a reload.
+
+**The agent hears about your edits.** The next tool result after you change something lists the parts
+and relationships you changed, added, or removed, so the agent re-reads them rather than working from
+an out-of-date picture. Opening a file or starting a new assembly in a tab replaces the agent's scene
+too, and the agent is told. That scene counts as unsaved, so the agent's `save_scene` needs a new path.
+
+The tab keeps the model in view as the agent adds to it, until you move the camera yourself. It keeps
+no local autosave, and does not touch the autosave of the normal app. If the agent's session ends, the
+tab says so and keeps working on its own copy: use **Save scene** to keep it. Edits made while the
+agent is briefly unreachable are sent when it is back.
 
 The address listens on 127.0.0.1 only, includes a random token, and ignores other host names.
 Set `KITBASHER_LIVE_PORT` to use a fixed port.
 
 ## Limits
 
-- **One scene per server.** Each client session starts its own server and its own scene.
+- **One scene per server.** Each client session starts its own server and its own scene, so two agent
+  sessions cannot share one scene. A tab joins the agent's scene; it cannot bring an agent into a scene
+  already open in the normal app, so save that scene and ask the agent to open the file.
+- **The scene lives in the agent's server.** Unsaved work in a shared scene, including edits made in
+  tabs, ends with the agent's session unless a tab or the agent saves it.
 - **Booleans run on the server's only thread.** To stay inside a client's tool timeout, they are limited
   to 2 million triangles in total, rather than the app's 10 million per part. Other tool calls wait while
   one runs.
@@ -140,13 +166,15 @@ Set `KITBASHER_LIVE_PORT` to use a fixed port.
 
 ## Source
 
-| File             | Contents                                                                     |
-| ---------------- | ---------------------------------------------------------------------------- |
-| `mcp/server.ts`  | Stdio entry point                                                            |
-| `mcp/tools.ts`   | Tool definitions, their schemas, and the instructions given to agents        |
-| `mcp/session.ts` | The operations, built on the app's store and solvers                         |
-| `mcp/shapes.ts`  | Shape builders, which all produce closed solids                              |
-| `mcp/render.ts`  | The CPU renderer and PNG encoder                                             |
-| `mcp/live.ts`    | The local server behind the live view. `src/core/live.ts` is the page's side |
-| `mcp/measure.ts` | Exact world bounds and closest-surface lookups                               |
-| `mcp/shims.ts`   | The browser APIs Three's loaders and exporters expect                        |
+| File               | Contents                                                                     |
+| ------------------ | ---------------------------------------------------------------------------- |
+| `mcp/server.ts`    | Stdio entry point                                                            |
+| `mcp/tools.ts`     | Tool definitions, their schemas, and the instructions given to agents        |
+| `mcp/session.ts`   | The operations, built on the app's store and solvers                         |
+| `mcp/shapes.ts`    | Shape builders, which all produce closed solids                              |
+| `mcp/render.ts`    | The CPU renderer and PNG encoder                                             |
+| `mcp/live.ts`      | The local server behind the live view. `src/core/live.ts` is the page's side |
+| `mcp/document.ts`  | The shared scene: versions, per-author undo, and meshes from tabs            |
+| `src/core/sync.ts` | How concurrent edits merge and how undo steps apply, used on both sides      |
+| `mcp/measure.ts`   | Exact world bounds and closest-surface lookups                               |
+| `mcp/shims.ts`     | The browser APIs Three's loaders and exporters expect                        |
