@@ -427,3 +427,7 @@ State lives in a typed Zustand store. `mcp/` holds the [MCP server](docs/mcp.md)
 `src/core/`. Tests are in `tests/unit/` and `tests/e2e/`.
 
 See [design specification](docs/design.md) and [verification notes](docs/verification.md).
+
+## License
+
+Copyright © 2026 Michael Pearce. Licensed under the [MIT License](LICENSE).
