@@ -521,27 +521,52 @@ export default function App() {
       search?.select();
     });
   }, []);
-  const contextGesture = useRef({ x: 0, y: 0, moved: false, selection: [] as string[] });
+  const contextGesture = useRef({
+    x: 0,
+    y: 0,
+    moved: false,
+    active: false,
+    pending: null as { target: Element; event: MouseEvent } | null,
+  });
   useRecovery();
   useKeyboard(openScene, searchParts);
   useEffect(() => {
-    // Some platforms emit contextmenu on right-button down. Close that early
-    // menu once the gesture becomes a pan, even if the pointer is over its portal.
+    // Keep press-time context menus out of the DOM until we know this is a click.
+    // Replaying on the original target preserves mesh raycasting and brush menus.
     const move = (event: PointerEvent) => {
       const gesture = contextGesture.current;
-      if (
-        !(event.buttons & 2) ||
-        Math.hypot(event.clientX - gesture.x, event.clientY - gesture.y) <= 5
-      )
-        return;
-      gesture.moved = true;
-      if (useEditor.getState().contextMenu) {
-        useEditor.setState({ contextMenu: null, selected: gesture.selection });
-        document.querySelector<HTMLElement>('.viewport')?.focus({ preventScroll: true });
+      if (!gesture.active) return;
+      if (Math.hypot(event.clientX - gesture.x, event.clientY - gesture.y) > 5) {
+        gesture.moved = true;
+        gesture.pending = null;
       }
     };
+    const up = (event: PointerEvent) => {
+      const gesture = contextGesture.current;
+      if (!gesture.active) return;
+      move(event);
+      gesture.active = false;
+      const pending = gesture.pending;
+      gesture.pending = null;
+      if (!gesture.moved && pending?.target.isConnected) {
+        pending.target.dispatchEvent(new MouseEvent('contextmenu', pending.event));
+      }
+    };
+    const cancel = () => {
+      contextGesture.current.active = false;
+      contextGesture.current.moved = true;
+      contextGesture.current.pending = null;
+    };
     window.addEventListener('pointermove', move, true);
-    return () => window.removeEventListener('pointermove', move, true);
+    window.addEventListener('pointerup', up, true);
+    window.addEventListener('pointercancel', cancel, true);
+    window.addEventListener('blur', cancel);
+    return () => {
+      window.removeEventListener('pointermove', move, true);
+      window.removeEventListener('pointerup', up, true);
+      window.removeEventListener('pointercancel', cancel, true);
+      window.removeEventListener('blur', cancel);
+    };
   }, []);
   useEffect(() => {
     if (tool === 'align' || tool === 'joint') setRight(true);
@@ -589,7 +614,8 @@ export default function App() {
           x: event.clientX,
           y: event.clientY,
           moved: false,
-          selection: useEditor.getState().selected,
+          active: event.button === 2 || (event.button === 0 && event.ctrlKey),
+          pending: null,
         };
       }}
       onPointerMoveCapture={(event) => {
@@ -598,6 +624,15 @@ export default function App() {
           gesture.moved = true;
       }}
       onContextMenuCapture={(event) => {
+        const gesture = contextGesture.current;
+        if (gesture.active && event.target instanceof Element && !isEditableTarget(event.target)) {
+          event.preventDefault();
+          event.stopPropagation();
+          if (!gesture.moved) {
+            gesture.pending = { target: event.target, event: event.nativeEvent };
+          }
+          return;
+        }
         if ((event.button === 2 || event.ctrlKey) && contextGesture.current.moved) {
           event.preventDefault();
           event.stopPropagation();

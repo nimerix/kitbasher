@@ -234,8 +234,24 @@ test('right-clicks real mesh surfaces to target a part and set its pivot without
 }) => {
   await page.keyboard.press('1');
   const location = await screenPoint(page, 'b', [0, 0, 8]);
-  await page.mouse.click(location.x, location.y, { button: 'right' });
   const menu = page.getByRole('menu', { name: 'Component actions' });
+  await page.mouse.move(location.x, location.y);
+  await page.mouse.down({ button: 'right' });
+  // Model platforms that report a context menu on press, before any drag.
+  await page.locator('canvas').evaluate((canvas, point) => {
+    canvas.dispatchEvent(
+      new MouseEvent('contextmenu', {
+        button: 2,
+        buttons: 2,
+        clientX: point.x,
+        clientY: point.y,
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+  }, location);
+  await expect(menu).toHaveCount(0);
+  await page.mouse.up({ button: 'right' });
   await expect(menu).toBeVisible();
   const clicked = await editorState(page);
   expect(clicked.selected).toEqual(['b']);
@@ -249,6 +265,20 @@ test('right-clicks real mesh surfaces to target a part and set its pivot without
   const start = { x: bounds.x + bounds.width * 0.7, y: bounds.y + bounds.height * 0.6 };
   await page.mouse.move(start.x, start.y);
   await page.mouse.down({ button: 'right' });
+  await page.locator('canvas').evaluate((canvas, point) => {
+    canvas.dispatchEvent(
+      new MouseEvent('contextmenu', {
+        button: 2,
+        buttons: 2,
+        clientX: point.x,
+        clientY: point.y,
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+  }, start);
+  await expect(menu).toHaveCount(0);
+  expect((await editorState(page)).selected).toEqual(before.selected);
   await page.mouse.move(start.x + 85, start.y + 20, { steps: 10 });
   await page.mouse.up({ button: 'right' });
   await expect(menu).toHaveCount(0);
