@@ -116,6 +116,7 @@ export function useKeyboard(openScene: () => void, searchParts: () => void) {
         s: 'scale',
         a: 'align',
         j: 'joint',
+        k: 'anchors',
         d: 'measure',
       } as const;
       if (key in tools) {

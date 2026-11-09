@@ -10,6 +10,7 @@ import {
   validateJoint,
 } from './constraints';
 import { solveAlignment } from './alignment';
+import { fitAnchors } from './anchor-fit';
 import {
   planeKindLabels,
   solvePlaneConstraints,
@@ -39,6 +40,7 @@ import type {
   SurfaceSide,
   Tool,
   ViewSettings,
+  Vec3,
 } from './types';
 
 export type Modal = 'export' | 'import' | 'merge' | 'help' | 'new' | 'rename' | null;
@@ -85,6 +87,8 @@ interface EditorState {
   precision: boolean;
   pivotRequest: number;
   pivotPicking: boolean;
+  activeAnchor: string | null;
+  anchorPicking: boolean;
   painting: boolean;
   brushRadius: number;
   brushErase: boolean;
@@ -120,6 +124,16 @@ interface EditorState {
   setPivotPicking: (enabled: boolean) => void;
   setPartPivot: (point: SurfacePoint) => void;
   clearPartPivot: (id: string) => void;
+  addFitAnchor: (point: SurfacePoint) => void;
+  moveFitAnchor: (
+    partId: string,
+    anchorId: string,
+    target: Vec3,
+    checkpoint?: boolean,
+    baseline?: SceneDocument,
+  ) => void;
+  removeFitAnchor: (partId: string, anchorId: string) => void;
+  rebaseFitAnchors: (partId: string) => void;
   setBrush: (patch: {
     radius?: number;
     erase?: boolean;
@@ -195,6 +209,8 @@ export const useEditor = create<EditorState>((set, get) => ({
   precision: false,
   pivotRequest: 0,
   pivotPicking: false,
+  activeAnchor: null,
+  anchorPicking: false,
   painting: false,
   brushRadius: 3,
   brushErase: false,
@@ -322,6 +338,9 @@ export const useEditor = create<EditorState>((set, get) => ({
       const pair = mode === 'surface' ? emptySurfacePair() : null;
       return {
         tool,
+        anchorPicking:
+          tool === 'anchors' &&
+          !state.scene.parts.find((p) => p.id === state.selected[0])?.anchors?.length,
         navigationMode: null,
         pivotPicking: false,
         painting: false,
@@ -337,6 +356,82 @@ export const useEditor = create<EditorState>((set, get) => ({
         view: { ...state.view, explode: 0 },
       };
     }),
+  addFitAnchor: (point) => {
+    const state = get();
+    const part = state.scene.parts.find((p) => p.id === point.partId);
+    if (state.tool !== 'anchors' || !state.anchorPicking || state.view.explode || !part) return;
+    if (part.locked || !part.visible) {
+      state.notify('Choose a visible, unlocked part.', 'info');
+      return;
+    }
+    if (state.selected.length && state.selected[0] !== part.id) {
+      state.notify('Select the moving part in the Anchors panel before adding points.', 'info');
+      return;
+    }
+    const anchor = {
+      id: uid(),
+      point: [...point.point] as Vec3,
+      target: worldPoint(part, point).toArray(),
+    };
+    set({
+      ...changed(state, {
+        ...state.scene,
+        parts: state.scene.parts.map((p) =>
+          p.id === part.id ? { ...p, anchors: [...(p.anchors ?? []), anchor] } : p,
+        ),
+      }),
+      selected: [part.id],
+      activeAnchor: anchor.id,
+    });
+  },
+  moveFitAnchor: (partId, anchorId, target, checkpoint = true, baseline) => {
+    const state = get();
+    const scene = baseline ?? state.scene;
+    const part = scene.parts.find((p) => p.id === partId);
+    const current = state.scene.parts.find((p) => p.id === partId);
+    const anchor = current?.anchors?.find((a) => a.id === anchorId);
+    if (
+      !part ||
+      !current ||
+      current.locked ||
+      !current.visible ||
+      state.view.explode ||
+      !anchor ||
+      !target.every(Number.isFinite) ||
+      target.every((v, i) => v === anchor.target[i])
+    )
+      return;
+    const anchors = part.anchors?.map((a) =>
+      a.id === anchorId ? { ...a, target: [...target] as Vec3 } : a,
+    );
+    if (!anchors) return;
+    try {
+      const parts = fitAnchors(scene, partId, anchors);
+      set(changed(state, { ...state.scene, parts }, checkpoint));
+    } catch (error) {
+      const message = (error as Error).message;
+      if (get().toast?.message !== message) state.notify(message, 'error');
+    }
+  },
+  removeFitAnchor: (partId, anchorId) => {
+    const state = get();
+    const part = state.scene.parts.find((p) => p.id === partId);
+    if (!part || part.locked || !part.anchors?.some((a) => a.id === anchorId)) return;
+    const anchors = part.anchors.filter((a) => a.id !== anchorId);
+    state.patchParts([partId], { anchors });
+    if (state.activeAnchor === anchorId) set({ activeAnchor: anchors[0]?.id ?? null });
+  },
+  rebaseFitAnchors: (partId) => {
+    const state = get();
+    const part = state.scene.parts.find((p) => p.id === partId);
+    if (!part || part.locked || !part.anchors?.length) return;
+    state.patchParts([partId], {
+      anchors: part.anchors.map((a) => ({
+        ...a,
+        target: worldPoint(part, { partId, point: a.point, normal: [0, 1, 0] }).toArray(),
+      })),
+    });
+  },
   setNavigationMode: (navigationMode) =>
     set(() => ({
       navigationMode,
@@ -1002,6 +1097,8 @@ export const useEditor = create<EditorState>((set, get) => ({
       revision: state.revision + 1,
       savedRevision: recovered ? state.revision : state.revision + 1,
       tool: 'select',
+      activeAnchor: null,
+      anchorPicking: false,
       navigationMode: null,
       temporaryOrbit: false,
       precision: false,

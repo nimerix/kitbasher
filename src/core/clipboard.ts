@@ -1,5 +1,5 @@
 import { Vector3 } from 'three';
-import { uid } from './geometry';
+import { partMatrix, uid, vec } from './geometry';
 import type { Joint, Part, PlaneConstraint, SceneDocument } from './types';
 
 export interface ComponentClipboard {
@@ -78,6 +78,17 @@ export function instantiateComponents(clipboard: ComponentClipboard, existing: P
       ...snapshotPart(part),
       id: ids.get(part.id)!,
       name,
+      anchors: part.anchors?.map((a) => ({
+        id: uid(),
+        point: [...a.point] as typeof a.point,
+        target:
+          clipboard.nextOffset === 0
+            ? ([...a.target] as typeof a.target)
+            : vec(a.point)
+                .applyMatrix4(partMatrix(part))
+                .add(new Vector3(12 * clipboard.nextOffset, 0, 0))
+                .toArray(),
+      })),
       position: new Vector3(...part.position)
         .add(new Vector3(12 * clipboard.nextOffset, 0, 0))
         .toArray(),

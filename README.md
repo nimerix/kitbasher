@@ -70,6 +70,28 @@ for an empty workbench or to reload the sample.
    snapping it back to the center. This also works with clicked custom pivots and
    the directional buttons; only explicit centering or framing recenters the view.
 
+   **Anchors (K)** provides fine rigid fitting for imperfect scanned interfaces.
+   Select a moving part, click **Add anchors on surface**, and place three points
+   around the interface. Click **Finish adding anchors**, select a numbered target,
+   and drag its XYZ handle, or edit its world coordinates in 0.01 mm increments.
+   Hold **Shift** while dragging for 10× finer movement; the existing Snap and
+   World/Local settings also apply. One or two anchors work too, retaining the
+   current orientation wherever the points do not determine it.
+
+   All targets participate equally in a best fit. Moving one target leaves the
+   other targets fixed, while the part translates and rotates to minimize the
+   combined gaps. A reachable adjustment can pivot around the other anchors;
+   incompatible targets leave residual gaps rather than stretching the mesh.
+   Numbered circles mark targets, surface dots mark actual attachment points,
+   and connecting lines and per-anchor millimeter values show the difference.
+   Existing joints, locked parts, and retained plane constraints remain
+   authoritative. **Hold current positions** resets all targets to the achieved
+   placement for another adjustment. Anchors are undoable, each drag is one undo
+   step, and anchors survive scene save/recovery/reopen. Other transform tools
+   leave their world targets unchanged; use **Hold current positions** to rebase
+   after moving the part with those tools. **Esc** leaves anchor editing while
+   keeping the anchors and adjustments.
+
 3. Choose **Align** and a method. Click a source surface and its matching target.
    Targets can be another part or a world reference plane:
    - **Point to point:** translate the picked point to the matching target.

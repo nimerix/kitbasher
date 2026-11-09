@@ -302,6 +302,21 @@ export function parseSceneDocument(
     ) {
       throw new Error('The scene contains invalid part data.');
     }
+    if (p.anchors !== undefined) {
+      const anchorIds = new Set<string>();
+      if (!Array.isArray(p.anchors)) throw new Error('The scene contains invalid fit anchors.');
+      for (const anchor of p.anchors) {
+        if (
+          !anchor ||
+          typeof anchor.id !== 'string' ||
+          anchorIds.has(anchor.id) ||
+          !finiteTuple(anchor.point, 3) ||
+          !finiteTuple(anchor.target, 3)
+        )
+          throw new Error('The scene contains invalid fit anchors.');
+        anchorIds.add(anchor.id);
+      }
+    }
     ids.add(p.id);
     return {
       ...p,

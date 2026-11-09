@@ -331,6 +331,15 @@ function Toolbar({
           <Keyboard>B</Keyboard>
         </button>
         <button
+          className={`tool-button ${tool === 'anchors' ? 'active' : ''}`}
+          title="Rigid anchor fit (K)"
+          onClick={() => useEditor.getState().setTool('anchors')}
+        >
+          <Crosshair size={16} />
+          <span>Anchors</span>
+          <Keyboard>K</Keyboard>
+        </button>
+        <button
           className={`tool-button ${tool === 'joint' ? 'active' : ''}`}
           onClick={() => useEditor.getState().setTool('joint')}
         >
@@ -432,11 +441,13 @@ function StatusBar() {
                   ? 'Drag to paint · Alt erases · [ / ] brush size · Middle / Space orbits'
                   : tool === 'align'
                     ? 'Pick source → target · Middle / Space orbits'
-                    : tool === 'joint'
-                      ? 'Pick anchors to connect parts'
-                      : ['translate', 'rotate', 'scale'].includes(tool)
-                        ? 'Hold Shift while dragging for 10× finer adjustment'
-                        : 'Shift + click to select multiple'}
+                    : tool === 'anchors'
+                      ? 'Add surface anchors · Drag a target to fit · Shift for fine adjustment'
+                      : tool === 'joint'
+                        ? 'Pick anchors to connect parts'
+                        : ['translate', 'rotate', 'scale'].includes(tool)
+                          ? 'Hold Shift while dragging for 10× finer adjustment'
+                          : 'Shift + click to select multiple'}
         </span>
       </div>
       <div className="local-save-status">
@@ -569,7 +580,7 @@ export default function App() {
     };
   }, []);
   useEffect(() => {
-    if (tool === 'align' || tool === 'joint') setRight(true);
+    if (tool === 'align' || tool === 'joint' || tool === 'anchors') setRight(true);
   }, [tool]);
   useEffect(() => {
     // Dropped files belong to one import dialog, not to the next one opened from a menu.

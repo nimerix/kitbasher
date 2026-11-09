@@ -4,8 +4,17 @@ import type { InspectionSettings } from './inspection-types';
 export type Vec3 = [number, number, number];
 export type Quat = [number, number, number, number];
 export type AxisLocks = [boolean, boolean, boolean];
-export type Tool = 'select' | 'translate' | 'rotate' | 'scale' | 'align' | 'joint' | 'measure';
+export type Tool =
+  'select' | 'translate' | 'rotate' | 'scale' | 'align' | 'joint' | 'measure' | 'anchors';
 export type AlignmentMode = 'point' | 'point-plane' | 'plane' | 'multi' | 'surface';
+
+export interface FitAnchor {
+  id: string;
+  /** Attachment in mesh-local coordinates; never changes during fitting. */
+  point: Vec3;
+  /** Desired position in world millimeters. */
+  target: Vec3;
+}
 
 export interface Part {
   id: string;
@@ -20,6 +29,7 @@ export interface Part {
   source: string;
   /** User-picked pivot in mesh-local coordinates. */
   pivot?: Vec3;
+  anchors?: FitAnchor[];
 }
 
 export interface Joint {

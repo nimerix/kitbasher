@@ -600,6 +600,7 @@ function HelpDialog() {
     ['Move / Rotate / Scale', 'G / R / S'],
     ['Paint contact surfaces', 'B · drag to paint'],
     ['Paint brush size / Erase', '[ and ] / hold Alt'],
+    ['Rigid anchor fit', 'K · add surface anchors, then drag a target'],
     ['Pick pivot on model', 'P · click a surface'],
     ['Align / Joint / Measure', 'A / J / D'],
     ['Front / Right / Top', '1 / 3 / 7'],

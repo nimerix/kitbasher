@@ -4396,3 +4396,87 @@ optgroup {
   padding: 6px;
   border-radius: 4px;
 }
+
+/* Rigid anchor placement and residual controls. */
+.anchor-help {
+  color: var(--text-muted, #9da3ad);
+  font-size: 11px;
+  line-height: 1.6;
+  margin: 10px 0;
+}
+.anchor-part-label {
+  display: grid;
+  gap: 7px;
+  font-size: 11px;
+  margin: 14px 0;
+}
+.anchor-part-label select {
+  width: 100%;
+  min-width: 0;
+  padding: 8px;
+  background: #272b31;
+  color: #e1e3e7;
+  border: 1px solid #454a52;
+  border-radius: 5px;
+}
+.anchor-list {
+  display: grid;
+  gap: 5px;
+  margin-top: 14px;
+}
+.anchor-row {
+  display: flex;
+  gap: 4px;
+}
+.anchor-row > button:first-child {
+  flex: 1;
+  display: flex;
+  justify-content: space-between;
+  padding: 9px;
+  font-size: 11px;
+  border: 1px solid #454a52;
+  border-radius: 5px;
+}
+.anchor-row > button.active {
+  color: #ffbd7a;
+  border-color: #b58253;
+  background: #b5825315;
+}
+.anchor-coordinates {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+.anchor-coordinates label {
+  display: grid;
+  gap: 6px;
+  font-size: 11px;
+}
+.anchor-coordinates input {
+  width: 100%;
+  min-width: 0;
+  padding: 7px 4px;
+  background: #272b31;
+  border: 1px solid #454a52;
+  border-radius: 4px;
+  color: #e1e3e7;
+}
+.anchor-marker {
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  border: 1px solid #7ce1d1;
+  border-radius: 50%;
+  background: #1d3338;
+  color: #a1eee1;
+  font:
+    600 11px Inter,
+    sans-serif;
+  box-shadow: 0 1px 6px #0008;
+}
+.anchor-marker.active {
+  border-color: #ffbd7a;
+  background: #423127;
+  color: #ffcf9f;
+}

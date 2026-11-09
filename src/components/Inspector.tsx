@@ -1,3 +1,4 @@
+import { AnchorControls } from './AnchorControls';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Box,
@@ -923,7 +924,13 @@ export function Inspector({ onClose }: { onClose: () => void }) {
       <div className="inspector-title">
         <span>
           <SlidersHorizontal size={14} />
-          {tool === 'align' ? 'Alignment' : tool === 'joint' ? 'Joint builder' : 'Inspector'}
+          {tool === 'anchors'
+            ? 'Anchors'
+            : tool === 'align'
+              ? 'Alignment'
+              : tool === 'joint'
+                ? 'Joint builder'
+                : 'Inspector'}
         </span>
         <div>
           <IconButton label="Workbench help" onClick={() => useEditor.getState().setModal('help')}>
@@ -941,7 +948,9 @@ export function Inspector({ onClose }: { onClose: () => void }) {
       <div
         className={`inspector-scroll ${tool === 'align' || tool === 'joint' ? 'assembly-scroll' : ''}`}
       >
-        {tool === 'align' || tool === 'joint' ? (
+        {tool === 'anchors' ? (
+          <AnchorControls />
+        ) : tool === 'align' || tool === 'joint' ? (
           <AssemblyInspector />
         ) : selected.length > 1 ? (
           <>

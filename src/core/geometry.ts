@@ -212,8 +212,8 @@ export function deserializeGeometry(data: SerializedGeometry | BinaryGeometry): 
 }
 
 /** Least-squares rigid registration (Kabsch); reflects neither shape nor scale. */
-export function rigidAlignment(source: Vector3[], target: Vector3[]) {
-  if (source.length !== target.length || source.length < 3)
+export function rigidAlignment(source: Vector3[], target: Vector3[], stabilize = false) {
+  if (source.length !== target.length || source.length < (stabilize ? 1 : 3))
     throw new Error('Pick at least three matching point pairs.');
   const centroid = (points: Vector3[]) =>
     points.reduce((sum, p) => sum.add(p), new Vector3()).multiplyScalar(1 / points.length);
@@ -227,8 +227,14 @@ export function rigidAlignment(source: Vector3[], target: Vector3[]) {
       for (let c = 0; c < 3; c++) {
         h.set(r, c, h.get(r, c) + a[i].getComponent(r) * b[i].getComponent(c));
       }
+  // A tiny preference for the current orientation resolves free twist for one,
+  // two, or collinear anchors without introducing arbitrary SVD rotations.
+  if (stabilize) {
+    const bias = Math.max(...h.to1DArray().map(Math.abs), 1e-12) * 1e-10;
+    for (let i = 0; i < 3; i++) h.set(i, i, h.get(i, i) + bias);
+  }
   const svd = new SingularValueDecomposition(h, { autoTranspose: true });
-  if (svd.diagonal[1] < Math.max(svd.diagonal[0], 1) * 1e-8)
+  if (!stabilize && svd.diagonal[1] < Math.max(svd.diagonal[0], 1) * 1e-8)
     throw new Error('Points are on one line or too close together. Pick a wider triangle.');
   const u = svd.leftSingularVectors,
     v = svd.rightSingularVectors;

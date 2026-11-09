@@ -50,7 +50,7 @@ import { measureDistance, useEditor } from '../core/store';
 import { PrecisionDrag } from '../core/precision';
 import { isJointConnected, translationIsPinned } from '../core/constraints';
 import { referencePlanes, resolvePart } from '../core/references';
-import type { Part, SurfacePoint } from '../core/types';
+import type { Part, SurfacePoint, FitAnchor, SceneDocument } from '../core/types';
 import { IconButton, useDismiss } from './ui';
 import { CameraNavigation, CameraRig } from './CameraNavigation';
 import { PaintCursor, SurfacePaintOverlay } from './SurfacePainter';
@@ -113,6 +113,11 @@ function PartMesh({ part, frame }: { part: Part; frame?: ExplodeFrame }) {
     if (state.navigationMode || state.temporaryOrbit) return;
     if (state.pivotPicking) {
       state.setPartPivot(toSurface(event));
+      return;
+    }
+    if (state.tool === 'anchors') {
+      if (state.anchorPicking) state.addFitAnchor(toSurface(event));
+      else state.select(part.id);
       return;
     }
     if (state.tool === 'align' && state.operation.mode === 'surface') return;
@@ -197,7 +202,8 @@ function PartMesh({ part, frame }: { part: Part; frame?: ExplodeFrame }) {
             e.stopPropagation();
             document.body.style.cursor = navigationMode
               ? 'grab'
-              : useEditor.getState().pivotPicking || ['align', 'joint', 'measure'].includes(tool)
+              : useEditor.getState().pivotPicking ||
+                  ['align', 'joint', 'measure', 'anchors'].includes(tool)
                 ? 'crosshair'
                 : 'pointer';
           }}
@@ -381,6 +387,136 @@ function TransformGizmo() {
           if (useEditor.getState().scene !== before) start.current.checkpointed = true;
         }}
       />
+    </>
+  );
+}
+
+function AnchorHandle({ part, anchor }: { part: Part; anchor: FitAnchor }) {
+  const proxy = useMemo(() => new Object3D(), []);
+  const start = useRef<{
+    scene: SceneDocument;
+    motion: PrecisionDrag;
+    origin: Vector3;
+    checkpointed: boolean;
+  } | null>(null);
+  const [version, setVersion] = useState(0);
+  const getRoot = useThree((s) => s.get),
+    invalidate = useThree((s) => s.invalidate);
+  const view = useEditor((s) => s.view);
+  const finish = useCallback(() => {
+    if (!start.current) return;
+    start.current = null;
+    const controls = getRoot().controls;
+    if (controls && 'enabled' in controls) controls.enabled = true;
+    setVersion((v) => v + 1);
+    invalidate();
+  }, [getRoot, invalidate]);
+  useEffect(() => {
+    window.addEventListener('blur', finish);
+    window.addEventListener('pointercancel', finish);
+    return () => {
+      window.removeEventListener('blur', finish);
+      window.removeEventListener('pointercancel', finish);
+    };
+  }, [finish]);
+  useLayoutEffect(() => {
+    if (start.current) return;
+    proxy.position.fromArray(anchor.target);
+    proxy.quaternion.copy(view.space === 'local' ? quat(part.quaternion) : new Quaternion());
+    proxy.updateMatrixWorld(true);
+    invalidate();
+  }, [anchor.target, part.quaternion, view.space, proxy, version, invalidate]);
+  return (
+    <>
+      <primitive object={proxy} />
+      <ManagedTransformControls
+        key={version}
+        object={proxy}
+        mode="translate"
+        space={view.space}
+        size={0.7}
+        translationSnap={view.snap ? view.snapStep : null}
+        onFinishDrag={finish}
+        onMouseDown={() => {
+          gizmoPressed = true;
+          proxy.updateMatrixWorld(true);
+          start.current = {
+            scene: useEditor.getState().scene,
+            motion: new PrecisionDrag(proxy.matrixWorld),
+            origin: proxy.position.clone(),
+            checkpointed: false,
+          };
+        }}
+        onObjectChange={() => {
+          const drag = start.current;
+          if (!drag) return;
+          proxy.updateMatrixWorld(true);
+          const state = useEditor.getState();
+          const delta = drag.motion.update(proxy.matrixWorld, state.precision ? 0.1 : 1);
+          if (!delta) return;
+          const target = drag.origin.clone().applyMatrix4(delta).toArray();
+          const before = state.scene;
+          state.moveFitAnchor(part.id, anchor.id, target, !drag.checkpointed, drag.scene);
+          if (useEditor.getState().scene !== before) drag.checkpointed = true;
+        }}
+      />
+    </>
+  );
+}
+
+function AnchorOverlay() {
+  const tool = useEditor((s) => s.tool),
+    parts = useEditor((s) => s.scene.parts);
+  const selected = useEditor((s) => s.selected),
+    active = useEditor((s) => s.activeAnchor);
+  const picking = useEditor((s) => s.anchorPicking),
+    explode = useEditor((s) => s.view.explode);
+  const navigating = useEditor((s) => !!s.navigationMode || s.temporaryOrbit || s.pivotPicking);
+  const part = parts.find((p) => p.id === selected[0]);
+  if (tool !== 'anchors' || explode || !part?.visible) return null;
+  const anchors = part.anchors ?? [];
+  const current = anchors.find((a) => a.id === active) ?? anchors[0];
+  return (
+    <>
+      {anchors.map((anchor, index) => {
+        const actual = vec(anchor.point).applyMatrix4(partMatrix(part));
+        const target = vec(anchor.target);
+        const color = current?.id === anchor.id ? '#ffbd7a' : '#7ce1d1';
+        return (
+          <group key={anchor.id}>
+            {actual.distanceToSquared(target) > 1e-12 && (
+              <Line
+                points={[actual, target]}
+                color={color}
+                lineWidth={1.5}
+                depthTest={false}
+                raycast={noRaycast}
+              />
+            )}
+            <mesh position={actual} renderOrder={10} raycast={noRaycast}>
+              <sphereGeometry args={[0.35, 12, 8]} />
+              <meshBasicMaterial color={color} depthTest={false} depthWrite={false} />
+            </mesh>
+            <Html position={target} center zIndexRange={[30, 20]}>
+              <button
+                className={`anchor-marker ${current?.id === anchor.id ? 'active' : ''}`}
+                aria-label={`Select anchor ${index + 1} target`}
+                disabled={navigating}
+                onPointerDown={(e) => e.stopPropagation()}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  useEditor.setState({ activeAnchor: anchor.id, anchorPicking: false });
+                }}
+              >
+                {index + 1}
+              </button>
+            </Html>
+          </group>
+        );
+      })}
+      {current && !part.locked && !picking && !navigating && (
+        <AnchorHandle key={`${part.id}:${current.id}`} part={part} anchor={current} />
+      )}
     </>
   );
 }
@@ -609,6 +745,7 @@ function Scene({ inspection }: { inspection: InspectionState }) {
       <InspectionOverlay inspection={inspection} />
       <SurfacePaintOverlay />
       <TransformGizmo />
+      <AnchorOverlay />
       <AssemblyAnnotations />
       <GizmoHelper alignment="top-right" margin={[62, 66]}>
         <GizmoViewcube
