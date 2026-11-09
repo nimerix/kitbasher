@@ -4,6 +4,8 @@ import { liveSession, useEditor } from '../core/store';
 import { readRecovery, saveRecovery } from '../core/recovery';
 import { executeEditorCommand, shortcutCommand } from '../core/commands';
 import { isEditableTarget, keyboardContextMenu } from '../core/context-menu';
+import { actionRepeats, keyName, matchKeyAction } from '../core/keybindings';
+import { usePreferences } from '../core/preferences';
 
 export function useLiveSession() {
   useEffect(() => (liveSession ? joinLiveSession() : undefined), []);
@@ -67,6 +69,8 @@ export function useKeyboard(openScene: () => void, searchParts: () => void) {
   useEffect(() => {
     // :focus-visible cannot tell these apart, because browsers set it on any key press.
     let focusedByKeyboard = false;
+    // The physical key that started a held orbit, so its release ends it.
+    let orbitKey: string | null = null;
     const onPointerDown = () => {
       focusedByKeyboard = false;
     };
@@ -76,8 +80,6 @@ export function useKeyboard(openScene: () => void, searchParts: () => void) {
       const target = event.target instanceof HTMLElement ? event.target : document.body;
       const state = useEditor.getState();
       if (state.modal || target.closest('[role=dialog]')) return;
-      const cmd = event.metaKey || event.ctrlKey;
-      const key = event.key.toLowerCase();
       const command = shortcutCommand(event);
       const editable = isEditableTarget(target);
       if (command && (!editable || command === 'save' || command === 'open')) {
@@ -88,24 +90,22 @@ export function useKeyboard(openScene: () => void, searchParts: () => void) {
         return;
       }
       if (editable) return;
-      if (key === 'shift') useEditor.setState({ precision: true });
+      if (event.key === 'Shift') useEditor.setState({ precision: true });
       // A control reached by keyboard keeps its native Space and Enter activation. Mouse
       // clicks also leave focus on buttons, and those must not capture the tool shortcuts.
       const nativeActivation =
         focusedByKeyboard &&
         !!target.closest('button, a[href], summary, [role="button"], [role="switch"]');
-      if (
-        event.code === 'Space' &&
-        !nativeActivation &&
-        !cmd &&
-        !event.altKey &&
-        !target.closest('[role=menu]')
-      ) {
+      const action = command ? null : matchKeyAction(event, usePreferences.getState().keybindings);
+      const inMenu = !!target.closest('[role=menu]');
+      if (action === 'holdOrbit' && !nativeActivation && !inMenu) {
         event.preventDefault();
         state.endPaintStroke();
+        orbitKey = event.code || keyName(event.key);
         useEditor.setState({ temporaryOrbit: true });
         return;
       }
+      const key = event.key.toLowerCase();
       if (key === 'contextmenu' || (key === 'f10' && event.shiftKey)) {
         event.preventDefault();
         state.openContextMenu(
@@ -113,103 +113,125 @@ export function useKeyboard(openScene: () => void, searchParts: () => void) {
         );
         return;
       }
-      if (target.closest('[role=menu]') || cmd || event.altKey) return;
+      if (!action || inMenu) return;
       // Auto-repeat would flicker toggles such as P, O, H, and 5. Only brush sizing repeats.
-      if (event.repeat && key !== '[' && key !== ']') return;
+      if (event.repeat && !actionRepeats(action)) return;
+      const paintingSurface = state.tool === 'align' && state.operation.mode === 'surface';
       const tools = {
-        v: 'select',
-        g: 'translate',
-        r: 'rotate',
-        s: 'scale',
-        a: 'align',
-        j: 'joint',
-        k: 'anchors',
-        d: 'measure',
+        select: 'select',
+        move: 'translate',
+        rotate: 'rotate',
+        scale: 'scale',
+        align: 'align',
+        joint: 'joint',
+        anchors: 'anchors',
+        measure: 'measure',
       } as const;
-      if (key in tools) {
+      if (action in tools) {
         event.preventDefault();
-        state.setTool(tools[key as keyof typeof tools]);
-      }
-      if (key === 'p') {
-        event.preventDefault();
-        state.setPivotPicking(!state.pivotPicking);
+        state.setTool(tools[action as keyof typeof tools]);
         return;
       }
-      if (key === 'b') {
-        event.preventDefault();
-        state.setTool('align');
-        state.setOperation({ mode: 'surface' });
-        return;
-      }
-      if (
-        (key === '[' || key === ']') &&
-        state.tool === 'align' &&
-        state.operation.mode === 'surface'
-      ) {
-        event.preventDefault();
-        state.setBrush({
-          radius: Number((state.brushRadius * (key === '[' ? 0.8 : 1.25)).toFixed(2)),
-        });
-        return;
-      }
-      if (key === 'o' || key === 'h') {
-        event.preventDefault();
-        const mode = key === 'o' ? 'orbit' : 'pan';
-        state.setNavigationMode(state.navigationMode === mode ? null : mode);
-      }
-      if (key === '.' || event.code === 'Period' || event.code === 'NumpadDecimal') {
-        event.preventDefault();
-        if (event.shiftKey) state.setView({ orbitSelection: !state.view.orbitSelection });
-        else state.centerOrbit();
-        return;
-      }
-      if (key === 'f') {
-        event.preventDefault();
-        state.focus();
-      }
-      if (key === 'home') {
-        event.preventDefault();
-        state.focus(undefined, true);
-      }
-      if (key === 'escape') {
-        if (state.pivotPicking) {
-          state.setPivotPicking(false);
+      switch (action) {
+        case 'pivot':
+          event.preventDefault();
+          state.setPivotPicking(!state.pivotPicking);
+          return;
+        case 'paint':
+          event.preventDefault();
+          state.setTool('align');
+          state.setOperation({ mode: 'surface' });
+          return;
+        case 'brushSmaller':
+        case 'brushLarger':
+          if (!paintingSurface) return;
+          event.preventDefault();
+          state.setBrush({
+            radius: Number(
+              (state.brushRadius * (action === 'brushSmaller' ? 0.8 : 1.25)).toFixed(2),
+            ),
+          });
+          return;
+        case 'orbitTool':
+        case 'panTool': {
+          event.preventDefault();
+          const mode = action === 'orbitTool' ? 'orbit' : 'pan';
+          state.setNavigationMode(state.navigationMode === mode ? null : mode);
           return;
         }
-        if (state.navigationMode) {
-          state.setNavigationMode(null);
+        case 'centerOrbit':
+          event.preventDefault();
+          state.centerOrbit();
+          return;
+        case 'orbitSelection':
+          event.preventDefault();
+          state.setView({ orbitSelection: !state.view.orbitSelection });
+          return;
+        case 'focus':
+          event.preventDefault();
+          state.focus();
+          return;
+        case 'frameAll':
+          event.preventDefault();
+          state.focus(undefined, true);
+          return;
+        case 'cancel': {
+          if (state.pivotPicking) {
+            state.setPivotPicking(false);
+            return;
+          }
+          if (state.navigationMode) {
+            state.setNavigationMode(null);
+            return;
+          }
+          const wasSelecting = state.tool === 'select';
+          state.setTool('select');
+          state.resetPicks();
+          if (wasSelecting) state.select(null);
           return;
         }
-        const wasSelecting = state.tool === 'select';
-        state.setTool('select');
-        state.resetPicks();
-        if (wasSelecting) state.select(null);
+        case 'delete':
+          event.preventDefault();
+          executeEditorCommand('delete');
+          return;
+        case 'apply':
+          if (nativeActivation || !['align', 'joint'].includes(state.tool)) return;
+          event.preventDefault();
+          if (state.tool === 'joint') state.createJoint();
+          else state.applyAlignment();
+          return;
+        case 'viewFront':
+          state.focus('front', true);
+          return;
+        case 'viewRight':
+          state.focus('right', true);
+          return;
+        case 'viewTop':
+          state.focus('top', true);
+          return;
+        case 'projection':
+          state.setView({
+            projection: state.view.projection === 'perspective' ? 'orthographic' : 'perspective',
+          });
+          return;
       }
-      if (key === 'delete' || key === 'backspace') {
-        event.preventDefault();
-        executeEditorCommand('delete');
-      }
-      if (key === 'enter' && !nativeActivation && ['align', 'joint'].includes(state.tool)) {
-        event.preventDefault();
-        state.tool === 'joint' ? state.createJoint() : state.applyAlignment();
-      }
-      if (key === '1') state.focus('front', true);
-      if (key === '3') state.focus('right', true);
-      if (key === '7') state.focus('top', true);
-      if (key === '5')
-        state.setView({
-          projection: state.view.projection === 'perspective' ? 'orthographic' : 'perspective',
-        });
-      if (key === '?') state.setModal('help');
     };
     const up = (event: KeyboardEvent) => {
       if (event.key === 'Shift') useEditor.setState({ precision: false });
-      if (event.code === 'Space' && useEditor.getState().temporaryOrbit) {
+      if (
+        useEditor.getState().temporaryOrbit &&
+        orbitKey !== null &&
+        (event.code || keyName(event.key)) === orbitKey
+      ) {
         event.preventDefault();
+        orbitKey = null;
         useEditor.setState({ temporaryOrbit: false });
       }
     };
-    const blur = () => useEditor.setState({ temporaryOrbit: false, precision: false });
+    const blur = () => {
+      orbitKey = null;
+      useEditor.setState({ temporaryOrbit: false, precision: false });
+    };
     window.addEventListener('pointerdown', onPointerDown, true);
     window.addEventListener('keydown', onKey);
     window.addEventListener('keyup', up);

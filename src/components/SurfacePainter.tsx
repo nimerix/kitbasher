@@ -1,28 +1,17 @@
 import { useEffect, useMemo } from 'react';
-import { Html } from '@react-three/drei';
 import { DoubleSide, MeshBasicMaterial, Quaternion, Vector3 } from 'three';
 import { useEditor } from '../core/store';
-import { contactColors, patchCenter, patchGeometry } from '../core/surfaces';
+import { contactColors, patchGeometry } from '../core/surfaces';
 import { worldNormal, worldPoint } from '../core/geometry';
 import { solveAlignment } from '../core/alignment';
 import type { Part, SurfacePatch, SurfacePoint } from '../core/types';
 
-function PaintedPatch({
-  part,
-  patch,
-  color,
-  label,
-}: {
-  part: Part;
-  patch: SurfacePatch;
-  color: string;
-  label: string;
-}) {
+/** The patch's S/T label is drawn by the annotation layer. */
+function PaintedPatch({ part, patch, color }: { part: Part; patch: SurfacePatch; color: string }) {
   const geometry = useMemo(
     () => patchGeometry(part.geometry, patch.faces),
     [part.geometry, patch.faces],
   );
-  const center = useMemo(() => patchCenter(part, patch), [part, patch]);
   useEffect(() => () => geometry.dispose(), [geometry]);
   if (!part.visible || !patch.faces.length) return null;
   return (
@@ -39,13 +28,6 @@ function PaintedPatch({
           polygonOffsetUnits={-3}
         />
       </mesh>
-      {center ? (
-        <Html position={center} center style={{ pointerEvents: 'none' }}>
-          <span className="surface-pick-label" style={{ color }}>
-            {label}
-          </span>
-        </Html>
-      ) : null}
     </group>
   );
 }
@@ -70,7 +52,6 @@ export function SurfacePaintOverlay() {
               part={part}
               patch={patch}
               color={contactColors[index % contactColors.length]}
-              label={`${side === 'source' ? 'S' : 'T'}${index + 1}`}
             />
           ) : null;
         }),

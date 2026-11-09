@@ -1,11 +1,9 @@
 import { downloadScene } from './files';
+import { matchKeyAction } from './keybindings';
+import type { KeyActionId, KeyInput } from './keybindings';
+import { primaryShortcutText, usePreferences } from './preferences';
 import { canRedo, canUndo, useEditor } from './store';
 import type { SurfacePoint } from './types';
-
-export function primaryShortcut(key: string, shift = false) {
-  const apple = typeof navigator !== 'undefined' && /Mac|iPhone|iPad|iPod/.test(navigator.platform);
-  return `${apple ? '⌘' : 'Ctrl'}${shift ? '+Shift' : ''}+${key}`;
-}
 
 export async function saveCurrentScene() {
   const state = useEditor.getState();
@@ -35,11 +33,11 @@ export function editorCommands(context: CommandContext = {}) {
   const hasSelection = selected.length > 0;
   const editable = selected.some((part) => !part.locked);
   const idle = !state.busy;
-  const command = (label: string, run: () => void, enabled = true, shortcut?: string) => ({
+  const command = (label: string, run: () => void, enabled = true, key?: KeyActionId) => ({
     label,
     run,
     enabled,
-    shortcut,
+    shortcut: key ? primaryShortcutText(key) || undefined : undefined,
   });
   const updateSelected = (patch: { visible?: boolean; locked?: boolean }) =>
     state.patchParts(
@@ -59,72 +57,57 @@ export function editorCommands(context: CommandContext = {}) {
         else state.undo();
       },
       idle && (canUndo(state) || state.paintHistory.length > 0),
-      primaryShortcut('Z'),
+      'undo',
     ),
-    redo: command('Redo', state.redo, idle && canRedo(state), primaryShortcut('Z', true)),
+    redo: command('Redo', state.redo, idle && canRedo(state), 'redo'),
     selectAll: command(
       'Select all components',
       state.selectAll,
       !!state.scene.parts.length,
-      primaryShortcut('A'),
+      'selectAll',
     ),
-    deselect: command(
-      'Deselect all',
-      () => state.select(null),
-      hasSelection,
-      primaryShortcut('A', true),
-    ),
-    copy: command(
-      'Copy components',
-      () => state.copySelected(),
-      hasSelection,
-      primaryShortcut('C'),
-    ),
-    cut: command(
-      'Cut components',
-      () => state.copySelected(true),
-      idle && editable,
-      primaryShortcut('X'),
-    ),
+    deselect: command('Deselect all', () => state.select(null), hasSelection, 'deselect'),
+    copy: command('Copy components', () => state.copySelected(), hasSelection, 'copy'),
+    cut: command('Cut components', () => state.copySelected(true), idle && editable, 'cut'),
     paste: command(
       'Paste components',
       state.pasteClipboard,
       idle && !!state.clipboard?.parts.length,
-      primaryShortcut('V'),
+      'paste',
     ),
     duplicate: command(
       'Duplicate selected',
       state.duplicateSelected,
       idle && hasSelection,
-      primaryShortcut('D'),
+      'duplicate',
     ),
     rename: command(
       'Rename component…',
       () => state.setModal('rename'),
       idle && selected.length === 1,
-      'F2',
+      'rename',
     ),
-    delete: command('Delete unlocked parts', state.deleteSelected, idle && editable, 'Del / ⌫'),
-    move: command('Move', () => state.setTool('translate'), idle && editable, 'G'),
-    rotate: command('Rotate', () => state.setTool('rotate'), idle && editable, 'R'),
-    scale: command('Scale', () => state.setTool('scale'), idle && editable, 'S'),
+    delete: command('Delete unlocked parts', state.deleteSelected, idle && editable, 'delete'),
+    move: command('Move', () => state.setTool('translate'), idle && editable, 'move'),
+    rotate: command('Rotate', () => state.setTool('rotate'), idle && editable, 'rotate'),
+    scale: command('Scale', () => state.setTool('scale'), idle && editable, 'scale'),
     focus: command(
       'Frame selection',
       () => state.focus(),
       selected.some((part) => part.visible),
-      'F',
+      'focus',
     ),
     frameAll: command(
       'Frame all parts',
       () => state.focus(undefined, true),
       state.scene.parts.some((part) => part.visible),
-      'Home',
+      'frameAll',
     ),
     centerOrbit: command(
       'Center orbit on selection',
       state.centerOrbit,
       selected.some((part) => part.visible),
-      '.',
+      'centerOrbit',
     ),
     pivot: command(
       context.point ? 'Set pivot here' : 'Pick pivot on model',
@@ -133,9 +116,9 @@ export function editorCommands(context: CommandContext = {}) {
         (context.point
           ? state.scene.parts.some((part) => part.id === context.point!.partId && part.visible)
           : hasSelection),
-      context.point ? undefined : 'P',
+      context.point ? undefined : 'pivot',
     ),
-    align: command('Align parts', () => state.setTool('align'), idle && editable, 'A'),
+    align: command('Align parts', () => state.setTool('align'), idle && editable, 'align'),
     paint: command(
       'Paint contact surfaces',
       () => {
@@ -143,9 +126,9 @@ export function editorCommands(context: CommandContext = {}) {
         useEditor.getState().setOperation({ mode: 'surface' });
       },
       idle && editable,
-      'B',
+      'paint',
     ),
-    joint: command('Create joint', () => state.setTool('joint'), idle && editable, 'J'),
+    joint: command('Create joint', () => state.setTool('joint'), idle && editable, 'joint'),
     merge: command(
       'Merge selected parts…',
       () => state.setModal('merge'),
@@ -187,28 +170,32 @@ export function editorCommands(context: CommandContext = {}) {
       () => updateSelected({ locked: false }),
       idle && selected.some((part) => part.locked),
     ),
-    new: command('New assembly…', () => state.setModal('new'), idle, primaryShortcut('N')),
-    open: command(
-      'Open scene…',
-      () => context.openScene?.(),
-      idle && !!context.openScene,
-      primaryShortcut('O'),
-    ),
-    import: command('Import parts…', () => state.setModal('import'), idle, primaryShortcut('I')),
-    save: command('Save scene', saveCurrentScene, true, primaryShortcut('S')),
+    new: command('New assembly…', () => state.setModal('new'), idle, 'new'),
+    open: command('Open scene…', () => context.openScene?.(), idle && !!context.openScene, 'open'),
+    import: command('Import parts…', () => state.setModal('import'), idle, 'import'),
+    save: command('Save scene', saveCurrentScene, true, 'save'),
     export: command(
       'Export assembly…',
       () => state.setModal('export'),
       !!state.scene.parts.length,
-      primaryShortcut('E', true),
+      'export',
     ),
     search: command(
       'Find a component',
       () => context.searchParts?.(),
       !!context.searchParts,
-      primaryShortcut('F'),
+      'search',
     ),
-    help: command('Keyboard shortcuts', () => state.setModal('help'), true, 'F1 / ?'),
+    help: command('Keyboard shortcuts', () => state.setModal('help'), true, 'help'),
+    preferences: command(
+      'Preferences…',
+      () => {
+        state.setModal(null);
+        usePreferences.getState().openPanel();
+      },
+      true,
+      'preferences',
+    ),
   };
 }
 
@@ -220,31 +207,33 @@ export function executeEditorCommand(id: CommandId, context: CommandContext = {}
   if (command.enabled) command.run();
 }
 
+/** Commands that run from the keyboard, including in text fields where noted. */
+const keyboardCommands = [
+  'undo',
+  'redo',
+  'selectAll',
+  'deselect',
+  'copy',
+  'cut',
+  'paste',
+  'duplicate',
+  'rename',
+  'new',
+  'open',
+  'import',
+  'save',
+  'export',
+  'search',
+  'help',
+  'preferences',
+] as const satisfies readonly (CommandId & KeyActionId)[];
+
 export function shortcutCommand(
-  event: Pick<KeyboardEvent, 'key' | 'metaKey' | 'ctrlKey' | 'shiftKey' | 'altKey'>,
+  event: Pick<KeyInput, 'key' | 'metaKey' | 'ctrlKey' | 'shiftKey' | 'altKey'> & { code?: string },
 ): CommandId | null {
-  if (event.altKey) return null;
-  const key = event.key.toLowerCase();
-  if (event.metaKey || event.ctrlKey) {
-    if (key === 'a') return event.shiftKey ? 'deselect' : 'selectAll';
-    if (key === 'z') return event.shiftKey ? 'redo' : 'undo';
-    if (key === 's') return 'save';
-    if (key === 'e' && event.shiftKey) return 'export';
-    if (event.shiftKey) return null;
-    const commands: Record<string, CommandId> = {
-      c: 'copy',
-      x: 'cut',
-      v: 'paste',
-      d: 'duplicate',
-      y: 'redo',
-      o: 'open',
-      n: 'new',
-      i: 'import',
-      f: 'search',
-    };
-    return commands[key] ?? null;
-  }
-  if (key === 'f2') return 'rename';
-  if (key === 'f1') return 'help';
-  return null;
+  return matchKeyAction(
+    event,
+    usePreferences.getState().keybindings,
+    keyboardCommands,
+  ) as CommandId | null;
 }

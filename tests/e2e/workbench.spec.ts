@@ -25,9 +25,9 @@ test('positions an assembly, preserves joints, undoes, saves and recovers', asyn
   await page.locator('.part-select[title="Power pack"]').click();
   await expect(x).toHaveValue('12');
   await page.locator('.part-select[title="Torso shell"]').click();
-  await page.getByRole('button', { name: 'Undo (Ctrl/⌘ Z)', exact: true }).click();
+  await page.getByRole('button', { name: /^Undo \((⌘|Ctrl)\+Z\)$/ }).click();
   await expect(x).toHaveValue('0');
-  await page.getByRole('button', { name: 'Redo (Ctrl/⌘ Shift Z)', exact: true }).click();
+  await page.getByRole('button', { name: /^Redo \((⌘|Ctrl)\+Shift\+Z\)$/ }).click();
   await expect(x).toHaveValue('12');
   const downloadPromise = page.waitForEvent('download');
   await page.getByRole('button', { name: 'Save scene', exact: true }).click();
@@ -116,7 +116,7 @@ test('imports an STL, combines objects, and restores the merge with undo', async
   await page.getByRole('button', { name: 'Merge parts', exact: true }).click();
   await expect(page.getByText('2 parts combined into one mesh')).toBeVisible();
   await expect(page.locator('.part-row')).toHaveCount(15);
-  await page.getByRole('button', { name: 'Undo (Ctrl/⌘ Z)', exact: true }).click();
+  await page.getByRole('button', { name: /^Undo \((⌘|Ctrl)\+Z\)$/ }).click();
   await expect(page.locator('.part-row')).toHaveCount(16);
 });
 

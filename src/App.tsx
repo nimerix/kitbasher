@@ -36,6 +36,7 @@ import {
   Save,
   Scaling,
   ScanLine,
+  Settings2,
   Undo2,
   X,
 } from 'lucide-react';
@@ -46,6 +47,8 @@ import { isEditableTarget } from './core/context-menu';
 import { EditorContextMenu } from './components/EditorContextMenu';
 import { readSceneFile } from './core/scene-file';
 import { useKeyboard, useLiveSession, useRecovery } from './hooks/useWorkbench';
+import { usePreferences, useShortcut, withShortcut } from './core/preferences';
+import { PreferencesPanel } from './components/PreferencesPanel';
 import { PartsPanel } from './components/PartsPanel';
 import { Inspector } from './components/Inspector';
 import { Dialogs } from './components/Dialogs';
@@ -67,6 +70,8 @@ function Header({ openScene }: { openScene: () => void }) {
   useEditor((state) => state.clipboard);
   useEditor((state) => state.busy);
   useEditor((state) => state.paintHistory);
+  usePreferences((state) => state.keybindings);
+  const preferencesKey = useShortcut('preferences');
   const [menu, setMenu] = useState<string | null>(null),
     [editing, setEditing] = useState(false),
     [draft, setDraft] = useState(name);
@@ -120,6 +125,8 @@ function Header({ openScene }: { openScene: () => void }) {
                     <hr />
                     {commandItem('save', Save)}
                     {commandItem('export', ArrowDownToLine)}
+                    <hr />
+                    {commandItem('preferences', Settings2)}
                   </>
                 ) : label === 'Edit' ? (
                   <>
@@ -225,6 +232,12 @@ function Header({ openScene }: { openScene: () => void }) {
         >
           <CircleHelp size={17} />
         </IconButton>
+        <IconButton
+          label={withShortcut('Preferences', preferencesKey)}
+          onClick={() => executeEditorCommand('preferences')}
+        >
+          <Settings2 size={17} />
+        </IconButton>
         <button className="button secondary save-button" onClick={save}>
           <Save size={14} />
           <span>Save scene</span>
@@ -260,11 +273,25 @@ function Toolbar({
     selected = useEditor((s) => s.selected);
   const pivotPicking = useEditor((s) => s.pivotPicking);
   const surfacePainting = useEditor((s) => s.tool === 'align' && s.operation.mode === 'surface');
+  const keys = {
+    select: useShortcut('select'),
+    move: useShortcut('move'),
+    rotate: useShortcut('rotate'),
+    scale: useShortcut('scale'),
+    undo: useShortcut('undo'),
+    redo: useShortcut('redo'),
+    pivot: useShortcut('pivot'),
+    align: useShortcut('align'),
+    paint: useShortcut('paint'),
+    anchors: useShortcut('anchors'),
+    joint: useShortcut('joint'),
+    measure: useShortcut('measure'),
+  };
   const tools: { id: Tool; label: string; shortcut: string; icon: typeof MousePointer2 }[] = [
-    { id: 'select', label: 'Select', shortcut: 'V', icon: MousePointer2 },
-    { id: 'translate', label: 'Move', shortcut: 'G', icon: Move3D },
-    { id: 'rotate', label: 'Rotate', shortcut: 'R', icon: Rotate3D },
-    { id: 'scale', label: 'Scale', shortcut: 'S', icon: Scaling },
+    { id: 'select', label: 'Select', shortcut: keys.select, icon: MousePointer2 },
+    { id: 'translate', label: 'Move', shortcut: keys.move, icon: Move3D },
+    { id: 'rotate', label: 'Rotate', shortcut: keys.rotate, icon: Rotate3D },
+    { id: 'scale', label: 'Scale', shortcut: keys.scale, icon: Scaling },
   ];
   return (
     <div className="toolbar" role="toolbar" aria-label="Assembly tools">
@@ -275,14 +302,14 @@ function Toolbar({
         <span className="tool-divider" />
         <div className="history-tools">
           <IconButton
-            label="Undo (Ctrl/⌘ Z)"
+            label={withShortcut('Undo', keys.undo)}
             disabled={!undoable}
             onClick={() => executeEditorCommand('undo')}
           >
             <Undo2 size={15} />
           </IconButton>
           <IconButton
-            label="Redo (Ctrl/⌘ Shift Z)"
+            label={withShortcut('Redo', keys.redo)}
             disabled={!redoable}
             onClick={() => useEditor.getState().redo()}
           >
@@ -294,7 +321,7 @@ function Toolbar({
           {tools.map(({ id, label, shortcut, icon: Icon }) => (
             <IconButton
               key={id}
-              label={`${label} (${shortcut})`}
+              label={withShortcut(label, shortcut)}
               active={tool === id}
               onClick={() => useEditor.getState().setTool(id)}
             >
@@ -302,7 +329,7 @@ function Toolbar({
             </IconButton>
           ))}
           <IconButton
-            label="Pick pivot point (P)"
+            label={withShortcut('Pick pivot point', keys.pivot)}
             active={pivotPicking}
             onClick={() => useEditor.getState().setPivotPicking(!pivotPicking)}
           >
@@ -312,16 +339,16 @@ function Toolbar({
         <span className="tool-divider" />
         <button
           className={`tool-button ${tool === 'align' && !surfacePainting ? 'active' : ''}`}
-          title="Align parts (A)"
+          title={withShortcut('Align parts', keys.align)}
           onClick={() => useEditor.getState().setTool('align')}
         >
           <ScanLine size={16} />
           <span>Align</span>
-          <Keyboard>A</Keyboard>
+          {keys.align ? <Keyboard>{keys.align}</Keyboard> : null}
         </button>
         <button
           className={`tool-button paint-tool ${surfacePainting ? 'active' : ''}`}
-          title="Paint contact surfaces (B)"
+          title={withShortcut('Paint contact surfaces', keys.paint)}
           onClick={() => {
             useEditor.getState().setTool('align');
             useEditor.getState().setOperation({ mode: 'surface' });
@@ -329,24 +356,25 @@ function Toolbar({
         >
           <Paintbrush size={16} />
           <span>Contact paint</span>
-          <Keyboard>B</Keyboard>
+          {keys.paint ? <Keyboard>{keys.paint}</Keyboard> : null}
         </button>
         <button
           className={`tool-button ${tool === 'anchors' ? 'active' : ''}`}
-          title="Rigid anchor fit (K)"
+          title={withShortcut('Rigid anchor fit', keys.anchors)}
           onClick={() => useEditor.getState().setTool('anchors')}
         >
           <Crosshair size={16} />
           <span>Anchors</span>
-          <Keyboard>K</Keyboard>
+          {keys.anchors ? <Keyboard>{keys.anchors}</Keyboard> : null}
         </button>
         <button
           className={`tool-button ${tool === 'joint' ? 'active' : ''}`}
+          title={withShortcut('Create joint', keys.joint)}
           onClick={() => useEditor.getState().setTool('joint')}
         >
           <Link2 size={16} />
           <span>Joint</span>
-          <Keyboard>J</Keyboard>
+          {keys.joint ? <Keyboard>{keys.joint}</Keyboard> : null}
         </button>
         <button
           className="tool-button merge-tool"
@@ -358,7 +386,7 @@ function Toolbar({
         </button>
         <span className="tool-divider measurement-divider" />
         <IconButton
-          label="Measure distance (D)"
+          label={withShortcut('Measure distance', keys.measure)}
           active={tool === 'measure'}
           onClick={() => useEditor.getState().setTool('measure')}
         >
@@ -418,12 +446,18 @@ function StatusBar() {
     navigationMode = useEditor((s) => (s.temporaryOrbit ? 'orbit' : s.navigationMode)),
     indexing = useEditor((s) => s.indexingMeshes > 0),
     live = useEditor((s) => s.liveStatus);
+  const hold = useShortcut('holdOrbit'),
+    cancel = useShortcut('cancel'),
+    pivot = useShortcut('pivot'),
+    smaller = useShortcut('brushSmaller'),
+    larger = useShortcut('brushLarger');
+  const orbitHint = `Middle${hold ? ` / ${hold}` : ''}`;
   return (
     <footer className="statusbar">
       <div className="navigation-hints">
         <span>
           <MousePointer2 size={11} />
-          Orbit <kbd>Middle / Space</kbd>
+          Orbit <kbd>{orbitHint}</kbd>
         </span>
         <span>
           <Hand size={11} />
@@ -436,13 +470,13 @@ function StatusBar() {
           {indexing
             ? 'Preparing a dense mesh · It can be clicked when this finishes'
             : navigationMode
-              ? `${navigationMode === 'pan' ? 'Pan' : 'Orbit'} tool · Drag to navigate · Esc to return`
+              ? `${navigationMode === 'pan' ? 'Pan' : 'Orbit'} tool · Drag to navigate${cancel ? ` · ${cancel} to return` : ''}`
               : pivotPicking
-                ? 'Click a model surface to set its pivot · P or Esc to cancel'
+                ? `Click a model surface to set its pivot${[pivot, cancel].some(Boolean) ? ` · ${[pivot, cancel].filter(Boolean).join(' or ')} to cancel` : ''}`
                 : surfacePainting
-                  ? 'Drag to paint · Alt erases · [ / ] brush size · Middle / Space orbits'
+                  ? `Drag to paint · Alt erases${smaller || larger ? ` · ${[smaller, larger].filter(Boolean).join(' / ')} brush size` : ''} · ${orbitHint} orbits`
                   : tool === 'align'
-                    ? 'Pick source → target · Middle / Space orbits'
+                    ? `Pick source → target · ${orbitHint} orbits`
                     : tool === 'anchors'
                       ? 'Add surface anchors · Drag a target to fit · Shift for fine adjustment'
                       : tool === 'joint'
@@ -795,6 +829,7 @@ export default function App() {
           </div>
         </div>
         <Inspector onClose={() => setRight(false)} />
+        <PreferencesPanel />
       </div>
       <StatusBar />
       <footer className="site-footer">

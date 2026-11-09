@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef } from 'react';
-import { useThree } from '@react-three/fiber';
+import { useFrame, useThree } from '@react-three/fiber';
 import { OrbitControls } from '@react-three/drei';
 import type { OrbitControls as OrbitControlsImpl } from 'three-stdlib';
 import { MOUSE, Quaternion, TOUCH, Vector3 } from 'three';
@@ -15,6 +15,8 @@ import {
 } from '../core/navigation';
 import type { CameraDirection, CameraStep } from '../core/navigation';
 import { useEditor } from '../core/store';
+import { usePreferences, useShortcut, withShortcut } from '../core/preferences';
+import { clampPendingZoom, wheelZoom, zoomGlideStep } from '../core/zoom';
 import { IconButton } from './ui';
 
 const cameraStepEvent = 'kitbasher:camera-step';
@@ -46,6 +48,58 @@ export function CameraRig() {
     projection: 'perspective' | 'orthographic';
   } | null>(null);
   const rotation = useRef<{ pivot: Vector3; previous: Quaternion } | null>(null);
+  // The natural log of the zoom still to glide through, and when the glide last moved.
+  const zoom = useRef({ pending: 0, time: 0 });
+
+  /** Zooms toward the orbit target. Returns false once a distance or zoom limit stops it. */
+  const applyZoom = useCallback(
+    (amount: number) => {
+      const orbit = controls.current;
+      if (!orbit || !amount) return true;
+      if ('isOrthographicCamera' in camera) {
+        const wanted = camera.zoom * Math.exp(amount);
+        camera.zoom = Math.max(orbit.minZoom, Math.min(orbit.maxZoom, wanted));
+        camera.updateProjectionMatrix();
+        return camera.zoom === wanted;
+      }
+      const offset = camera.position.clone().sub(orbit.target);
+      const distance = offset.length();
+      if (distance === 0) return false;
+      const wanted = distance * Math.exp(-amount);
+      const next = Math.max(orbit.minDistance, Math.min(orbit.maxDistance, wanted));
+      camera.position.copy(orbit.target).add(offset.multiplyScalar(next / distance));
+      return next === wanted;
+    },
+    [camera],
+  );
+
+  const queueZoom = useCallback(
+    (amount: number) => {
+      const glide = zoom.current;
+      if (!glide.pending) glide.time = performance.now();
+      glide.pending = clampPendingZoom(glide.pending + amount);
+      if (usePreferences.getState().zoom.smoothing <= 0) {
+        applyZoom(glide.pending);
+        glide.pending = 0;
+        controls.current?.update();
+      }
+      invalidate();
+    },
+    [applyZoom, invalidate],
+  );
+
+  // Runs before the controls update, so they clamp and publish the new distance this frame.
+  useFrame(() => {
+    const glide = zoom.current;
+    if (!glide.pending) return;
+    const now = performance.now();
+    const dt = Math.min((now - glide.time) / 1000, 0.1);
+    glide.time = now;
+    const step = zoomGlideStep(glide.pending, dt, usePreferences.getState().zoom.smoothing);
+    glide.pending = applyZoom(step) ? glide.pending - step : 0;
+    if (Math.abs(glide.pending) < 1e-9) glide.pending = 0;
+    if (glide.pending) invalidate();
+  }, -2);
 
   const orbitPivot = useCallback(() => {
     const state = useEditor.getState();
@@ -65,12 +119,15 @@ export function CameraRig() {
   const settle = useCallback(() => {
     const orbit = controls.current;
     if (!orbit) return;
+    // Land any zoom still gliding, as damping lands any orbit still drifting.
+    if (zoom.current.pending) applyZoom(zoom.current.pending);
+    zoom.current.pending = 0;
     const damping = orbit.enableDamping;
     orbit.enableDamping = false;
     orbit.update();
     orbit.enableDamping = damping;
     rotation.current = null;
-  }, []);
+  }, [applyZoom]);
 
   const centerSelection = useCallback(() => {
     const orbit = controls.current;
@@ -138,20 +195,30 @@ export function CameraRig() {
   }, [pivotRequest, centerSelection]);
 
   useEffect(() => {
-    const zoom = (event: Event) => {
-      const detail = (event as CustomEvent<number>).detail;
-      settle();
-      if ('isOrthographicCamera' in camera) {
-        camera.zoom *= detail;
-        camera.updateProjectionMatrix();
-      } else if (controls.current) {
-        camera.position
-          .sub(controls.current.target)
-          .multiplyScalar(1 / detail)
-          .add(controls.current.target);
-      }
-      controls.current?.update();
-      invalidate();
+    const zoomBy = (event: Event) => {
+      const factor = (event as CustomEvent<number>).detail;
+      if (factor > 0) queueZoom(Math.log(factor));
+    };
+    // Track a held Control key, because a trackpad pinch arrives as Ctrl + wheel without it.
+    let controlHeld = false;
+    const control = (event: KeyboardEvent) => {
+      if (event.key === 'Control') controlHeld = event.type === 'keydown';
+    };
+    const releaseControl = () => {
+      controlHeld = false;
+    };
+    // Replace the controls' fixed wheel steps with a configurable, gliding zoom. Capture
+    // runs first on this element, so the controls never see the wheel.
+    const wheel = (event: WheelEvent) => {
+      if (!controls.current?.enabled) return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      const amount = wheelZoom(
+        event,
+        usePreferences.getState().zoom,
+        event.ctrlKey && !controlHeld,
+      );
+      if (amount) queueZoom(amount);
     };
     const step = (event: Event) => {
       const orbit = controls.current;
@@ -192,14 +259,22 @@ export function CameraRig() {
     };
     const canvas = connected instanceof HTMLElement ? connected : gl.domElement;
     canvas.addEventListener('pointerdown', down, true);
-    window.addEventListener('kitbasher:zoom', zoom);
+    canvas.addEventListener('wheel', wheel, { capture: true, passive: false });
+    window.addEventListener('keydown', control, true);
+    window.addEventListener('keyup', control, true);
+    window.addEventListener('blur', releaseControl);
+    window.addEventListener('kitbasher:zoom', zoomBy);
     window.addEventListener(cameraStepEvent, step);
     return () => {
       canvas.removeEventListener('pointerdown', down, true);
-      window.removeEventListener('kitbasher:zoom', zoom);
+      canvas.removeEventListener('wheel', wheel, { capture: true });
+      window.removeEventListener('keydown', control, true);
+      window.removeEventListener('keyup', control, true);
+      window.removeEventListener('blur', releaseControl);
+      window.removeEventListener('kitbasher:zoom', zoomBy);
       window.removeEventListener(cameraStepEvent, step);
     };
-  }, [camera, connected, gl.domElement, invalidate, orbitPivot, settle]);
+  }, [camera, connected, gl.domElement, invalidate, orbitPivot, queueZoom, settle]);
 
   return (
     <OrbitControls
@@ -233,6 +308,14 @@ export function CameraNavigation() {
   const canCenter = useEditor((state) =>
     state.scene.parts.some((part) => part.visible && state.selected.includes(part.id)),
   );
+  const keys = {
+    orbit: useShortcut('orbitTool'),
+    pan: useShortcut('panTool'),
+    center: useShortcut('centerOrbit'),
+    cancel: useShortcut('cancel'),
+    pivot: useShortcut('pivot'),
+    hold: useShortcut('holdOrbit'),
+  };
   const step = (direction: CameraDirection) =>
     window.dispatchEvent(
       new CustomEvent<CameraStep>(cameraStepEvent, {
@@ -248,7 +331,7 @@ export function CameraNavigation() {
         <span>Camera</span>
         {mode ? (
           <IconButton
-            label="Exit camera tool (Esc)"
+            label={withShortcut('Exit camera tool', keys.cancel)}
             onClick={() => useEditor.getState().setNavigationMode(null)}
           >
             <X size={12} />
@@ -258,21 +341,21 @@ export function CameraNavigation() {
       <div className="camera-mode-buttons">
         <button
           className={mode === 'orbit' ? 'active' : ''}
-          aria-label="Orbit tool (O)"
+          aria-label={withShortcut('Orbit tool', keys.orbit)}
           aria-pressed={mode === 'orbit'}
           onClick={() => useEditor.getState().setNavigationMode(mode === 'orbit' ? null : 'orbit')}
         >
           <Orbit size={15} />
-          Orbit<kbd>O</kbd>
+          Orbit{keys.orbit ? <kbd>{keys.orbit}</kbd> : null}
         </button>
         <button
           className={mode === 'pan' ? 'active' : ''}
-          aria-label="Pan tool (H)"
+          aria-label={withShortcut('Pan tool', keys.pan)}
           aria-pressed={mode === 'pan'}
           onClick={() => useEditor.getState().setNavigationMode(mode === 'pan' ? null : 'pan')}
         >
           <Hand size={14} />
-          Pan<kbd>H</kbd>
+          Pan{keys.pan ? <kbd>{keys.pan}</kbd> : null}
         </button>
       </div>
       {mode ? (
@@ -292,7 +375,7 @@ export function CameraNavigation() {
               <ArrowLeft size={16} />
             </IconButton>
             <IconButton
-              label="Center orbit on selection (.)"
+              label={withShortcut('Center orbit on selection', keys.center)}
               disabled={!canCenter}
               onClick={() => useEditor.getState().centerOrbit()}
             >
@@ -314,7 +397,8 @@ export function CameraNavigation() {
           <p className="camera-tool-hint">
             {mode === 'pan' ? 'Drag to move the view' : 'Drag to orbit the view'}
             <span>
-              <kbd>.</kbd> Center selection · <kbd>Esc</kbd> Exit
+              {keys.center ? <kbd>{keys.center}</kbd> : null} Center selection ·{' '}
+              {keys.cancel ? <kbd>{keys.cancel}</kbd> : null} Exit
             </span>
           </p>
         </>
@@ -324,7 +408,7 @@ export function CameraNavigation() {
         aria-pressed={pivotPicking}
         onClick={() => useEditor.getState().setPivotPicking(!pivotPicking)}
       >
-        <Crosshair size={13} /> Pick surface pivot <kbd>P</kbd>
+        <Crosshair size={13} /> Pick surface pivot {keys.pivot ? <kbd>{keys.pivot}</kbd> : null}
       </button>
       {customPivot ? (
         <button
@@ -334,7 +418,9 @@ export function CameraNavigation() {
           Reset custom pivot
         </button>
       ) : null}
-      <p className="camera-gesture-hint">Middle / Space + drag: orbit · Right-drag: pan</p>
+      <p className="camera-gesture-hint">
+        Middle{keys.hold ? ` / ${keys.hold}` : ''} + drag: orbit · Right-drag: pan
+      </p>
       <label className="orbit-selection-setting">
         <span>Orbit selection</span>
         <button

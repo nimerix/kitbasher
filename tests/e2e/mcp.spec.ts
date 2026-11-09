@@ -257,7 +257,7 @@ test('tabs and the agent edit one scene, each with its own view', async ({ brows
   await expect(field(first, 'X')).toHaveValue('25');
 
   // Undo in a tab reverts that tab's change, and the agent's undo reverts the agent's.
-  await first.getByRole('button', { name: 'Undo (Ctrl/⌘ Z)', exact: true }).click();
+  await first.getByRole('button', { name: /^Undo \((⌘|Ctrl)\+Z\)$/ }).click();
   await expect(field(first, 'X')).toHaveValue('0');
   const undone = await call('get_scene');
   expect(positionOf(undone, 'agent-column')).toEqual([0, 40, 0]);
@@ -268,7 +268,7 @@ test('tabs and the agent edit one scene, each with its own view', async ({ brows
   await first.locator(part('Agent column')).click();
   await first.keyboard.press('ControlOrMeta+Shift+z');
   await expect(field(first, 'X')).toHaveValue('25');
-  await expect(first.getByRole('button', { name: 'Redo (Ctrl/⌘ Shift Z)' })).toBeDisabled();
+  await expect(first.getByRole('button', { name: /^Redo \((⌘|Ctrl)\+Shift\+Z\)$/ })).toBeDisabled();
 
   // A model imported in a tab sends its mesh once, and the agent can work with it.
   await first.getByRole('button', { name: 'Import parts', exact: true }).click();
