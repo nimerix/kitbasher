@@ -1,5 +1,5 @@
 import { downloadScene } from './files';
-import { useEditor } from './store';
+import { canRedo, canUndo, useEditor } from './store';
 import type { SurfacePoint } from './types';
 
 export function primaryShortcut(key: string, shift = false) {
@@ -58,10 +58,10 @@ export function editorCommands(context: CommandContext = {}) {
           state.undoPaintStroke();
         else state.undo();
       },
-      idle && (state.past.length > 0 || state.paintHistory.length > 0),
+      idle && (canUndo(state) || state.paintHistory.length > 0),
       primaryShortcut('Z'),
     ),
-    redo: command('Redo', state.redo, idle && state.future.length > 0, primaryShortcut('Z', true)),
+    redo: command('Redo', state.redo, idle && canRedo(state), primaryShortcut('Z', true)),
     selectAll: command(
       'Select all components',
       state.selectAll,

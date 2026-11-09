@@ -350,7 +350,9 @@ context menu. The File and Edit menus expose the same commands and shortcuts.
 
 Coding agents can build models directly through the included MCP server. It adds, places, and
 joins parts, checks them for interference, renders views the agent can see, and saves `.kitbash`
-files that open here. It runs locally, without a browser or GPU.
+files that open here. It runs locally, without a browser or GPU. Its live view opens the agent's
+scene here, where you can look around freely and edit alongside the agent: each tab keeps its own
+camera and selection, edits from both sides merge, and undo reverts only your own changes.
 
 ```sh
 npm run build

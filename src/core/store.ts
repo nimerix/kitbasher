@@ -73,10 +73,10 @@ const hasOperationWork = (op: AssemblyOperation) =>
   op.pairs.length > 0 ||
   !!op.pending ||
   op.surfacePairs.some((pair) => pair.source?.faces.length || pair.target?.faces.length);
-/** Set when the page was opened by an MCP server's live view. */
-export const liveFollow =
+/** Set when the page was opened by an MCP server's live view, which shares its scene. */
+export const liveSession =
   typeof location !== 'undefined' && new URLSearchParams(location.search).has('live');
-const initialScene: SceneDocument = liveFollow
+const initialScene: SceneDocument = liveSession
   ? { name: 'Waiting for the agent', parts: [], joints: [], constraints: [] }
   : createSample();
 const historyLimit = 40;
@@ -107,6 +107,10 @@ interface EditorState {
   savedRevision: number;
   recoveryStatus: 'saving' | 'saved' | 'error';
   liveStatus: 'connecting' | 'connected' | 'disconnected' | null;
+  /** This tab's own steps in a shared scene. Null when undo uses the local history. */
+  sharedHistory: { undo: number; redo: number } | null;
+  /** Counts whole-scene replacements, such as opening a file. */
+  sceneEpoch: number;
   modal: Modal;
   toast: Toast | null;
   busy: string | null;
@@ -171,8 +175,8 @@ interface EditorState {
   duplicateSelected: () => void;
   replaceWithMerged: (part: Part, ids: string[]) => void;
   setScene: (scene: SceneDocument, recovered?: boolean) => void;
-  /** Takes the scene from a live view's server, leaving the camera and tools where they are. */
-  followScene: (scene: SceneDocument) => void;
+  /** Takes the shared scene from a live view's server, leaving camera, selection, and tools. */
+  receiveScene: (scene: SceneDocument) => void;
   renameScene: (name: string) => void;
   undo: () => void;
   redo: () => void;
@@ -208,7 +212,7 @@ const withoutRemovedParts = (state: EditorState, ids: string[]) => {
 
 export const useEditor = create<EditorState>((set, get) => ({
   scene: initialScene,
-  selected: liveFollow ? [] : ['torso'],
+  selected: liveSession ? [] : ['torso'],
   clipboard: null,
   contextMenu: null,
   tool: 'select',
@@ -252,6 +256,8 @@ export const useEditor = create<EditorState>((set, get) => ({
   savedRevision: 0,
   recoveryStatus: 'saved',
   liveStatus: null,
+  sharedHistory: null,
+  sceneEpoch: 0,
   modal: null,
   toast: null,
   busy: null,
@@ -1100,6 +1106,7 @@ export const useEditor = create<EditorState>((set, get) => ({
   setScene: (scene, recovered = false) =>
     set((state) => ({
       scene,
+      sceneEpoch: state.sceneEpoch + 1,
       selected: [],
       past: [],
       future: [],
@@ -1121,20 +1128,16 @@ export const useEditor = create<EditorState>((set, get) => ({
       view: { ...state.view, explode: 0 },
       focusRequest: { id: state.focusRequest.id + 1, all: true },
     })),
-  followScene: (scene) =>
+  receiveScene: (scene) =>
     set((state) => {
+      if (scene === state.scene) return {};
       const ids = new Set(scene.parts.map((part) => part.id));
+      const removed = state.scene.parts.map((part) => part.id).filter((id) => !ids.has(id));
       return {
         scene,
         selected: state.selected.filter((id) => ids.has(id)),
-        past: [],
-        future: [],
         revision: state.revision + 1,
-        savedRevision: state.revision + 1,
-        ...withoutRemovedParts(
-          state,
-          state.scene.parts.map((part) => part.id).filter((id) => !ids.has(id)),
-        ),
+        ...(removed.length ? withoutRemovedParts(state, removed) : {}),
       };
     }),
   renameScene: (name) =>
@@ -1143,45 +1146,51 @@ export const useEditor = create<EditorState>((set, get) => ({
       return next === state.scene.name ? {} : changed(state, { ...state.scene, name: next });
     }),
   undo: () =>
-    set((state) =>
-      state.past.length
-        ? {
-            scene: state.past.at(-1)!,
-            past: state.past.slice(0, -1),
-            future: [state.scene, ...state.future],
-            revision: state.revision + 1,
-            selected: state.selected.filter((id) =>
-              state.past.at(-1)!.parts.some((p) => p.id === id),
-            ),
-            operation: blankOperation(),
-            tool: 'select',
-            navigationMode: null,
-            pivotPicking: false,
-            painting: false,
-            paintHistory: [],
-            measurement: [],
-          }
-        : {},
-    ),
+    sharedHandlers
+      ? sharedHandlers.undo()
+      : set((state) =>
+          state.past.length
+            ? {
+                scene: state.past.at(-1)!,
+                past: state.past.slice(0, -1),
+                future: [state.scene, ...state.future],
+                revision: state.revision + 1,
+                selected: state.selected.filter((id) =>
+                  state.past.at(-1)!.parts.some((p) => p.id === id),
+                ),
+                operation: blankOperation(),
+                tool: 'select',
+                navigationMode: null,
+                pivotPicking: false,
+                painting: false,
+                paintHistory: [],
+                measurement: [],
+              }
+            : {},
+        ),
   redo: () =>
-    set((state) =>
-      state.future.length
-        ? {
-            scene: state.future[0],
-            past: [...state.past, state.scene],
-            future: state.future.slice(1),
-            revision: state.revision + 1,
-            selected: state.selected.filter((id) => state.future[0].parts.some((p) => p.id === id)),
-            operation: blankOperation(),
-            tool: 'select',
-            navigationMode: null,
-            pivotPicking: false,
-            painting: false,
-            paintHistory: [],
-            measurement: [],
-          }
-        : {},
-    ),
+    sharedHandlers
+      ? sharedHandlers.redo()
+      : set((state) =>
+          state.future.length
+            ? {
+                scene: state.future[0],
+                past: [...state.past, state.scene],
+                future: state.future.slice(1),
+                revision: state.revision + 1,
+                selected: state.selected.filter((id) =>
+                  state.future[0].parts.some((p) => p.id === id),
+                ),
+                operation: blankOperation(),
+                tool: 'select',
+                navigationMode: null,
+                pivotPicking: false,
+                painting: false,
+                paintHistory: [],
+                measurement: [],
+              }
+            : {},
+        ),
   setView: (patch) => {
     if (patch.orbitSelection !== undefined) saveOrbitPreference(patch.orbitSelection);
     set((state) => ({
@@ -1195,6 +1204,18 @@ export const useEditor = create<EditorState>((set, get) => ({
     set((state) => ({ focusRequest: { id: state.focusRequest.id + 1, view, all } })),
   markSaved: (revision) => set({ savedRevision: revision }),
 }));
+
+let sharedHandlers: { undo: () => void; redo: () => void } | null = null;
+
+/** In a shared scene, undo and redo step through this tab's own changes on the server. */
+export function useSharedHistory(handlers: typeof sharedHandlers) {
+  sharedHandlers = handlers;
+}
+
+export const canUndo = (state: EditorState) =>
+  state.sharedHistory ? state.sharedHistory.undo > 0 : state.past.length > 0;
+export const canRedo = (state: EditorState) =>
+  state.sharedHistory ? state.sharedHistory.redo > 0 : state.future.length > 0;
 
 function reachableGeometries(state: EditorState) {
   const geometries = new Set<BufferGeometry>();

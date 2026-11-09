@@ -5,7 +5,7 @@ Verified locally on November 9, 2026.
 ## Automated checks
 
 - `npm run build`: TypeScript checks and production compilation pass.
-- `npm test`: **391 tests pass**, covering Kabsch registration, non-collinear
+- `npm test`: **427 tests pass**, covering Kabsch registration, non-collinear
   point selection, reflection prevention, all four alignment methods, axis locks,
   anchor coincidence, descendant propagation, capture of the current pose when
   locking an axis, invalid joint graphs, scene round trips, mesh combination,
@@ -18,7 +18,7 @@ Verified locally on November 9, 2026.
   `tests/unit/regressions.test.ts` adds lossless compact scene numbers, retained
   normals, typed-array recovery, reopenable subset exports, mirrored STL facets,
   geometry disposal, and projection-preserving camera transfer.
-- `npm run test:e2e`: **88 browser tests pass** in headless installed Google Chrome.
+- `npm run test:e2e`: **89 browser tests pass** in headless installed Google Chrome.
   Exercises real gizmo dragging, numeric edit cancellation, surface picking,
   joint creation, local recovery, save/open, STL import, combination/undo,
   GLB/3MF downloads and reimports, physical scale, Boolean worker volume and
@@ -67,6 +67,14 @@ through a real client, with every tool reached. It also tries the live view's re
 names, a missing token, and paths outside the app. `tests/e2e/mcp.spec.ts` starts the built server
 over real stdio, opens a saved scene in the app, and follows live edits in Chrome. It checks that
 each mesh is fetched once, that autosave is left alone, and that the server exits with its client.
+
+Shared editing: `tests/unit/sync.test.ts` covers merging by part and by field, conflicts, removals,
+joints reseated after a merge, and undo steps that leave others' later values. `tests/unit/mcp/shared.test.ts`
+drives the live view's HTTP protocol against a real MCP client: stale and conflicting edits, refused
+joints that change nothing, mesh uploads and bad meshes, per-author undo, one undo step per drag, and
+a scene replaced from a tab. In Chrome, two tabs and the agent edit one scene: an edit in either tab
+reaches the other and the agent, orbiting and zooming send nothing, undo in a tab and the agent's
+`undo` each revert only their own change, and a model imported in a tab uploads its mesh once.
 
 Two real clients each built a stool from one prompt, through the built server, with no tool errors:
 

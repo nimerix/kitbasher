@@ -39,13 +39,13 @@ import {
   Undo2,
   X,
 } from 'lucide-react';
-import { useEditor } from './core/store';
+import { canRedo, canUndo, useEditor } from './core/store';
 import { editorCommands, executeEditorCommand, saveCurrentScene } from './core/commands';
 import type { CommandId } from './core/commands';
 import { isEditableTarget } from './core/context-menu';
 import { EditorContextMenu } from './components/EditorContextMenu';
 import { readSceneFile } from './core/scene-file';
-import { useKeyboard, useLiveFollow, useRecovery } from './hooks/useWorkbench';
+import { useKeyboard, useLiveSession, useRecovery } from './hooks/useWorkbench';
 import { PartsPanel } from './components/PartsPanel';
 import { Inspector } from './components/Inspector';
 import { Dialogs } from './components/Dialogs';
@@ -62,6 +62,7 @@ function Header({ openScene }: { openScene: () => void }) {
     savedRevision = useEditor((s) => s.savedRevision);
   useEditor((state) => state.past);
   useEditor((state) => state.future);
+  useEditor((state) => state.sharedHistory);
   useEditor((state) => state.selected);
   useEditor((state) => state.clipboard);
   useEditor((state) => state.busy);
@@ -254,8 +255,8 @@ function Toolbar({
 }) {
   const tool = useEditor((s) => s.tool),
     view = useEditor((s) => s.view),
-    canUndo = useEditor((s) => s.past.length > 0 || s.paintHistory.length > 0),
-    future = useEditor((s) => s.future),
+    undoable = useEditor((s) => canUndo(s) || s.paintHistory.length > 0),
+    redoable = useEditor(canRedo),
     selected = useEditor((s) => s.selected);
   const pivotPicking = useEditor((s) => s.pivotPicking);
   const surfacePainting = useEditor((s) => s.tool === 'align' && s.operation.mode === 'surface');
@@ -275,14 +276,14 @@ function Toolbar({
         <div className="history-tools">
           <IconButton
             label="Undo (Ctrl/⌘ Z)"
-            disabled={!canUndo}
+            disabled={!undoable}
             onClick={() => executeEditorCommand('undo')}
           >
             <Undo2 size={15} />
           </IconButton>
           <IconButton
             label="Redo (Ctrl/⌘ Shift Z)"
-            disabled={!future.length}
+            disabled={!redoable}
             onClick={() => useEditor.getState().redo()}
           >
             <Redo2 size={15} />
@@ -457,10 +458,10 @@ function StatusBar() {
             <span className={`status-dot${live === 'connected' ? '' : ' warning'}`} />
             <span>
               {live === 'connected'
-                ? 'Following agent · Its next change replaces edits made here'
+                ? 'Shared with agent · Edits sync both ways'
                 : live === 'connecting'
                   ? 'Connecting to agent…'
-                  : 'Agent disconnected · Save scene to keep this copy'}
+                  : 'Agent disconnected · Edits stay in this tab · Save scene to keep them'}
             </span>
           </>
         ) : (
@@ -556,7 +557,7 @@ export default function App() {
     pending: null as { target: Element; event: MouseEvent } | null,
   });
   useRecovery();
-  useLiveFollow();
+  useLiveSession();
   useKeyboard(openScene, searchParts);
   useEffect(() => {
     // Keep press-time context menus out of the DOM until we know this is a click.

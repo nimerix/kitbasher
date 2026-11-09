@@ -62,6 +62,7 @@ import type {
   SurfacePoint,
   Vec3,
 } from '../src/core/types';
+import { agent, sharedDocument } from './document';
 import { closestSurface, ensureBvh, unionBounds, worldBounds } from './measure';
 import { buildPartGeometry, parseColor } from './shapes';
 import type { ShapeSpec } from './shapes';
@@ -222,22 +223,20 @@ function setScene(scene: SceneDocument) {
  * report failures as notifications for the UI, so they are turned back into errors here.
  */
 function transaction<T>(run: () => T): T {
-  const { scene, past, future, revision, tool, operation, selected } = editor();
+  const { scene, revision, tool, operation, selected } = editor();
   useEditor.setState({ toast: null });
   try {
     const result = run();
     const after = editor();
     if (after.toast?.kind === 'error') throw new Error(after.toast.message);
-    if (after.scene !== scene)
-      useEditor.setState({ past: [...past.slice(-39), scene], future: [] });
     useEditor.setState({ toast: null });
+    // Nothing is shared until the whole call has worked.
+    sharedDocument.commit(agent, scene);
     return result;
   } catch (error) {
     const scratch = editor();
     useEditor.setState({
       scene,
-      past,
-      future,
       revision: scratch.scene === scene ? revision : scratch.revision + 1,
       tool,
       operation,
@@ -361,10 +360,21 @@ const statusOf = (pair: { volume: number | null; distance: number }) =>
   pair.volume && pair.volume > 0 ? 'overlap' : pair.distance < 1e-3 ? 'touching' : 'near';
 
 export class Session {
-  path: string | null = null;
+  private file: string | null = null;
+  /** A scene someone opens in the live view replaces the one this file held. */
+  private fileEpoch = 0;
 
   constructor() {
-    editor().setScene(blankScene());
+    sharedDocument.replace(blankScene());
+  }
+
+  get path() {
+    return this.fileEpoch === sharedDocument.epoch ? this.file : null;
+  }
+
+  private setPath(file: string | null) {
+    this.file = file;
+    this.fileEpoch = sharedDocument.epoch;
   }
 
   private assertDiscardable(discard = false) {
@@ -379,8 +389,8 @@ export class Session {
     this.assertDiscardable(discard);
     const scene = sample ? createSample() : blankScene(name);
     if (name) scene.name = name;
-    editor().setScene(scene);
-    this.path = null;
+    sharedDocument.replace(scene);
+    this.setPath(null);
     return this.summary();
   }
 
@@ -390,8 +400,8 @@ export class Session {
     if (!['.kitbash', '.json'].includes(extname(file).toLowerCase()))
       throw new Error('Scene files end in .kitbash.');
     if (!existsSync(file)) throw new Error(`${file} does not exist.`);
-    editor().setScene(await readSceneFile(await openAsBlob(file)));
-    this.path = file;
+    sharedDocument.replace(await readSceneFile(await openAsBlob(file)));
+    this.setPath(file);
     return this.summary();
   }
 
@@ -405,7 +415,7 @@ export class Session {
       throw new Error(`${file} already exists. Pass overwrite: true to replace it.`);
     const { scene, revision } = editor();
     const bytes = await writeAtomically(file, sceneFileBlob(scene));
-    this.path = file;
+    this.setPath(file);
     editor().markSaved(revision);
     return { path: file, bytes, parts: scene.parts.length };
   }
@@ -439,7 +449,8 @@ export class Session {
   }
 
   summary(ids?: string[], offset = 0, limit = 200) {
-    const { scene, revision, savedRevision, past, future } = editor();
+    const { scene, revision, savedRevision } = editor();
+    const history = sharedDocument.counts(agent);
     const selected = ids ? ids.map(requirePart) : scene.parts;
     const page = selected.slice(offset, offset + limit);
     const bounds = selected.length ? unionBounds(selected) : null;
@@ -448,8 +459,8 @@ export class Session {
       path: this.path,
       units: 'mm',
       unsaved: revision !== savedRevision,
-      can_undo: past.length,
-      can_redo: future.length,
+      can_undo: history.undo,
+      can_redo: history.redo,
       part_count: scene.parts.length,
       triangles: scene.parts.reduce((total, part) => total + triangleCount(part.geometry), 0),
       ...(bounds
@@ -1067,23 +1078,28 @@ export class Session {
   }
 
   undo() {
-    if (!editor().past.length) throw new Error('There is nothing to undo.');
-    editor().undo();
-    return this.historyState();
+    return this.historyStep('undo');
   }
 
   redo() {
-    if (!editor().future.length) throw new Error('There is nothing to redo.');
-    editor().redo();
-    return this.historyState();
+    return this.historyStep('redo');
   }
 
-  private historyState() {
-    const { past, future, scene } = editor();
+  /** Steps through this agent's own changes only. Edits made in the live view are kept. */
+  private historyStep(direction: 'undo' | 'redo') {
+    const result = sharedDocument[direction](agent);
+    if (!result) throw new Error(`There is nothing to ${direction}.`);
+    const { undo, redo } = sharedDocument.counts(agent);
     return {
-      can_undo: past.length,
-      can_redo: future.length,
-      parts: scene.parts.map((part) => part.id),
+      ...(result.changed
+        ? {}
+        : {
+            changed: false,
+            note: `Nothing was ${direction === 'undo' ? 'reverted' : 'restored'}: the user has since changed everything that step touched.`,
+          }),
+      can_undo: undo,
+      can_redo: redo,
+      parts: editor().scene.parts.map((part) => part.id),
     };
   }
 
