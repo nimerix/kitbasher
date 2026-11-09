@@ -11,6 +11,7 @@ import {
   setOrbitCenter,
   stepCamera,
   transferView,
+  viewDirections,
 } from '../core/navigation';
 import type { CameraDirection, CameraStep } from '../core/navigation';
 import { useEditor } from '../core/store';
@@ -111,17 +112,8 @@ export function CameraRig() {
     const distance =
       ((radius / Math.sin((35 * Math.PI) / 360)) * 1.12) / Math.min(Math.sqrt(aspect), 1);
     const direction = new Vector3();
-    const directions = {
-      front: [0, 0, 1],
-      back: [0, 0, -1],
-      right: [1, 0, 0],
-      left: [-1, 0, 0],
-      top: [0, 1, 0.001],
-      bottom: [0, -1, 0.001],
-      iso: [1, 0.65, 1.3],
-    };
     settle();
-    if (focusRequest.view) direction.fromArray(directions[focusRequest.view]);
+    if (focusRequest.view) direction.fromArray(viewDirections[focusRequest.view]);
     else direction.copy(camera.position).sub(controls.current?.target ?? center);
     if (direction.length() < 0.01) direction.set(1, 0.65, 1.3);
     camera.position.copy(center).add(direction.normalize().multiplyScalar(distance));

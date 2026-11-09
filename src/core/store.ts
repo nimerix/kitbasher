@@ -73,7 +73,12 @@ const hasOperationWork = (op: AssemblyOperation) =>
   op.pairs.length > 0 ||
   !!op.pending ||
   op.surfacePairs.some((pair) => pair.source?.faces.length || pair.target?.faces.length);
-const initialScene = createSample();
+/** Set when the page was opened by an MCP server's live view. */
+export const liveFollow =
+  typeof location !== 'undefined' && new URLSearchParams(location.search).has('live');
+const initialScene: SceneDocument = liveFollow
+  ? { name: 'Waiting for the agent', parts: [], joints: [], constraints: [] }
+  : createSample();
 const historyLimit = 40;
 
 interface EditorState {
@@ -101,6 +106,7 @@ interface EditorState {
   revision: number;
   savedRevision: number;
   recoveryStatus: 'saving' | 'saved' | 'error';
+  liveStatus: 'connecting' | 'connected' | 'disconnected' | null;
   modal: Modal;
   toast: Toast | null;
   busy: string | null;
@@ -165,6 +171,8 @@ interface EditorState {
   duplicateSelected: () => void;
   replaceWithMerged: (part: Part, ids: string[]) => void;
   setScene: (scene: SceneDocument, recovered?: boolean) => void;
+  /** Takes the scene from a live view's server, leaving the camera and tools where they are. */
+  followScene: (scene: SceneDocument) => void;
   renameScene: (name: string) => void;
   undo: () => void;
   redo: () => void;
@@ -200,7 +208,7 @@ const withoutRemovedParts = (state: EditorState, ids: string[]) => {
 
 export const useEditor = create<EditorState>((set, get) => ({
   scene: initialScene,
-  selected: ['torso'],
+  selected: liveFollow ? [] : ['torso'],
   clipboard: null,
   contextMenu: null,
   tool: 'select',
@@ -243,6 +251,7 @@ export const useEditor = create<EditorState>((set, get) => ({
   revision: 0,
   savedRevision: 0,
   recoveryStatus: 'saved',
+  liveStatus: null,
   modal: null,
   toast: null,
   busy: null,
@@ -1112,6 +1121,22 @@ export const useEditor = create<EditorState>((set, get) => ({
       view: { ...state.view, explode: 0 },
       focusRequest: { id: state.focusRequest.id + 1, all: true },
     })),
+  followScene: (scene) =>
+    set((state) => {
+      const ids = new Set(scene.parts.map((part) => part.id));
+      return {
+        scene,
+        selected: state.selected.filter((id) => ids.has(id)),
+        past: [],
+        future: [],
+        revision: state.revision + 1,
+        savedRevision: state.revision + 1,
+        ...withoutRemovedParts(
+          state,
+          state.scene.parts.map((part) => part.id).filter((id) => !ids.has(id)),
+        ),
+      };
+    }),
   renameScene: (name) =>
     set((state) => {
       const next = name.trim() || 'Untitled assembly';

@@ -1,11 +1,11 @@
 # Verification
 
-Verified locally on November 8, 2026.
+Verified locally on November 9, 2026.
 
 ## Automated checks
 
 - `npm run build`: TypeScript checks and production compilation pass.
-- `npm test`: **188 tests pass**, covering Kabsch registration, non-collinear
+- `npm test`: **391 tests pass**, covering Kabsch registration, non-collinear
   point selection, reflection prevention, all four alignment methods, axis locks,
   anchor coincidence, descendant propagation, capture of the current pose when
   locking an axis, invalid joint graphs, scene round trips, mesh combination,
@@ -18,7 +18,7 @@ Verified locally on November 8, 2026.
   `tests/unit/regressions.test.ts` adds lossless compact scene numbers, retained
   normals, typed-array recovery, reopenable subset exports, mirrored STL facets,
   geometry disposal, and projection-preserving camera transfer.
-- `npm run test:e2e`: **80 browser tests pass** in headless installed Google Chrome.
+- `npm run test:e2e`: **88 browser tests pass** in headless installed Google Chrome.
   Exercises real gizmo dragging, numeric edit cancellation, surface picking,
   joint creation, local recovery, save/open, STL import, combination/undo,
   GLB/3MF downloads and reimports, physical scale, Boolean worker volume and
@@ -57,6 +57,29 @@ at 1440 × 1000 and 390 × 844. Browser tests assert no page/console errors or V
 error overlay, preserve native field editing, and verify no horizontal overflow.
 Context menus reposition on resize, and early right-button menus dismiss when a
 surface gesture becomes a camera pan.
+
+## MCP server
+
+`tests/unit/mcp/` compares every shape with its analytic volume and checks that it stays closed
+through any placement. It covers each session operation, including all-or-nothing calls, joints,
+plane constraints, Booleans, every import and export format, renderer pixels, and the protocol
+through a real client, with every tool reached. It also tries the live view's refusals: other host
+names, a missing token, and paths outside the app. `tests/e2e/mcp.spec.ts` starts the built server
+over real stdio, opens a saved scene in the app, and follows live edits in Chrome. It checks that
+each mesh is fetched once, that autosave is left alone, and that the server exits with its client.
+
+Two real clients each built a stool from one prompt, through the built server, with no tool errors:
+
+| Client              | Model                        | Result                                             |
+| ------------------- | ---------------------------- | -------------------------------------------------- |
+| Claude Code 2.1.319 | `claude-haiku-5-5`           | All 26 tools listed. 5 parts, checked and saved    |
+| Codex CLI 0.167.0   | `gpt-6.1-sol`, low reasoning | 5 parts, checked and saved, in a read-only sandbox |
+
+Each was asked for the scale bar's text in the image it rendered, which no tool result states.
+Both answered `100 MM`, which matches the image, so the render does reach the model. Both saved
+files reopened through the server with correct dimensions and no isolated parts. Codex ran with
+`approval_policy = "never"` and `default_tools_approval_mode = "approve"`. Its interactive approval
+prompts were not exercised.
 
 ## Large scenes
 

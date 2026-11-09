@@ -21,6 +21,8 @@ export interface InspectionMesh {
 export interface InspectionRequest {
   meshes: InspectionMesh[];
   distance: number;
+  /** False skips the near-surface overlay meshes, for callers that only need the pairs. */
+  surfaces?: boolean;
 }
 
 export interface InspectionPair {

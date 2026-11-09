@@ -17,5 +17,13 @@
     "noUnusedParameters": true,
     "types": ["vite/client", "vitest/globals"]
   },
-  "include": ["src", "tests", "vite.config.ts", "vitest.config.ts", "playwright.config.ts"]
+  "include": [
+    "src",
+    "mcp",
+    "tests",
+    "vite.config.ts",
+    "vite.mcp.config.ts",
+    "vitest.config.ts",
+    "playwright.config.ts"
+  ]
 }
