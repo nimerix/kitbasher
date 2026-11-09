@@ -2049,6 +2049,35 @@ optgroup {
   gap: 20px;
   z-index: 20;
 }
+.site-footer {
+  display: flex;
+  flex-shrink: 0;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 4px 16px;
+  padding: 4px 12px;
+  border-top: 1px solid var(--border);
+  background: #1c1f23;
+  color: var(--muted);
+  font-size: 10px;
+}
+.site-footer nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0 14px;
+}
+.site-footer a {
+  padding: 5px 0;
+  text-underline-offset: 3px;
+}
+.site-footer a:hover {
+  color: var(--text);
+}
+.site-footer a:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
 .navigation-hints {
   display: flex;
   align-items: center;
