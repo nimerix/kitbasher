@@ -74,6 +74,7 @@ The server gives connecting agents these conventions, along with a suggested way
 | `align_parts`                                        | Point to point, point to plane, plane to plane, and best fit through three or more point pairs                                |
 | `fit_surfaces`                                       | Contact fit, flush fit across seams, and plane relationships, from patches of a mesh around a point. Suited to imported scans |
 | `fit_anchors`                                        | Best-fit a part so points on it reach world targets, leaving gaps rather than stretching                                      |
+| `set_clipping`                                       | Keep later moves and fits out of other parts, with an allowed overlap. Off by default                                         |
 | `create_joint`, `update_joint`                       | Connect a child to a parent at anchors, with locked rotation axes                                                             |
 | `create_plane_constraint`, `update_plane_constraint` | Keep a mate, parallel, perpendicular, or angle relationship through later moves                                               |
 | `remove_relationships`                               | Remove joints and plane constraints, leaving parts in place                                                                   |
@@ -94,6 +95,13 @@ calls in parallel; they run in the order they were sent.
 
 **Relationships stay in force.** Joints, plane constraints, and locks hold through every later move,
 as they do in the app. A result marked `constrained` did not reach the requested pose.
+
+**Parts can overlap unless told otherwise.** Agents often embed primitives in each other on purpose,
+so clipping is not avoided by default. After `set_clipping`, `update_parts`, `place_parts`,
+`align_parts`, `fit_surfaces`, and `fit_anchors` keep the moved parts out of every other visible part,
+within `max_overlap_mm`. A result that was affected carries a `clip` object or a `note` saying how far
+it moved and which parts blocked it, and `unresolved` when a joint, lock, constraint, or tight fit
+held an overlap. The setting belongs to the agent's session; each tab of the live view has its own.
 
 **Nothing is written until asked.** The scene lives in the server's memory and ends with the session,
 so agents should call `save_scene`. Saves and exports will not replace another existing file without

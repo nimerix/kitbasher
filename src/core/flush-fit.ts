@@ -5,9 +5,15 @@ import { quat, vec } from './geometry';
 import { solvePlaneConstraints } from './plane-constraints';
 import { fitPatchPlane, worldPlane } from './planes';
 import { completedSurfacePairs } from './surfaces';
-import type { AssemblyOperation, Part, SceneDocument } from './types';
+import { placeClear } from './clipping';
+import type { ClipReport } from './clipping';
+import type { AssemblyOperation, ClipSettings, Part, SceneDocument } from './types';
 
-export function solveFlushAlignment(scene: SceneDocument, operation: AssemblyOperation) {
+export function solveFlushAlignment(
+  scene: SceneDocument,
+  operation: AssemblyOperation,
+  clip?: ClipSettings,
+) {
   const source = scene.parts.find((part) => part.id === operation.sourceId);
   if (!source || source.locked) throw new Error('Choose an unlocked moving part.');
   const complete = completedSurfacePairs(operation.surfacePairs);
@@ -55,6 +61,16 @@ export function solveFlushAlignment(scene: SceneDocument, operation: AssemblyOpe
       (part) => !movable.has(part.id) || regions.some((region) => region.targetId === part.id),
     )
     .map((part) => part.id);
+  const seat = (requested: Part) => {
+    const parts = solvePlaneConstraints(
+      scene,
+      transformAssembly(scene.parts, scene.joints, source.id, requested, {
+        stationaryIds: fixedIds,
+      }),
+      fixedIds,
+    );
+    return { parts, placed: parts.find((part) => part.id === source.id)! };
+  };
   const place = (parameters: number[]) => {
     const rotationVector = new Vector3(
       ...(parameters.slice(3) as [number, number, number]),
@@ -73,14 +89,7 @@ export function solveFlushAlignment(scene: SceneDocument, operation: AssemblyOpe
         .toArray(),
       quaternion: rotation.multiply(quat(source.quaternion)).normalize().toArray(),
     };
-    const parts = solvePlaneConstraints(
-      scene,
-      transformAssembly(scene.parts, scene.joints, source.id, requested, {
-        stationaryIds: fixedIds,
-      }),
-      fixedIds,
-    );
-    return { parts, placed: parts.find((part) => part.id === source.id)! };
+    return seat(requested);
   };
   const residuals = (parameters: number[]) => {
     const { parts, placed } = place(parameters);
@@ -143,8 +152,24 @@ export function solveFlushAlignment(scene: SceneDocument, operation: AssemblyOpe
     }
     if (!improved) break;
   }
+  let fitted: { parts: Part[]; placed: Part } = best;
+  let report: ClipReport | null = null;
+  if (clip?.enabled) {
+    const clear = placeClear({
+      parts: scene.parts,
+      joints: scene.joints,
+      ids: [source.id],
+      target: [best.placed],
+      place: ([pose]) => seat(pose).parts,
+      overlap: clip.overlap,
+      mode: 'fit',
+      rotate: true,
+    });
+    report = clear.report;
+    fitted = { parts: clear.parts, placed: clear.parts.find((part) => part.id === source.id)! };
+  }
   const regionErrors = regions.map((region) => {
-    const moving = worldPlane(best.placed, region.movingPlane);
+    const moving = worldPlane(fitted.placed, region.movingPlane);
     return {
       region: region.index,
       distance: Math.abs(moving.point.sub(region.targetPlane.point).dot(region.targetPlane.normal)),
@@ -152,7 +177,7 @@ export function solveFlushAlignment(scene: SceneDocument, operation: AssemblyOpe
     };
   });
   return {
-    parts: best.parts,
+    parts: fitted.parts,
     rms: Math.sqrt(
       regionErrors.reduce((sum, region) => sum + region.distance ** 2, 0) / regionErrors.length,
     ),
@@ -161,5 +186,6 @@ export function solveFlushAlignment(scene: SceneDocument, operation: AssemblyOpe
     constrained: regionErrors.some((region) => region.distance > 0.05 || region.angle > 1),
     anchored: scene.joints.some((joint) => joint.childId === source.id && isJointConnected(joint)),
     addedConstraints: [],
+    clip: report,
   };
 }

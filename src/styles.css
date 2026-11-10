@@ -409,7 +409,8 @@ optgroup {
   background: #5c402f55;
   border-color: #79543c;
 }
-.snap-toggle {
+.snap-toggle,
+.clip-toggle {
   display: flex;
   align-items: center;
   gap: 7px;
@@ -417,7 +418,8 @@ optgroup {
   color: #a4aab4;
   padding: 5px;
 }
-.snap-toggle.active {
+.snap-toggle.active,
+.clip-toggle.active {
   color: #e3a473;
 }
 .mini-toggle {
@@ -453,6 +455,22 @@ optgroup {
   border-radius: 4px;
   background-color: #282b30;
   padding: 4px 6px;
+}
+.clip-overlap {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 10px;
+  color: #959aa3;
+}
+.clip-overlap input {
+  width: 46px;
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  border: 1px solid #42464d;
+  border-radius: 4px;
+  background-color: #282b30;
+  padding: 4px 5px;
 }
 .space-button {
   display: flex;
@@ -2931,7 +2949,8 @@ optgroup {
   .tool-button.merge-tool {
     padding: 0 6px;
   }
-  .snap-toggle > span:not(.mini-toggle) {
+  .snap-toggle > span:not(.mini-toggle),
+  .clip-toggle > span:not(.mini-toggle) {
     display: none;
   }
   .history-tools {
@@ -3142,13 +3161,16 @@ optgroup {
   .toolbar-right > .space-button {
     display: none;
   }
-  .snap-toggle {
+  .snap-toggle,
+  .clip-toggle {
     padding: 4px;
   }
-  .snap-toggle > .mini-toggle {
+  .snap-toggle > .mini-toggle,
+  .clip-toggle > .mini-toggle {
     display: none;
   }
-  .snap-step {
+  .snap-step,
+  .clip-overlap {
     display: none;
   }
   .parts-panel,
@@ -3373,7 +3395,8 @@ optgroup {
   .toolbar-right > .icon-button {
     width: 25px;
   }
-  .toolbar-right .snap-toggle > svg {
+  .toolbar-right .snap-toggle > svg,
+  .toolbar-right .clip-toggle > svg {
     width: 14px;
   }
   .toolbar-right {

@@ -51,6 +51,11 @@ provide spatial context. Smaller screens use collapsible sidebars.
   The Constraints tab exposes names, parameters, residuals, suppression, and deletion.
   Save/recovery and internal clipboard relationships retain these definitions;
   Blender/GLB retain solved placement and plane metadata, with live solving in Kitbasher.
+- Offer a persisted No clip toggle, on by default, with an adjustable overlap allowance in
+  millimeters. Every move and fit treats other visible parts as solid: drags slide along
+  surfaces and never tunnel, and typed values, alignments, and anchor fits land on the nearest
+  clear placement. Joints, locks, and kept constraints win, and remaining overlap is reported.
+  Existing overlap is kept by moves and never deepened. See [clipping](#avoiding-clipping).
 - Allow any number of matching pairs after the third, show pending pair state,
   per-pair removal, and preview RMS using the same solver used on application.
 - Explicitly save and reopen a self-contained .kitbash scene, with IndexedDB
@@ -64,6 +69,18 @@ provide spatial context. Smaller screens use collapsible sidebars.
 Image generation tools are unavailable in this session. The visual specification
 is code-native; there is no generated concept image. The rendered robot must
 remain actual 3D geometry rather than a background image.
+
+## Avoiding clipping
+
+`src/core/clipping.ts` places parts as near a requested pose as other parts allow. Surface
+samples of each part are measured against the other's mesh in both directions. Each contact
+is a plane the moving part must stay in front of, less the allowance, and the smallest
+correcting step is solved from those planes. A sample near an edge may pass it on either
+side, so its plane is chosen from where the step takes it. A gesture marches from the
+current pose in short steps and only accepts placements measured clear, which is what stops
+tunnelling. A fit starts at its target and steps out. Corrections shift a part for moves and
+plane methods, and may also turn it for best fits. The solver calls the same joint and
+constraint pipeline as an unobstructed move, so those relationships hold throughout.
 
 ## Camera navigation
 

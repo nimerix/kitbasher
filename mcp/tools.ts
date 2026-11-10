@@ -21,8 +21,9 @@ Working well:
 1. Build in real-world sizes, with one part per physical piece so it stays movable. add_parts takes many parts in one call, and one part can merge several shapes.
 2. Use place_parts to stack or seat parts by their actual bounds rather than computing coordinates by hand. duplicate_parts makes mirrors and arrays.
 3. Look at the result: call render_view after each stage. Coordinates that seem right can still look wrong. Then call inspect_interference, which reports overlaps, gaps, and parts floating free of everything else.
-4. Use create_joint for parts that pivot and create_plane_constraint for relationships that must survive later moves. Joints, plane constraints, and locks stay in force through every later move, so a result marked constrained did not reach the requested pose.
-5. Nothing is written to disk until save_scene or export_scene. Every tool call is one undo step, and a call that fails changes nothing.
+4. Parts may overlap freely by default, which suits primitives embedded in each other. For separately made pieces that must not pass through each other, such as scans, call set_clipping: moves and fits then stop at the surfaces of other visible parts, and a result with clip says how far that moved it.
+5. Use create_joint for parts that pivot and create_plane_constraint for relationships that must survive later moves. Joints, plane constraints, and locks stay in force through every later move, so a result marked constrained did not reach the requested pose.
+6. Nothing is written to disk until save_scene or export_scene. Every tool call is one undo step, and a call that fails changes nothing.
 
 Working with the user: open_live_view opens this scene in the Kitbasher app, where the user can watch and edit it too. Changes merge, so their edits and yours both stand. A result with user_changes lists what they changed since your previous call: re-read those parts with get_scene before relying on earlier values, and build on their work rather than reverting it. undo reverts only your own changes.`;
 
@@ -402,6 +403,17 @@ export function createServer(session = new Session(), live = new LiveView()) {
       anchors: z.array(z.strictObject({ point: pointRef, target: vector('World target.') })).min(1),
     },
     ({ part: id, anchors }) => session.fitAnchors(id, anchors as never),
+  );
+
+  tool(
+    'set_clipping',
+    'Turns avoiding clipping on or off for this session. When on, update_parts, place_parts, align_parts, fit_surfaces, and fit_anchors keep the moved parts out of every other visible part, placing them as near the request as fits. max_overlap_mm is how far parts may sink into each other, which lets imperfect scans seat. Overlap that already exists is kept by plain moves and removed by fits. Joints, locks, and kept plane constraints still win, so a result can report an overlap it could not remove. Hidden parts are ignored.',
+    edits,
+    {
+      enabled: z.boolean().optional(),
+      max_overlap_mm: z.number().min(0).max(5).optional().describe('Default 0.1.'),
+    },
+    ({ enabled, max_overlap_mm }) => session.setClipping(enabled, max_overlap_mm),
   );
 
   tool(

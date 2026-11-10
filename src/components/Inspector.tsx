@@ -25,6 +25,7 @@ import { useEditor } from '../core/store';
 import { useShortcut } from '../core/preferences';
 import { isJointConnected, translationIsPinned } from '../core/constraints';
 import { solveAlignment } from '../core/alignment';
+import { clipNote } from '../core/clipping';
 import {
   degrees,
   quat,
@@ -524,6 +525,7 @@ function AssemblyInspector() {
   const tool = useEditor((s) => s.tool),
     op = useEditor((s) => s.operation),
     scene = useEditor((s) => s.scene),
+    clip = useEditor((s) => s.view.clip),
     setOperation = useEditor((s) => s.setOperation);
   const parts = scene.parts;
   const isJoint = tool === 'joint';
@@ -546,11 +548,12 @@ function AssemblyInspector() {
   const preview = useMemo(() => {
     if (isJoint || !enoughPairs || op.pending || painting) return null;
     try {
-      return { result: solveAlignment(scene, op), error: null };
+      return { result: solveAlignment(scene, op, clip), error: null };
     } catch (error) {
       return { result: null, error: (error as Error).message };
     }
-  }, [scene, op, enoughPairs, isJoint, painting]);
+  }, [scene, op, clip, enoughPairs, isJoint, painting]);
+  const clipping = clipNote(preview?.result?.clip, parts);
   const ready = enoughPairs && !op.pending && !painting && !preview?.error;
   const sourceJoint = scene.joints.find(
     (joint) => joint.childId === op.sourceId && isJointConnected(joint),
@@ -764,6 +767,17 @@ function AssemblyInspector() {
               Some seams remain more than 0.05 mm or 1° out of alignment. Review the cyan preview
               and each seam’s errors before applying this compromise. Conflicting regions, locks,
               joints, or the 30° local correction limit can prevent a perfect fit.
+            </p>
+          ) : null}
+          {clipping ? (
+            <p
+              className={`field-help ${preview?.result?.clip?.unresolved ? 'fit-error' : ''}`}
+              role="status"
+            >
+              Avoid clipping: {clipping}.
+              {preview?.result?.clip?.unresolved
+                ? ' A joint, constraint, or tight fit holds the overlap. Raise the allowed overlap or free the part.'
+                : ''}
             </p>
           ) : null}
           {sourceJoint && !isJoint ? (

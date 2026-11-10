@@ -9,6 +9,7 @@ import { DoubleSide, Euler, Matrix3, Matrix4, Quaternion, Ray, Vector3 } from 't
 import { fitAnchors, anchorGaps } from '../src/core/anchor-fit';
 import { solveAlignment } from '../src/core/alignment';
 import { evaluateBoolean } from '../src/core/boolean';
+import type { ClipReport } from '../src/core/clipping';
 import type { BooleanOperation } from '../src/core/boolean';
 import { captureComponents, instantiateComponents } from '../src/core/clipboard';
 import { anchorError, isJointConnected } from '../src/core/constraints';
@@ -337,13 +338,31 @@ function requestedPose(part: Part, update: PartUpdate): Partial<Part> {
   return patch;
 }
 
+/** What staying clear of other parts did to a placement, when it did anything. */
+function clipResult(report: ClipReport | null | undefined) {
+  if (!report || (!report.unresolved && report.moved < 0.001)) return {};
+  return {
+    clip: {
+      moved_mm: round(report.moved),
+      overlap_mm: round(report.depth),
+      blocked_by: report.blockers,
+      ...(report.unresolved ? { unresolved: true } : {}),
+    },
+  };
+}
+
 function moveResult(before: Part, requested: Partial<Part>) {
   const after = requirePart(before.id);
+  const { toast } = editor();
   const achieved = (['position', 'quaternion', 'scale'] as const).every((key) => {
     const wanted = requested[key];
     return !wanted || wanted.every((value, i) => Math.abs(value - after[key][i]) < 1e-6);
   });
-  return { ...describePart(after), ...(achieved ? {} : { constrained: true }) };
+  return {
+    ...describePart(after),
+    ...(achieved ? {} : { constrained: true }),
+    ...(toast?.kind === 'info' ? { note: toast.message } : {}),
+  };
 }
 
 function withFriendlyIds(parts: Part[], names?: string[]) {
@@ -459,6 +478,7 @@ export class Session {
       path: this.path,
       units: 'mm',
       unsaved: revision !== savedRevision,
+      avoid_clipping: this.clipping(),
       can_undo: history.undo,
       can_redo: history.redo,
       part_count: scene.parts.length,
@@ -497,6 +517,21 @@ export class Session {
         };
       }),
     };
+  }
+
+  clipping() {
+    const { enabled, overlap } = editor().view.clip;
+    return { enabled, max_overlap_mm: overlap };
+  }
+
+  setClipping(enabled?: boolean, overlap?: number) {
+    const current = editor().view.clip;
+    if (overlap !== undefined && (!Number.isFinite(overlap) || overlap < 0 || overlap > 5))
+      throw new Error('max_overlap_mm must be from 0 to 5.');
+    editor().setView({
+      clip: { enabled: enabled ?? current.enabled, overlap: overlap ?? current.overlap },
+    });
+    return this.clipping();
   }
 
   addParts(specs: PartSpec[]) {
@@ -888,7 +923,9 @@ export class Session {
 
   private applyOperation(operation: AssemblyOperation, sourceId: string) {
     const scene = editor().scene;
-    const solved = solveAlignment(scene, operation) as ReturnType<typeof solveAlignment> & {
+    const solved = solveAlignment(scene, operation, editor().view.clip) as ReturnType<
+      typeof solveAlignment
+    > & {
       angleError?: number;
       addedConstraints?: PlaneConstraint[];
     };
@@ -905,6 +942,7 @@ export class Session {
       ...(solved.constrained ? { constrained: true } : {}),
       ...(solved.anchored ? { anchored_by_joint: true } : {}),
       ...(added.length ? { plane_constraints_added: added.map((c) => c.id) } : {}),
+      ...clipResult(solved.clip),
     };
   }
 
@@ -917,9 +955,25 @@ export class Session {
         target: [...tuple3(anchor.target, `anchors[${i}].target`)],
       }));
       const scene = editor().scene;
-      setScene({ ...scene, parts: fitAnchors(scene, part.id, fit) });
+      const { clip } = editor().view;
+      let report: ClipReport | null = null;
+      setScene({
+        ...scene,
+        parts: fitAnchors(
+          scene,
+          part.id,
+          fit,
+          clip.enabled
+            ? { overlap: clip.overlap, mode: 'fit', report: (value) => (report = value) }
+            : undefined,
+        ),
+      });
       const placed = requirePart(part.id);
-      return { part: describePart(placed), gaps_mm: rounded(anchorGaps(placed)) };
+      return {
+        part: describePart(placed),
+        gaps_mm: rounded(anchorGaps(placed)),
+        ...clipResult(report),
+      };
     });
   }
 

@@ -2,7 +2,7 @@ import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { openAsBlob } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { Euler, Quaternion, Vector3 } from 'three';
 import { unzipSync } from 'fflate';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
@@ -1217,5 +1217,42 @@ describe('scene summary', () => {
     expect(described.scale).toBeUndefined();
     expect(described.locked).toBe(true);
     expect(described.visible).toBe(false);
+  });
+});
+
+describe('avoiding clipping', () => {
+  const view = useEditor.getState().view;
+  afterEach(() => useEditor.setState({ view }));
+
+  it('is off until asked for, then keeps moves and fits out of other parts', () => {
+    session.addParts([box('a'), box('b', [10, 10, 10], [30, 0, 0])]);
+    expect(session.summary().avoid_clipping).toEqual({ enabled: false, max_overlap_mm: 0.1 });
+    session.updateParts([{ id: 'b', position: [5, 0, 0] }]);
+    expectVector(pos('b'), [5, 0, 0]);
+
+    expect(session.setClipping(true, 0.2)).toEqual({ enabled: true, max_overlap_mm: 0.2 });
+    session.updateParts([{ id: 'b', position: [30, 0, 0] }]);
+    const moved = session.updateParts([{ id: 'b', position: [5, 0, 0] }]).updated[0];
+    expectVector(pos('b'), [9.8, 0, 0], 3);
+    expect(moved).toMatchObject({ constrained: true, note: 'b moved 4.80 mm to clear a' });
+
+    session.updateParts([{ id: 'b', position: [30, 0, 0] }]);
+    const placed = session.placeParts([{ id: 'b', target: 'a', side: '+x', gap: -3 }]).placed[0];
+    expectVector(pos('b'), [9.8, 0, 0], 3);
+    expect(placed.note).toMatch(/to clear a$/);
+
+    const aligned = session.alignParts({
+      source: 'b',
+      target: 'a',
+      method: 'point',
+      pairs: [{ source: { local: [-2, 0, 0] }, target: { face: '+x' } }],
+    });
+    expectVector(pos('b'), [9.8, 0, 0], 3);
+    expect(aligned.clip).toMatchObject({ blocked_by: ['a'], moved_mm: 2.8 });
+
+    const fitted = session.fitAnchors('b', [{ point: { face: '-x' }, target: [2, 0, 0] }]);
+    expectVector(pos('b'), [9.8, 0, 0], 2);
+    expect(fitted.clip?.blocked_by).toEqual(['a']);
+    expect(() => session.setClipping(true, 9)).toThrow('0 to 5');
   });
 });

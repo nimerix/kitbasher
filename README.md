@@ -134,7 +134,8 @@ for an empty workbench or to reload the sample.
    Contact RMS measures sampled distances to the actual matching painted surfaces,
    after joint constraints. This is a local fit; spread pairs around the join to
    distinguish similar or symmetric surfaces. It preserves scale and does not
-   deform the scan or perform collision avoidance. Unfinished pairs must be
+   deform the scan. With [No clip](#avoid-clipping) on, the fit stops at the surfaces
+   of other parts. Unfinished pairs must be
    completed or removed before fitting.
 
    **Paint flush:** press **B**, then choose **Paint flush · across seams** in
@@ -161,7 +162,7 @@ for an empty workbench or to reload the sample.
    and existing joints, locked parts, and retained plane constraints remain
    authoritative. Connected descendants may follow the moving part. Unpainted
    connections without joints or constraints are not automatically protected.
-   This does not scale, deform, weld, fill gaps, or check collisions. Painted
+   This does not scale, deform, weld, or fill gaps. Painted
    regions are temporary and reset on apply, cancel, or switching into/out of
    flush mode; the applied transforms are saved normally with the scene. Use
    retained plane constraints or joints for relationships that must persist
@@ -210,6 +211,43 @@ orthographic views, framing, visibility, and fixed part locks are included.
 Larger meshes use BVH-accelerated picking; rendering pauses when the view is idle. Above a
 million triangles, picking is prepared in the background: the mesh draws and can be selected
 in the parts list straight away, and can be clicked when the status bar notice clears.
+
+## Avoid clipping
+
+**No clip** in the toolbar keeps parts from passing through each other, the way physical
+pieces cannot. It starts on, is saved in this browser, and applies to every move and fit:
+
+- **Dragging** a move, rotate, or scale gizmo, or an anchor target, slides the part along the
+  surfaces it meets instead of pushing into them. It never jumps through a thin part,
+  however fast the pointer moves. Turning or scaling a part against another shifts it clear.
+  A dragged part can trail the pointer briefly on dense scans and settles when you release.
+- **Typed values** and every **alignment** (point, plane, 3+ point, contact fit, flush fit,
+  plane relationships) and **anchor fit** land on the nearest placement to the request that
+  stays clear. The preview, residuals, and RMS describe that achieved placement, and a note
+  says how far it moved and which parts were in the way.
+
+The field beside the toggle is the **allowed overlap** in millimeters, 0.1 by default and up
+to 5. Parts may sink into each other by that much and no farther, which lets imperfect
+scanned interfaces seat, like fitting with a file. Raise it for rough scans or a snug socket;
+set it to 0 for hard contact.
+
+- Every visible part is solid, including locked ones. **Hide a part** to work through it, for
+  example parts still piled where they were imported.
+- Overlap that already exists is never forced apart by a drag or a typed move, and can
+  always be pulled out, but cannot be pushed deeper. An alignment or anchor fit is a fresh
+  placement, so it does clear existing overlap.
+- Jointed parts may keep the overlap they have around their anchor, like a ball in a
+  socket, so they still pose freely. The rest of the part stops at its parent.
+- Joints, locks, and kept plane constraints stay authoritative. When one of them, or a fit
+  tighter than the allowance, holds parts together, the result says how much overlap remains.
+- Creating a joint or editing a kept constraint seats parts exactly as asked, without this check.
+
+Contact is measured from about 3,000 points spread evenly over each part, plus the edges of
+coarse meshes, against the exact surface of the other part. Features much finer than that
+spacing, or thinner than twice the allowed overlap, can slip through. Open scans block from
+both sides, except within a hair of their open rim. Meshes above a million triangles join in
+once they are prepared for clicking. This does not replace
+[interference inspection](#inspect-contact-and-interference), which measures exact overlap volume.
 
 ## Inspect contact and interference
 

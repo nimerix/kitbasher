@@ -75,11 +75,12 @@ function FlushPreview() {
   useEffect(() => () => material.dispose(), [material]);
   const scene = useEditor((state) => state.scene),
     operation = useEditor((state) => state.operation),
-    painting = useEditor((state) => state.painting);
+    painting = useEditor((state) => state.painting),
+    clip = useEditor((state) => state.view.clip);
   const parts = useMemo(() => {
     if (painting || operation.surfaceMethod !== 'flush') return [];
     try {
-      return solveAlignment(scene, operation).parts.filter((part) => {
+      return solveAlignment(scene, operation, clip).parts.filter((part) => {
         const original = scene.parts.find((entry) => entry.id === part.id)!;
         return (
           part.visible &&
@@ -92,7 +93,7 @@ function FlushPreview() {
     } catch {
       return [];
     }
-  }, [scene, operation, painting]);
+  }, [scene, operation, painting, clip]);
   return (
     <>
       {parts.map((part) => (

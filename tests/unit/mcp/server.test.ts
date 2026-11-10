@@ -243,6 +243,7 @@ describe('protocol', () => {
     await step('import_model', { path: join(folder, 'tour.stl') });
     await step('open_scene', { path: scene, discard_unsaved: true });
     await step('open_live_view', { open_browser: false });
+    await step('set_clipping', { enabled: false, max_overlap_mm: 0.2 });
     await step('get_scene');
     const { tools } = await client.listTools();
     expect([...called].sort()).toEqual(tools.map((tool) => tool.name).sort());

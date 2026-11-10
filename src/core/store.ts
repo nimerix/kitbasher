@@ -12,6 +12,13 @@ import {
 import { solveAlignment } from './alignment';
 import { fitAnchors } from './anchor-fit';
 import {
+  clipNote,
+  placeClear,
+  readClipSettings,
+  sanitizeClipSettings,
+  saveClipSettings,
+} from './clipping';
+import {
   planeKindLabels,
   solvePlaneConstraints,
   validatePlaneConstraints,
@@ -80,6 +87,8 @@ const initialScene: SceneDocument = liveSession
   ? { name: 'Waiting for the agent', parts: [], joints: [], constraints: [] }
   : createSample();
 const historyLimit = 40;
+// Leaves a dragged frame time to draw. The part catches up over the next frames.
+const gestureBudget = 12;
 
 interface EditorState {
   scene: SceneDocument;
@@ -141,6 +150,8 @@ interface EditorState {
     target: Vec3,
     checkpoint?: boolean,
     baseline?: SceneDocument,
+    /** Part of a drag, or the end of one, rather than a typed value. */
+    gesture?: 'drag' | 'settle',
   ) => void;
   removeFitAnchor: (partId: string, anchorId: string) => void;
   rebaseFitAnchors: (partId: string) => void;
@@ -168,6 +179,8 @@ interface EditorState {
     patches: { id: string; patch: Partial<Part> }[],
     checkpoint?: boolean,
     moveConnected?: boolean,
+    /** The drag has ended, so finish avoiding other parts at full detail. */
+    settle?: boolean,
   ) => void;
   patchParts: (ids: string[], patch: Partial<Part>, checkpoint?: boolean) => void;
   addParts: (parts: Part[]) => void;
@@ -239,6 +252,7 @@ export const useEditor = create<EditorState>((set, get) => ({
       closestPoints: false,
       context: true,
     },
+    clip: readClipSettings(),
     orbitSelection: readOrbitPreference(),
     grid: true,
     joints: false,
@@ -399,7 +413,7 @@ export const useEditor = create<EditorState>((set, get) => ({
       activeAnchor: anchor.id,
     });
   },
-  moveFitAnchor: (partId, anchorId, target, checkpoint = true, baseline) => {
+  moveFitAnchor: (partId, anchorId, target, checkpoint = true, baseline, gesture) => {
     const state = get();
     const scene = baseline ?? state.scene;
     const part = scene.parts.find((p) => p.id === partId);
@@ -413,7 +427,7 @@ export const useEditor = create<EditorState>((set, get) => ({
       state.view.explode ||
       !anchor ||
       !target.every(Number.isFinite) ||
-      target.every((v, i) => v === anchor.target[i])
+      (gesture !== 'settle' && target.every((v, i) => v === anchor.target[i]))
     )
       return;
     const anchors = part.anchors?.map((a) =>
@@ -421,8 +435,25 @@ export const useEditor = create<EditorState>((set, get) => ({
     );
     if (!anchors) return;
     try {
-      const parts = fitAnchors(scene, partId, anchors);
+      const { clip } = state.view;
+      let note = '';
+      const parts = fitAnchors(
+        scene,
+        partId,
+        anchors,
+        clip.enabled
+          ? {
+              overlap: clip.overlap,
+              mode: gesture ? 'drag' : 'adjust',
+              current: state.scene.parts,
+              budget: gesture === 'drag' ? gestureBudget : undefined,
+              settle: gesture === 'settle',
+              report: (report) => (note = clipNote(report, state.scene.parts)),
+            }
+          : undefined,
+      );
       set(changed(state, { ...state.scene, parts }, checkpoint));
+      if (note && !gesture) state.notify(`Anchor fit ${note}`, 'info');
     } catch (error) {
       const message = (error as Error).message;
       if (get().toast?.message !== message) state.notify(message, 'error');
@@ -782,10 +813,12 @@ export const useEditor = create<EditorState>((set, get) => ({
       return;
     }
     try {
-      const { parts, rms, constrained, anchored, addedConstraints } = solveAlignment(
+      const { parts, rms, constrained, anchored, addedConstraints, clip } = solveAlignment(
         state.scene,
         op,
+        state.view.clip,
       );
+      const note = clipNote(clip, state.scene.parts);
       set({
         ...changed(state, {
           ...state.scene,
@@ -822,8 +855,9 @@ export const useEditor = create<EditorState>((set, get) => ({
               : ' · limited by joint constraints'
             : anchored
               ? ' · anchor connected'
-              : ''),
-        constrained ? 'info' : 'success',
+              : '') +
+          (note ? ` · ${note}` : ''),
+        constrained || clip?.unresolved ? 'info' : 'success',
       );
     } catch (error) {
       state.notify((error as Error).message, 'error');
@@ -971,31 +1005,49 @@ export const useEditor = create<EditorState>((set, get) => ({
     set((state) => {
       const part = state.scene.parts.find((p) => p.id === id);
       if (!part || part.locked) return {};
-      let parts = transformAssembly(
-        state.scene.parts,
-        state.scene.joints,
-        id,
-        { ...part, ...patch },
-        { moveConnected: !!patch.position && !patch.quaternion && !patch.scale },
-      );
+      const place = (requested: Part) =>
+        solvePlaneConstraints(
+          state.scene,
+          transformAssembly(state.scene.parts, state.scene.joints, id, requested, {
+            moveConnected: !!patch.position && !patch.quaternion && !patch.scale,
+          }),
+        );
+      const { clip } = state.view;
+      let parts: Part[];
+      let note = '';
       try {
-        parts = solvePlaneConstraints(state.scene, parts);
+        if (clip.enabled) {
+          const result = placeClear({
+            parts: state.scene.parts,
+            joints: state.scene.joints,
+            ids: [id],
+            target: [{ ...part, ...patch }],
+            place: ([pose]) => place(pose),
+            overlap: clip.overlap,
+            mode: 'adjust',
+          });
+          parts = result.parts;
+          note = clipNote(result.report, state.scene.parts);
+        } else parts = place({ ...part, ...patch });
       } catch (error) {
         const message = (error as Error).message;
         if (get().toast?.message !== message) get().notify(message, 'error');
         return {};
       }
-      return parts === state.scene.parts
-        ? {}
-        : changed(state, { ...state.scene, parts }, checkpoint);
+      return {
+        ...(parts === state.scene.parts
+          ? {}
+          : changed(state, { ...state.scene, parts }, checkpoint)),
+        ...(note
+          ? { toast: { id: uid(), message: `${part.name} ${note}`, kind: 'info' as const } }
+          : {}),
+      };
     }),
-  transformMany: (patches, checkpoint = true, moveConnected = false) =>
+  transformMany: (patches, checkpoint = true, moveConnected = false, settle = false) =>
     set((state) => {
-      let parts = state.scene.parts;
       const ids = new Set(patches.map((p) => p.id));
-      for (const { id, patch } of patches) {
-        let ancestor = id,
-          hasSelectedAncestor = false;
+      const driven = patches.filter(({ id }) => {
+        let ancestor = id;
         const checked = new Set<string>();
         while (!checked.has(ancestor)) {
           checked.add(ancestor);
@@ -1003,25 +1055,40 @@ export const useEditor = create<EditorState>((set, get) => ({
             (j) => j.childId === ancestor && isJointConnected(j),
           )?.parentId;
           if (!parent) break;
-          if (ids.has(parent)) {
-            hasSelectedAncestor = true;
-            break;
-          }
+          if (ids.has(parent)) return false;
           ancestor = parent;
         }
-        if (hasSelectedAncestor) continue;
-        const part = parts.find((p) => p.id === id);
-        if (part && !part.locked)
-          parts = transformAssembly(
-            parts,
-            state.scene.joints,
-            id,
-            { ...part, ...patch },
-            { moveConnected },
-          );
-      }
+        const part = state.scene.parts.find((p) => p.id === id);
+        return !!part && !part.locked;
+      });
+      const place = (poses: Part[]) => {
+        let parts = state.scene.parts;
+        driven.forEach(({ id }, i) => {
+          parts = transformAssembly(parts, state.scene.joints, id, poses[i], { moveConnected });
+        });
+        return solvePlaneConstraints(state.scene, parts);
+      };
+      const target = driven.map(({ id, patch }) => ({
+        ...state.scene.parts.find((p) => p.id === id)!,
+        ...patch,
+      }));
+      const { clip } = state.view;
+      let parts: Part[];
       try {
-        parts = solvePlaneConstraints(state.scene, parts);
+        parts =
+          clip.enabled && driven.length
+            ? placeClear({
+                parts: state.scene.parts,
+                joints: state.scene.joints,
+                ids: driven.map(({ id }) => id),
+                target,
+                place,
+                overlap: clip.overlap,
+                mode: 'drag',
+                budget: settle ? undefined : gestureBudget,
+                settle,
+              }).parts
+            : place(target);
       } catch (error) {
         const message = (error as Error).message;
         if (get().toast?.message !== message) get().notify(message, 'error');
@@ -1193,6 +1260,10 @@ export const useEditor = create<EditorState>((set, get) => ({
         ),
   setView: (patch) => {
     if (patch.orbitSelection !== undefined) saveOrbitPreference(patch.orbitSelection);
+    if (patch.clip) {
+      patch = { ...patch, clip: sanitizeClipSettings(patch.clip, get().view.clip) };
+      saveClipSettings(patch.clip!);
+    }
     set((state) => ({
       view: { ...state.view, ...patch },
     }));

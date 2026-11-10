@@ -23,6 +23,7 @@ import {
   Link2,
   LoaderCircle,
   Magnet,
+  Shield,
   Maximize,
   MousePointer2,
   Move3D,
@@ -52,7 +53,8 @@ import { PreferencesPanel } from './components/PreferencesPanel';
 import { PartsPanel } from './components/PartsPanel';
 import { Inspector } from './components/Inspector';
 import { Dialogs } from './components/Dialogs';
-import { IconButton, Keyboard, Logo, Modal, useDismiss } from './components/ui';
+import { IconButton, Keyboard, Logo, Modal, NumericInput, useDismiss } from './components/ui';
+import { clipLimits } from './core/clipping';
 import type { SceneDocument, Tool } from './core/types';
 
 const Viewport = lazy(() =>
@@ -416,6 +418,38 @@ function Toolbar({
             <option value={1}>1 mm</option>
             <option value={5}>5 mm</option>
           </select>
+        ) : null}
+        <span className="tool-divider" />
+        <button
+          className={`clip-toggle ${view.clip.enabled ? 'active' : ''}`}
+          title="Keep parts from passing through each other. Moves slide along other parts, and fits stop at their surfaces."
+          aria-label="Avoid clipping"
+          aria-pressed={view.clip.enabled}
+          onClick={() =>
+            useEditor.getState().setView({ clip: { ...view.clip, enabled: !view.clip.enabled } })
+          }
+        >
+          <Shield size={15} />
+          <span>No clip</span>
+          <span className={`mini-toggle ${view.clip.enabled ? 'on' : ''}`} />
+        </button>
+        {view.clip.enabled ? (
+          <label
+            className="clip-overlap"
+            title="How far parts may sink into each other, for seating imperfect scans"
+          >
+            <NumericInput
+              label="Allowed overlap"
+              value={view.clip.overlap}
+              min={clipLimits.min}
+              max={clipLimits.max}
+              step={0.05}
+              onCommit={(overlap) =>
+                useEditor.getState().setView({ clip: { ...view.clip, overlap } })
+              }
+            />
+            <small>mm</small>
+          </label>
         ) : null}
         <span className="tool-divider" />
         <button

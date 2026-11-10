@@ -270,14 +270,19 @@ function TransformGizmo() {
     dragging = useRef(false);
   const [dragVersion, setDragVersion] = useState(0);
   const [controlVersion, setControlVersion] = useState(0);
-  const start = useRef<{ motion: PrecisionDrag; parts: Part[]; checkpointed: boolean } | null>(
-    null,
-  );
+  const start = useRef<{
+    motion: PrecisionDrag;
+    parts: Part[];
+    checkpointed: boolean;
+    settle?: () => void;
+  } | null>(null);
   const invalidate = useThree((s) => s.invalidate);
   const getRoot = useThree((s) => s.get);
   const finishDrag = useCallback(() => {
     if (!dragging.current) return;
     dragging.current = false;
+    // A drag keeps each frame short, so finish avoiding other parts now that it has ended.
+    start.current?.settle?.();
     start.current = null;
     const cameraControls = getRoot().controls;
     if (cameraControls && 'enabled' in cameraControls) cameraControls.enabled = true;
@@ -381,11 +386,16 @@ function TransformGizmo() {
           if (patches.some((p) => p.patch.scale?.some((v) => Math.abs(v) < 0.001))) return;
           // The first real change checkpoints the drag, so a press without motion
           // adds no undo step and keeps redo available.
-          const before = useEditor.getState().scene;
-          useEditor
-            .getState()
-            .transformMany(patches, !start.current.checkpointed, tool === 'translate');
-          if (useEditor.getState().scene !== before) start.current.checkpointed = true;
+          const drag = start.current;
+          const apply = (settle: boolean) => {
+            const before = useEditor.getState().scene;
+            useEditor
+              .getState()
+              .transformMany(patches, !drag.checkpointed, tool === 'translate', settle);
+            if (useEditor.getState().scene !== before) drag.checkpointed = true;
+          };
+          apply(false);
+          drag.settle = useEditor.getState().view.clip.enabled ? () => apply(true) : undefined;
         }}
       />
     </>
@@ -399,6 +409,7 @@ function AnchorHandle({ part, anchor }: { part: Part; anchor: FitAnchor }) {
     motion: PrecisionDrag;
     origin: Vector3;
     checkpointed: boolean;
+    settle?: () => void;
   } | null>(null);
   const [version, setVersion] = useState(0);
   const getRoot = useThree((s) => s.get),
@@ -406,6 +417,7 @@ function AnchorHandle({ part, anchor }: { part: Part; anchor: FitAnchor }) {
   const view = useEditor((s) => s.view);
   const finish = useCallback(() => {
     if (!start.current) return;
+    start.current.settle?.();
     start.current = null;
     const controls = getRoot().controls;
     if (controls && 'enabled' in controls) controls.enabled = true;
@@ -456,9 +468,15 @@ function AnchorHandle({ part, anchor }: { part: Part; anchor: FitAnchor }) {
           const delta = drag.motion.update(proxy.matrixWorld, state.precision ? 0.1 : 1);
           if (!delta) return;
           const target = drag.origin.clone().applyMatrix4(delta).toArray();
-          const before = state.scene;
-          state.moveFitAnchor(part.id, anchor.id, target, !drag.checkpointed, drag.scene);
-          if (useEditor.getState().scene !== before) drag.checkpointed = true;
+          const apply = (gesture: 'drag' | 'settle') => {
+            const before = useEditor.getState().scene;
+            useEditor
+              .getState()
+              .moveFitAnchor(part.id, anchor.id, target, !drag.checkpointed, drag.scene, gesture);
+            if (useEditor.getState().scene !== before) drag.checkpointed = true;
+          };
+          apply('drag');
+          drag.settle = state.view.clip.enabled ? () => apply('settle') : undefined;
         }}
       />
     </>

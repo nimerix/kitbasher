@@ -2,6 +2,8 @@ import { Quaternion } from 'three';
 import { partMatrix, quat, rigidAlignment, vec } from './geometry';
 import { transformAssembly } from './constraints';
 import { solvePlaneConstraints } from './plane-constraints';
+import { placeClear } from './clipping';
+import type { ClipMode, ClipReport } from './clipping';
 import type { FitAnchor, Part, SceneDocument } from './types';
 
 export function anchorGaps(part: Part) {
@@ -11,8 +13,27 @@ export function anchorGaps(part: Part) {
   );
 }
 
-/** Equal-weight rigid best fit. Targets are soft; existing joints/planes stay authoritative. */
-export function fitAnchors(scene: SceneDocument, id: string, anchors: FitAnchor[]) {
+export interface AnchorClearance {
+  overlap: number;
+  mode: ClipMode;
+  /** Where the parts are now, when a drag fits from the scene as it was at its start. */
+  current?: Part[];
+  budget?: number;
+  settle?: boolean;
+  /** Receives what staying clear of other parts did to the fit. */
+  report?: (report: ClipReport | null) => void;
+}
+
+/**
+ * Equal-weight rigid best fit. Targets are soft; existing joints/planes stay authoritative. With
+ * `clear`, the fit also stays out of every other visible part.
+ */
+export function fitAnchors(
+  scene: SceneDocument,
+  id: string,
+  anchors: FitAnchor[],
+  clear?: AnchorClearance,
+) {
   const part = scene.parts.find((p) => p.id === id);
   if (!part || part.locked || !part.visible) throw new Error('Choose a visible, unlocked part.');
   if (!anchors.length) throw new Error('Add an anchor on the part first.');
@@ -35,9 +56,24 @@ export function fitAnchors(scene: SceneDocument, id: string, anchors: FitAnchor[
       .normalize()
       .toArray(),
   };
-  const placed = solvePlaneConstraints(
-    scene,
-    transformAssembly(scene.parts, scene.joints, id, requested),
-  );
+  const place = (pose: Part) =>
+    solvePlaneConstraints(scene, transformAssembly(scene.parts, scene.joints, id, pose));
+  let placed = place(requested);
+  if (clear) {
+    const result = placeClear({
+      parts: clear.current ?? scene.parts,
+      joints: scene.joints,
+      ids: [id],
+      target: [requested],
+      place: ([pose]) => place(pose),
+      overlap: clear.overlap,
+      mode: clear.mode,
+      rotate: true,
+      budget: clear.budget,
+      settle: clear.settle,
+    });
+    placed = result.parts;
+    clear.report?.(result.report);
+  }
   return placed.map((p) => (p.id === id ? { ...p, anchors } : p));
 }

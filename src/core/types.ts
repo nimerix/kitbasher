@@ -64,6 +64,12 @@ export interface PlaneConstraint {
   enabled: boolean;
 }
 
+export interface ClipSettings {
+  enabled: boolean;
+  /** How far parts may sink into each other, in mm. */
+  overlap: number;
+}
+
 export interface SceneDocument {
   name: string;
   parts: Part[];
@@ -174,6 +180,8 @@ export interface SceneFile {
 
 export interface ViewSettings {
   inspection: InspectionSettings;
+  /** Keep moves and fits from pushing parts through each other. */
+  clip: ClipSettings;
   orbitSelection: boolean;
   grid: boolean;
   joints: boolean;

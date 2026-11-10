@@ -11,6 +11,18 @@ export default defineConfig({
     channel: 'chrome',
     launchOptions: { args: ['--enable-unsafe-swiftshader'] },
     trace: 'retain-on-failure',
+    // These tests place parts inside each other freely. clipping.spec.ts covers the default.
+    storageState: {
+      cookies: [],
+      origins: [
+        {
+          origin: 'http://127.0.0.1:5173',
+          localStorage: [
+            { name: 'kitbasher.avoid-clipping', value: '{"enabled":false,"overlap":0.1}' },
+          ],
+        },
+      ],
+    },
   },
   webServer: {
     command: 'npm run dev -- --port 5173',
