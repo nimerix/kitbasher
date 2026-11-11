@@ -64,6 +64,11 @@ top of the viewport, with Studio as the default. Smaller screens use collapsible
   without changing what any export or merge contains. Adjust the scene's lighting with presets,
   brightness, and up to 8 directional or point lights, placed by handle or by numbers. Both are
   saved with the scene and undoable. See [editor colors and lighting](#editor-colors-and-lighting).
+- Offer a headset view where the browser has WebXR. The model is set within reach at a scale
+  the viewer chooses, parts are held by hand through the same joints, constraints, and No clip
+  as a drag, one or two hands move and resize the world, and a small panel in the headset
+  covers what the page's interface cannot. `npm run headset` shares one scene between a tab on
+  the computer and a headset on the network. See [headset](#headset).
 - Allow any number of matching pairs after the third, show pending pair state,
   per-pair removal, and preview RMS using the same solver used on application.
 - Explicitly save and reopen a self-contained .kitbash scene, with IndexedDB
@@ -165,6 +170,45 @@ light's position between the world and camera frames, so it stays where it is.
 In the live view, lighting merges in five groups: brightness, ambient, the sky fill with its
 colors, shadows, and the whole light list. Agents cannot set editor colors or lighting, and
 changes to either are left out of what an agent is told.
+
+## Headset
+
+A headset session runs in the viewport's own canvas and scene. The page's interface is not
+shown in a headset and no pointer events reach the canvas, so `src/xr/runtime.ts` reads the
+headset's poses each frame and acts on the editor store itself.
+
+The room, in meters, is a group in the scene, in millimeters. `src/core/xr.ts` holds its
+position, rotation, and scale as a rig, and the magnification is 1000 divided by that scale.
+The viewport's camera moves into the group for the session and goes back exactly as it was, so
+lights and anything else that follow the camera follow the viewer's head. Hands, the panel, and
+the scale readout are placed in the room, which keeps them their real size at any
+magnification. A new view sets the whole model 0.4 m across, 0.55 m ahead of the eyes and
+0.25 m below them, upright and seen from its front. A scene that arrives later, or replaces
+the one in view, is set the same way.
+
+One hand holding the world moves the rig so that the point it holds stays in it. Two hands
+also resize and turn the world about the point between them, and only about the vertical while
+Keep level is on. The hands start again from where they are each time one joins or leaves.
+
+A press acts on the first of: a part the hand touches or has reached into, the panel, and a
+part the ray meets. Touch reaches 20 mm in the room. The panel is drawn over everything and
+takes a ray before any part does, so it stays in reach when a magnified part surrounds it. A
+held part is asked to turn with the hand about the point it was taken by, and to travel as far
+as the hand has. That request goes through `transformMany` as a gizmo drag does, so joints,
+plane constraints, and No clip all apply. Clearing other parts gets 5 ms of a headset frame,
+where a mouse drag gets 12, and a part held back keeps closing on a hand that has stopped. A
+hold is one undo step, and letting go finishes the clearing at full detail. The drawn parts
+move in the same frame, a frame ahead of React.
+
+What needs the mouse, the page, or a second camera is left out of a session: gizmos, the view
+cube, point markers, and the ground shadow. Other shadows stop above 300,000 triangles, and
+the edge of view gives up detail above 500,000.
+
+`npm run headset` starts `mcp/headset.ts`: the live view's server without an agent, and a
+second, encrypted listener for the network. A device there is served one page, which asks for
+a six-digit code and trades the right one for the scene's address. Five wrong codes replace
+the code. Only tabs on the computer are told the code, and the loopback listener answers as it
+always has. The certificate is made on the computer and kept in the user's home folder.
 
 ## Camera navigation
 

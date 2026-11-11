@@ -5,6 +5,7 @@ import {
   Mesh,
   MeshDepthMaterial,
   PlaneGeometry,
+  Quaternion,
   ShaderMaterial,
   Sphere,
   UniformsUtils,
@@ -14,8 +15,9 @@ import {
 import type { DirectionalLight, Group, OrthographicCamera, PointLight } from 'three';
 import { HorizontalBlurShader } from 'three/addons/shaders/HorizontalBlurShader.js';
 import { VerticalBlurShader } from 'three/addons/shaders/VerticalBlurShader.js';
-import { sceneBounds, vec } from '../core/geometry';
+import { sceneBounds, triangleCount, vec } from '../core/geometry';
 import { sceneLighting, useEditor } from '../core/store';
+import { useXR } from '../core/xr-session';
 import type { Part, SceneLight } from '../core/types';
 
 export interface SceneFrame {
@@ -47,7 +49,12 @@ const shadowNear = 1;
 const shadowFar = 5;
 const shadowBias = -0.00066;
 
+// A headset draws the scene twice each frame and has a phone's graphics, so past this many
+// triangles it goes without the extra pass that shadows need.
+const headsetShadowTriangles = 300_000;
+
 const scratch = new Vector3();
+const turned = new Quaternion();
 
 function DirectionalSceneLight({
   light,
@@ -89,7 +96,11 @@ function DirectionalSceneLight({
   }, [light, invalidate]);
   useFrame(({ camera }) => {
     if (!light.camera || !ref.current) return;
-    scratch.fromArray(light.position).normalize().applyQuaternion(camera.quaternion);
+    // In a headset the camera sits in the room, which is itself turned within the scene.
+    scratch
+      .fromArray(light.position)
+      .normalize()
+      .applyQuaternion(camera.getWorldQuaternion(turned));
     ref.current.position.copy(frame.center).addScaledVector(scratch, lightDistance * frame.radius);
   });
   return (
@@ -112,9 +123,16 @@ function PointSceneLight({ light }: { light: SceneLight }) {
     invalidate();
   }, [light, invalidate]);
   useFrame(({ camera }) => {
-    if (!light.camera || !ref.current) return;
+    if (!ref.current) return;
+    // The shader measures range from the camera, which a headset places in a room of meters.
+    ref.current.distance = light.range / camera.getWorldScale(scratch).x;
+    if (!light.camera) return;
     camera.updateMatrixWorld();
-    ref.current.position.fromArray(light.position).applyMatrix4(camera.matrixWorld);
+    // Not the camera's matrix, which in a headset also carries the scale of the room.
+    ref.current.position
+      .fromArray(light.position)
+      .applyQuaternion(camera.getWorldQuaternion(turned))
+      .add(camera.getWorldPosition(scratch));
   });
   return (
     <pointLight
@@ -128,7 +146,7 @@ function PointSceneLight({ light }: { light: SceneLight }) {
   );
 }
 
-function Lights({ frame }: { frame: SceneFrame }) {
+function Lights({ frame, shadows }: { frame: SceneFrame; shadows: boolean }) {
   const lighting = useEditor(sceneLighting);
   const gl = useThree((s) => s.gl),
     invalidate = useThree((s) => s.invalidate);
@@ -150,7 +168,7 @@ function Lights({ frame }: { frame: SceneFrame }) {
             key={`${light.id}:directional`}
             light={light}
             frame={frame}
-            shadow={lighting.shadows && light.castShadow && !light.camera}
+            shadow={shadows && light.castShadow && !light.camera}
           />
         ) : (
           <PointSceneLight key={`${light.id}:point`} light={light} />
@@ -311,11 +329,20 @@ function GroundShadow({ frame }: { frame: SceneFrame }) {
  */
 export function SceneLighting() {
   const shadows = useEditor((s) => sceneLighting(s).shadows);
+  const headset = useXR((s) => !!s.session);
+  const sparse = useEditor(
+    (s) =>
+      s.scene.parts.reduce(
+        (total, part) => total + (part.visible ? triangleCount(part.geometry) : 0),
+        0,
+      ) <= headsetShadowTriangles,
+  );
   const frame = useSceneFrame();
   return (
     <>
-      <Lights frame={frame} />
-      {shadows ? <GroundShadow frame={frame} /> : null}
+      <Lights frame={frame} shadows={shadows && (!headset || sparse)} />
+      {/* The ground shadow is drawn to a texture with its own camera, which a headset replaces. */}
+      {shadows && !headset ? <GroundShadow frame={frame} /> : null}
     </>
   );
 }

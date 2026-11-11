@@ -44,7 +44,7 @@ import {
   Undo2,
   X,
 } from 'lucide-react';
-import { canRedo, canUndo, useEditor } from './core/store';
+import { canRedo, canUndo, liveHost, useEditor } from './core/store';
 import { editorCommands, executeEditorCommand, saveCurrentScene } from './core/commands';
 import type { CommandId } from './core/commands';
 import { isEditableTarget } from './core/context-menu';
@@ -562,10 +562,12 @@ function StatusBar() {
             <span className={`status-dot${live === 'connected' ? '' : ' warning'}`} />
             <span>
               {live === 'connected'
-                ? 'Shared with agent · Edits sync both ways'
+                ? `${liveHost === 'people' ? 'Shared session' : 'Shared with agent'} · Edits sync both ways`
                 : live === 'connecting'
-                  ? 'Connecting to agent…'
-                  : 'Agent disconnected · Edits stay in this tab · Save scene to keep them'}
+                  ? liveHost === 'people'
+                    ? 'Joining the session…'
+                    : 'Connecting to agent…'
+                  : `${liveHost === 'people' ? 'Session ended' : 'Agent disconnected'} · Edits stay in this tab · Save scene to keep them`}
             </span>
           </>
         ) : (

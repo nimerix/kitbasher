@@ -71,6 +71,9 @@ import { SceneLighting, overlayLayer, overlayLayers, useSceneFrame } from './Sce
 import type { SceneFrame } from './SceneLighting';
 import { DisplayMenu } from './DisplayMenu';
 import { LightingPanel } from './LightingPanel';
+import { HeadsetButton, HeadsetView } from './Headset';
+import { useXR } from '../core/xr-session';
+import { partMeshes } from '../xr/part-meshes';
 
 class ViewportBoundary extends Component<{ children: ReactNode }, { error: string | null }> {
   state = { error: null as string | null };
@@ -126,6 +129,13 @@ function PartMesh({
     navigationMode = useEditor((s) => (s.temporaryOrbit ? 'orbit' : s.navigationMode));
   const group = useRef<Group>(null);
   const [brushHit, setBrushHit] = useState<SurfacePoint | null>(null);
+  const register = useCallback(
+    (mesh: Mesh | null) => {
+      if (mesh) partMeshes.set(part.id, mesh);
+      else partMeshes.delete(part.id);
+    },
+    [part.id],
+  );
   const toSurface = (event: ThreeEvent<PointerEvent | MouseEvent>): SurfacePoint => ({
     partId: part.id,
     point: (event.object as Mesh).worldToLocal(event.point.clone()).toArray(),
@@ -174,6 +184,7 @@ function PartMesh({
         visible={shown}
       >
         <mesh
+          ref={register}
           name={`part:${part.id}`}
           geometry={part.geometry}
           // Raycasting ignores Object3D.visible, so a hidden part would still catch clicks.
@@ -894,6 +905,8 @@ function Scene({
     operation = useEditor((s) => s.operation),
     tool = useEditor((s) => s.tool);
   const isolated = useEditor((s) => s.isolated);
+  const headset = useXR((s) => !!s.session),
+    passthrough = useXR((s) => s.passthrough);
   const nearby = useNearbySurfaces();
   const exploding = view.explode > 0;
   const frame = useMemo(() => (exploding ? explodeFrame(parts) : undefined), [exploding, parts]);
@@ -903,7 +916,8 @@ function Scene({
   );
   return (
     <>
-      <color attach="background" args={['#272a2f']} />
+      {/* A headset that shows the room draws the scene over it, so nothing may fill the view. */}
+      {passthrough ? null : <color attach="background" args={['#272a2f']} />}
       <PerspectiveCamera
         makeDefault={view.projection === 'perspective'}
         position={[150, 125, 200]}
@@ -985,21 +999,27 @@ function Scene({
         ))}
       <InspectionOverlay inspection={inspection} />
       <SurfacePaintOverlay />
-      <TransformGizmo />
-      <AnchorOverlay />
-      <LightHandles />
-      <AssemblyAnnotations />
-      <ProjectionTracker projection={projection} />
-      <GizmoHelper alignment="top-right" margin={[62, 66]}>
-        <GizmoViewcube
-          font="12px sans-serif"
-          color="#373b41"
-          textColor="#c4c8ce"
-          hoverColor="#d29560"
-          strokeColor="#636970"
-          faces={['RIGHT', 'LEFT', 'TOP', 'BOTTOM', 'FRONT', 'BACK']}
-        />
-      </GizmoHelper>
+      <HeadsetView />
+      {/* Handles and the view cube answer to the mouse, which a headset session does not have. */}
+      {headset ? null : (
+        <>
+          <TransformGizmo />
+          <AnchorOverlay />
+          <LightHandles />
+          <AssemblyAnnotations />
+          <ProjectionTracker projection={projection} />
+          <GizmoHelper alignment="top-right" margin={[62, 66]}>
+            <GizmoViewcube
+              font="12px sans-serif"
+              color="#373b41"
+              textColor="#c4c8ce"
+              hoverColor="#d29560"
+              strokeColor="#636970"
+              faces={['RIGHT', 'LEFT', 'TOP', 'BOTTOM', 'FRONT', 'BACK']}
+            />
+          </GizmoHelper>
+        </>
+      )}
     </>
   );
 }
@@ -1081,6 +1101,7 @@ export function Viewport() {
         </div>
         <InspectionToggle inspection={inspection} />
         <DisplayMenu />
+        <HeadsetButton />
       </div>
       <ViewportBoundary>
         <Suspense fallback={<div className="viewport-loading">Preparing the workbench…</div>}>

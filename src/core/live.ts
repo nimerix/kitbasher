@@ -1,7 +1,8 @@
 import type { BufferGeometry } from 'three';
 import { uid } from './geometry';
 import { appendGeometry, parseSceneDocument, readGeometry, validateLayout } from './scene-file';
-import { useEditor, useSharedHistory } from './store';
+import { liveHost, useEditor, useSharedHistory } from './store';
+import { useXR } from './xr-session';
 import { keepUnchanged, mergeScenes, sharedScene } from './sync';
 import type { GeometryLayout, SceneDocument } from './types';
 
@@ -12,6 +13,10 @@ interface Message {
   geometries: Record<string, GeometryLayout>;
   history: Record<string, [number, number]>;
 }
+
+// The other side of the scene: an agent's server, or a session with no agent in it.
+const host = liveHost === 'people' ? 'The session' : 'The agent';
+const other = liveHost === 'people' ? 'someone else' : 'the agent';
 
 /** The server turned a request down. Retrying it would not help. */
 class Refusal extends Error {}
@@ -96,7 +101,7 @@ export function joinLiveSession() {
       const response = await fetch(`live/geometry/${encodeURIComponent(key)}`);
       // The scene has already moved on from this mesh, and a newer message is on its way.
       if (response.status === 404) return false;
-      if (!response.ok) throw new Error('The agent did not send a mesh.');
+      if (!response.ok) throw new Error(`${host} did not send a mesh.`);
       const body = await response.blob();
       validateLayout(layout, 0, body.size);
       const geometry = await readGeometry(body, layout);
@@ -109,7 +114,7 @@ export function joinLiveSession() {
   const apply = (message: Message) => {
     const scene = parseSceneDocument(message.scene, 2, (key) => {
       const geometry = meshes.get(key as string);
-      if (!geometry) throw new Error('The agent sent a part without its mesh.');
+      if (!geometry) throw new Error(`${host} sent a part without its mesh.`);
       return geometry;
     });
     for (const key of Object.keys(message.geometries)) known.add(key);
@@ -164,7 +169,7 @@ export function joinLiveSession() {
       body: new Blob(body),
     });
     if (!response.ok)
-      throw new Refusal((await errorOf(response)) ?? 'The agent could not take a mesh.');
+      throw new Refusal((await errorOf(response)) ?? `${host} could not take a mesh.`);
   };
 
   /** The server's scene stands. Later changes here were built on the refused one, so they go too. */
@@ -174,7 +179,7 @@ export function joinLiveSession() {
     checkpoint = true;
     if (confirmed) show(confirmed.scene);
     notify(
-      `Your last change was undone because it could not be combined with the agent's.${reason ? ` ${reason}` : ''}`,
+      `Your last change was undone because it could not be combined with ${other}'s.${reason ? ` ${reason}` : ''}`,
     );
   };
 
@@ -239,7 +244,7 @@ export function joinLiveSession() {
       awaited = result.version;
       if (!result.changed && !result.empty)
         notify(
-          `Nothing to ${direction}: the agent has since changed everything that step touched.`,
+          `Nothing to ${direction}: ${other} has since changed everything that step touched.`,
           'info',
         );
     } catch {
@@ -288,6 +293,10 @@ export function joinLiveSession() {
     }
     void receive();
   });
+  // Sent only to tabs on the computer that holds the scene: how another device joins it.
+  source.addEventListener('share', (event) =>
+    useXR.setState({ sharing: JSON.parse((event as MessageEvent<string>).data) }),
+  );
   // EventSource keeps retrying, so a server that is only briefly unreachable reconnects by itself.
   source.onerror = lost;
   useEditor.setState({ liveStatus: 'connecting' });

@@ -1,8 +1,10 @@
 import { spawn } from 'node:child_process';
-import { randomBytes } from 'node:crypto';
+import { randomBytes, randomInt, timingSafeEqual } from 'node:crypto';
 import { createReadStream, existsSync, statSync } from 'node:fs';
 import { createServer } from 'node:http';
 import type { IncomingMessage, Server, ServerResponse } from 'node:http';
+import { createServer as createSecureServer } from 'node:https';
+import { networkInterfaces } from 'node:os';
 import { extname, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { BufferGeometry } from 'three';
@@ -60,6 +62,80 @@ async function readBody(request: IncomingMessage, limit = Infinity) {
   return chunks;
 }
 
+/** How another device on the network joins: an address to open and a code to type there. */
+export interface Sharing {
+  addresses: string[];
+  code: string;
+}
+
+// A guessed code has five tries in a million before a new one replaces it.
+const codeAttempts = 5;
+const defaultSharePort = 8443;
+
+const sharePort = () => {
+  const wanted = process.env.KITBASHER_SHARE_PORT;
+  return wanted && Number.isInteger(Number(wanted)) ? Number(wanted) : defaultSharePort;
+};
+
+const networkAddresses = () =>
+  Object.values(networkInterfaces())
+    .flat()
+    .filter((entry) => entry && entry.family === 'IPv4' && !entry.internal)
+    .map((entry) => entry!.address);
+
+const joinPage = `<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Kitbasher — Join</title>
+    <style>
+      body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: #191b1e;
+        color: #e2e4e8; font: 18px system-ui, sans-serif; }
+      form { display: grid; gap: 18px; width: min(360px, 86vw); text-align: center; }
+      h1 { margin: 0; font-size: 26px; }
+      h1 span { color: #ed9f60; }
+      p { margin: 0; color: #9499a3; line-height: 1.45; }
+      input { font: 600 40px ui-monospace, monospace; letter-spacing: 8px; text-align: center;
+        padding: 14px 8px; color: inherit; background: #202226; border: 1px solid #454b54;
+        border-radius: 8px; width: 100%; box-sizing: border-box; }
+      button { font: 600 20px system-ui, sans-serif; padding: 14px; color: #1b1d20;
+        background: #ed9f60; border: 0; border-radius: 8px; }
+      output { min-height: 1.5em; color: #f0a39a; }
+    </style>
+  </head>
+  <body>
+    <form>
+      <h1>kitbasher<span>.</span></h1>
+      <p>Enter the code showing in Kitbasher on your computer.</p>
+      <input name="code" inputmode="numeric" autocomplete="off" maxlength="6" autofocus
+        aria-label="Code" />
+      <button>Join</button>
+      <output role="status"></output>
+    </form>
+    <script>
+      const form = document.querySelector('form'), status = document.querySelector('output');
+      form.addEventListener('submit', async (event) => {
+        event.preventDefault();
+        status.textContent = '';
+        try {
+          const response = await fetch('join', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ code: form.code.value }),
+          });
+          const result = await response.json();
+          if (response.ok) location.href = result.url;
+          else status.textContent = result.error;
+        } catch {
+          status.textContent = 'The computer could not be reached.';
+        }
+      });
+    </script>
+  </body>
+</html>
+`;
+
 const clientOf = (value: unknown) => {
   // The agent's own history is not a browser tab's to undo.
   if (typeof value !== 'string' || !/^[\w-]{1,64}$/.test(value) || value === agent)
@@ -71,12 +147,21 @@ const clientOf = (value: unknown) => {
  * Serves the built app on loopback and shares the scene with it. Every tab is a full editor of the
  * agent's scene, with its own camera, selection, and tools. Parts and relationships are small and
  * sent on every change. Meshes never change, so each one crosses once, by key, in either direction.
+ *
+ * Sharing also answers other devices on the network, such as a headset, over an encrypted
+ * connection. They reach the scene only by typing a code that shows on this computer.
  */
 export class LiveView {
   private server: Server | null = null;
+  private shared: Server | null = null;
   private url: string | null = null;
   private readonly token = randomBytes(16).toString('hex');
   private readonly clients = new Set<ServerResponse>();
+  /** The tabs on this computer, which are shown how another device joins. */
+  private readonly local = new Set<ServerResponse>();
+  private code = '';
+  private misses = 0;
+  private codeChanged: ((sharing: Sharing) => void) | null = null;
   private readonly layouts = new WeakMap<BufferGeometry, GeometryLayout>();
   private unsubscribe: (() => void) | null = null;
   private pending: NodeJS.Timeout | null = null;
@@ -86,6 +171,8 @@ export class LiveView {
     private readonly appDirectory = defaultAppDirectory(),
     private readonly port = Number(process.env.KITBASHER_LIVE_PORT) || 0,
     private readonly document: SharedDocument = sharedDocument,
+    /** Who holds the scene: an agent, or only the people editing it. */
+    private readonly host: 'agent' | 'people' = 'agent',
   ) {}
 
   get viewers() {
@@ -98,16 +185,7 @@ export class LiveView {
       throw new Error(
         `The Kitbasher app has not been built at ${this.appDirectory}. Run npm run build in the Kitbasher folder first.`,
       );
-    const server = createServer((request, response) => {
-      this.route(request, response).catch((error) => {
-        const status = error instanceof RequestError ? error.status : 500;
-        if (!response.headersSent)
-          response
-            .writeHead(status, { 'Content-Type': 'application/json' })
-            .end(JSON.stringify({ error: (error as Error).message }));
-        else response.destroy();
-      });
-    });
+    const server = createServer((request, response) => this.answer(request, response));
     await new Promise<void>((done, fail) => {
       server.once('error', fail);
       server.listen(this.port, '127.0.0.1', done);
@@ -117,7 +195,7 @@ export class LiveView {
     this.server = server;
     const address = server.address();
     if (!address || typeof address === 'string') throw new Error('The live view has no address.');
-    this.url = `http://127.0.0.1:${address.port}/${this.token}/?live=1`;
+    this.url = `http://127.0.0.1:${address.port}/${this.token}/?${this.query}`;
     this.unsubscribe = this.document.subscribe(() => this.schedule());
     this.keepAlive = setInterval(() => {
       for (const client of this.clients) client.write(': keep-alive\n\n');
@@ -126,15 +204,87 @@ export class LiveView {
     return this.url;
   }
 
+  /**
+   * Also answers other devices on the network, encrypted with this certificate and its key in
+   * one PEM. Unlike the loopback server, this one keeps the process running.
+   */
+  async share(
+    certificate: string,
+    port = sharePort(),
+    onCodeChange?: (sharing: Sharing) => void,
+  ): Promise<Sharing> {
+    await this.start();
+    if (this.shared) return this.sharing!;
+    const listen = (port: number) => {
+      const server = createSecureServer(
+        { key: certificate, cert: certificate },
+        (request, response) => this.answer(request, response, true),
+      );
+      return new Promise<Server>((done, fail) => {
+        server.once('error', fail);
+        server.listen(port, '0.0.0.0', () => done(server));
+      });
+    };
+    // The usual port makes an address worth bookmarking. Any free one still works.
+    this.shared = await listen(port).catch((error: NodeJS.ErrnoException) => {
+      if (error.code !== 'EADDRINUSE') throw error;
+      return listen(0);
+    });
+    this.newCode();
+    this.codeChanged = onCodeChange ?? null;
+    return this.sharing!;
+  }
+
+  /** How another device joins, or null when the scene is not shared beyond this computer. */
+  get sharing(): Sharing | null {
+    const address = this.shared?.address();
+    if (!address || typeof address === 'string') return null;
+    return {
+      addresses: networkAddresses().map((ip) => `https://${ip}:${address.port}`),
+      code: this.code,
+    };
+  }
+
   stop() {
     this.unsubscribe?.();
     if (this.pending) clearTimeout(this.pending);
     if (this.keepAlive) clearInterval(this.keepAlive);
     for (const client of this.clients) client.end();
     this.clients.clear();
+    this.local.clear();
     this.server?.close();
-    this.server = null;
+    this.shared?.close();
+    this.shared?.closeAllConnections();
+    this.server = this.shared = null;
     this.url = null;
+  }
+
+  private get query() {
+    return this.host === 'agent' ? 'live=1' : 'live=shared';
+  }
+
+  private newCode() {
+    this.code = String(randomInt(1_000_000)).padStart(6, '0');
+    this.misses = 0;
+    const sharing = this.sharing!;
+    this.codeChanged?.(sharing);
+    const message = this.shareMessage();
+    for (const client of this.local) client.write(message);
+  }
+
+  private shareMessage() {
+    return `event: share\ndata: ${JSON.stringify(this.sharing)}\n\n`;
+  }
+
+  private answer(request: IncomingMessage, response: ServerResponse, network = false) {
+    this.route(request, response, network).catch((error) => {
+      const status = error instanceof RequestError ? error.status : 500;
+      if (!response.headersSent)
+        response
+          .writeHead(status, { 'Content-Type': 'application/json' })
+          .end(JSON.stringify({ error: (error as Error).message }));
+      else response.destroy();
+    });
   }
 
   private schedule() {
@@ -170,15 +320,27 @@ export class LiveView {
     for (const client of this.clients) client.write(message);
   }
 
-  private async route(request: IncomingMessage, response: ServerResponse) {
+  private async route(request: IncomingMessage, response: ServerResponse, network: boolean) {
     const host = request.headers.host ?? '';
-    const port = (this.server?.address() as { port: number } | null)?.port;
+    const port = ((network ? this.shared : this.server)?.address() as { port: number } | null)
+      ?.port;
     // Another site can point its own name at this address, so only this host is answered.
-    if (host !== `127.0.0.1:${port}` && host !== `localhost:${port}`) {
+    const names = ['127.0.0.1', 'localhost', ...(network ? networkAddresses() : [])];
+    if (!names.some((name) => host === `${name}:${port}`)) {
       response.writeHead(403).end();
       return;
     }
     const url = new URL(request.url ?? '/', `http://${host}`);
+    if (network && url.pathname === '/') {
+      if (request.method === 'GET')
+        response
+          .writeHead(200, { 'Content-Type': contentTypes['.html'], 'Cache-Control': 'no-store' })
+          .end(joinPage);
+      else response.writeHead(404).end();
+      return;
+    }
+    if (network && url.pathname === '/join' && request.method === 'POST')
+      return this.join(request, response);
     const prefix = `/${this.token}/`;
     if (!url.pathname.startsWith(prefix)) {
       response.writeHead(404).end();
@@ -195,18 +357,35 @@ export class LiveView {
       response.writeHead(404).end();
       return;
     }
-    if (path === 'live/events') return this.events(response);
+    if (path === 'live/events') return this.events(response, network);
     if (path.startsWith('live/geometry/'))
       return this.geometry(path.slice('live/geometry/'.length), response);
     this.file(path || 'index.html', response);
+  }
+
+  /** Trades the code a person typed for the address of the scene. */
+  private async join(request: IncomingMessage, response: ServerResponse) {
+    const typed = Buffer.from(String((await this.json(request, 1024))?.code ?? '').trim());
+    const code = Buffer.from(this.code);
+    if (typed.length === code.length && timingSafeEqual(typed, code)) {
+      this.misses = 0;
+      return this.reply(response, 200, { url: `/${this.token}/?${this.query}` });
+    }
+    const replaced = ++this.misses >= codeAttempts;
+    if (replaced) this.newCode();
+    this.reply(response, 403, {
+      error: replaced
+        ? 'Too many wrong codes. A new one is showing on your computer.'
+        : 'That is not the code showing on your computer.',
+    });
   }
 
   private reply(response: ServerResponse, status: number, body: object) {
     response.writeHead(status, { 'Content-Type': 'application/json' }).end(JSON.stringify(body));
   }
 
-  private async json(request: IncomingMessage) {
-    const text = Buffer.concat(await readBody(request, maxEditBytes)).toString('utf8');
+  private async json(request: IncomingMessage, limit = maxEditBytes) {
+    const text = Buffer.concat(await readBody(request, limit)).toString('utf8');
     try {
       return JSON.parse(text);
     } catch {
@@ -294,15 +473,21 @@ export class LiveView {
     response.writeHead(204).end();
   }
 
-  private events(response: ServerResponse) {
+  private events(response: ServerResponse, network: boolean) {
     response.writeHead(200, {
       'Content-Type': 'text/event-stream',
       'Cache-Control': 'no-store',
       Connection: 'keep-alive',
     });
     this.clients.add(response);
-    response.on('close', () => this.clients.delete(response));
+    if (!network) this.local.add(response);
+    response.on('close', () => {
+      this.clients.delete(response);
+      this.local.delete(response);
+    });
     response.write(this.message());
+    // Only a tab on this computer is told the code, which is what lets another device in.
+    if (!network && this.shared) response.write(this.shareMessage());
   }
 
   private geometry(key: string, response: ServerResponse) {

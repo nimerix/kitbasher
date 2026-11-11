@@ -20,6 +20,7 @@ Open the local URL printed by Vite, usually http://localhost:5173.
 ```sh
 npm run build        # TypeScript checks, static production build, and MCP server
 npm run preview      # Serve the production build locally
+npm run headset      # Share a scene with a headset on your network
 npm test             # Geometry, constraints, scene and export tests
 npm run test:e2e     # Interaction and WebGL tests in installed Google Chrome
 npm run format       # Format source and tests
@@ -526,6 +527,81 @@ codex mcp add kitbasher -- node "$PWD/dist-mcp/kitbasher-mcp.js"
 
 See [Building with agents](docs/mcp.md) for the tools, the live view, and limits.
 
+## Assemble in a headset
+
+In a WebXR headset such as a Meta Quest, you pick parts up and place them by hand, and choose
+how large the model looks. The headset and a tab on your computer work on one scene together,
+so each does what it suits: import, fit, paint, and export on the computer, and place parts by
+hand in the headset. Edits from both merge, and undo on each side reverts only its own changes.
+
+```sh
+npm run headset                            # starts with the sample
+npm run headset -- path/to/scene.kitbash   # or with a scene of yours
+```
+
+This builds Kitbasher, opens the scene in your browser, and prints an address and a six-digit
+code. Both also show under **Headset** at the top of the viewport on the computer. If the
+computer's firewall asks, allow Node to accept incoming connections.
+
+1. With the headset on the same network as the computer, open the address in the headset's
+   browser, for example `https://192.168.1.20:8443`. The browser warns that the connection is
+   not private, because the computer makes its own certificate. Choose **Advanced**, then
+   **Proceed**. The address usually stays the same from one session to the next, so it is
+   worth a bookmark.
+2. Enter the code.
+3. Choose **Headset** at the top of the viewport, then **In your room**, which shows the model
+   in the room around you, or **Virtual space**, which shows it on the workbench grid.
+
+Open or import models on the computer at any time, and the headset shows them. Save from the
+computer: the scene ends with the session, and nothing is kept on the headset. `Ctrl + C` in
+the terminal ends the session.
+
+The model starts within reach, about 40 cm across. In the headset:
+
+- **Trigger on a part** holds it, and letting go puts it down. Touch the part, or point at it
+  from a distance. Either way it moves exactly as far as your hand does and turns with your
+  wrist, about the point you took it by. The part a press would take is tinted.
+- [No clip](#avoid-clipping) applies as it does to a drag: a held part stops at the surface of
+  other parts and slides along them, and the controller taps when it is first held back. Joints,
+  locks, and kept plane constraints hold too. A part on a joint turns about its anchor and
+  carries its connected assembly with it.
+- **Trigger on empty space, or the grip anywhere,** holds the world, which moves with your
+  hand. A locked part holds the world as well.
+- **Both hands** holding the world resize it, turn it, and carry it. Move them apart to make
+  everything larger, which also makes your hands steadier in the model's own millimeters. The
+  scale shows between your hands.
+- **Bare hands** work like controllers: pinch for the trigger. A pinch on empty space holds
+  the world.
+
+A panel hangs to your lower left, with the world scale, **1:1** for true size, **Reset view**,
+**Undo** and **Redo**, **No clip**, **Keep level**, and **Leave headset view**. Point at a control
+and pull the trigger. Take the panel by its background to move it, and press **B** or **Y** to
+bring it back in front of you. **Keep level**, on to start, keeps the model upright while two
+hands turn it, like a turntable. Turn it off to tip the model over and look underneath.
+
+The last line of the panel shows how the headset is coping: frames per second, the slowest
+frame in the last second, the time spent moving a held part, and the triangles drawn.
+
+Without `npm run headset`, a copy of Kitbasher served over HTTPS also offers **Headset** when
+opened in the headset's browser. It works on that browser's own scene, with nothing shared.
+
+Limits in a headset:
+
+- **Placing by hand only.** Alignment, contact paint, anchors, joints, measuring, merging,
+  colors, lighting, and files stay on the computer, as does everything typed.
+- **A headset draws far less than a computer.** Expect it to keep up with hundreds of thousands
+  of triangles, not the millions a desktop shows. Ground shadows are off in a headset, and other
+  shadows are off above 300,000 triangles. Dense scans need decimating first, which Kitbasher
+  does not do.
+- **A held part can trail a fast hand** against other parts, more than a mouse drag does,
+  because a headset frame leaves less time to keep it clear. It catches up when your hand slows.
+- **Anyone on your network with the code can edit the scene** while the session runs. Five wrong
+  codes replace it with a new one. The connection is encrypted, with a certificate the headset
+  cannot verify, which is why its browser warns. The certificate is kept in `.kitbasher` in
+  your home folder. Set `KITBASHER_SHARE_PORT` to change the port.
+- **Checked with an emulated headset.** Everything above runs against Meta's WebXR emulator in
+  the tests. It has not yet been measured on a physical headset.
+
 ## Large files
 
 Imports have no fixed size limit. STL and OBJ are read in pieces into typed arrays, so
@@ -589,8 +665,9 @@ Firefox or Safari.
 `src/core/` owns geometry, rigid registration, constraints, serialization, imports,
 exports, and the Boolean worker. `src/components/` owns the viewport, part tree,
 inspector, and dialogs. `src/hooks/` owns keyboard controls and local recovery.
-State lives in a typed Zustand store. `mcp/` holds the [MCP server](docs/mcp.md), which reuses
-`src/core/`. Tests are in `tests/unit/` and `tests/e2e/`.
+`src/xr/` owns the headset session. State lives in a typed Zustand store. `mcp/` holds the
+[MCP server](docs/mcp.md) and the headset session's host, which reuse `src/core/`. Tests are
+in `tests/unit/` and `tests/e2e/`.
 
 See [design specification](docs/design.md) and [verification notes](docs/verification.md).
 

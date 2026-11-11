@@ -1,15 +1,24 @@
 import { defineConfig } from 'vite';
 
-// One self-contained file, so an MCP client can start it with plain `node` from any folder.
-export default defineConfig({
-  ssr: { noExternal: true },
-  build: {
-    ssr: 'mcp/server.ts',
-    outDir: 'dist-mcp',
-    target: 'node22',
-    minify: false,
-    rollupOptions: {
-      output: { entryFileNames: 'kitbasher-mcp.js', format: 'es' },
+// One self-contained file each, so an MCP client can start the server with plain `node` from
+// any folder. The headset mode builds the program that shares a scene with a headset.
+export default defineConfig(({ mode }) => {
+  const headset = mode === 'headset';
+  return {
+    ssr: { noExternal: true },
+    build: {
+      ssr: headset ? 'mcp/headset.ts' : 'mcp/server.ts',
+      outDir: 'dist-mcp',
+      emptyOutDir: !headset,
+      target: 'node22',
+      minify: false,
+      rollupOptions: {
+        output: {
+          entryFileNames: headset ? 'kitbasher-headset.js' : 'kitbasher-mcp.js',
+          format: 'es',
+          inlineDynamicImports: true,
+        },
+      },
     },
-  },
+  };
 });

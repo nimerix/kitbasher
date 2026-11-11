@@ -9,6 +9,9 @@ async function cameraState(page: Page) {
       .map((entry) => entry.name)
       .find((url) => url.includes('/@react-three_fiber.js'))!;
     const fiber = await import(url);
+    // A page that has just loaded shows its canvas a moment before the renderer takes it.
+    while (!fiber._roots.get(document.querySelector('canvas')))
+      await new Promise((resolve) => setTimeout(resolve, 10));
     const { camera, controls } = fiber._roots
       .get(document.querySelector('canvas'))
       .store.getState();
