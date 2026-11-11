@@ -601,6 +601,7 @@ function HelpDialog() {
     ['Orbit selection by default', key('orbitSelection')],
     ['Focus selection', `${key('focus')} (frames selection)`],
     ['Frame all parts', key('frameAll')],
+    ['Isolate selection / with nearby surfaces', keys('isolate', 'isolateNearby')],
     ['Move / Rotate / Scale', keys('move', 'rotate', 'scale')],
     ['Paint contact surfaces', `${key('paint')} · drag to paint`],
     ['Paint brush size / Erase', `${key('brushSmaller')} and ${key('brushLarger')} / hold Alt`],

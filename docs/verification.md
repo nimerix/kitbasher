@@ -1,11 +1,11 @@
 # Verification
 
-Verified locally on November 9, 2026.
+Verified locally on November 10, 2026.
 
 ## Automated checks
 
 - `npm run build`: TypeScript checks and production compilation pass.
-- `npm test`: **448 tests pass**, covering Kabsch registration, non-collinear
+- `npm test`: **502 tests pass**, covering Kabsch registration, non-collinear
   point selection, reflection prevention, all four alignment methods, axis locks,
   anchor coincidence, descendant propagation, capture of the current pose when
   locking an axis, invalid joint graphs, scene round trips, mesh combination,
@@ -21,7 +21,7 @@ Verified locally on November 9, 2026.
   `tests/unit/preferences.test.ts` covers key matching across layouts, Alt, Shift-implied
   symbols, and Num Lock off, binding capture and conflicts, stored preference validation,
   wheel zoom response, pinch, smoothing that lands, and callout placement and stacking.
-- `npm run test:e2e`: **93 browser tests pass** in headless installed Google Chrome.
+- `npm run test:e2e`: **100 browser tests pass** in headless installed Google Chrome.
   Exercises real gizmo dragging, numeric edit cancellation, surface picking,
   joint creation, local recovery, save/open, STL import, combination/undo,
   GLB/3MF downloads and reimports, physical scale, Boolean worker volume and
@@ -40,6 +40,14 @@ Verified locally on November 9, 2026.
   viewport zoomable, that wheel zoom glides and follows sensitivity and smoothing, that a
   rebound key works, updates labels, survives a reload, and resets, and that markers keep
   their pixel size while callouts stay straight above their point through an orbit.
+  `tests/e2e/isolation.spec.ts` presses I and Shift + I on real parts and reads viewport
+  pixels. Other parts disappear and cannot be clicked, while the scene, its history, and part
+  visibility stay untouched. A neighbor is drawn only within the distance, as the distance
+  changes and as the isolated part moves, without measuring the field again. Nearby surfaces
+  take clicks and alignment picks and cut-away ones do not, also through a cut seen from
+  behind, and a part too far away to be drawn offers no gizmo. The menus, isolation bar,
+  framing, interference view, and deleting the isolated part all follow, and a
+  1.2-million-triangle part is isolated with nearby surfaces without holding the viewport.
   `tests/e2e/large-scenes.spec.ts` round trips a 3-million-triangle scene and checks
   that autosave writes each mesh once, survives failed writes, and upgrades old saves.
   `tests/unit/scene-format.test.ts` covers the binary layout and damaged or crafted files.
@@ -48,6 +56,12 @@ Verified locally on November 9, 2026.
   picking is prepared in a worker. `tests/unit/model-readers.test.ts` compares the streaming OBJ
   and STL readers against three.js's loaders, value for value.
   `tests/unit/import-limits.test.ts` covers each import and export limit.
+  `tests/unit/isolation.test.ts` compares the nearby-surface distance field with exact mesh
+  distances for coarse, dense, thin, turned, stretched, mirrored, and sliver-heavy meshes, and
+  checks that a surface in contact always reads below the drawing limit, also on a part far
+  larger than the distance. It covers the grid limits, the field following parts that move
+  together, isolation leaving the scene and its history untouched, parts that leave or join
+  the isolated view, the two commands, and a rebound key staying with its action.
 - `npm run format:check` and `git diff --check`: clean.
 
 The production build was also served from a `/kitbasher/` subpath, and both the
@@ -156,6 +170,16 @@ right part at every stage.
 | 3MF export      | 2M        | Works. Holds the main thread 11.2 s                     |
 | 3MF export      | 3M        | Fails with a clear error after 9.6 s                    |
 | 3MF export      | 24M       | Refused immediately. Previously took 24 s to fail       |
+
+Isolating a part with nearby surfaces measures a distance field around it once. Each row is
+three runs in headless Chrome on the same machine, timed from the key press until the nearby
+surfaces were drawn. The work is sliced, so the viewport keeps drawing throughout.
+
+| Isolated part  | Triangles | Nearby surfaces drawn after | Longest gap between frames |
+| -------------- | --------- | --------------------------- | -------------------------- |
+| Sample torso   | 3.2K      | 0.17 to 0.26 s              | 0.05 s                     |
+| Unindexed scan | 1.2M      | 0.26 to 0.31 s              | 0.05 s                     |
+| Unindexed scan | 10M       | 0.67 to 0.68 s              | 0.05 s                     |
 
 The GLB exporter's limit was located by bisection: 2,036 MiB of output works and 2,060 MiB does
 not. Preparing a mesh for clicking took 19 s at 120 million triangles and failed at 150 million

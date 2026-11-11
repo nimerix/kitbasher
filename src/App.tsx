@@ -31,11 +31,13 @@ import {
   PanelLeftOpen,
   PanelRightClose,
   PanelRightOpen,
+  Radius,
   Redo2,
   Rotate3D,
   Ruler,
   Save,
   Scaling,
+  ScanEye,
   ScanLine,
   Settings2,
   Undo2,
@@ -69,6 +71,8 @@ function Header({ openScene }: { openScene: () => void }) {
   useEditor((state) => state.future);
   useEditor((state) => state.sharedHistory);
   useEditor((state) => state.selected);
+  useEditor((state) => state.isolated);
+  useEditor((state) => state.view.isolation);
   useEditor((state) => state.clipboard);
   useEditor((state) => state.busy);
   useEditor((state) => state.paintHistory);
@@ -186,6 +190,9 @@ function Header({ openScene }: { openScene: () => void }) {
                       <Box size={14} />
                       Wireframe
                     </button>
+                    <hr />
+                    {commandItem('isolate', ScanEye)}
+                    {commandItem('isolateNearby', Radius)}
                   </>
                 )}
               </div>

@@ -300,7 +300,7 @@ test('preserves multiselection under right-click and makes visibility and select
   await expect(page.getByLabel('Inspection scope')).toHaveValue('selected');
   await page.getByRole('button', { name: 'Close interference view', exact: true }).click();
   await partA.click({ button: 'right' });
-  await menu.getByRole('menuitem', { name: 'Isolate selected', exact: true }).click();
+  await menu.getByRole('menuitem', { name: 'Hide others', exact: true }).click();
   expect(
     (await editorState(page)).parts.filter((part: any) => part.visible).map((part: any) => part.id),
   ).toEqual(['a', 'b']);

@@ -6,19 +6,24 @@ import type { InspectionMesh, InspectionResult } from '../core/inspection-types'
 export function useInspection() {
   const parts = useEditor((state) => state.scene.parts);
   const selected = useEditor((state) => state.selected);
+  const isolated = useEditor((state) => state.isolated);
   const settings = useEditor((state) => state.view.inspection);
   const [retryId, setRetryId] = useState(0);
   const selectionKey = settings.scope === 'selected' ? selected.join('\0') : '';
   const request = useMemo(
     () => ({
+      // An isolated view compares what it shows, not parts that are out of sight.
       parts: parts.filter(
-        (part) => part.visible && (settings.scope === 'all' || selected.includes(part.id)),
+        (part) =>
+          part.visible &&
+          (!isolated || isolated.includes(part.id)) &&
+          (settings.scope === 'all' || selected.includes(part.id)),
       ),
       distance: settings.distance,
       enabled: settings.enabled,
       retryId,
     }),
-    [parts, selectionKey, settings.scope, settings.distance, settings.enabled, retryId],
+    [parts, selectionKey, isolated, settings.scope, settings.distance, settings.enabled, retryId],
   );
   const [completed, setCompleted] = useState<{
     request: typeof request;

@@ -12,6 +12,7 @@ import {
   Link2,
   LockKeyhole,
   Plus,
+  ScanEye,
   Search,
   Trash2,
   UnlockKeyhole,
@@ -26,6 +27,7 @@ import { ConstraintList } from './ConstraintList';
 export function PartsPanel({ onClose }: { onClose: () => void }) {
   const scene = useEditor((s) => s.scene),
     selected = useEditor((s) => s.selected),
+    isolated = useEditor((s) => s.isolated),
     view = useEditor((s) => s.view);
   const select = useEditor((s) => s.select),
     patchParts = useEditor((s) => s.patchParts),
@@ -94,7 +96,7 @@ export function PartsPanel({ onClose }: { onClose: () => void }) {
                   <div
                     key={part.id}
                     data-part-id={part.id}
-                    className={`part-row ${selected.includes(part.id) ? 'selected' : ''} ${!part.visible ? 'muted' : ''}`}
+                    className={`part-row ${selected.includes(part.id) ? 'selected' : ''} ${!part.visible ? 'muted' : ''} ${isolated && !isolated.includes(part.id) ? 'outside-isolation' : ''}`}
                   >
                     <button
                       className="part-select"
@@ -108,6 +110,9 @@ export function PartsPanel({ onClose }: { onClose: () => void }) {
                       <span>{part.name}</span>
                       {scene.joints.some((j) => j.childId === part.id) ? (
                         <Link2 className="part-joint-icon" size={11} />
+                      ) : null}
+                      {isolated?.includes(part.id) ? (
+                        <ScanEye className="part-isolated-icon" size={11} aria-label="Isolated" />
                       ) : null}
                     </button>
                     <div className="part-actions">

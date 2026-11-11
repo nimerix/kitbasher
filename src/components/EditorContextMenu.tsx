@@ -6,6 +6,7 @@ import {
   Copy,
   Crosshair,
   Eye,
+  EyeClosed,
   EyeOff,
   Focus,
   GitMerge,
@@ -17,8 +18,10 @@ import {
   Move3D,
   Paintbrush,
   Pencil,
+  Radius,
   Rotate3D,
   Scaling,
+  ScanEye,
   ScanLine,
   Scissors,
   Trash2,
@@ -49,7 +52,9 @@ const icons = {
   merge: GitMerge,
   inspect: Layers2,
   hide: EyeOff,
-  isolate: Focus,
+  hideOthers: EyeClosed,
+  isolate: ScanEye,
+  isolateNearby: Radius,
   showAll: Eye,
   lock: LockKeyhole,
   unlock: UnlockKeyhole,
@@ -162,10 +167,15 @@ function OpenContextMenu({
         ['cut', 'copy', 'paste', 'duplicate'],
         ['rename', 'delete'],
         ['focus', 'pivot', 'align', 'paint', 'joint', 'merge', 'inspect'],
-        ['hide', 'isolate', unlocked ? 'lock' : 'unlock', 'showAll'],
+        ['isolate', 'isolateNearby'],
+        ['hide', 'hideOthers', unlocked ? 'lock' : 'unlock', 'showAll'],
         ['selectAll', 'deselect'],
       ]
-    : [['paste', 'import'], ['selectAll', 'showAll'], ['frameAll']];
+    : [
+        ['paste', 'import'],
+        ['selectAll', 'showAll'],
+        state.isolated ? ['frameAll', 'isolate', 'isolateNearby'] : ['frameAll'],
+      ];
   return createPortal(
     <div
       ref={menu}
