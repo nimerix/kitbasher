@@ -4,6 +4,7 @@ import { useEditor } from '../core/store';
 import { contactColors, patchGeometry } from '../core/surfaces';
 import { worldNormal, worldPoint } from '../core/geometry';
 import { solveAlignment } from '../core/alignment';
+import { hiddenByIsolation } from '../core/isolation';
 import type { Part, SurfacePatch, SurfacePoint } from '../core/types';
 
 /** The patch's S/T label is drawn by the annotation layer. */
@@ -13,7 +14,8 @@ function PaintedPatch({ part, patch, color }: { part: Part; patch: SurfacePatch;
     [part.geometry, patch.faces],
   );
   useEffect(() => () => geometry.dispose(), [geometry]);
-  if (!part.visible || !patch.faces.length) return null;
+  const hidden = useEditor((s) => hiddenByIsolation(s.isolated, s.nearbyParts, part.id));
+  if (!part.visible || hidden || !patch.faces.length) return null;
   return (
     <group position={part.position} quaternion={part.quaternion} scale={part.scale}>
       <mesh geometry={geometry} raycast={() => {}} renderOrder={5}>

@@ -30,6 +30,7 @@ import {
   Grid2X2,
   Layers3,
   Maximize,
+  ScanEye,
   ScanLine,
   ZoomIn,
   ZoomOut,
@@ -60,6 +61,9 @@ import type { ExplodeFrame } from '../core/navigation';
 import { useInspection } from '../hooks/useInspection';
 import type { InspectionState } from '../hooks/useInspection';
 import { InspectionToggle, InspectionControls, InspectionOverlay } from './InterferenceInspection';
+import { hiddenByIsolation, nextIsolation } from '../core/isolation';
+import { IsolationNotice, nearbyRaycast, useNearbySurfaces } from './Isolation';
+import type { NearbySurfaces } from './Isolation';
 
 class ViewportBoundary extends Component<{ children: ReactNode }, { error: string | null }> {
   state = { error: null as string | null };
@@ -87,7 +91,20 @@ const noRaycast = () => {};
 // A press on a gizmo handle also reaches whatever lies under it, but it is not a selection click.
 let gizmoPressed = false;
 
-function PartMesh({ part, frame }: { part: Part; frame?: ExplodeFrame }) {
+function PartMesh({
+  part,
+  frame,
+  hidden,
+  nearby,
+}: {
+  part: Part;
+  frame?: ExplodeFrame;
+  /** Left out of an isolated view. */
+  hidden: boolean;
+  /** Drawn only where it comes near the isolated parts. */
+  nearby?: NearbySurfaces;
+}) {
+  const shown = part.visible && !hidden;
   const selected = useEditor((s) => s.selected.includes(part.id));
   const inspection = useEditor((s) => s.view.inspection);
   const tool = useEditor((s) => s.tool),
@@ -103,8 +120,9 @@ function PartMesh({ part, frame }: { part: Part; frame?: ExplodeFrame }) {
   });
   useEffect(() => {
     // Hidden parts cannot be picked, so a dense one need not pay for this until shown.
-    if (part.visible) prepareForPicking(part.geometry);
-  }, [part.geometry, part.visible]);
+    if (shown) prepareForPicking(part.geometry);
+  }, [part.geometry, shown]);
+  const raycast = useMemo(() => (nearby ? nearbyRaycast(nearby.shows) : pickRaycast), [nearby]);
   const exploded = useMemo(() => displayedPosition(part, explode, frame), [part, explode, frame]);
   const onClick = (event: ThreeEvent<MouseEvent>) => {
     if (event.button !== 0 || event.delta > 5) return;
@@ -140,15 +158,16 @@ function PartMesh({ part, frame }: { part: Part; frame?: ExplodeFrame }) {
         position={exploded}
         quaternion={part.quaternion}
         scale={part.scale}
-        visible={part.visible}
+        visible={shown}
       >
         <mesh
           name={`part:${part.id}`}
           geometry={part.geometry}
           // Raycasting ignores Object3D.visible, so a hidden part would still catch clicks.
-          raycast={part.visible ? pickRaycast : noRaycast}
+          raycast={shown ? raycast : noRaycast}
           dispose={null}
-          castShadow
+          // The shadow pass would draw the whole part, including what is cut away.
+          castShadow={!nearby}
           receiveShadow
           onContextMenu={(event) => {
             event.nativeEvent.preventDefault();
@@ -214,7 +233,9 @@ function PartMesh({ part, frame }: { part: Part; frame?: ExplodeFrame }) {
           }}
         >
           <meshStandardMaterial
-            key={inspection.enabled ? 'inspection' : 'solid'}
+            key={inspection.enabled ? 'inspection' : nearby ? 'nearby' : 'solid'}
+            // Both sides, because the facing surfaces of a cut-away part are seen from behind.
+            {...(nearby ? { onBeforeCompile: nearby.compile, side: DoubleSide } : {})}
             color={inspection.enabled ? '#a4aab4' : part.color}
             transparent={inspection.enabled}
             opacity={inspection.enabled ? (inspection.context ? 0.12 : 0) : 1}
@@ -229,6 +250,7 @@ function PartMesh({ part, frame }: { part: Part; frame?: ExplodeFrame }) {
           {selected &&
           !inspection.enabled &&
           !wireframe &&
+          !nearby &&
           triangleCount(part.geometry) < 150000 ? (
             <Edges threshold={32} color="#e8aa6d" lineWidth={0.8} />
           ) : null}
@@ -264,6 +286,8 @@ function TransformGizmo() {
     parts = useEditor((s) => s.scene.parts),
     joints = useEditor((s) => s.scene.joints),
     view = useEditor((s) => s.view),
+    isolated = useEditor((s) => s.isolated),
+    nearbyParts = useEditor((s) => s.nearbyParts),
     navigationMode = useEditor((s) => (s.temporaryOrbit ? 'orbit' : s.navigationMode)),
     pivotPicking = useEditor((s) => s.pivotPicking);
   const proxy = useMemo(() => new Object3D(), []),
@@ -302,7 +326,13 @@ function TransformGizmo() {
       window.removeEventListener('pointercancel', cancel);
     };
   }, [finishDrag]);
-  const movable = parts.filter((p) => selected.includes(p.id) && p.visible && !p.locked);
+  const movable = parts.filter(
+    (p) =>
+      selected.includes(p.id) &&
+      p.visible &&
+      !p.locked &&
+      !hiddenByIsolation(isolated, nearbyParts, p.id),
+  );
   const singleJoint =
     movable.length === 1
       ? joints.find((j) => j.childId === movable[0].id && isJointConnected(j))
@@ -492,7 +522,8 @@ function AnchorOverlay() {
     explode = useEditor((s) => s.view.explode);
   const navigating = useEditor((s) => !!s.navigationMode || s.temporaryOrbit || s.pivotPicking);
   const part = parts.find((p) => p.id === selected[0]);
-  if (tool !== 'anchors' || explode || !part?.visible) return null;
+  const hidden = useEditor((s) => !!part && hiddenByIsolation(s.isolated, s.nearbyParts, part.id));
+  if (tool !== 'anchors' || explode || !part?.visible || hidden) return null;
   const anchors = part.anchors ?? [];
   const current = anchors.find((a) => a.id === active) ?? anchors[0];
   // The markers and their number labels are drawn by the annotation layer.
@@ -585,6 +616,8 @@ function Scene({
     view = useEditor((s) => s.view),
     operation = useEditor((s) => s.operation),
     tool = useEditor((s) => s.tool);
+  const isolated = useEditor((s) => s.isolated);
+  const nearby = useNearbySurfaces();
   const exploding = view.explode > 0;
   const frame = useMemo(() => (exploding ? explodeFrame(parts) : undefined), [exploding, parts]);
   return (
@@ -645,9 +678,19 @@ function Scene({
         resolution={256}
         frames={1}
       />
-      {parts.map((part) => (
-        <PartMesh key={part.id} part={part} frame={frame} />
-      ))}
+      {parts.map((part) => {
+        const outside = !!isolated && !isolated.includes(part.id);
+        const surfaces = outside && nearby?.ids.has(part.id) ? nearby.surfaces : undefined;
+        return (
+          <PartMesh
+            key={part.id}
+            part={part}
+            frame={frame}
+            hidden={outside && !surfaces}
+            nearby={surfaces}
+          />
+        );
+      })}
       {referencePlanes
         .filter((p) => view.planes.includes(p.id) || operation.targetId === p.id)
         .map((plane) => (
@@ -706,6 +749,7 @@ export function Viewport() {
   const view = useEditor((s) => s.view),
     tool = useEditor((s) => s.tool),
     selected = useEditor((s) => s.selected),
+    isolated = useEditor((s) => s.isolated),
     parts = useEditor((s) => s.scene.parts),
     op = useEditor((s) => s.operation),
     measurement = useEditor((s) => s.measurement),
@@ -722,6 +766,7 @@ export function Viewport() {
     hold: useShortcut('holdOrbit'),
     focus: useShortcut('focus'),
     frameAll: useShortcut('frameAll'),
+    isolate: useShortcut('isolate'),
   };
   const orbitHint = `Middle${keys.hold ? ` / ${keys.hold}` : ''}: orbit`;
   const closeViewMenu = useCallback(() => setViewMenu(false), []);
@@ -867,11 +912,14 @@ export function Viewport() {
           )}
         </div>
       ) : null}
-      {view.explode > 0 ? (
-        <div className="exploded-notice">
-          Exploded view <button onClick={() => setView({ explode: 0 })}>Reset</button>
-        </div>
-      ) : null}
+      <div className="viewport-notices">
+        {view.explode > 0 ? (
+          <div className="exploded-notice">
+            Exploded view <button onClick={() => setView({ explode: 0 })}>Reset</button>
+          </div>
+        ) : null}
+        <IsolationNotice />
+      </div>
       <CameraNavigation />
       <div className="viewport-bottom">
         <div className="canvas-selection">
@@ -899,6 +947,18 @@ export function Viewport() {
             onClick={() => setView({ wireframe: !view.wireframe })}
           >
             <Layers3 size={16} />
+          </IconButton>
+          <IconButton
+            label={withShortcut(
+              isolated && !nextIsolation(parts, selected, isolated)
+                ? 'Exit isolation'
+                : 'Isolate selection',
+              keys.isolate,
+            )}
+            active={!!isolated}
+            onClick={() => useEditor.getState().toggleIsolation()}
+          >
+            <ScanEye size={16} />
           </IconButton>
           <span className="tool-divider" />
           <IconButton

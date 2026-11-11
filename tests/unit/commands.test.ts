@@ -123,10 +123,10 @@ describe('component clipboard and selection', () => {
     expect(useEditor.getState().scene.parts).toHaveLength(3);
     expect(useEditor.getState().scene.joints).toHaveLength(1);
   });
-  it('isolates in one history step, can show all again, and enables commands for the actual selection', () => {
+  it('hides the other parts in one history step, can show all again, and enables commands for the actual selection', () => {
     useEditor.getState().select('b');
     expect(editorCommands().merge.enabled).toBe(false);
-    executeEditorCommand('isolate');
+    executeEditorCommand('hideOthers');
     expect(useEditor.getState().past).toHaveLength(1);
     expect(
       useEditor

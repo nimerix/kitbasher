@@ -8,6 +8,7 @@ import { isJointConnected } from '../core/constraints';
 import { resolvePart } from '../core/references';
 import { contactColors, patchCenter } from '../core/surfaces';
 import { layoutCallouts } from '../core/callouts';
+import { hiddenByIsolation } from '../core/isolation';
 import { usePreferences } from '../core/preferences';
 import { useEditor } from '../core/store';
 import type { Part, SurfacePatch } from '../core/types';
@@ -83,14 +84,22 @@ function useAnnotations(): Annotation[] {
     explode = useEditor((s) => s.view.explode),
     tool = useEditor((s) => s.tool),
     activeAnchor = useEditor((s) => s.activeAnchor),
+    isolated = useEditor((s) => s.isolated),
+    nearby = useEditor((s) => s.nearbyParts),
     navigating = useEditor((s) => !!s.navigationMode || s.temporaryOrbit || s.pivotPicking);
   return useMemo(() => {
     if (explode) return [];
+    const shown = (part?: Part): part is Part =>
+      !!part?.visible && !hiddenByIsolation(isolated, nearby, part.id);
     // Callouts clear the whole visible model, not only the part their point is on.
-    const model = boxCorners(sceneBounds(scene.parts));
+    const model = boxCorners(
+      sceneBounds(
+        isolated ? scene.parts.filter((part) => isolated.includes(part.id)) : scene.parts,
+      ),
+    );
     const list: Annotation[] = [];
     for (const part of scene.parts)
-      if (part.visible && part.pivot && selected.includes(part.id))
+      if (shown(part) && part.pivot && selected.includes(part.id))
         list.push({
           id: `pivot:${part.id}`,
           kind: 'pivot',
@@ -126,7 +135,7 @@ function useAnnotations(): Annotation[] {
     if (showJoints)
       for (const joint of scene.joints.filter(isJointConnected)) {
         const parent = scene.parts.find((p) => p.id === joint.parentId);
-        if (parent?.visible)
+        if (shown(parent))
           list.push({
             id: `joint:${joint.id}`,
             kind: 'joint',
@@ -135,7 +144,7 @@ function useAnnotations(): Annotation[] {
           });
       }
     const anchorPart = scene.parts.find((p) => p.id === selected[0]);
-    if (tool === 'anchors' && anchorPart?.visible) {
+    if (tool === 'anchors' && shown(anchorPart)) {
       const anchors = anchorPart.anchors ?? [];
       const current = anchors.find((a) => a.id === activeAnchor) ?? anchors[0];
       anchors.forEach((anchor, index) => {
@@ -168,7 +177,7 @@ function useAnnotations(): Annotation[] {
         (['source', 'target'] as const).forEach((side) => {
           const patch = pair[side];
           const part = scene.parts.find((p) => p.id === patch?.partId);
-          if (!patch || !part?.visible || !patch.faces.length) return;
+          if (!patch || !shown(part) || !patch.faces.length) return;
           const center = cachedPatchCenter(part, patch);
           if (center)
             list.push({
@@ -182,7 +191,19 @@ function useAnnotations(): Annotation[] {
         }),
       );
     return list;
-  }, [scene, op, measurement, selected, showJoints, explode, tool, activeAnchor, navigating]);
+  }, [
+    scene,
+    op,
+    measurement,
+    selected,
+    showJoints,
+    explode,
+    tool,
+    activeAnchor,
+    navigating,
+    isolated,
+    nearby,
+  ]);
 }
 
 /** How far each marker reaches from its point, in pixels, so leaders meet its edge. */

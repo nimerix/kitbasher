@@ -5,6 +5,7 @@ import type { OrbitControls as OrbitControlsImpl } from 'three-stdlib';
 import { MOUSE, Quaternion, TOUCH, Vector3 } from 'three';
 import { ArrowDown, ArrowLeft, ArrowRight, ArrowUp, Crosshair, Hand, Orbit, X } from 'lucide-react';
 import { sceneBounds } from '../core/geometry';
+import { hiddenByIsolation } from '../core/isolation';
 import {
   rotateOrbitOffset,
   selectionOrbitCenter,
@@ -20,6 +21,11 @@ import { clampPendingZoom, wheelZoom, zoomGlideStep } from '../core/zoom';
 import { IconButton } from './ui';
 
 const cameraStepEvent = 'kitbasher:camera-step';
+
+type Editor = ReturnType<typeof useEditor.getState>;
+/** The selected parts an isolated view still draws, which is what the camera can aim at. */
+const drawnSelection = (state: Editor) =>
+  state.selected.filter((id) => !hiddenByIsolation(state.isolated, state.nearbyParts, id));
 const initialOrbitTarget: [number, number, number] = [0, 54, 0];
 
 export function CameraRig() {
@@ -105,7 +111,7 @@ export function CameraRig() {
     const state = useEditor.getState();
     return state.view.orbitSelection ||
       state.scene.parts.some((part) => state.selected.includes(part.id) && part.pivot)
-      ? selectionOrbitCenter(state.scene.parts, state.selected, state.view.explode)
+      ? selectionOrbitCenter(state.scene.parts, drawnSelection(state), state.view.explode)
       : null;
   }, []);
 
@@ -133,7 +139,11 @@ export function CameraRig() {
     const orbit = controls.current;
     if (!orbit?.enabled) return;
     const state = useEditor.getState();
-    const center = selectionOrbitCenter(state.scene.parts, state.selected, state.view.explode);
+    const center = selectionOrbitCenter(
+      state.scene.parts,
+      drawnSelection(state),
+      state.view.explode,
+    );
     if (!center) return;
     settle();
     setOrbitCenter(camera, orbit.target, center);
@@ -159,10 +169,13 @@ export function CameraRig() {
     if (framedRequest.current === focusRequest && !cameraChanged) return;
     framedRequest.current = focusRequest;
     const state = useEditor.getState();
-    const selected = state.scene.parts.filter(
-      (part) => part.visible && state.selected.includes(part.id),
-    );
-    const bounds = sceneBounds(focusRequest.all || !selected.length ? state.scene.parts : selected);
+    const aimed = drawnSelection(state);
+    const selected = state.scene.parts.filter((part) => part.visible && aimed.includes(part.id));
+    // Framing everything means everything drawn in full, which isolation narrows.
+    const drawn = state.isolated
+      ? state.scene.parts.filter((part) => state.isolated!.includes(part.id))
+      : state.scene.parts;
+    const bounds = sceneBounds(focusRequest.all || !selected.length ? drawn : selected);
     const center = bounds.getCenter(new Vector3());
     const radius = Math.max(bounds.getSize(new Vector3()).length() / 2, 8);
     const aspect = size.width / size.height;

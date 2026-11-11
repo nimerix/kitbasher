@@ -70,6 +70,13 @@ export interface ClipSettings {
   overlap: number;
 }
 
+export interface IsolationSettings {
+  /** Also draw other parts where they come near the isolated ones. */
+  nearby: boolean;
+  /** How near, in mm. */
+  distance: number;
+}
+
 export interface SceneDocument {
   name: string;
   parts: Part[];
@@ -182,6 +189,7 @@ export interface ViewSettings {
   inspection: InspectionSettings;
   /** Keep moves and fits from pushing parts through each other. */
   clip: ClipSettings;
+  isolation: IsolationSettings;
   orbitSelection: boolean;
   grid: boolean;
   joints: boolean;

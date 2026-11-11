@@ -175,6 +175,14 @@ export function useKeyboard(openScene: () => void, searchParts: () => void) {
           event.preventDefault();
           state.focus(undefined, true);
           return;
+        case 'isolate':
+          event.preventDefault();
+          state.toggleIsolation();
+          return;
+        case 'isolateNearby':
+          event.preventDefault();
+          state.toggleNearby();
+          return;
         case 'cancel': {
           if (state.pivotPicking) {
             state.setPivotPicking(false);

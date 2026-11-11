@@ -29,6 +29,12 @@ import {
   facesUnderBrush,
   maxPaintTriangles,
 } from './surfaces';
+import {
+  nextIsolation,
+  readIsolationSettings,
+  sanitizeIsolationSettings,
+  saveIsolationSettings,
+} from './isolation';
 import { readOrbitPreference, saveOrbitPreference } from './navigation';
 import type { NavigationMode } from './navigation';
 import { createSample } from './sample';
@@ -93,6 +99,12 @@ const gestureBudget = 12;
 interface EditorState {
   scene: SceneDocument;
   selected: string[];
+  /** Parts the viewport draws alone. A view state: never saved, shared, or undone. */
+  isolated: string[] | null;
+  /** Grid spacing in mm of the nearby-surface field in use, or null until one is ready. */
+  nearbyDetail: number | null;
+  /** The parts outside the isolated set that are near enough to be drawn in part. */
+  nearbyParts: string[] | null;
   clipboard: ComponentClipboard | null;
   contextMenu: EditorContextMenu | null;
   tool: Tool;
@@ -132,7 +144,12 @@ interface EditorState {
   measurement: SurfacePoint[];
   select: (id: string | null, additive?: boolean) => void;
   selectAll: () => void;
-  isolateSelected: () => void;
+  isolate: (ids: string[] | null) => void;
+  /** Isolates the selection, or shows everything when it is already isolated. */
+  toggleIsolation: () => void;
+  /** Turns nearby surfaces on or off, isolating the selection first if nothing is. */
+  toggleNearby: () => void;
+  hideOthers: () => void;
   copySelected: (cut?: boolean) => void;
   pasteClipboard: () => void;
   openContextMenu: (menu: EditorContextMenu) => void;
@@ -223,9 +240,23 @@ const withoutRemovedParts = (state: EditorState, ids: string[]) => {
   };
 };
 
+/** Parts made while isolating join the isolated view, so they do not appear to be missing. */
+const alsoIsolated = (state: EditorState, parts: Part[]) =>
+  state.isolated ? { isolated: [...state.isolated, ...parts.map((part) => part.id)] } : {};
+
+/** The same for parts that undo or redo brings back. */
+const restoredIsolated = (state: EditorState, scene: SceneDocument) =>
+  alsoIsolated(
+    state,
+    scene.parts.filter((part) => !state.scene.parts.some((p) => p.id === part.id)),
+  );
+
 export const useEditor = create<EditorState>((set, get) => ({
   scene: initialScene,
   selected: liveSession ? [] : ['torso'],
+  isolated: null,
+  nearbyDetail: null,
+  nearbyParts: null,
   clipboard: null,
   contextMenu: null,
   tool: 'select',
@@ -253,6 +284,7 @@ export const useEditor = create<EditorState>((set, get) => ({
       context: true,
     },
     clip: readClipSettings(),
+    isolation: readIsolationSettings(),
     orbitSelection: readOrbitPreference(),
     grid: true,
     joints: false,
@@ -289,7 +321,35 @@ export const useEditor = create<EditorState>((set, get) => ({
         : [],
     })),
   selectAll: () => set((state) => ({ selected: state.scene.parts.map((part) => part.id) })),
-  isolateSelected: () =>
+  isolate: (ids) => set({ isolated: ids?.length ? ids : null }),
+  toggleIsolation: () => {
+    const state = get();
+    const next = nextIsolation(state.scene.parts, state.selected, state.isolated);
+    if (!next && !state.isolated) {
+      state.notify('Select a visible part to isolate.', 'info');
+      return;
+    }
+    // A new isolation starts plain. Moving it to another part keeps nearby surfaces as set.
+    if (next && !state.isolated && state.view.isolation.nearby)
+      state.setView({ isolation: { ...state.view.isolation, nearby: false } });
+    set({ isolated: next });
+  },
+  toggleNearby: () => {
+    const state = get();
+    const { isolation } = state.view;
+    if (state.isolated) {
+      state.setView({ isolation: { ...isolation, nearby: !isolation.nearby } });
+      return;
+    }
+    const next = nextIsolation(state.scene.parts, state.selected, null);
+    if (!next) {
+      state.notify('Select a visible part to isolate.', 'info');
+      return;
+    }
+    state.setView({ isolation: { ...isolation, nearby: true } });
+    set({ isolated: next });
+  },
+  hideOthers: () =>
     set((state) => {
       if (!state.selected.length) return {};
       const ids = new Set(state.selected);
@@ -342,6 +402,7 @@ export const useEditor = create<EditorState>((set, get) => ({
         constraints: [...(state.scene.constraints ?? []), ...copies.constraints],
       }),
       selected: copies.parts.map((part) => part.id),
+      ...alsoIsolated(state, copies.parts),
       clipboard: { ...state.clipboard, nextOffset: state.clipboard.nextOffset + 1 },
       operation: blankOperation(),
       paintHistory: [],
@@ -1117,6 +1178,7 @@ export const useEditor = create<EditorState>((set, get) => ({
     set((state) => ({
       ...changed(state, { ...state.scene, parts: [...state.scene.parts, ...parts] }),
       selected: parts.map((p) => p.id),
+      ...alsoIsolated(state, parts),
       focusRequest: { id: state.focusRequest.id + 1, all: false },
     })),
   deleteSelected: () =>
@@ -1153,6 +1215,7 @@ export const useEditor = create<EditorState>((set, get) => ({
           constraints: [...(state.scene.constraints ?? []), ...copies.constraints],
         }),
         selected: copies.parts.map((part) => part.id),
+        ...alsoIsolated(state, copies.parts),
       };
     }),
   replaceWithMerged: (part, ids) =>
@@ -1169,12 +1232,14 @@ export const useEditor = create<EditorState>((set, get) => ({
       }),
       ...withoutRemovedParts(state, ids),
       selected: [part.id],
+      ...alsoIsolated(state, [part]),
     })),
   setScene: (scene, recovered = false) =>
     set((state) => ({
       scene,
       sceneEpoch: state.sceneEpoch + 1,
       selected: [],
+      isolated: null,
       past: [],
       future: [],
       revision: state.revision + 1,
@@ -1225,6 +1290,7 @@ export const useEditor = create<EditorState>((set, get) => ({
                 selected: state.selected.filter((id) =>
                   state.past.at(-1)!.parts.some((p) => p.id === id),
                 ),
+                ...restoredIsolated(state, state.past.at(-1)!),
                 operation: blankOperation(),
                 tool: 'select',
                 navigationMode: null,
@@ -1248,6 +1314,7 @@ export const useEditor = create<EditorState>((set, get) => ({
                 selected: state.selected.filter((id) =>
                   state.future[0].parts.some((p) => p.id === id),
                 ),
+                ...restoredIsolated(state, state.future[0]),
                 operation: blankOperation(),
                 tool: 'select',
                 navigationMode: null,
@@ -1263,6 +1330,13 @@ export const useEditor = create<EditorState>((set, get) => ({
     if (patch.clip) {
       patch = { ...patch, clip: sanitizeClipSettings(patch.clip, get().view.clip) };
       saveClipSettings(patch.clip!);
+    }
+    if (patch.isolation) {
+      patch = {
+        ...patch,
+        isolation: sanitizeIsolationSettings(patch.isolation, get().view.isolation),
+      };
+      saveIsolationSettings(patch.isolation!);
     }
     set((state) => ({
       view: { ...state.view, ...patch },
@@ -1314,6 +1388,14 @@ useEditor.subscribe((state, previous) => {
   const reachable = reachableGeometries(state);
   for (const geometry of trackedGeometries) if (!reachable.has(geometry)) geometry.dispose();
   trackedGeometries = reachable;
+});
+
+// Parts can leave the scene by many routes, such as delete, undo, or another editor.
+useEditor.subscribe((state, previous) => {
+  if (!state.isolated || state.scene.parts === previous.scene.parts) return;
+  const isolated = state.isolated.filter((id) => state.scene.parts.some((part) => part.id === id));
+  if (isolated.length !== state.isolated.length)
+    useEditor.setState({ isolated: isolated.length ? isolated : null });
 });
 
 export function measureDistance() {

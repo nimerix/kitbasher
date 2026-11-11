@@ -34,6 +34,8 @@ export const keyActions = {
   orbitSelection: { group: 'Camera', label: 'Toggle orbit around selection', keys: ['Shift+.'] },
   focus: { group: 'Camera', label: 'Frame selection', keys: ['F'] },
   frameAll: { group: 'Camera', label: 'Frame all parts', keys: ['Home'] },
+  isolate: { group: 'Camera', label: 'Isolate selection', keys: ['I'] },
+  isolateNearby: { group: 'Camera', label: 'Isolate with nearby surfaces', keys: ['Shift+I'] },
   viewFront: { group: 'Camera', label: 'Front view', keys: ['1'] },
   viewRight: { group: 'Camera', label: 'Right view', keys: ['3'] },
   viewTop: { group: 'Camera', label: 'Top view', keys: ['7'] },
@@ -67,7 +69,12 @@ export const isKeyAction = (id: string): id is KeyActionId => Object.hasOwn(keyA
 export const actionRepeats = (id: KeyActionId) => !!(keyActions[id] as KeyActionDefinition).repeat;
 
 export function bindingsFor(id: KeyActionId, overrides: KeyBindingOverrides): readonly string[] {
-  return overrides[id] ?? keyActions[id].keys;
+  const own = overrides[id];
+  if (own) return own;
+  // A key the user gave to another action stays there, also when a later default wants it.
+  const taken = Object.values(overrides).flat();
+  const defaults: readonly string[] = keyActions[id].keys;
+  return taken.length ? defaults.filter((key) => !taken.includes(key)) : defaults;
 }
 
 export interface KeyChord {

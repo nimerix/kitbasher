@@ -56,6 +56,9 @@ provide spatial context. Smaller screens use collapsible sidebars.
   surfaces and never tunnel, and typed values, alignments, and anchor fits land on the nearest
   clear placement. Joints, locks, and kept constraints win, and remaining overlap is reported.
   Existing overlap is kept by moves and never deepened. See [clipping](#avoiding-clipping).
+- Isolate the selection with one key, as a view state that never edits, saves, or shares the
+  scene. Optionally keep other parts drawn, and pickable, wherever they come within a set
+  distance of the isolated parts, updating as parts move. See [isolation](#isolation).
 - Allow any number of matching pairs after the third, show pending pair state,
   per-pair removal, and preview RMS using the same solver used on application.
 - Explicitly save and reopen a self-contained .kitbash scene, with IndexedDB
@@ -81,6 +84,32 @@ current pose in short steps and only accepts placements measured clear, which is
 tunnelling. A fit starts at its target and steps out. Corrections shift a part for moves and
 plane methods, and may also turn it for best fits. The solver calls the same joint and
 constraint pipeline as an unobstructed move, so those relationships hold throughout.
+
+## Isolation
+
+The isolated set lives beside the selection in the editor store, outside the scene document,
+so undo, autosave, scene files, and shared sessions never see it. It changes what the
+viewport draws and picks, what Frame all frames, and what the interference view compares.
+Clipping, joints, constraints, and exports keep using part visibility. Parts that leave the
+scene leave the set, and parts made or restored while isolating join it. I starts a plain
+isolation and Shift + I one with nearby surfaces, so each key always does the same thing.
+Gizmos and markers follow what is drawn, including parts too far away to appear.
+
+Nearby surfaces need the distance from every drawn fragment of the other parts to the
+isolated parts, each frame, on meshes of any density. `src/core/proximity.ts` measures that
+once into a grid around the isolated parts: surface samples are written to the grid nodes
+beside them, and eight sweeps carry each node the nearest sample its neighbors know. Vertices
+are the samples, with larger triangles sampled across their face, so the cost follows the
+vertex count and the grid size, not their product. The result is one byte per node in a 3D
+texture. A shader on the other parts looks it up and discards fragments beyond the distance,
+and picking reads the same bytes, so a click lands exactly where something is drawn.
+
+The grid sits in the frame of the first isolated part, without its scale. Moving that part,
+or all isolated parts together, only changes the matrix into the grid, which is why the cut
+tracks a drag at no cost. Between nodes a surface in contact reads up to three quarters of a
+cell away, so the drawing limit never goes below that. The work is cut into slices of a few
+milliseconds on the main thread, which reads the mesh in place instead of copying a dense
+scan to a worker.
 
 ## Camera navigation
 

@@ -207,10 +207,49 @@ for an empty workbench or to reload the sample.
    worker, first checking for open/non-manifold edges. Both are undoable.
 
 World reference planes, wireframe, an exploded view, distance measurement,
-orthographic views, framing, visibility, and fixed part locks are included.
+orthographic views, framing, [isolation](#isolate-a-part), visibility, and fixed part locks
+are included.
 Larger meshes use BVH-accelerated picking; rendering pauses when the view is idle. Above a
 million triangles, picking is prepared in the background: the mesh draws and can be selected
 in the parts list straight away, and can be clicked when the status bar notice clears.
+
+## Isolate a part
+
+Press **I** to draw only the selected parts, and **I** again to show everything. The isolate
+button beside the zoom controls, **View ▸ Isolate selected**, and the context menu do the
+same. Isolation changes the view and nothing else. It is not saved, undone, or shared, and
+part visibility is untouched. The other parts stay in the assembly, so
+[No clip](#avoid-clipping), joints, and constraints still act on them.
+
+- Select another part in the Parts panel and press **I** to move the isolation to it. With
+  nothing new selected, **I** exits. Parts outside the isolated view are dimmed in the list.
+- **Frame all** (Home) frames the isolated parts, and the interference view compares only
+  them. Parts you paste, duplicate, import, or merge while isolating join the view.
+- **Hide others** in the context menu is the lasting version. It changes part visibility in
+  the scene, is undoable, and affects exports of visible parts.
+
+**Nearby surfaces** keeps the surroundings of the isolated part in view. Press **Shift + I**,
+or use the switch in the bar at the top of the viewport, to also draw the other parts
+wherever their surface comes within a set distance of an isolated part. **I** always starts
+without them, and the switch stays as set while you move the isolation between parts. The distance is in
+millimeters, 2 by default and up to 200. Everything farther is cut away, so a socket, seam,
+or mating face stays visible around the part you are fitting, without the rest of the model
+in the way. A cut-away part is drawn on both sides, because its facing surface is often seen
+from behind.
+
+- The cut follows the part as you move, rotate, or fit it, and follows its neighbors as they
+  move, with no delay, including on dense scans.
+- Nearby surfaces can be clicked, picked for alignment, joints, and measurement, and painted.
+  Cut-away surfaces cannot, and a click passes through them to whatever is drawn behind.
+- Distances are read from a grid around the isolated parts with cells about a hundredth of
+  their size, 0.4 mm for a 40 mm part. The cut is accurate to about one cell, and the
+  tooltip on the distance shows the size. A surface in contact always shows, even with the
+  distance at 0.
+- The grid is measured once, when you isolate, without holding the viewport. In testing it
+  took about 0.2 seconds for a simple part and 0.7 seconds for a 10-million-triangle scan.
+  It is measured again when the isolated parts, their scale, or the range of the distance
+  change.
+- Nearby surfaces pause in the exploded and interference views.
 
 ## Avoid clipping
 
@@ -343,6 +382,7 @@ During contact painting, undo removes the last brush stroke before scene changes
 | Fine gizmo adjustment                 | Hold `Shift` during move / rotate / scale (10× finer)                            |
 | Select multiple                       | Shift / Ctrl / ⌘ + click                                                         |
 | Focus / frame all                     | `F` / `Home`                                                                     |
+| Isolate / with nearby surfaces        | `I` / `Shift + I`                                                                |
 | Center orbit / toggle orbit selection | `.` / `Shift + .`                                                                |
 | Select / move / rotate / scale        | `V` / `G` / `R` / `S`                                                            |
 | Align / joint / measure               | `A` / `J` / `D`                                                                  |
@@ -379,7 +419,7 @@ selected, and scene changes can be undone.
 
 Right-click a component in the viewport or Parts panel for transform, clipboard,
 rename/delete, alignment, contact painting, joint, merge, interface inspection,
-visibility, and lock actions. Right-clicking a selected part retains the whole
+isolation, visibility, and lock actions. Right-clicking a selected part retains the whole
 selection; right-clicking another part selects it. A model surface menu also
 offers **Set pivot here** at the clicked point. Right-drag continues to pan the
 camera. The menu supports arrow keys, Home/End, typing an action name, Enter/Space,

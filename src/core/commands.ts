@@ -1,4 +1,5 @@
 import { downloadScene } from './files';
+import { nextIsolation } from './isolation';
 import { matchKeyAction } from './keybindings';
 import type { KeyActionId, KeyInput } from './keybindings';
 import { primaryShortcutText, usePreferences } from './preferences';
@@ -33,6 +34,7 @@ export function editorCommands(context: CommandContext = {}) {
   const hasSelection = selected.length > 0;
   const editable = selected.some((part) => !part.locked);
   const idle = !state.busy;
+  const canIsolate = !!nextIsolation(state.scene.parts, state.selected, state.isolated);
   const command = (label: string, run: () => void, enabled = true, key?: KeyActionId) => ({
     label,
     run,
@@ -148,12 +150,28 @@ export function editorCommands(context: CommandContext = {}) {
       () => updateSelected({ visible: false }),
       idle && selected.some((part) => part.visible),
     ),
-    isolate: command(
-      'Isolate selected',
-      state.isolateSelected,
+    hideOthers: command(
+      'Hide others',
+      state.hideOthers,
       idle &&
         hasSelection &&
         state.scene.parts.some((part) => part.visible !== state.selected.includes(part.id)),
+    ),
+    isolate: command(
+      state.isolated && !canIsolate ? 'Exit isolation' : 'Isolate selected',
+      state.toggleIsolation,
+      !!state.isolated || canIsolate,
+      'isolate',
+    ),
+    isolateNearby: command(
+      !state.isolated
+        ? 'Isolate with nearby surfaces'
+        : state.view.isolation.nearby
+          ? 'Hide nearby surfaces'
+          : 'Show nearby surfaces',
+      state.toggleNearby,
+      !!state.isolated || canIsolate,
+      'isolateNearby',
     ),
     showAll: command(
       'Show all parts',
