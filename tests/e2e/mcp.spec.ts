@@ -176,6 +176,11 @@ test('the live view frames a new scene, then leaves a moved camera alone', async
   const { url } = await call('open_live_view', { open_browser: false });
   await page.goto(url);
   await expect(page.locator(part('Agent base'))).toBeVisible();
+  // Shadows fit the scene's bounds, so leave them out of a comparison of the camera alone.
+  await page.getByRole('button', { name: /^Display:/ }).click();
+  await page.getByRole('button', { name: 'Edit lights…' }).click();
+  await page.getByRole('switch', { name: 'Shadows', exact: true }).click();
+  await page.getByRole('button', { name: 'Close lighting' }).click();
   await page.waitForTimeout(400);
   const framed = await page.locator('canvas').first().screenshot();
 

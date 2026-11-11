@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import {
   ArrowDownToLine,
   Box,
@@ -21,6 +21,7 @@ import {
 import { useEditor } from '../core/store';
 import { referencePlanes } from '../core/references';
 import { triangleCount } from '../core/geometry';
+import { distinctColors, swatchBackground, swatchColors } from '../core/appearance';
 import { IconButton } from './ui';
 import { ConstraintList } from './ConstraintList';
 
@@ -36,6 +37,7 @@ export function PartsPanel({ onClose }: { onClose: () => void }) {
     [query, setQuery] = useState(''),
     [expanded, setExpanded] = useState(true);
   const filtered = scene.parts.filter((p) => p.name.toLowerCase().includes(query.toLowerCase()));
+  const distinct = useMemo(() => distinctColors(scene.parts), [scene.parts]);
   const triangles = scene.parts.reduce((sum, p) => sum + triangleCount(p.geometry), 0);
   return (
     <aside className="parts-panel" aria-label="Scene parts">
@@ -107,6 +109,15 @@ export function PartsPanel({ onClose }: { onClose: () => void }) {
                     >
                       <span className="tree-branch" />
                       <Box size={14} />
+                      <span
+                        className="part-swatch"
+                        aria-hidden="true"
+                        style={{
+                          background: swatchBackground(
+                            swatchColors(part, view.partColors, distinct.get(part.id)),
+                          ),
+                        }}
+                      />
                       <span>{part.name}</span>
                       {scene.joints.some((j) => j.childId === part.id) ? (
                         <Link2 className="part-joint-icon" size={11} />

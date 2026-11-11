@@ -13,7 +13,7 @@ import type { TransformControls as TransformControlsImpl } from 'three-stdlib';
 import { Canvas, useThree } from '@react-three/fiber';
 import type { ThreeEvent } from '@react-three/fiber';
 import {
-  ContactShadows,
+  Billboard,
   Edges,
   GizmoHelper,
   GizmoViewcube,
@@ -21,6 +21,7 @@ import {
   Line,
   OrthographicCamera,
   PerspectiveCamera,
+  ScreenSizer,
   TransformControls,
 } from '@react-three/drei';
 import { DoubleSide, Group, Mesh, Object3D, Quaternion, Vector3 } from 'three';
@@ -46,11 +47,13 @@ import {
   vec,
   worldPoint,
 } from '../core/geometry';
-import { measureDistance, useEditor } from '../core/store';
+import { measureDistance, sceneLighting, useEditor } from '../core/store';
 import { PrecisionDrag } from '../core/precision';
 import { isJointConnected, translationIsPinned } from '../core/constraints';
 import { referencePlanes, resolvePart } from '../core/references';
-import type { Part, SurfacePoint, FitAnchor, SceneDocument } from '../core/types';
+import type { Part, SurfacePoint, FitAnchor, SceneDocument, SceneLight } from '../core/types';
+import { distinctColors, shownColor } from '../core/appearance';
+import { updateLight } from '../core/lighting';
 import { useShortcut, withShortcut } from '../core/preferences';
 import { AnnotationLayer, ProjectionTracker, ViewProjection } from './Annotations';
 import { IconButton, useDismiss } from './ui';
@@ -64,6 +67,10 @@ import { InspectionToggle, InspectionControls, InspectionOverlay } from './Inter
 import { hiddenByIsolation, nextIsolation } from '../core/isolation';
 import { IsolationNotice, nearbyRaycast, useNearbySurfaces } from './Isolation';
 import type { NearbySurfaces } from './Isolation';
+import { SceneLighting, overlayLayer, overlayLayers, useSceneFrame } from './SceneLighting';
+import type { SceneFrame } from './SceneLighting';
+import { DisplayMenu } from './DisplayMenu';
+import { LightingPanel } from './LightingPanel';
 
 class ViewportBoundary extends Component<{ children: ReactNode }, { error: string | null }> {
   state = { error: null as string | null };
@@ -96,6 +103,7 @@ function PartMesh({
   frame,
   hidden,
   nearby,
+  distinct,
 }: {
   part: Part;
   frame?: ExplodeFrame;
@@ -103,10 +111,15 @@ function PartMesh({
   hidden: boolean;
   /** Drawn only where it comes near the isolated parts. */
   nearby?: NearbySurfaces;
+  /** Its automatic color when every part is shown in a different one. */
+  distinct?: string;
 }) {
   const shown = part.visible && !hidden;
   const selected = useEditor((s) => s.selected.includes(part.id));
   const inspection = useEditor((s) => s.view.inspection);
+  const partColors = useEditor((s) => s.view.partColors);
+  const paint = shownColor(part, partColors, distinct);
+  const vertexColors = !inspection.enabled && paint.vertexColors;
   const tool = useEditor((s) => s.tool),
     wireframe = useEditor((s) => s.view.wireframe),
     explode = useEditor((s) => s.view.explode),
@@ -233,16 +246,17 @@ function PartMesh({
           }}
         >
           <meshStandardMaterial
-            key={inspection.enabled ? 'inspection' : nearby ? 'nearby' : 'solid'}
+            // Three compiles vertex colors into the shader, so toggling them needs a new material.
+            key={`${inspection.enabled ? 'inspection' : nearby ? 'nearby' : 'solid'}:${vertexColors}`}
             // Both sides, because the facing surfaces of a cut-away part are seen from behind.
             {...(nearby ? { onBeforeCompile: nearby.compile, side: DoubleSide } : {})}
-            color={inspection.enabled ? '#a4aab4' : part.color}
+            color={inspection.enabled ? '#a4aab4' : paint.color}
             transparent={inspection.enabled}
             opacity={inspection.enabled ? (inspection.context ? 0.12 : 0) : 1}
             depthWrite={!inspection.enabled}
             roughness={0.64}
             metalness={0.2}
-            vertexColors={!inspection.enabled && !!part.geometry.getAttribute('color')}
+            vertexColors={vertexColors}
             wireframe={!inspection.enabled && wireframe}
             emissive={selected && !inspection.enabled ? '#c77c39' : '#000000'}
             emissiveIntensity={selected ? 0.12 : 0}
@@ -550,6 +564,269 @@ function AnchorOverlay() {
   );
 }
 
+const handleAccent = '#ed9b54',
+  handleIdle = '#959aa3';
+
+/**
+ * Where a world light's handle sits. Only a directional light's direction counts, so its handle
+ * rides a sphere just outside the scene, where it stays in view.
+ */
+function lightHandlePosition(light: SceneLight, frame: SceneFrame, onSphere = true) {
+  const position = vec(light.position);
+  if (light.kind === 'point') return position;
+  return (onSphere ? position.setLength(1.2 * frame.radius) : position).add(frame.center);
+}
+
+function LightMarker({
+  light,
+  position,
+  frame,
+  active,
+}: {
+  light: SceneLight;
+  position: Vector3;
+  frame: SceneFrame;
+  active: boolean;
+}) {
+  const [hovered, setHovered] = useState(false);
+  const hovering = useRef(false);
+  useEffect(
+    () => () => {
+      if (hovering.current) document.body.style.cursor = 'auto';
+    },
+    [],
+  );
+  const opacity = light.enabled ? 1 : 0.35;
+  const overlay = {
+    transparent: true,
+    opacity,
+    depthTest: false,
+    depthWrite: false,
+    toneMapped: false,
+  };
+  return (
+    <>
+      {light.kind === 'directional' ? (
+        <Line
+          points={[frame.center, position]}
+          color={active ? handleAccent : handleIdle}
+          lineWidth={1}
+          dashed
+          dashSize={frame.radius * 0.04}
+          gapSize={frame.radius * 0.03}
+          transparent
+          opacity={0.6 * opacity}
+          layers={overlayLayers}
+          raycast={noRaycast}
+        />
+      ) : null}
+      {/* Sized in pixels, so handles read the same at any scene scale or zoom. */}
+      <ScreenSizer position={position}>
+        <Billboard>
+          <mesh layers={overlayLayers} renderOrder={1000} raycast={noRaycast}>
+            <circleGeometry args={[4.5, 24]} />
+            <meshBasicMaterial color={light.color} {...overlay} />
+          </mesh>
+          <mesh layers={overlayLayers} renderOrder={1000} raycast={noRaycast}>
+            <ringGeometry args={[active ? 6.5 : 7, active ? 9.5 : 8.5, 32]} />
+            <meshBasicMaterial
+              color={active ? handleAccent : hovered ? '#e9eaec' : handleIdle}
+              {...overlay}
+            />
+          </mesh>
+          <mesh
+            layers={overlayLayers}
+            userData={{ lightHandle: true }}
+            // Whatever a press on a handle ends on, it never selects or deselects parts.
+            onPointerDown={(event) => {
+              event.stopPropagation();
+              gizmoPressed = true;
+            }}
+            onContextMenu={(event) => event.stopPropagation()}
+            onClick={(event) => {
+              event.stopPropagation();
+              const state = useEditor.getState();
+              if (event.button !== 0 || event.delta > 5) return;
+              if (!state.navigationMode && !state.temporaryOrbit) state.setActiveLight(light.id);
+            }}
+            onPointerOver={(event) => {
+              event.stopPropagation();
+              hovering.current = true;
+              setHovered(true);
+              document.body.style.cursor = 'pointer';
+            }}
+            onPointerOut={() => {
+              hovering.current = false;
+              setHovered(false);
+              document.body.style.cursor = 'auto';
+            }}
+          >
+            <circleGeometry args={[12, 16]} />
+            <meshBasicMaterial visible={false} />
+          </mesh>
+        </Billboard>
+      </ScreenSizer>
+    </>
+  );
+}
+
+function LightHandles() {
+  const open = useEditor((s) => s.lightingPanel);
+  return open ? <LightHandleLayer /> : null;
+}
+
+/** Markers for the world lights and a translate gizmo on the active one. */
+function LightHandleLayer() {
+  const lights = useEditor(sceneLighting).lights.filter((light) => !light.camera),
+    active = useEditor((s) => s.activeLight);
+  // Other tools have their own gizmos or picks, which a light's gizmo would overlap.
+  const movable = useEditor(
+    (s) => s.tool === 'select' && !s.navigationMode && !s.temporaryOrbit && !s.pivotPicking,
+  );
+  const snap = useEditor((s) => (s.view.snap ? s.view.snapStep : null));
+  const current = useSceneFrame();
+  const camera = useThree((s) => s.camera),
+    raycaster = useThree((s) => s.raycaster),
+    setEvents = useThree((s) => s.setEvents),
+    getRoot = useThree((s) => s.get),
+    invalidate = useThree((s) => s.invalidate);
+  const proxy = useMemo(() => new Object3D(), []);
+  const start = useRef<{
+    id: string;
+    frame: SceneFrame;
+    motion: PrecisionDrag;
+    origin: Vector3;
+    checkpointed: boolean;
+  } | null>(null);
+  // Handles keep the scene frame they started with, so a drag never chases its own handle.
+  const [drag, setDrag] = useState<{ id: string; frame: SceneFrame; moved: boolean } | null>(null);
+  const [version, setVersion] = useState(0);
+  const frame = drag?.frame ?? current;
+  const selected = lights.find((light) => light.id === active);
+  useLayoutEffect(() => {
+    camera.layers.enable(overlayLayer);
+    raycaster.layers.enable(overlayLayer);
+    invalidate();
+    return () => {
+      camera.layers.disable(overlayLayer);
+      raycaster.layers.disable(overlayLayer);
+      invalidate();
+    };
+  }, [camera, raycaster, invalidate]);
+  useEffect(() => {
+    // Handles draw over the parts, so they also take the click before anything behind them.
+    const previous = getRoot().events.filter;
+    setEvents({
+      filter: (hits, state) => {
+        const sorted = previous ? previous(hits, state) : hits;
+        const handle = (hit: (typeof sorted)[number]) => !!hit.object.userData.lightHandle;
+        if (!sorted.some(handle)) return sorted;
+        // Overlays in their own scenes, such as the view cube, still come first.
+        const inScene = (hit: (typeof sorted)[number]) => {
+          let root = hit.object;
+          while (root.parent) root = root.parent;
+          return root === state.scene;
+        };
+        return [
+          ...sorted.filter((hit) => !inScene(hit)),
+          ...sorted.filter(handle),
+          ...sorted.filter((hit) => inScene(hit) && !handle(hit)),
+        ];
+      },
+    });
+    return () => setEvents({ filter: previous });
+  }, [getRoot, setEvents]);
+  const finish = useCallback(() => {
+    if (!start.current) return;
+    start.current = null;
+    setDrag(null);
+    const controls = getRoot().controls;
+    if (controls && 'enabled' in controls) controls.enabled = true;
+    setVersion((v) => v + 1);
+    invalidate();
+  }, [getRoot, invalidate]);
+  useEffect(() => {
+    window.addEventListener('blur', finish);
+    window.addEventListener('pointercancel', finish);
+    return () => {
+      window.removeEventListener('blur', finish);
+      window.removeEventListener('pointercancel', finish);
+    };
+  }, [finish]);
+  useLayoutEffect(() => {
+    if (start.current || !selected) return;
+    proxy.position.copy(lightHandlePosition(selected, frame));
+    proxy.updateMatrixWorld(true);
+    invalidate();
+  }, [selected, frame, proxy, version, invalidate]);
+  return (
+    <>
+      {lights.map((light) => (
+        <LightMarker
+          key={light.id}
+          light={light}
+          // While dragged, a directional handle follows the pointer off its sphere.
+          position={lightHandlePosition(light, frame, !(drag?.id === light.id && drag.moved))}
+          frame={frame}
+          active={light.id === active}
+        />
+      ))}
+      {selected && movable ? (
+        <>
+          <primitive object={proxy} />
+          <ManagedTransformControls
+            key={`${selected.id}:${version}`}
+            object={proxy}
+            mode="translate"
+            space="world"
+            size={0.7}
+            translationSnap={snap}
+            onFinishDrag={finish}
+            onMouseDown={() => {
+              gizmoPressed = true;
+              proxy.updateMatrixWorld(true);
+              start.current = {
+                id: selected.id,
+                frame,
+                motion: new PrecisionDrag(proxy.matrixWorld),
+                origin: proxy.position.clone(),
+                checkpointed: false,
+              };
+              setDrag({ id: selected.id, frame, moved: false });
+            }}
+            onObjectChange={() => {
+              const gesture = start.current;
+              if (!gesture) return;
+              proxy.updateMatrixWorld(true);
+              const state = useEditor.getState();
+              const delta = gesture.motion.update(proxy.matrixWorld, state.precision ? 0.1 : 1);
+              if (!delta) return;
+              const lighting = sceneLighting(state);
+              const light = lighting.lights.find((l) => l.id === gesture.id);
+              if (!light) return;
+              const target = gesture.origin.clone().applyMatrix4(delta);
+              if (light.kind === 'directional') {
+                target.sub(gesture.frame.center);
+                // A directional light needs a direction.
+                if (target.length() < gesture.frame.radius * 1e-6) return;
+              }
+              const before = state.scene;
+              // The first real change checkpoints the drag, like part and anchor drags.
+              state.setLighting(
+                updateLight(lighting, gesture.id, { position: target.toArray() }),
+                !gesture.checkpointed,
+              );
+              if (gesture.checkpointed || useEditor.getState().scene === before) return;
+              gesture.checkpointed = true;
+              setDrag({ id: gesture.id, frame: gesture.frame, moved: true });
+            }}
+          />
+        </>
+      ) : null}
+    </>
+  );
+}
+
 /** Lines between picked points. The points and labels are drawn by the annotation layer. */
 function AssemblyAnnotations() {
   const scene = useEditor((s) => s.scene),
@@ -620,6 +897,10 @@ function Scene({
   const nearby = useNearbySurfaces();
   const exploding = view.explode > 0;
   const frame = useMemo(() => (exploding ? explodeFrame(parts) : undefined), [exploding, parts]);
+  const distinct = useMemo(
+    () => (view.partColors === 'distinct' ? distinctColors(parts) : undefined),
+    [view.partColors, parts],
+  );
   return (
     <>
       <color attach="background" args={['#272a2f']} />
@@ -638,22 +919,7 @@ function Scene({
         far={50000}
       />
       <CameraRig />
-      <ambientLight intensity={1.0} />
-      <hemisphereLight args={['#e6e9ef', '#8b8073', 1.25]} />
-      <directionalLight
-        position={[90, 150, 90]}
-        intensity={2.5}
-        color="#fff1dc"
-        castShadow
-        shadow-mapSize={[2048, 2048]}
-        shadow-camera-left={-110}
-        shadow-camera-right={110}
-        shadow-camera-top={140}
-        shadow-camera-bottom={-100}
-        shadow-bias={-0.0004}
-      />
-      <directionalLight position={[-90, 80, -90]} intensity={2.2} color="#d5e5f4" />
-      <directionalLight position={[-90, 40, 90]} intensity={0.6} color="#ddd0b8" />
+      <SceneLighting />
       {view.grid ? (
         <Grid
           position={[0, -0.07, 0]}
@@ -669,15 +935,6 @@ function Scene({
           infiniteGrid
         />
       ) : null}
-      <ContactShadows
-        position={[0, -0.1, 0]}
-        opacity={0.48}
-        scale={300}
-        blur={2.5}
-        far={160}
-        resolution={256}
-        frames={1}
-      />
       {parts.map((part) => {
         const outside = !!isolated && !isolated.includes(part.id);
         const surfaces = outside && nearby?.ids.has(part.id) ? nearby.surfaces : undefined;
@@ -688,6 +945,7 @@ function Scene({
             frame={frame}
             hidden={outside && !surfaces}
             nearby={surfaces}
+            distinct={distinct?.get(part.id)}
           />
         );
       })}
@@ -699,6 +957,7 @@ function Scene({
             geometry={plane.geometry}
             onClick={(event) => {
               if (
+                gizmoPressed ||
                 useEditor.getState().navigationMode ||
                 useEditor.getState().temporaryOrbit ||
                 (tool === 'align' && useEditor.getState().operation.mode === 'surface') ||
@@ -728,6 +987,7 @@ function Scene({
       <SurfacePaintOverlay />
       <TransformGizmo />
       <AnchorOverlay />
+      <LightHandles />
       <AssemblyAnnotations />
       <ProjectionTracker projection={projection} />
       <GizmoHelper alignment="top-right" margin={[62, 66]}>
@@ -820,9 +1080,7 @@ export function Viewport() {
           ) : null}
         </div>
         <InspectionToggle inspection={inspection} />
-        <span className="viewport-shading">
-          Solid <span /> Studio
-        </span>
+        <DisplayMenu />
       </div>
       <ViewportBoundary>
         <Suspense fallback={<div className="viewport-loading">Preparing the workbench…</div>}>
@@ -921,6 +1179,7 @@ export function Viewport() {
         <IsolationNotice />
       </div>
       <CameraNavigation />
+      <LightingPanel projection={projection} />
       <div className="viewport-bottom">
         <div className="canvas-selection">
           <span className="selection-dot" />

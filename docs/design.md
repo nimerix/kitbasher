@@ -19,7 +19,8 @@ numbers in numeric inputs. Corners 5–8px; thin outline icons at 16px.
 The sample is a multipart, original stylized expedition robot on a round base.
 Each component is actual editable geometry. A subtle ground grid, studio
 lighting, selection silhouette, axis gizmo, orientation cube, and focus control
-provide spatial context. Smaller screens use collapsible sidebars.
+provide spatial context. Lighting is adjustable per scene from a display menu at the
+top of the viewport, with Studio as the default. Smaller screens use collapsible sidebars.
 
 ## Core behavior and acceptance
 
@@ -59,6 +60,10 @@ provide spatial context. Smaller screens use collapsible sidebars.
 - Isolate the selection with one key, as a view state that never edits, saves, or shares the
   scene. Optionally keep other parts drawn, and pickable, wherever they come within a set
   distance of the isolated parts, updating as parts move. See [isolation](#isolation).
+- Show parts in their material colors, in per-part editor colors, or each in a distinct color,
+  without changing what any export or merge contains. Adjust the scene's lighting with presets,
+  brightness, and up to 8 directional or point lights, placed by handle or by numbers. Both are
+  saved with the scene and undoable. See [editor colors and lighting](#editor-colors-and-lighting).
 - Allow any number of matching pairs after the third, show pending pair state,
   per-pair removal, and preview RMS using the same solver used on application.
 - Explicitly save and reopen a self-contained .kitbash scene, with IndexedDB
@@ -110,6 +115,56 @@ tracks a drag at no cost. Between nodes a surface in contact reads up to three q
 cell away, so the drawing limit never goes below that. The work is cut into slices of a few
 milliseconds on the main thread, which reads the mesh in place instead of copying a dense
 scan to a worker.
+
+## Editor colors and lighting
+
+A part's `color` is its material color, which every export and merge reads. `displayColor` is
+an optional editor color that only the viewport reads. `shownColor` in `src/core/appearance.ts`
+decides what is drawn: Material shows material and vertex colors, Editor shows the editor color
+where one is set, and Distinct also gives every other part an automatic color. A shown override
+replaces vertex colors, which would otherwise hide it. Distinct colors come from the part's
+index in the scene into a fixed OKLCh palette, five lightness tones by 72 hues, ordered so each
+color is the one farthest from all before it. Any first n parts stay far apart, adding parts
+never recolors earlier ones, and moving a part never recolors it. The mode is a view
+preference in local storage, Editor by default, and picking a color in Material switches to
+Editor. Editor colors are scene data: undoable, saved, recovered, copied with their parts, and
+merged in the live view as their own field. A merged part has none. The interference view keeps
+its grey parts.
+
+`SceneDocument.lighting` is absent until the user changes the lighting, and the viewport draws
+`scene.lighting ?? defaultLighting`. The default is the Studio preset, or lighting the user
+saved in local storage. Studio reproduces the editor's original fixed lights value for value,
+so a scene that never touched its lighting renders as before. `src/core/lighting.ts` holds the
+presets, the limits, and `sanitizeLighting`, which every store change, scene file, recovery,
+live-view message, and saved default passes through. Valid lighting comes back unchanged, so it
+can run any number of times. Brightness is the renderer's tone-mapping exposure.
+
+`src/components/SceneLighting.tsx` draws the lights. A directional light's position is an
+offset from the center of the visible parts' bounding sphere, and only its direction counts.
+The light sits three radii out, aims at the center, and fits its shadow camera to the sphere,
+so shadows hold at any scene scale. Point lights are world positions with no decay, fading out by
+their range. Lights that follow the camera are placed in its frame on every rendered frame and
+cast no shadows. The ground contact shadow shows only with Shadows on. It is drei's
+ContactShadows adapted to blur where it sits rather than at the origin and to free its render
+targets when replaced, so it follows the parts anywhere. Its size steps by powers of two from the
+sample's, so ordinary edits never resize it.
+
+The lighting panel is non-modal, docked at the viewport's top left, clear of the view cube and
+beside the Interference panel, and becomes a bottom sheet on narrow windows. Every slider,
+picker, and handle drag is one undo step: its first change checkpoints and the rest extend it.
+While the panel is open, world lights get handles of constant pixel size on an overlay layer
+that ground shadows leave out. Directional handles sit on a sphere at 1.2 × the scene's radius,
+so they stay in view; only their direction counts. Handle hits take precedence over parts, but
+not over overlays such as the view cube, and never change the part selection. With the Select
+tool, the active light gets the same translate gizmo as parts, with Shift precision and
+snapping; other tools keep their own gizmos and picks, so the two never overlap. The scene's
+center and radius are frozen for a drag so a handle never chases itself, and a drag that would
+put a directional light on the center is skipped. Turning Follow camera on or off converts the
+light's position between the world and camera frames, so it stays where it is.
+
+In the live view, lighting merges in five groups: brightness, ambient, the sky fill with its
+colors, shadows, and the whole light list. Agents cannot set editor colors or lighting, and
+changes to either are left out of what an agent is told.
 
 ## Camera navigation
 

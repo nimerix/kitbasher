@@ -1,7 +1,8 @@
 import { Component, useEffect, useRef, useState } from 'react';
 import type { ButtonHTMLAttributes, ErrorInfo, ReactNode, RefObject } from 'react';
-import { ChevronDown, X } from 'lucide-react';
+import { ChevronDown, LockKeyhole, X } from 'lucide-react';
 import { clearRecovery } from '../core/recovery';
+import type { AxisLocks, Vec3 } from '../core/types';
 
 /** The last autosave survives a render failure, so offer a way back to it. */
 export class AppBoundary extends Component<{ children: ReactNode }, { error: string | null }> {
@@ -277,5 +278,228 @@ export function NumericInput({
         }
       }}
     />
+  );
+}
+
+export function VectorFields({
+  label,
+  values,
+  onCommit,
+  disabled = false,
+  locks,
+  unit,
+  step = 1,
+  min,
+}: {
+  label: string;
+  values: Vec3;
+  onCommit: (values: Vec3) => void;
+  disabled?: boolean;
+  locks?: AxisLocks;
+  unit?: string;
+  step?: number;
+  min?: number;
+}) {
+  return (
+    <div className="vector-control">
+      <div className="field-label">
+        <span>{label}</span>
+        <small>{unit}</small>
+      </div>
+      <div className="vector-fields">
+        {(['X', 'Y', 'Z'] as const).map((axis, i) => (
+          <label
+            key={axis}
+            className={`axis-field axis-${axis.toLowerCase()} ${disabled || locks?.[i] ? 'disabled' : ''}`}
+          >
+            <span>{axis}</span>
+            <NumericInput
+              label={`${label} ${axis}`}
+              value={values[i]}
+              step={step}
+              min={min}
+              disabled={disabled || locks?.[i]}
+              onCommit={(value) => {
+                const next = [...values] as Vec3;
+                next[i] = value;
+                onCommit(next);
+              }}
+            />
+            {locks?.[i] ? <LockKeyhole size={9} /> : null}
+          </label>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Range and color inputs fire React's onChange throughout a drag and the native change event
+ * once it ends. `begin()` is true only for a drag's first change, so each drag is one undo step.
+ */
+export function useDragCheckpoint() {
+  const input = useRef<HTMLInputElement>(null);
+  const dragging = useRef(false);
+  useEffect(() => {
+    const element = input.current!;
+    const end = () => {
+      dragging.current = false;
+    };
+    // A drag that ends where it began fires no change, so a new press also ends the last one.
+    const events = ['change', 'pointerdown', 'keydown'];
+    events.forEach((name) => element.addEventListener(name, end));
+    return () => events.forEach((name) => element.removeEventListener(name, end));
+  }, []);
+  const begin = () => {
+    const first = !dragging.current;
+    dragging.current = true;
+    return first;
+  };
+  return { input, begin };
+}
+
+export function ColorInput({
+  label,
+  value,
+  onChange,
+}: {
+  label: string;
+  value: string;
+  onChange: (value: string, checkpoint: boolean) => void;
+}) {
+  const { input, begin } = useDragCheckpoint();
+  return (
+    <input
+      ref={input}
+      aria-label={label}
+      type="color"
+      value={value}
+      onChange={(e) => onChange(e.target.value, begin())}
+    />
+  );
+}
+
+/** A swatch, its hex value or another short text, and a picker that opens on click. */
+export function ColorControl({
+  label,
+  value,
+  text,
+  onChange,
+}: {
+  label: string;
+  value: string;
+  text?: string;
+  onChange: (value: string, checkpoint: boolean) => void;
+}) {
+  return (
+    <label className="color-control">
+      <ColorInput label={label} value={value} onChange={onChange} />
+      <span>{text ?? value.toUpperCase()}</span>
+      <ChevronDown size={11} />
+    </label>
+  );
+}
+
+export function RangeInput({
+  label,
+  value,
+  limit,
+  disabled,
+  onChange,
+}: {
+  label: string;
+  value: number;
+  limit: { min: number; max: number; step: number };
+  disabled?: boolean;
+  onChange: (value: number, checkpoint: boolean) => void;
+}) {
+  const { input, begin } = useDragCheckpoint();
+  return (
+    <input
+      ref={input}
+      type="range"
+      aria-label={label}
+      min={limit.min}
+      max={limit.max}
+      step={limit.step}
+      value={value}
+      disabled={disabled}
+      onChange={(e) => onChange(Number(e.target.value), begin())}
+    />
+  );
+}
+
+export function Switch({
+  label,
+  checked,
+  disabled,
+  onChange,
+}: {
+  label: string;
+  checked: boolean;
+  disabled?: boolean;
+  onChange: (checked: boolean) => void;
+}) {
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-label={label}
+      aria-checked={checked}
+      disabled={disabled}
+      className={`toggle ${checked ? 'on' : ''}`}
+      onClick={() => onChange(!checked)}
+    >
+      <span />
+    </button>
+  );
+}
+
+/** One choice of several. Arrow keys move the choice, and Tab enters at the chosen option. */
+export function RadioGroup<T extends string>({
+  label,
+  value,
+  options,
+  onChange,
+  className,
+}: {
+  label: string;
+  value: T | null;
+  options: { id: T; label: ReactNode; title?: string }[];
+  onChange: (value: T) => void;
+  className?: string;
+}) {
+  const group = useRef<HTMLDivElement>(null);
+  const tabStop = options.some((o) => o.id === value) ? value : options[0]?.id;
+  return (
+    <div ref={group} role="radiogroup" aria-label={label} className={className}>
+      {options.map((option, i) => (
+        <button
+          key={option.id}
+          type="button"
+          role="radio"
+          aria-checked={option.id === value}
+          tabIndex={option.id === tabStop ? 0 : -1}
+          title={option.title}
+          className={option.id === value ? 'active' : ''}
+          onClick={() => option.id !== value && onChange(option.id)}
+          onKeyDown={(e) => {
+            const step =
+              e.key === 'ArrowRight' || e.key === 'ArrowDown'
+                ? 1
+                : e.key === 'ArrowLeft' || e.key === 'ArrowUp'
+                  ? -1
+                  : 0;
+            if (!step) return;
+            e.preventDefault();
+            const next = (i + step + options.length) % options.length;
+            onChange(options[next].id);
+            group.current?.querySelectorAll<HTMLElement>('[role=radio]')[next]?.focus();
+          }}
+        >
+          {option.label}
+        </button>
+      ))}
+    </div>
   );
 }

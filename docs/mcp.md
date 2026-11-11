@@ -137,6 +137,13 @@ later one wins. Joints and plane constraints are then applied again, so connecte
 connected. A change that cannot be combined, such as giving a part a second parent, is refused, and
 the tab undoes it and says why.
 
+**Editor colors and lighting belong to the tabs.** They are saved in the scene, so every tab shows
+them and the agent's `save_scene` keeps them, but the agent cannot set them and is not told when they
+change. `render_view` uses material colors and its own fixed shading. A part with an editor color
+keeps showing it in the tabs when the agent recolors the part; choose **Material** in the display menu
+to see the agent's colors. The part color mode is a view setting, so it stays in each tab. Lights are
+merged as one list, so when two tabs change lights at once, the later change wins.
+
 **Undo is your own.** In a tab, undo and redo step through that tab's changes only, and the agent's
 `undo` steps through its own. A value someone else has changed since stays as they left it. A tab keeps
 its history across a reload.

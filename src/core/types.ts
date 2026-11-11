@@ -30,6 +30,45 @@ export interface Part {
   /** User-picked pivot in mesh-local coordinates. */
   pivot?: Vec3;
   anchors?: FitAnchor[];
+  /** Viewport-only color. Saved with the scene; exports and merges use `color`. */
+  displayColor?: string;
+}
+
+/** What the viewport paints parts with: export colors, editor colors, or one color per part. */
+export type PartColorMode = 'material' | 'editor' | 'distinct';
+
+export type LightKind = 'directional' | 'point';
+
+export interface SceneLight {
+  id: string;
+  name: string;
+  kind: LightKind;
+  color: string;
+  intensity: number;
+  /**
+   * Directional: where it shines from, as an offset from the scene's center; only the
+   * direction counts. Point: a world position in mm. With `camera`, in the camera's frame.
+   */
+  position: Vec3;
+  /** Point lights fade out by this distance in mm. 0 reaches everything. */
+  range: number;
+  /** Directional lights only. */
+  castShadow: boolean;
+  enabled: boolean;
+  /** Moves with the camera, like a headlight. */
+  camera: boolean;
+}
+
+/** Editor lighting, saved with the scene and never exported. */
+export interface SceneLighting {
+  /** Overall brightness. */
+  exposure: number;
+  ambient: number;
+  hemisphere: number;
+  sky: string;
+  ground: string;
+  shadows: boolean;
+  lights: SceneLight[];
 }
 
 export interface Joint {
@@ -82,6 +121,8 @@ export interface SceneDocument {
   parts: Part[];
   joints: Joint[];
   constraints?: PlaneConstraint[];
+  /** Absent until the user changes it; the viewport then uses their default lighting. */
+  lighting?: SceneLighting;
 }
 
 export interface SurfacePoint {
@@ -170,6 +211,7 @@ export interface BinarySceneHeader {
   parts: (Omit<Part, 'geometry'> & { geometry: number })[];
   joints: Joint[];
   constraints: PlaneConstraint[];
+  lighting?: SceneLighting;
   geometries: GeometryLayout[];
   bodyLength: number;
 }
@@ -183,6 +225,7 @@ export interface SceneFile {
   parts: (Omit<Part, 'geometry'> & { geometry: SerializedGeometry })[];
   joints: Joint[];
   constraints?: PlaneConstraint[];
+  lighting?: SceneLighting;
 }
 
 export interface ViewSettings {
@@ -191,6 +234,7 @@ export interface ViewSettings {
   clip: ClipSettings;
   isolation: IsolationSettings;
   orbitSelection: boolean;
+  partColors: PartColorMode;
   grid: boolean;
   joints: boolean;
   wireframe: boolean;

@@ -36,6 +36,14 @@ import {
   saveIsolationSettings,
 } from './isolation';
 import { readOrbitPreference, saveOrbitPreference } from './navigation';
+import { readPartColorMode, savePartColorMode } from './appearance';
+import {
+  presetLighting,
+  readDefaultLighting,
+  sanitizeLighting,
+  saveDefaultLighting,
+} from './lighting';
+import { same } from './sync';
 import type { NavigationMode } from './navigation';
 import { createSample } from './sample';
 import { captureComponents, instantiateComponents } from './clipboard';
@@ -48,6 +56,7 @@ import type {
   PlaneConstraint,
   Part,
   SceneDocument,
+  SceneLighting,
   SurfacePoint,
   SurfacePair,
   SurfaceSide,
@@ -122,6 +131,11 @@ interface EditorState {
   paintHistory: SurfacePair[][];
   operation: AssemblyOperation;
   view: ViewSettings;
+  /** Lighting for scenes that have none of their own. Kept in this browser. */
+  defaultLighting: SceneLighting;
+  lightingPanel: boolean;
+  /** The light being edited in the lighting panel and moved in the viewport. */
+  activeLight: string | null;
   past: SceneDocument[];
   future: SceneDocument[];
   revision: number;
@@ -200,6 +214,14 @@ interface EditorState {
     settle?: boolean,
   ) => void;
   patchParts: (ids: string[], patch: Partial<Part>, checkpoint?: boolean) => void;
+  /** Sets or, with null, clears the viewport-only color of these parts. */
+  setDisplayColor: (ids: string[], color: string | null, checkpoint?: boolean) => void;
+  /** Gives the scene its own lighting, or with null returns it to the default. */
+  setLighting: (lighting: SceneLighting | null, checkpoint?: boolean) => void;
+  /** Saves lighting for scenes without their own, or with null restores the built-in one. */
+  setDefaultLighting: (lighting: SceneLighting | null) => void;
+  setLightingPanel: (open: boolean) => void;
+  setActiveLight: (id: string | null) => void;
   addParts: (parts: Part[]) => void;
   deleteSelected: () => void;
   duplicateSelected: () => void;
@@ -286,6 +308,7 @@ export const useEditor = create<EditorState>((set, get) => ({
     clip: readClipSettings(),
     isolation: readIsolationSettings(),
     orbitSelection: readOrbitPreference(),
+    partColors: readPartColorMode(),
     grid: true,
     joints: false,
     wireframe: false,
@@ -296,6 +319,9 @@ export const useEditor = create<EditorState>((set, get) => ({
     space: 'world',
     planes: [],
   },
+  defaultLighting: readDefaultLighting(),
+  lightingPanel: false,
+  activeLight: null,
   past: [],
   future: [],
   revision: 0,
@@ -1174,6 +1200,44 @@ export const useEditor = create<EditorState>((set, get) => ({
         checkpoint,
       );
     }),
+  setDisplayColor: (ids, color, checkpoint = true) => {
+    set((state) => {
+      const targets = new Set(ids);
+      if (
+        !state.scene.parts.some((p) => targets.has(p.id) && p.displayColor !== (color || undefined))
+      )
+        return {};
+      return changed(
+        state,
+        {
+          ...state.scene,
+          parts: state.scene.parts.map((p) => {
+            if (!targets.has(p.id)) return p;
+            const { displayColor: _, ...rest } = p;
+            return color ? { ...rest, displayColor: color } : rest;
+          }),
+        },
+        checkpoint,
+      );
+    });
+    // Material mode would hide the color just picked.
+    if (color && get().view.partColors === 'material') get().setView({ partColors: 'editor' });
+  },
+  setLighting: (lighting, checkpoint = true) =>
+    set((state) => {
+      const next = lighting ? sanitizeLighting(lighting, state.defaultLighting) : undefined;
+      if (same(next, state.scene.lighting)) return {};
+      const { lighting: _, ...rest } = state.scene;
+      return changed(state, next ? { ...rest, lighting: next } : rest, checkpoint);
+    }),
+  setDefaultLighting: (lighting) => {
+    // Not read back from storage, which may be unavailable; the default still applies this session.
+    const next = lighting ? sanitizeLighting(lighting) : presetLighting('studio');
+    saveDefaultLighting(lighting ? next : null);
+    set({ defaultLighting: next });
+  },
+  setLightingPanel: (open) => set({ lightingPanel: open }),
+  setActiveLight: (id) => set({ activeLight: id }),
   addParts: (parts) =>
     set((state) => ({
       ...changed(state, { ...state.scene, parts: [...state.scene.parts, ...parts] }),
@@ -1246,6 +1310,7 @@ export const useEditor = create<EditorState>((set, get) => ({
       savedRevision: recovered ? state.revision : state.revision + 1,
       tool: 'select',
       activeAnchor: null,
+      activeLight: null,
       anchorPicking: false,
       navigationMode: null,
       temporaryOrbit: false,
@@ -1327,6 +1392,7 @@ export const useEditor = create<EditorState>((set, get) => ({
         ),
   setView: (patch) => {
     if (patch.orbitSelection !== undefined) saveOrbitPreference(patch.orbitSelection);
+    if (patch.partColors !== undefined) savePartColorMode(patch.partColors);
     if (patch.clip) {
       patch = { ...patch, clip: sanitizeClipSettings(patch.clip, get().view.clip) };
       saveClipSettings(patch.clip!);
@@ -1356,6 +1422,9 @@ let sharedHandlers: { undo: () => void; redo: () => void } | null = null;
 export function useSharedHistory(handlers: typeof sharedHandlers) {
   sharedHandlers = handlers;
 }
+
+/** The lighting the viewport draws: the scene's own, or the default. */
+export const sceneLighting = (state: EditorState) => state.scene.lighting ?? state.defaultLighting;
 
 export const canUndo = (state: EditorState) =>
   state.sharedHistory ? state.sharedHistory.undo > 0 : state.past.length > 0;
