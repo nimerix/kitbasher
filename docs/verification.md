@@ -5,7 +5,7 @@ Verified locally on November 10, 2026.
 ## Automated checks
 
 - `npm run build`: TypeScript checks and production compilation pass.
-- `npm test`: **502 tests pass**, covering Kabsch registration, non-collinear
+- `npm test`: **629 tests pass**, covering Kabsch registration, non-collinear
   point selection, reflection prevention, all four alignment methods, axis locks,
   anchor coincidence, descendant propagation, capture of the current pose when
   locking an axis, invalid joint graphs, scene round trips, mesh combination,
@@ -21,7 +21,7 @@ Verified locally on November 10, 2026.
   `tests/unit/preferences.test.ts` covers key matching across layouts, Alt, Shift-implied
   symbols, and Num Lock off, binding capture and conflicts, stored preference validation,
   wheel zoom response, pinch, smoothing that lands, and callout placement and stacking.
-- `npm run test:e2e`: **100 browser tests pass** in headless installed Google Chrome.
+- `npm run test:e2e`: **105 browser tests pass** in headless installed Google Chrome.
   Exercises real gizmo dragging, numeric edit cancellation, surface picking,
   joint creation, local recovery, save/open, STL import, combination/undo,
   GLB/3MF downloads and reimports, physical scale, Boolean worker volume and
@@ -50,7 +50,9 @@ Verified locally on November 10, 2026.
   1.2-million-triangle part is isolated with nearby surfaces without holding the viewport.
   `tests/e2e/large-scenes.spec.ts` round trips a 3-million-triangle scene and checks
   that autosave writes each mesh once, survives failed writes, and upgrades old saves.
-  `tests/unit/scene-format.test.ts` covers the binary layout and damaged or crafted files.
+  `tests/unit/scene-format.test.ts` covers the binary layout and damaged or crafted files, and
+  editor colors and lighting: exact round trips, saved selections, scenes from before them, and
+  partly invalid lighting that opens repaired.
   `tests/e2e/large-imports.spec.ts` imports an OBJ of the size that used to crash the tab and a
   text STL past the browser's string limit, and checks that a dense mesh stays usable while
   picking is prepared in a worker. `tests/unit/model-readers.test.ts` compares the streaming OBJ
@@ -62,6 +64,18 @@ Verified locally on November 10, 2026.
   larger than the distance. It covers the grid limits, the field following parts that move
   together, isolation leaving the scene and its history untouched, parts that leave or join
   the isolated view, the two commands, and a rebound key staying with its action.
+  `tests/unit/appearance.test.ts` covers the color shown in each mode with and without an editor
+  color, vertex colors, and a distinct color, distinct colors that follow scene order and stay
+  apart, an OKLCh conversion that always lands in gamut and cannot loop, and part swatches that
+  sample a mesh's main vertex colors.
+  `tests/unit/lighting.test.ts` checks that Studio matches the editor's original fixed lights,
+  preset matching, sanitizing (clamping, per-field fallbacks, dropped and repeated lights, the
+  8-light limit, unknown fields), adding and removing lights, azimuth and elevation round trips,
+  converting a light between world and camera frames, and the saved default with damaged or unavailable storage. `tests/unit/editor-appearance.test.ts`
+  covers editor colors and lighting in the store as undo steps, a drag as one step, and the
+  default lighting. It also checks that baked vertex colors, Combine, merges, STL, 3MF, GLB, and
+  the Blender package come out identical with and without editor colors, and that GLB carries no
+  editor colors or lighting.
 - `npm run format:check` and `git diff --check`: clean.
 
 The production build was also served from a `/kitbasher/` subpath, and both the
@@ -90,7 +104,9 @@ over real stdio, opens a saved scene in the app, and follows live edits in Chrom
 each mesh is fetched once, that autosave is left alone, and that the server exits with its client.
 
 Shared editing: `tests/unit/sync.test.ts` covers merging by part and by field, conflicts, removals,
-joints reseated after a merge, and undo steps that leave others' later values. `tests/unit/mcp/shared.test.ts`
+joints reseated after a merge, and undo steps that leave others' later values. It also covers editor
+colors and lighting: merging by setting, conflicts, undo, and staying out of what the agent is told.
+`tests/unit/mcp/shared.test.ts`
 drives the live view's HTTP protocol against a real MCP client: stale and conflicting edits, refused
 joints that change nothing, mesh uploads and bad meshes, per-author undo, one undo step per drag, and
 a scene replaced from a tab. In Chrome, two tabs and the agent edit one scene: an edit in either tab
@@ -109,6 +125,46 @@ Both answered `100 MM`, which matches the image, so the render does reach the mo
 files reopened through the server with correct dimensions and no isolated parts. Codex ran with
 `approval_policy = "never"` and `default_tools_approval_mode = "approve"`. Its interactive approval
 prompts were not exercised.
+
+## Part colors and lighting
+
+`tests/e2e/appearance.spec.ts` reads viewport pixels in Chrome. An editor color paints only its
+part, leaves the material tint alone, and clears again. Distinct tells apart parts of one material
+color, an editor color wins over it, Material hides both, and the mode and editor colors come back
+after a reload. A GLB export has material colors and no editor colors or lighting. Brightness and a
+positioned point light brighten the view, undo steps back through them, a saved scene keeps its
+lighting and editor colors, and Reset to default returns to the default. Clicking a light handle
+picks that light without changing the part selection, also with a part behind the handle, and
+closing the panel removes the handles.
+
+The checks below were run once in Chrome with Playwright scripts kept outside the suite, against
+the Vite development server.
+
+- With the default lighting, the sample robot was compared with the previous version at
+  1440 × 1000. Of 288,000 pixels around the robot, 455 differed by more than 4 levels, at most
+  19 of 255, all on self-shadow edges from the refitted shadow map. With the torso moved in both
+  versions the difference stayed at most 22 of 255, so the ground shadow still follows the parts.
+- Switching between Material, Editor, and Distinct renders the same pixels as loading in that
+  mode. Turning shadows off and on with light handles shown gives an identical image, so handles
+  stay out of the ground shadow.
+- Dragging the key light's arrow 60 pixels moved it 22.83 mm as one undo step; with Shift it
+  moved 2.28 mm. Undo restored the default lighting.
+- The ground contact shadow matched the previous version at the origin (equal mean luminance in
+  a band under the sample's base) and, unlike the previous version, still showed with the whole
+  sample moved 260 mm in X and 140 mm in Z.
+- With the lighting panel open, the active light's gizmo showed with the Select tool and gave way
+  to the part gizmo with the Translate tool.
+- Shadows stayed fitted with the sample scaled to 0.01× and 50×. The Headlight, Soft, and
+  Dramatic presets rendered without errors, and the headlight followed the camera to the back
+  view.
+- In the panels, each slider or color-picker drag was one undo step, turning a directional
+  light kept its distance, Add was disabled at 8 lights, undoing an added light selected the
+  first, and Escape in a text or number field did not close the panel. Use as default, Restore
+  built-in default, and Reset to default each showed and hid as expected. The display menu
+  moved focus to the checked mode, changed it with arrow keys, and returned focus to its button
+  on Escape. The inspector's editor color left the material color untouched and applied to every
+  selected part.
+- The panel and display menu were reviewed at 1440 × 1000, 1024 × 768, 700 × 800, and 390 × 844.
 
 ## Large scenes
 

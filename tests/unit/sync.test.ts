@@ -8,10 +8,19 @@ import {
   mergeScenes,
   reconcile,
   same,
+  sharedScene,
   summarizePatch,
 } from '../../src/core/sync';
 import { anchorError } from '../../src/core/constraints';
-import type { Joint, Part, PlaneConstraint, SceneDocument } from '../../src/core/types';
+import { addLight, presetLighting, removeLight, updateLight } from '../../src/core/lighting';
+import { parseSceneDocument } from '../../src/core/scene-file';
+import type {
+  Joint,
+  Part,
+  PlaneConstraint,
+  SceneDocument,
+  SceneLighting,
+} from '../../src/core/types';
 
 const geometry = new BoxGeometry(10, 10, 10);
 const part = (id: string, patch: Partial<Part> = {}): Part => ({
@@ -266,5 +275,285 @@ describe('reusing unchanged objects', () => {
     expect(kept).not.toBe(base);
     expect(find(kept, 'b')).toBe(find(base, 'b'));
     expect(find(kept, 'a')!.position).toEqual([1, 0, 0]);
+  });
+});
+
+describe('editor colors', () => {
+  it('merge with a pose change to the same part from the other side', () => {
+    const ours = change(base, 'a', { displayColor: '#ff0000' });
+    const theirs = change(base, 'a', { position: [4, 0, 0] });
+    for (const prefer of ['ours', 'theirs'] as const)
+      for (const [x, y] of [
+        [ours, theirs],
+        [theirs, ours],
+      ]) {
+        const merged = find(mergeScenes(base, x, y, prefer), 'a')!;
+        expect(merged).toMatchObject({ displayColor: '#ff0000', position: [4, 0, 0] });
+        expect(merged.color).toBe('#ffffff');
+      }
+  });
+
+  it('merge separately from the material color', () => {
+    const ours = change(base, 'a', { displayColor: '#ff0000' });
+    const theirs = change(base, 'a', { color: '#00ff00' });
+    expect(find(mergeScenes(base, ours, theirs, 'theirs'), 'a')).toMatchObject({
+      displayColor: '#ff0000',
+      color: '#00ff00',
+    });
+  });
+
+  it('settle two different editor colors by the preferred side, and a clear like any edit', () => {
+    const start = change(base, 'a', { displayColor: '#111111' });
+    const ours = change(start, 'a', { displayColor: '#222222' });
+    const theirs = change(start, 'a', { displayColor: '#333333' });
+    expect(find(mergeScenes(start, ours, theirs, 'ours'), 'a')!.displayColor).toBe('#222222');
+    expect(find(mergeScenes(start, ours, theirs, 'theirs'), 'a')!.displayColor).toBe('#333333');
+    const { displayColor: _, ...clearedPart } = find(start, 'a')!;
+    const cleared = { ...start, parts: start.parts.map((p) => (p.id === 'a' ? clearedPart : p)) };
+    const moved = change(start, 'a', { position: [1, 2, 3] });
+    const merged = find(mergeScenes(start, cleared, moved), 'a')!;
+    expect(merged.displayColor).toBeUndefined();
+    expect(merged.position).toEqual([1, 2, 3]);
+  });
+
+  it('are undone and redone, set and cleared', () => {
+    const colored = change(base, 'a', { displayColor: '#abcdef' });
+    const setting = diffScenes(base, colored);
+    expect(setting).toHaveLength(1);
+    const undone = applyPatch(colored, setting, 'undo');
+    expect(undone.changed).toBe(true);
+    expect(find(undone.scene, 'a')!.displayColor).toBeUndefined();
+    expect(same(find(undone.scene, 'a'), find(base, 'a'))).toBe(true);
+    expect(find(applyPatch(undone.scene, setting, 'redo').scene, 'a')!.displayColor).toBe(
+      '#abcdef',
+    );
+    const { displayColor: _, ...plain } = find(colored, 'a')!;
+    const cleared = { ...colored, parts: colored.parts.map((p) => (p.id === 'a' ? plain : p)) };
+    const clearing = diffScenes(colored, cleared);
+    const restored = applyPatch(cleared, clearing, 'undo').scene;
+    expect(find(restored, 'a')!.displayColor).toBe('#abcdef');
+    expect(find(applyPatch(restored, clearing, 'redo').scene, 'a')!.displayColor).toBeUndefined();
+    // Someone else moved the part since; undoing the color keeps their move.
+    const moved = change(colored, 'a', { position: [6, 0, 0] });
+    expect(find(applyPatch(moved, setting, 'undo').scene, 'a')).toMatchObject({
+      position: [6, 0, 0],
+      displayColor: undefined,
+    });
+  });
+
+  it('are not news to an agent unless the part also changed otherwise', () => {
+    const colored = change(base, 'a', { displayColor: '#abcdef' });
+    expect(summarizePatch(diffScenes(base, colored)).partsChanged).toEqual([]);
+    const both = change(colored, 'b', { displayColor: '#123456', position: [1, 0, 0] });
+    expect(summarizePatch(diffScenes(base, both)).partsChanged).toEqual(['b']);
+    const tinted = change(base, 'c', { color: '#123456' });
+    expect(summarizePatch(diffScenes(base, tinted)).partsChanged).toEqual(['c']);
+    // A drag that colored, then moved, the same part reports it.
+    const moved = change(colored, 'a', { position: [2, 0, 0] });
+    const composed = composePatches(diffScenes(base, colored), diffScenes(colored, moved));
+    expect(summarizePatch(composed).partsChanged).toEqual(['a']);
+    const added = { ...base, parts: [...base.parts, part('d', { displayColor: '#00ff00' })] };
+    expect(summarizePatch(diffScenes(base, added)).partsAdded).toEqual(['d']);
+  });
+
+  it('travel to the live view with the part', () => {
+    const shared = sharedScene(change(base, 'a', { displayColor: '#abcdef' }));
+    expect(shared.parts[0]).toMatchObject({ id: 'a', displayColor: '#abcdef' });
+    expect('displayColor' in shared.parts[1]).toBe(false);
+  });
+});
+
+describe('scene lighting', () => {
+  const studio = presetLighting('studio');
+  const lit = (lighting: SceneLighting): SceneDocument => ({ ...base, lighting });
+  const unlit = (s: SceneDocument): SceneDocument => {
+    const { lighting: _, ...rest } = s;
+    return rest;
+  };
+  const start = lit(studio);
+
+  it('merges edits to different settings from either side', () => {
+    const ours = lit({ ...studio, exposure: 1.5 });
+    const theirs = lit(updateLight(studio, 'key', { position: [10, 20, 30] }));
+    for (const prefer of ['ours', 'theirs'] as const) {
+      const merged = mergeScenes(start, ours, theirs, prefer).lighting!;
+      expect(merged.exposure).toBe(1.5);
+      expect(merged.lights[0].position).toEqual([10, 20, 30]);
+      expect('id' in merged).toBe(false);
+      expect(merged).toEqual({
+        ...updateLight(studio, 'key', { position: [10, 20, 30] }),
+        exposure: 1.5,
+      });
+    }
+    const ambient = lit({ ...studio, ambient: 3 });
+    const sky = lit({ ...studio, sky: '#000000', shadows: false });
+    expect(mergeScenes(start, ambient, sky).lighting).toEqual({
+      ...studio,
+      ambient: 3,
+      sky: '#000000',
+      shadows: false,
+    });
+  });
+
+  it('settles a conflict by the preferred side, never mixing a group', () => {
+    const ours = lit({ ...studio, sky: '#111111' });
+    const theirs = lit({ ...studio, hemisphere: 4 });
+    expect(mergeScenes(start, ours, theirs, 'ours').lighting).toEqual({
+      ...studio,
+      sky: '#111111',
+    });
+    expect(mergeScenes(start, ours, theirs, 'theirs').lighting).toEqual({
+      ...studio,
+      hemisphere: 4,
+    });
+    const a = lit(updateLight(studio, 'key', { intensity: 9 }));
+    const b = lit(updateLight(studio, 'rim', { color: '#000000' }));
+    expect(mergeScenes(start, a, b, 'ours').lighting).toEqual(a.lighting);
+    expect(mergeScenes(start, a, b, 'theirs').lighting).toEqual(b.lighting);
+    const exposureA = lit({ ...studio, exposure: 2 });
+    const exposureB = lit({ ...studio, exposure: 3 });
+    expect(mergeScenes(start, exposureA, exposureB, 'ours').lighting!.exposure).toBe(2);
+    expect(mergeScenes(start, exposureA, exposureB, 'theirs').lighting!.exposure).toBe(3);
+  });
+
+  it('keeps lighting created on one side, alongside the other side’s edits', () => {
+    const created = lit({ ...studio, exposure: 2 });
+    const moved = change(base, 'b', { position: [0, 9, 0] });
+    for (const prefer of ['ours', 'theirs'] as const) {
+      for (const [x, y] of [
+        [created, moved],
+        [moved, created],
+      ]) {
+        const merged = mergeScenes(base, x, y, prefer);
+        expect(merged.lighting).toEqual(created.lighting);
+        expect(find(merged, 'b')!.position).toEqual([0, 9, 0]);
+      }
+    }
+    expect('lighting' in mergeScenes(base, moved, base)).toBe(false);
+    const other = lit(presetLighting('soft'));
+    expect(mergeScenes(base, created, other, 'ours').lighting).toEqual(created.lighting);
+    expect(mergeScenes(base, created, other, 'theirs').lighting).toEqual(other.lighting);
+  });
+
+  it('lets the preferred side decide between resetting and editing lighting', () => {
+    const reset = unlit(start);
+    const edited = lit({ ...studio, ambient: 2 });
+    expect('lighting' in mergeScenes(start, reset, edited, 'ours')).toBe(false);
+    expect(mergeScenes(start, reset, edited, 'theirs').lighting).toEqual(edited.lighting);
+    expect('lighting' in mergeScenes(start, reset, start)).toBe(false);
+  });
+
+  it('undoes and redoes creating, editing, and removing lighting', () => {
+    const creating = diffScenes(base, start);
+    expect(creating).toHaveLength(1);
+    const uncreated = applyPatch(start, creating, 'undo');
+    expect(uncreated.changed).toBe(true);
+    expect('lighting' in uncreated.scene).toBe(false);
+    expect(applyPatch(uncreated.scene, creating, 'redo').scene.lighting).toEqual(studio);
+
+    const edited = lit(addLight(updateLight(studio, 'rim', { enabled: false }), 'point')!.lighting);
+    const editing = diffScenes(start, {
+      ...edited,
+      lighting: { ...edited.lighting!, exposure: 2 },
+    });
+    const after = applyPatch(start, editing, 'redo').scene;
+    expect(after.lighting).toEqual({ ...edited.lighting, exposure: 2 });
+    expect(applyPatch(after, editing, 'undo').scene.lighting).toEqual(studio);
+    expect('id' in applyPatch(after, editing, 'undo').scene.lighting!).toBe(false);
+
+    const removed = unlit(start);
+    const removing = diffScenes(start, removed);
+    const back = applyPatch(removed, removing, 'undo').scene;
+    expect(back.lighting).toEqual(studio);
+    expect('lighting' in applyPatch(back, removing, 'redo').scene).toBe(false);
+  });
+
+  it('keeps a lighting setting someone else changed since', () => {
+    const mine = lit({ ...studio, exposure: 2, ambient: 3 });
+    const patch = diffScenes(start, mine);
+    const later = lit({ ...mine.lighting!, exposure: 0.5 });
+    expect(applyPatch(later, patch, 'undo').scene.lighting).toEqual({ ...studio, exposure: 0.5 });
+    const removedSince = unlit(mine);
+    const undone = applyPatch(removedSince, patch, 'undo');
+    expect(undone.changed).toBe(false);
+    expect('lighting' in undone.scene).toBe(false);
+  });
+
+  it('joins the changes of a slider drag into one step', () => {
+    const one = lit({ ...studio, exposure: 1.1 });
+    const two = lit({ ...studio, exposure: 1.4 });
+    const fromNothing = composePatches(diffScenes(base, one), diffScenes(one, two));
+    expect(fromNothing).toHaveLength(1);
+    expect('lighting' in applyPatch(two, fromNothing, 'undo').scene).toBe(false);
+    const edits = composePatches(diffScenes(start, one), diffScenes(one, two));
+    expect(applyPatch(two, edits, 'undo').scene.lighting).toEqual(studio);
+    expect(composePatches(diffScenes(base, start), diffScenes(start, base))).toEqual([]);
+  });
+
+  it('is not part of what an agent is told changed', () => {
+    const lighting = summarizePatch(diffScenes(base, lit({ ...studio, exposure: 3 })));
+    expect(lighting).toEqual({
+      partsAdded: [],
+      partsChanged: [],
+      partsRemoved: [],
+      joints: [],
+      constraints: [],
+      renamed: false,
+    });
+  });
+
+  it('reuses the previous scene when lighting is equal, and not when it changed', () => {
+    const copy = { ...start, lighting: structuredClone(studio) };
+    expect(keepUnchanged(start, copy)).toBe(start);
+    expect(keepUnchanged(base, { ...base })).toBe(base);
+    const brighter = keepUnchanged(start, lit({ ...studio, exposure: 2 }));
+    expect(brighter).not.toBe(start);
+    expect(brighter.lighting!.exposure).toBe(2);
+    brighter.parts.forEach((p, i) => expect(p).toBe(start.parts[i]));
+    const reset = keepUnchanged(start, unlit(copy));
+    expect(reset).not.toBe(start);
+    expect('lighting' in reset).toBe(false);
+    const created = keepUnchanged(base, copy);
+    expect(created).not.toBe(base);
+    expect(created.lighting).toEqual(studio);
+    // A part change keeps the lighting object, so lights need not be rebuilt.
+    const moved = keepUnchanged(start, change(copy, 'a', { position: [1, 0, 0] }));
+    expect(moved).not.toBe(start);
+    expect(moved.lighting).toBe(start.lighting);
+    const removedLight = keepUnchanged(start, lit(removeLight(studio, 'rim')));
+    expect(removedLight.lighting!.lights.map((l) => l.id)).toEqual(['key', 'fill']);
+  });
+
+  it('comes back from the live view equal, so the view keeps its objects', () => {
+    const local = change(lit(addLight(studio, 'point')!.lighting), 'a', {
+      displayColor: '#abcdef',
+    });
+    const received = parseSceneDocument(
+      JSON.parse(JSON.stringify(sharedScene(local))),
+      2,
+      (key) => {
+        expect(key).toBe(geometry.uuid);
+        return geometry;
+      },
+    );
+    expect(received.lighting).toEqual(local.lighting);
+    expect(received.lighting).not.toBe(local.lighting);
+    expect(find(received, 'a')!.displayColor).toBe('#abcdef');
+    expect(keepUnchanged(local, received)).toBe(local);
+    // A merge result carries a cleared color as undefined, which the wire drops.
+    const cleared = mergeScenes(local, change(local, 'a', { displayColor: undefined }), local);
+    const back = parseSceneDocument(
+      JSON.parse(JSON.stringify(sharedScene(cleared))),
+      2,
+      () => geometry,
+    );
+    expect('displayColor' in find(back, 'a')!).toBe(false);
+    expect(keepUnchanged(cleared, back)).toBe(cleared);
+  });
+
+  it('survives reconciling and travels to the live view', () => {
+    expect(reconcile(start).lighting).toBe(start.lighting);
+    expect(sharedScene(start).lighting).toEqual(studio);
+    expect('lighting' in sharedScene(base)).toBe(false);
   });
 });

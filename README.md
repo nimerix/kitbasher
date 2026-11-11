@@ -317,11 +317,67 @@ or incorrectly wound scans can affect solid results. Reported overlap volume is
 summed **per pair**, so a region shared by three parts is counted in each relevant
 pair. Exploded view is disabled until inspection is closed.
 
+## Part colors and lighting
+
+Editor colors and lighting change only how the scene looks here. Both are undoable, are saved
+in the `.kitbash` file, and are never exported.
+
+**Editor colors.** Select one or more parts and pick an **Editor color** under **Appearance**
+in the inspector. **Material tint**, above it, is the color the part exports with. The **×**
+beside the editor color clears it, and **Clear all editor colors** in the display menu clears
+every part's. Copies keep their editor color; a merged part has none.
+
+The display menu beside **Interference**, or the **View** menu, chooses how parts are shown:
+
+- **Material:** the colors parts export with, including vertex colors.
+- **Editor**, the default: editor colors where set, material colors elsewhere.
+- **Distinct:** a different color for every part, by its place in the parts list. Editor
+  colors still win. Deleting or merging parts recolors the parts listed after them.
+
+An editor or distinct color replaces a part's vertex colors in the view. Picking an editor
+color while showing Material switches to Editor. The mode is saved in this browser, not in the
+scene. Each row of the parts list has a swatch of the part's shown color, and the interference
+view keeps its grey parts.
+
+**Lighting.** The display menu's button shows the color mode and the lighting preset, for example
+**Editor · Studio**, or **Custom** once the lighting has been changed. The menu offers four presets,
+**Studio**, **Soft**, **Headlight**, and **Dramatic**, and a **Brightness** slider.
+**Edit lights…** there, or **View ▸ Lighting…**, opens the lighting panel over the viewport,
+or along its bottom on narrow windows. **Esc** closes it.
+
+- **Brightness**, **Ambient**, and **Sky fill**, with the sky fill's **Sky** and **Ground**
+  colors. Each slider has a field for an exact value.
+- **Shadows** turns on shadows from directional lights that have **Cast shadows** on, and the
+  soft shadow on the ground.
+- Up to 8 lights, added with **Add directional** and **Add point**. Each has an on/off switch, a
+  name, a color, and an intensity. Click one in the list to edit it.
+- A directional light shines at the center of the visible parts from a direction set by
+  **Azimuth**, 0° from the front and 90° from the right, and **Elevation**.
+- A point light sits at an X, Y, Z position in millimeters and is equally bright at any
+  distance. **Range** fades it out by that distance; 0 reaches everything.
+- **Follow camera** attaches a light to the view, like a headlight, so it lights whatever you
+  face. Its direction or position is then relative to the camera. Turning it on or off keeps
+  the light where it is at that moment.
+
+While the panel is open, each light that does not follow the camera has a handle in the
+viewport: a dot in the light's color, with a dashed line to the center for directional lights.
+Click a handle to edit that light; this never changes the part selection. With the **Select**
+tool, drag the arrows on the active light to move it; other tools keep their own gizmos.
+Snapping applies, **Shift** gives one-tenth movement, and each drag is one undo step. Only a
+directional light's direction matters, so its handle sits just outside the parts, where it
+stays in view.
+
+A scene uses your default lighting until you change it, and **Reset to default** in the panel
+returns to it. The default is Studio, the editor's original lighting, until you save another
+with **Use as default**. That is kept in this browser and applies to every scene without
+lighting of its own. **Restore built-in default** goes back to Studio.
+
 ## Save and export
 
 **Save scene** downloads a self-contained `.kitbash` file, including geometry,
 surface normals, vertex colors, part transforms, names, visibility, fixed locks,
-joints, and editable plane constraints. Files are binary, so scene size is limited by
+joints, editable plane constraints, and [editor colors and lighting](#part-colors-and-lighting).
+Files are binary, so scene size is limited by
 device memory rather than a file format limit; in testing, a 4 GiB scene saved and
 opened in about 5 seconds each. Pasted copies share one mesh, in memory and in the file. Private windows
 cannot hold files above roughly 1.5 to 2 GiB and report an error; use a normal window for
@@ -330,13 +386,14 @@ larger scenes. Scene files from earlier versions still open. See the
 **File → Open scene** restores it. Changes also recover through IndexedDB in the
 same browser and origin. Each mesh is stored once, so edits stay fast at any scene size.
 Recovery is not a replacement for a downloaded scene; clearing browser storage removes
-it. View/camera preferences are not in scene files.
+it. View and camera preferences, including the part color mode and your default lighting,
+are not in scene files.
 If the editor ever hits an unexpected error, it offers to reload from that local
 save, or to discard the save if it keeps failing.
 
 | Format         | Contents                                                                                                  |
 | -------------- | --------------------------------------------------------------------------------------------------------- |
-| `.kitbash`     | Complete editable assembly, joint definitions, and plane constraints                                      |
+| `.kitbash`     | Complete editable assembly, joint definitions, plane constraints, editor colors, and lighting             |
 | `.glb`         | Separate named meshes, colors, and transforms; opens in Blender                                           |
 | Blender `.zip` | GLB plus `import_assembly.py`, which rebuilds joint anchors and rotation locks and saves `assembly.blend` |
 | `.3mf`         | Separate mesh objects and placement at millimeter scale                                                   |
@@ -356,7 +413,8 @@ Painted plane constraints are retained as metadata in GLB and the Blender packag
 their current solved placement is exported, while live plane solving remains in
 Kitbasher. Older scenes without plane constraints open normally.
 
-Export all, visible, or selected parts. Joints and plane constraints are kept only
+Export all, visible, or selected parts. Formats that carry color use each part's material
+tint; editor colors and lighting are never exported. Joints and plane constraints are kept only
 when both of their parts are included. GLB uses meters as required by glTF. 3MF
 retains separate objects but does not store colors or joints in this exporter. 3MF
 is XML text, so very dense assemblies report an error (one of 5 million triangles did
@@ -522,6 +580,8 @@ Firefox or Safari.
   dependencies and bounded projection. They do not provide a complete Fusion
   sketch/B-rep solver or solve cyclic mechanisms. Angle-only constraints allow
   translation; a single mate still allows planar sliding and twist.
+- Lighting is for viewing in the editor. A scene has at most 8 lights. Only directional
+  lights that do not follow the camera cast shadows; point lights do not.
 - Undo history retains the most recent 40 changes in the current session.
 
 ## Source

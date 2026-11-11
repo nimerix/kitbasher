@@ -40,6 +40,7 @@ import {
   ScanEye,
   ScanLine,
   Settings2,
+  SunMedium,
   Undo2,
   X,
 } from 'lucide-react';
@@ -57,6 +58,7 @@ import { Inspector } from './components/Inspector';
 import { Dialogs } from './components/Dialogs';
 import { IconButton, Keyboard, Logo, Modal, NumericInput, useDismiss } from './components/ui';
 import { clipLimits } from './core/clipping';
+import { partColorModes } from './core/appearance';
 import type { SceneDocument, Tool } from './core/types';
 
 const Viewport = lazy(() =>
@@ -77,6 +79,7 @@ function Header({ openScene }: { openScene: () => void }) {
   useEditor((state) => state.busy);
   useEditor((state) => state.paintHistory);
   usePreferences((state) => state.keybindings);
+  const partColors = useEditor((state) => state.view.partColors);
   const preferencesKey = useShortcut('preferences');
   const [menu, setMenu] = useState<string | null>(null),
     [editing, setEditing] = useState(false),
@@ -189,6 +192,32 @@ function Header({ openScene }: { openScene: () => void }) {
                     >
                       <Box size={14} />
                       Wireframe
+                    </button>
+                    <hr />
+                    <span className="dropdown-label" aria-hidden="true">
+                      Part colors
+                    </span>
+                    {partColorModes.map((mode) => (
+                      <button
+                        key={mode.id}
+                        aria-label={`${mode.label} part colors`}
+                        aria-pressed={partColors === mode.id}
+                        title={mode.description}
+                        onClick={() =>
+                          act(() => useEditor.getState().setView({ partColors: mode.id }))
+                        }
+                      >
+                        {partColors === mode.id ? (
+                          <Check size={14} className="dropdown-check" />
+                        ) : (
+                          <span className="dropdown-check" />
+                        )}
+                        {mode.label}
+                      </button>
+                    ))}
+                    <button onClick={() => act(() => useEditor.getState().setLightingPanel(true))}>
+                      <SunMedium size={14} />
+                      Lighting…
                     </button>
                     <hr />
                     {commandItem('isolate', ScanEye)}

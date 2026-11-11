@@ -8,11 +8,13 @@ import {
   SphereGeometry,
 } from 'three';
 import {
+  parseScene,
   readSceneFile,
   sceneFileBlob,
   sceneSubset,
   validateLayout,
 } from '../../src/core/scene-file';
+import { presetLighting } from '../../src/core/lighting';
 import { serializeScene } from '../helpers/legacy-scene';
 import type {
   BinarySceneHeader,
@@ -20,6 +22,7 @@ import type {
   Part,
   PlaneConstraint,
   SceneDocument,
+  SceneLighting,
   Vec3,
 } from '../../src/core/types';
 
@@ -408,5 +411,164 @@ describe('damaged scene files', () => {
       ];
     });
     await expect(readSceneFile(blob)).rejects.toThrow('existing parts');
+  });
+});
+
+describe('editor colors and lighting in scene files', () => {
+  const lighting: SceneLighting = {
+    exposure: 1.85,
+    ambient: 0,
+    hemisphere: 0.35,
+    sky: '#DFE6F0',
+    ground: '#6f665c',
+    shadows: false,
+    lights: [
+      {
+        id: 'key',
+        name: 'Key · 鍵',
+        kind: 'directional',
+        color: '#ffe6c7',
+        intensity: 3.6,
+        position: [140.125, -110, 1e-7],
+        range: 0,
+        castShadow: true,
+        enabled: false,
+        camera: false,
+      },
+      {
+        id: 'head',
+        name: '',
+        kind: 'point',
+        color: '#ffffff',
+        intensity: 0,
+        position: [0, 0, 0],
+        range: 1234.5,
+        castShadow: false,
+        enabled: true,
+        camera: true,
+      },
+    ],
+  };
+  const colored = () =>
+    scene(
+      [
+        { ...part('a'), displayColor: '#FF00aa' },
+        part('b'),
+        { ...part('c', new BoxGeometry(1, 2, 3)), displayColor: '#010203', color: '#ffffff' },
+      ],
+      { lighting },
+    );
+
+  it('restores editor colors and lighting exactly from a binary file', async () => {
+    const original = colored();
+    const restored = await readSceneFile(sceneFileBlob(original));
+    expect(restored.lighting).toEqual(lighting);
+    expect(restored.parts.map((p) => p.displayColor)).toEqual(['#FF00aa', undefined, '#010203']);
+    expect('displayColor' in restored.parts[1]).toBe(false);
+    expect(restored.parts.map((p) => p.color)).toEqual(['#aabbcc', '#aabbcc', '#ffffff']);
+    // Saving what was opened writes the same file.
+    expect(new Uint8Array(await sceneFileBlob(restored).arrayBuffer())).toEqual(
+      new Uint8Array(await sceneFileBlob(original).arrayBuffer()),
+    );
+  });
+
+  it('writes no lighting for a scene without its own', async () => {
+    const plain = scene([part('a')]);
+    const { header } = await open(sceneFileBlob(plain));
+    expect('lighting' in header).toBe(false);
+    expect('displayColor' in header.parts[0]).toBe(false);
+    const restored = await readSceneFile(sceneFileBlob(plain));
+    expect('lighting' in restored).toBe(false);
+    expect('lighting' in (await readSceneFile(sceneFileBlob(restored)))).toBe(false);
+    const { header: lit } = await open(sceneFileBlob(colored()));
+    expect(lit.lighting).toEqual(lighting);
+    expect(lit.parts[0].displayColor).toBe('#FF00aa');
+  });
+
+  it('opens JSON scenes from before editor colors and lighting', async () => {
+    const legacy = serializeScene(scene([part('a')]));
+    expect(Object.keys(legacy)).not.toContain('lighting');
+    const restored = await readSceneFile(new Blob([JSON.stringify(legacy)]));
+    expect('lighting' in restored).toBe(false);
+    expect('displayColor' in restored.parts[0]).toBe(false);
+    const withExtras = { ...serializeScene(colored()), lighting };
+    const opened = parseScene(JSON.parse(JSON.stringify(withExtras)));
+    expect(opened.lighting).toEqual(lighting);
+    expect(opened.parts[0].displayColor).toBe('#FF00aa');
+  });
+
+  it.each([
+    ['a color name', 'red'],
+    ['a short hex color', '#abc'],
+    ['a color with alpha', '#aabbccdd'],
+    ['a color without #', 'aabbcc'],
+    ['a number', 0xaabbcc],
+    ['null', null],
+    ['an empty string', ''],
+    ['an object', { r: 1 }],
+  ])('drops an editor color that is %s and keeps the part', async (_name, value) => {
+    const blob = await tampered((h) => {
+      (h.parts[0] as Record<string, unknown>).displayColor = value;
+    });
+    const restored = await readSceneFile(blob);
+    expect(restored.parts).toHaveLength(1);
+    expect('displayColor' in restored.parts[0]).toBe(false);
+    expect(restored.parts[0].color).toBe('#aabbcc');
+  });
+
+  it.each([
+    ['null', null],
+    ['false', false],
+    ['zero', 0],
+    ['a number', 7],
+    ['a string', 'studio'],
+    ['an empty string', ''],
+    ['an array', []],
+    ['an array of lights', [lighting.lights[0]]],
+  ])('treats lighting that is %s as absent', async (_name, value) => {
+    const blob = await tampered((h) => {
+      (h as unknown as Record<string, unknown>).lighting = value;
+    });
+    const restored = await readSceneFile(blob);
+    expect('lighting' in restored).toBe(false);
+    expect(restored.parts).toHaveLength(1);
+  });
+
+  it('repairs partly invalid lighting rather than refusing the scene', async () => {
+    const blob = await tampered((h) => {
+      (h as unknown as Record<string, unknown>).lighting = {
+        ...lighting,
+        exposure: 400,
+        ambient: 'bright',
+        sky: 'blue',
+        lights: [
+          { ...lighting.lights[0], intensity: -1 },
+          { ...lighting.lights[1], id: 'key' },
+          { ...lighting.lights[1], id: 'zero', kind: 'directional', position: [0, 0, 0] },
+          { id: 'spot', kind: 'spot', position: [1, 2, 3] },
+          { ...lighting.lights[1], id: 'bulb', color: 'white', range: -3 },
+        ],
+      };
+    });
+    const studio = presetLighting('studio');
+    expect((await readSceneFile(blob)).lighting).toEqual({
+      ...lighting,
+      exposure: 4,
+      ambient: studio.ambient,
+      sky: studio.sky,
+      lights: [
+        { ...lighting.lights[0], intensity: 0 },
+        { ...lighting.lights[1], id: 'bulb', color: '#ffffff', range: 0 },
+      ],
+    });
+  });
+
+  it('keeps lighting and editor colors in a saved selection', async () => {
+    const source = colored();
+    const subset = sceneSubset(source, [source.parts[2]]);
+    expect(subset.lighting).toBe(lighting);
+    const restored = await readSceneFile(sceneFileBlob(subset));
+    expect(restored.lighting).toEqual(lighting);
+    expect(restored.parts[0].displayColor).toBe('#010203');
   });
 });

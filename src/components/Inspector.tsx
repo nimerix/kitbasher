@@ -4,7 +4,6 @@ import {
   Box,
   Check,
   CheckCheck,
-  ChevronDown,
   Copy,
   Crosshair,
   ExternalLink,
@@ -40,59 +39,8 @@ import type { AlignmentMode, AxisLocks, Part, Vec3 } from '../core/types';
 import { completedSurfacePairs } from '../core/surfaces';
 import { SurfacePaintControls } from './SurfacePaintControls';
 import { planeKindLabels } from '../core/plane-constraints';
-import { IconButton, NumericInput, Section } from './ui';
-
-function VectorFields({
-  label,
-  values,
-  onCommit,
-  disabled = false,
-  locks,
-  unit,
-  step = 1,
-  min,
-}: {
-  label: string;
-  values: Vec3;
-  onCommit: (values: Vec3) => void;
-  disabled?: boolean;
-  locks?: AxisLocks;
-  unit?: string;
-  step?: number;
-  min?: number;
-}) {
-  return (
-    <div className="vector-control">
-      <div className="field-label">
-        <span>{label}</span>
-        <small>{unit}</small>
-      </div>
-      <div className="vector-fields">
-        {(['X', 'Y', 'Z'] as const).map((axis, i) => (
-          <label
-            key={axis}
-            className={`axis-field axis-${axis.toLowerCase()} ${disabled || locks?.[i] ? 'disabled' : ''}`}
-          >
-            <span>{axis}</span>
-            <NumericInput
-              label={`${label} ${axis}`}
-              value={values[i]}
-              step={step}
-              min={min}
-              disabled={disabled || locks?.[i]}
-              onCommit={(value) => {
-                const next = [...values] as Vec3;
-                next[i] = value;
-                onCommit(next);
-              }}
-            />
-            {locks?.[i] ? <LockKeyhole size={9} /> : null}
-          </label>
-        ))}
-      </div>
-    </div>
-  );
-}
+import { ColorControl, IconButton, NumericInput, Section, VectorFields } from './ui';
+import { distinctColors, swatchColors } from '../core/appearance';
 
 export function RotationLocks({
   locks,
@@ -152,29 +100,49 @@ function KeepConnectedToggle({
   );
 }
 
-function PartColorInput({ part }: { part: Part }) {
-  const input = useRef<HTMLInputElement>(null);
-  const editing = useRef(false);
-  useEffect(() => {
-    // React's onChange fires throughout a picker drag. Only the native change event ends it.
-    const element = input.current!;
-    const finish = () => {
-      editing.current = false;
-    };
-    element.addEventListener('change', finish);
-    return () => element.removeEventListener('change', finish);
-  }, []);
+/** The viewport-only color of these parts, shown over the material tint. */
+function EditorColor({ parts }: { parts: Part[] }) {
+  const mode = useEditor((s) => s.view.partColors),
+    scene = useEditor((s) => s.scene.parts);
+  const distinct = useMemo(() => distinctColors(scene), [scene]);
+  const ids = parts.map((p) => p.id);
+  const colors = new Set(parts.map((p) => p.displayColor));
+  const shared = colors.size === 1 ? parts[0].displayColor : undefined;
+  const set = parts.some((p) => p.displayColor);
+  const control = useRef<HTMLDivElement>(null);
+  if (!parts.length) return null;
   return (
-    <input
-      ref={input}
-      aria-label="Part material color"
-      type="color"
-      value={part.color}
-      onChange={(e) => {
-        useEditor.getState().patchParts([part.id], { color: e.target.value }, !editing.current);
-        editing.current = true;
-      }}
-    />
+    <>
+      <div className="appearance-row">
+        <span>Editor color</span>
+        <div className="editor-color" ref={control}>
+          {set ? (
+            <IconButton
+              label="Clear editor color"
+              className="icon-button clear-color"
+              onClick={() => {
+                useEditor.getState().setDisplayColor(ids, null);
+                control.current?.querySelector('input')?.focus();
+              }}
+            >
+              <X size={12} />
+            </IconButton>
+          ) : null}
+          <ColorControl
+            key={ids.join()}
+            label="Part editor color"
+            value={shared ?? swatchColors(parts[0], mode, distinct.get(parts[0].id))[0]}
+            text={colors.size > 1 ? 'Mixed' : shared ? shared.toUpperCase() : 'None'}
+            onChange={(color, checkpoint) =>
+              useEditor.getState().setDisplayColor(ids, color, checkpoint)
+            }
+          />
+        </div>
+      </div>
+      <p className="appearance-help">
+        Only changes how {parts.length > 1 ? 'they look' : 'it looks'} in the editor.
+      </p>
+    </>
   );
 }
 
@@ -420,13 +388,18 @@ function PartProperties({ part }: { part: Part }) {
       </Section>
       <Section title="Appearance">
         <div className="appearance-row">
-          <span>Material tint</span>
-          <label className="color-control">
-            <PartColorInput key={part.id} part={part} />
-            <span>{part.color.toUpperCase()}</span>
-            <ChevronDown size={11} />
-          </label>
+          <span className="appearance-label">
+            Material tint
+            <small>Exported with the part</small>
+          </span>
+          <ColorControl
+            key={part.id}
+            label="Part material color"
+            value={part.color}
+            onChange={(color, checkpoint) => patchParts([part.id], { color }, checkpoint)}
+          />
         </div>
+        <EditorColor parts={[part]} />
         <div className="appearance-row">
           <span>Visibility</span>
           <button
@@ -1011,6 +984,11 @@ export function Inspector({ onClose }: { onClose: () => void }) {
                 <Trash2 size={14} />
                 Delete unlocked parts
               </button>
+            </div>
+            <div className="multi-selection-appearance">
+              <Section title="Appearance">
+                <EditorColor parts={scene.parts.filter((p) => selected.includes(p.id))} />
+              </Section>
             </div>
           </>
         ) : part ? (

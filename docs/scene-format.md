@@ -30,9 +30,34 @@ All integers and mesh data are little-endian.
   "units": "mm",
   "name": "Scout · MK.04",
   // Part fields as in the scene, with `geometry` as an index into `geometries`.
-  "parts": [{ "id": "torso", "name": "Torso shell", "geometry": 0 /* … */ }],
+  "parts": [
+    { "id": "torso", "name": "Torso shell", "geometry": 0, "displayColor": "#3f7fd8" /* … */ },
+  ],
   "joints": [],
   "constraints": [],
+  // Only when the scene has lighting of its own.
+  "lighting": {
+    "exposure": 1,
+    "ambient": 1,
+    "hemisphere": 1.25,
+    "sky": "#e6e9ef",
+    "ground": "#8b8073",
+    "shadows": true,
+    "lights": [
+      {
+        "id": "key",
+        "name": "Key",
+        "kind": "directional",
+        "color": "#fff1dc",
+        "intensity": 2.5,
+        "position": [90, 150, 90],
+        "range": 0,
+        "castShadow": true,
+        "enabled": true,
+        "camera": false,
+      },
+    ],
+  },
   "geometries": [
     {
       "vertices": 1200,
@@ -57,6 +82,45 @@ All integers and mesh data are little-endian.
 - Parts that share a mesh, such as pasted copies, refer to the same `geometries` entry.
   The mesh is stored once and stays shared after reopening.
 
+### Editor colors and lighting
+
+Both are optional and only change how the editor draws the scene. No export contains either:
+GLB, STL, 3MF, and the Blender package use each part's `color`, the material color. A file
+without them opens with no editor colors and the default lighting, so files written before them
+open unchanged.
+
+- `parts[].displayColor` is the part's editor color, `#rrggbb`. It is absent when the part has
+  none. Any other value is dropped when the file opens.
+- `lighting` is present only once the scene has lighting of its own. Without it, the editor
+  uses the default lighting saved in that browser, or the Studio preset.
+
+| `lighting` field | Value              | Meaning                                                    |
+| ---------------- | ------------------ | ---------------------------------------------------------- |
+| `exposure`       | 0.1 to 4           | Brightness, the renderer's tone-mapping exposure           |
+| `ambient`        | 0 to 5             | Ambient light intensity                                    |
+| `hemisphere`     | 0 to 5             | Sky fill intensity                                         |
+| `sky`, `ground`  | `#rrggbb`          | Sky fill colors from above and from below                  |
+| `shadows`        | boolean            | Shadows from lights with `castShadow`, and a ground shadow |
+| `lights`         | array of at most 8 | The lights below                                           |
+
+| Light field  | Value                    | Meaning                                                              |
+| ------------ | ------------------------ | -------------------------------------------------------------------- |
+| `id`         | string                   | Unique within `lights`                                               |
+| `name`       | string                   | Shown in the lighting panel                                          |
+| `kind`       | `directional` or `point` |                                                                      |
+| `color`      | `#rrggbb`                |                                                                      |
+| `intensity`  | 0 to 10                  |                                                                      |
+| `position`   | three numbers            | Where a directional light shines from, or where a point light is     |
+| `range`      | 0 to 1,000,000 mm        | Point lights fade out by this distance. 0 reaches everything         |
+| `castShadow` | boolean                  | Directional lights only, and only with `shadows` on and `camera` off |
+| `enabled`    | boolean                  | Off keeps the light without drawing it                               |
+| `camera`     | boolean                  | Moves with the camera, like a headlight                              |
+
+A directional light's `position` is an offset from the center of the visible parts toward the
+light. Only its direction counts, so it cannot be zero. A point light's `position` is a world
+position in millimeters; it does not dim with distance unless it has a `range`. With `camera`,
+both are in the camera's frame instead: x right, y up, +z toward the viewer.
+
 ## Validation
 
 A file can be damaged, or crafted, so the reader checks it before trusting it:
@@ -68,6 +132,13 @@ A file can be damaged, or crafted, so the reader checks it before trusting it:
 - Before any mesh memory is read, every layout is validated. Mesh values are then checked
   for non-finite numbers and out-of-range indices, the same as JSON scenes.
 - Parts, joints, and plane constraints go through the same validation as JSON scenes.
+- Editor colors and lighting are repaired rather than refused, since they never affect the
+  geometry. A `lighting` that is not an object is ignored. Numbers are clamped into range, and
+  a setting of the wrong type takes the Studio preset's value. A light is dropped when its `id`
+  is missing or repeated, its `kind` is unknown, its `position` is not three finite numbers, or
+  it is directional with a zero position, and only the first 8 valid lights are kept. Its other
+  fields fall back to the name `Light` or `Point`, `#ffffff`, intensity 1, range 0, enabled,
+  without shadows, and not following the camera. Unknown fields are dropped.
 - A file with a higher version number asks for a newer version of Kitbasher.
 
 ## Autosave

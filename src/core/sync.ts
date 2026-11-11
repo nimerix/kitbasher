@@ -2,7 +2,7 @@ import { constrainPart, isJointConnected, validateJoint } from './constraints';
 import { partMatrix } from './geometry';
 import { solvePlaneConstraints, validatePlaneConstraints } from './plane-constraints';
 import { sceneMetadata } from './scene-file';
-import type { Joint, Part, PlaneConstraint, SceneDocument } from './types';
+import type { Joint, Part, PlaneConstraint, SceneDocument, SceneLighting } from './types';
 
 // Rules for one scene edited from several places at once: an agent's MCP server and the browser
 // tabs that share it. Changes combine field by field, so edits to different parts, or to different
@@ -15,10 +15,10 @@ export const sharedScene = (scene: SceneDocument) => ({
 });
 export type SharedScene = ReturnType<typeof sharedScene>;
 
-type Kind = 'parts' | 'joints' | 'constraints' | 'name';
+type Kind = 'parts' | 'joints' | 'constraints' | 'name' | 'lighting';
 type Entity = { id: string } & Record<string, unknown>;
 type Lists = Record<Kind, Entity[]>;
-const kinds: Kind[] = ['parts', 'joints', 'constraints', 'name'];
+const kinds: Kind[] = ['parts', 'joints', 'constraints', 'name', 'lighting'];
 
 /** Fields that only make sense together, such as a pose, change as one. */
 const fieldGroups: Record<Kind, string[][]> = {
@@ -28,6 +28,7 @@ const fieldGroups: Record<Kind, string[][]> = {
     ['anchors'],
     ['name'],
     ['color'],
+    ['displayColor'],
     ['visible'],
     ['locked'],
     ['geometry', 'source'],
@@ -45,7 +46,10 @@ const fieldGroups: Record<Kind, string[][]> = {
     ['name'],
   ],
   name: [['name']],
+  lighting: [['exposure'], ['ambient'], ['hemisphere', 'sky', 'ground'], ['shadows'], ['lights']],
 };
+
+const displayColorGroup = fieldGroups.parts.findIndex((keys) => keys.includes('displayColor'));
 
 const isPlain = (value: unknown): value is Record<string, unknown> =>
   !!value && typeof value === 'object' && Object.getPrototypeOf(value) === Object.prototype;
@@ -71,14 +75,22 @@ const lists = (scene: SceneDocument): Lists => ({
   joints: scene.joints as unknown as Entity[],
   constraints: (scene.constraints ?? []) as unknown as Entity[],
   name: [{ id: 'scene', name: scene.name }],
+  lighting: scene.lighting ? [{ id: 'lighting', ...scene.lighting }] : [],
 });
 
 /** Relationships to a part that is gone would make the scene invalid, so they go with it. */
 function fromLists(source: Lists): SceneDocument {
   const parts = source.parts as unknown as Part[];
   const ids = new Set(parts.map((part) => part.id));
+  const lit = source.lighting[0];
+  let lighting: SceneLighting | undefined;
+  if (lit) {
+    const { id: _, ...rest } = lit;
+    lighting = rest as unknown as SceneLighting;
+  }
   return {
     name: String(source.name[0]?.name ?? 'Untitled assembly'),
+    ...(lighting ? { lighting } : {}),
     parts,
     joints: (source.joints as unknown as Joint[]).filter(
       (joint) => ids.has(joint.parentId) && ids.has(joint.childId),
@@ -265,7 +277,14 @@ export function summarizePatch(patch: ScenePatch) {
     patch.filter((change) => change.kind === kind && test(change)).map((change) => change.id);
   return {
     partsAdded: ids('parts', (change) => !change.before),
-    partsChanged: ids('parts', (change) => !!change.before && !!change.after),
+    // Editor colors are invisible to an agent, so they are not news to it.
+    partsChanged: ids(
+      'parts',
+      (change) =>
+        !!change.before &&
+        !!change.after &&
+        change.groups.some((group) => group !== displayColorGroup),
+    ),
     partsRemoved: ids('parts', (change) => !change.after),
     joints: ids('joints', () => true),
     constraints: ids('constraints', () => true),
@@ -324,11 +343,17 @@ export function keepUnchanged(previous: SceneDocument, next: SceneDocument): Sce
       reused = false;
     return result;
   };
-  const scene = {
-    ...next,
+  const lighting =
+    previous.lighting && next.lighting && same(previous.lighting, next.lighting)
+      ? previous.lighting
+      : next.lighting;
+  const { lighting: _, ...rest } = next;
+  const scene: SceneDocument = {
+    ...rest,
     parts: reuse(previous.parts, next.parts),
     joints: reuse(previous.joints, next.joints),
     constraints: reuse(previous.constraints ?? [], next.constraints ?? []),
+    ...(lighting ? { lighting } : {}),
   };
-  return reused && previous.name === next.name ? previous : scene;
+  return reused && previous.name === next.name && previous.lighting === lighting ? previous : scene;
 }

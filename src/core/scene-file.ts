@@ -1,6 +1,8 @@
 import type { BufferGeometry } from 'three';
 import { binaryGeometry, deserializeGeometry } from './geometry';
 import { validateJoint } from './constraints';
+import { hexColor } from './appearance';
+import { sanitizeLighting } from './lighting';
 import { validatePlaneConstraints } from './plane-constraints';
 import type {
   BinaryGeometry,
@@ -33,6 +35,7 @@ export const sceneMetadata = (scene: SceneDocument) =>
     name: scene.name,
     joints: scene.joints,
     constraints: scene.constraints ?? [],
+    ...(scene.lighting ? { lighting: scene.lighting } : {}),
   }) as const;
 
 export function blobParts(values: ArrayBufferView) {
@@ -318,8 +321,11 @@ export function parseSceneDocument(
       }
     }
     ids.add(p.id);
+    const { displayColor, ...rest } = p;
     return {
-      ...p,
+      ...rest,
+      // Editor-only, so a bad value is dropped rather than refusing the scene.
+      ...(typeof displayColor === 'string' && hexColor.test(displayColor) ? { displayColor } : {}),
       source: typeof p.source === 'string' ? p.source : 'Scene',
       geometry: geometryOf(p.geometry),
     };
@@ -377,7 +383,15 @@ export function parseSceneDocument(
     constraints.push(constraint);
     constraintIds.add(constraint.id);
   }
-  const scene = { name: data.name, parts, joints, constraints };
+  const scene: SceneDocument = {
+    name: data.name,
+    parts,
+    joints,
+    constraints,
+    ...(data.lighting && typeof data.lighting === 'object' && !Array.isArray(data.lighting)
+      ? { lighting: sanitizeLighting(data.lighting) }
+      : {}),
+  };
   validatePlaneConstraints(scene);
   return scene;
 }
