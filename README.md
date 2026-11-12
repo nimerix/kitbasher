@@ -34,6 +34,14 @@ network, for example when testing on a tablet. Fonts and application assets are
 bundled locally. This is a browser application; native desktop installers are not
 included.
 
+## Privacy
+
+The website's [Privacy Policy](public/privacy.html) explains local processing,
+browser storage, Cloudflare hosting, and optional Google Drive and shared sessions.
+It is available at `privacy.html` in the production build. Keep hosting analytics
+and tracking disabled to preserve the policy's no-tracking commitments, and update
+the policy before changing data handling or adding third-party services.
+
 ## Assemble
 
 The initial workspace contains **Scout · MK.04**, an original 15-part robot.

@@ -936,6 +936,9 @@ export default function App() {
       <footer className="site-footer">
         <span>© 2026 Michael Pearce</span>
         <nav aria-label="Project links">
+          <a href="./privacy.html" target="_blank" rel="noopener noreferrer">
+            Privacy Policy
+          </a>
           <a href="https://github.com/nimerix/kitbasher" target="_blank" rel="noopener noreferrer">
             GitHub
           </a>
