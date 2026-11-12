@@ -1,4 +1,5 @@
 import { downloadScene } from './files';
+import { driveAutosave, useDrive } from './drive-sync';
 import { nextIsolation } from './isolation';
 import { matchKeyAction } from './keybindings';
 import type { KeyActionId, KeyInput } from './keybindings';
@@ -7,6 +8,14 @@ import { canRedo, canUndo, useEditor } from './store';
 import type { SurfacePoint } from './types';
 
 export async function saveCurrentScene() {
+  if (useEditor.getState().driveFile) {
+    if (!(await driveAutosave.flush())) useDrive.setState({ dialogOpen: true });
+    return;
+  }
+  await downloadCurrentScene();
+}
+
+export async function downloadCurrentScene() {
   const state = useEditor.getState();
   if (state.busy) return;
   const { revision } = state;
@@ -191,7 +200,12 @@ export function editorCommands(context: CommandContext = {}) {
     new: command('New assembly…', () => state.setModal('new'), idle, 'new'),
     open: command('Open scene…', () => context.openScene?.(), idle && !!context.openScene, 'open'),
     import: command('Import parts…', () => state.setModal('import'), idle, 'import'),
-    save: command('Save scene', saveCurrentScene, true, 'save'),
+    save: command(
+      state.driveFile ? 'Save to Google Drive' : 'Save scene',
+      saveCurrentScene,
+      idle,
+      'save',
+    ),
     export: command(
       'Export assembly…',
       () => state.setModal('export'),

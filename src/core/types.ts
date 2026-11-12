@@ -116,6 +116,14 @@ export interface IsolationSettings {
   distance: number;
 }
 
+/** Browser recovery only: never embedded in a portable .kitbash file. */
+export interface DriveFileBinding {
+  id: string;
+  version: string | null;
+  /** Identifies an upload whose response may have been lost. */
+  pendingWriteId?: string;
+}
+
 export interface SceneDocument {
   name: string;
   parts: Part[];

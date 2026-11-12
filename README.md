@@ -4,7 +4,8 @@
 
 A local-first 3D workbench for assembling multipart models and scanned miniatures.
 Runs in modern WebGL browsers on Windows, macOS, and Linux, with a responsive
-layout for tablets and smaller screens. No account, API keys, or cloud uploads.
+layout for tablets and smaller screens. Work locally without an account, or connect
+Google Drive for automatic cloud saves.
 
 ## Run
 
@@ -23,6 +24,7 @@ npm run preview      # Serve the production build locally
 npm run headset      # Share a scene with a headset on your network
 npm test             # Geometry, constraints, scene and export tests
 npm run test:e2e     # Interaction and WebGL tests in installed Google Chrome
+npm run test:e2e:drive # Drive autosave UI tests with mocked Google services
 npm run format       # Format source and tests
 ```
 
@@ -422,7 +424,16 @@ lighting of its own. **Restore built-in default** goes back to Studio.
 
 ## Save and export
 
-**Save scene** downloads a self-contained `.kitbash` file, including geometry,
+**Google Drive** connects your account and saves the current assembly automatically
+after you choose **Save this scene to Drive**. Later edits update the same file;
+the header shows saving, failures, and **Saved to Drive**. Open saved
+assemblies from the Drive dialog. Local recovery continues offline. A Google OAuth
+client ID must be configured for the installation; see [Google Drive setup and
+autosave behavior](docs/google-drive.md).
+
+**Save scene** downloads a self-contained `.kitbash` file when Drive is not attached.
+For a Drive scene, **Save** / **Cmd/Ctrl+S** flushes pending cloud edits and
+**File → Download scene copy** downloads a portable copy. Scene files include geometry,
 surface normals, vertex colors, part transforms, names, visibility, fixed locks,
 joints, editable plane constraints, and [editor colors and lighting](#part-colors-and-lighting).
 Files are binary, so scene size is limited by
@@ -433,7 +444,7 @@ larger scenes. Scene files from earlier versions still open. See the
 [scene format](docs/scene-format.md).
 **File → Open scene** restores it. Changes also recover through IndexedDB in the
 same browser and origin. Each mesh is stored once, so edits stay fast at any scene size.
-Recovery is not a replacement for a downloaded scene; clearing browser storage removes
+Recovery is not a replacement for a downloaded or Drive-saved scene; clearing browser storage removes
 it. View and camera preferences, including the part color mode and your default lighting,
 are not in scene files.
 If the editor ever hits an unexpected error, it offers to reload from that local

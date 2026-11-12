@@ -8,7 +8,13 @@ import {
   sceneMetadata,
   validateLayout,
 } from './scene-file';
-import type { GeometryLayout, Part, SceneDocument } from './types';
+import { readDriveBinding } from './google-drive';
+import type { DriveFileBinding, GeometryLayout, Part, SceneDocument } from './types';
+
+interface RecoverySnapshot {
+  scene: SceneDocument;
+  driveFile: DriveFileBinding | null;
+}
 
 const databaseName = 'kitbasher-workbench';
 const scenes = 'scenes';
@@ -95,10 +101,11 @@ async function removeOrphanMeshes(db: IDBDatabase) {
 
 // Meshes never change once they are in a scene, so each is written once. After that, an
 // edit only rewrites the scene's metadata, however large the scene is.
-async function writeRecovery(scene: SceneDocument) {
+async function writeRecovery({ scene, driveFile }: RecoverySnapshot) {
   const geometries = new Map(scene.parts.map((part) => [part.geometry.uuid, part.geometry]));
   const file = {
     ...sceneMetadata(scene),
+    driveFile,
     parts: scene.parts.map((part) => ({ ...part, geometry: part.geometry.uuid })),
   };
   const keys = new Set(geometries.keys());
@@ -122,12 +129,15 @@ async function writeRecovery(scene: SceneDocument) {
   }
 }
 
-let queued: SceneDocument | null = null;
+let queued: RecoverySnapshot | null = null;
 let writing: Promise<void> | null = null;
 
 /** Writes run one at a time, and only the newest waiting scene is kept. */
-export function saveRecovery(scene: SceneDocument): Promise<void> {
-  queued = scene;
+export function saveRecovery(
+  scene: SceneDocument,
+  driveFile: DriveFileBinding | null = null,
+): Promise<void> {
+  queued = { scene, driveFile };
   writing ??= (async () => {
     try {
       while (queued) {
@@ -142,14 +152,14 @@ export function saveRecovery(scene: SceneDocument): Promise<void> {
   return writing;
 }
 
-export async function readRecovery(): Promise<SceneDocument | null> {
+export async function readRecovery(): Promise<RecoverySnapshot | null> {
   const db = await openDatabase();
   try {
     const transaction = db.transaction([scenes, meshes]);
     const data = await requested(transaction.objectStore(scenes).get(currentScene));
     if (!data) return null;
     // Autosaves from earlier versions hold their meshes inside the scene record.
-    if (data.version !== 2) return parseScene(data);
+    if (data.version !== 2) return { scene: parseScene(data), driveFile: null };
     const keys: string[] = [
       ...new Set<string>(data.parts.map((part: StoredPart) => part.geometry)),
     ];
@@ -167,11 +177,12 @@ export async function readRecovery(): Promise<SceneDocument | null> {
       geometry.uuid = key;
       geometries.set(key, geometry);
     }
-    return parseSceneDocument(data, 2, (reference) => {
+    const scene = parseSceneDocument(data, 2, (reference) => {
       const geometry = geometries.get(reference as string);
       if (!geometry) throw new Error('The local save is missing a mesh.');
       return geometry;
     });
+    return { scene, driveFile: readDriveBinding(data.driveFile) };
   } finally {
     db.close();
   }

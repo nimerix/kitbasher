@@ -13,7 +13,8 @@ export function useLiveSession() {
 
 export function useRecovery() {
   const scene = useEditor((s) => s.scene),
-    revision = useEditor((s) => s.revision);
+    revision = useEditor((s) => s.revision),
+    driveFile = useEditor((s) => s.driveFile);
   const ready = useRef(false);
   useEffect(() => {
     // The agent's server holds a shared scene. Leaving ready unset also stops autosaving it.
@@ -24,12 +25,13 @@ export function useRecovery() {
       .then((saved) => {
         if (!active) return;
         if (saved && useEditor.getState().revision === 0) {
-          useEditor.getState().setScene(saved, true);
+          useEditor.getState().setScene(saved.scene, true, saved.driveFile);
           useEditor.getState().notify('Recovered your local assembly', 'info');
         }
         useEditor.getState().setBusy(null);
         ready.current = true;
-        return saveRecovery(useEditor.getState().scene);
+        const state = useEditor.getState();
+        return saveRecovery(state.scene, state.driveFile);
       })
       .catch(() => {
         if (active) useEditor.getState().setBusy(null);
@@ -44,15 +46,18 @@ export function useRecovery() {
     if (!ready.current) return;
     useEditor.setState({ recoveryStatus: 'saving' });
     const timeout = window.setTimeout(() => {
-      saveRecovery(scene)
+      saveRecovery(scene, driveFile)
         .then(() => {
-          if (useEditor.getState().revision === revision)
+          if (
+            useEditor.getState().revision === revision &&
+            useEditor.getState().driveFile === driveFile
+          )
             useEditor.setState({ recoveryStatus: 'saved' });
         })
         .catch(() => useEditor.setState({ recoveryStatus: 'error' }));
     }, 850);
     return () => clearTimeout(timeout);
-  }, [scene, revision]);
+  }, [scene, revision, driveFile]);
   useEffect(() => {
     const beforeUnload = (e: BeforeUnloadEvent) => {
       if (useEditor.getState().recoveryStatus !== 'saved') {

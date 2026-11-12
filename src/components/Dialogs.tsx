@@ -22,6 +22,7 @@ import {
 } from 'lucide-react';
 import { useEditor } from '../core/store';
 import { saveCurrentScene } from '../core/commands';
+import { flushDriveBeforeReplace } from '../core/drive-sync';
 import { bindingsFor, formatBindings } from '../core/keybindings';
 import type { KeyActionId } from '../core/keybindings';
 import { usePreferences } from '../core/preferences';
@@ -218,7 +219,7 @@ function ExportDialog() {
           </div>
           <p className="export-note">
             <ShieldCheck size={13} />
-            Your files stay on your device.
+            Exports are downloaded to your device.
           </p>
         </div>
       </div>
@@ -716,7 +717,8 @@ function HelpDialog() {
 }
 
 function NewDialog() {
-  const create = (sample: boolean) => {
+  const create = async (sample: boolean) => {
+    if (!(await flushDriveBeforeReplace())) return;
     useEditor
       .getState()
       .setScene(sample ? createSample() : { name: 'Untitled assembly', parts: [], joints: [] });
