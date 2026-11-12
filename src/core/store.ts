@@ -95,11 +95,19 @@ const hasOperationWork = (op: AssemblyOperation) =>
   op.pairs.length > 0 ||
   !!op.pending ||
   op.surfacePairs.some((pair) => pair.source?.faces.length || pair.target?.faces.length);
-/** Set when the page was opened by an MCP server's live view, which shares its scene. */
-export const liveSession =
-  typeof location !== 'undefined' && new URLSearchParams(location.search).has('live');
+const liveParameter =
+  typeof location === 'undefined' ? null : new URLSearchParams(location.search).get('live');
+/** Set when the page was opened by a live view, which shares its scene. */
+export const liveSession = liveParameter !== null;
+/** Who holds a shared scene: an agent's MCP server, or only the people editing it. */
+export const liveHost = liveParameter === 'shared' ? 'people' : 'agent';
 const initialScene: SceneDocument = liveSession
-  ? { name: 'Waiting for the agent', parts: [], joints: [], constraints: [] }
+  ? {
+      name: liveHost === 'people' ? 'Joining the shared scene' : 'Waiting for the agent',
+      parts: [],
+      joints: [],
+      constraints: [],
+    }
   : createSample();
 const historyLimit = 40;
 // Leaves a dragged frame time to draw. The part catches up over the next frames.
@@ -212,6 +220,8 @@ interface EditorState {
     moveConnected?: boolean,
     /** The drag has ended, so finish avoiding other parts at full detail. */
     settle?: boolean,
+    /** Milliseconds one step of a drag may spend avoiding other parts. */
+    budget?: number,
   ) => void;
   patchParts: (ids: string[], patch: Partial<Part>, checkpoint?: boolean) => void;
   /** Sets or, with null, clears the viewport-only color of these parts. */
@@ -1130,7 +1140,13 @@ export const useEditor = create<EditorState>((set, get) => ({
           : {}),
       };
     }),
-  transformMany: (patches, checkpoint = true, moveConnected = false, settle = false) =>
+  transformMany: (
+    patches,
+    checkpoint = true,
+    moveConnected = false,
+    settle = false,
+    budget = gestureBudget,
+  ) =>
     set((state) => {
       const ids = new Set(patches.map((p) => p.id));
       const driven = patches.filter(({ id }) => {
@@ -1172,7 +1188,7 @@ export const useEditor = create<EditorState>((set, get) => ({
                 place,
                 overlap: clip.overlap,
                 mode: 'drag',
-                budget: settle ? undefined : gestureBudget,
+                budget: settle ? undefined : budget,
                 settle,
               }).parts
             : place(target);

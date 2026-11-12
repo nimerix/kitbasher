@@ -161,6 +161,10 @@ agent is briefly unreachable are sent when it is back.
 The address listens on 127.0.0.1 only, includes a random token, and ignores other host names.
 Set `KITBASHER_LIVE_PORT` to use a fixed port.
 
+A headset on your network joins a scene through `npm run headset` instead, which shares one
+without an agent. See [Assemble in a headset](../README.md#assemble-in-a-headset). An agent's
+own live view is never offered to the network.
+
 ## Limits
 
 - **One scene per server.** Each client session starts its own server and its own scene, so two agent
@@ -189,6 +193,7 @@ Set `KITBASHER_LIVE_PORT` to use a fixed port.
 | `mcp/shapes.ts`    | Shape builders, which all produce closed solids                              |
 | `mcp/render.ts`    | The CPU renderer and PNG encoder                                             |
 | `mcp/live.ts`      | The local server behind the live view. `src/core/live.ts` is the page's side |
+| `mcp/headset.ts`   | Shares a scene with a headset on the network, without an agent               |
 | `mcp/document.ts`  | The shared scene: versions, per-author undo, and meshes from tabs            |
 | `src/core/sync.ts` | How concurrent edits merge and how undo steps apply, used on both sides      |
 | `mcp/measure.ts`   | Exact world bounds and closest-surface lookups                               |

@@ -68,7 +68,8 @@ const probeTarget = 3000;
 const sampledTriangles = 400_000;
 const detailedTriangles = 6000;
 
-function treeOf(geometry: BufferGeometry) {
+/** The surface index of a mesh, built on first use. Null for one too dense to build here. */
+export function treeOf(geometry: BufferGeometry) {
   if (geometry.boundsTree) return geometry.boundsTree as MeshBVH;
   const triangles = triangleCount(geometry);
   if (triangles < 1 || triangles > syncTriangles) return null;

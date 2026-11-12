@@ -1,11 +1,11 @@
 # Verification
 
-Verified locally on November 10, 2026.
+Verified locally on November 11, 2026.
 
 ## Automated checks
 
 - `npm run build`: TypeScript checks and production compilation pass.
-- `npm test`: **629 tests pass**, covering Kabsch registration, non-collinear
+- `npm test`: **655 tests pass**, covering Kabsch registration, non-collinear
   point selection, reflection prevention, all four alignment methods, axis locks,
   anchor coincidence, descendant propagation, capture of the current pose when
   locking an axis, invalid joint graphs, scene round trips, mesh combination,
@@ -21,7 +21,7 @@ Verified locally on November 10, 2026.
   `tests/unit/preferences.test.ts` covers key matching across layouts, Alt, Shift-implied
   symbols, and Num Lock off, binding capture and conflicts, stored preference validation,
   wheel zoom response, pinch, smoothing that lands, and callout placement and stacking.
-- `npm run test:e2e`: **105 browser tests pass** in headless installed Google Chrome.
+- `npm run test:e2e`: **118 browser tests pass** in headless installed Google Chrome.
   Exercises real gizmo dragging, numeric edit cancellation, surface picking,
   joint creation, local recovery, save/open, STL import, combination/undo,
   GLB/3MF downloads and reimports, physical scale, Boolean worker volume and
@@ -125,6 +125,56 @@ Both answered `100 MM`, which matches the image, so the render does reach the mo
 files reopened through the server with correct dimensions and no isolated parts. Codex ran with
 `approval_policy = "never"` and `default_tools_approval_mode = "approve"`. Its interactive approval
 prompts were not exercised.
+
+## Headset
+
+Checked with Meta's Immersive Web Emulation Runtime 2.8.0 standing in for a Quest 3, its
+controllers, and its hands, in headless installed Google Chrome. **It has not been run on a
+physical headset.** Frame rate there, the time a held part takes to stay clear of others, how
+far a shared scene keeps up over Wi-Fi, and how the controls feel in the hand are all unmeasured.
+The panel in the headset reports the first two.
+
+`tests/unit/xr.test.ts` covers the room's place in the scene: a new view set ahead of the
+viewer, upright and facing the model's front from any heading, also when looking straight
+down; one hand carrying the point it holds; two hands keeping hold of both points when free to
+tilt, and of the point between them when kept level; the magnification limits; resizing and
+levelling about a point that stays put; and a held part moving as far as the hand and turning
+about the point it was taken by.
+
+`tests/e2e/headset.spec.ts` drives the emulator through the real app. The button appears only
+where the browser has a headset. A session sets the model 0.55 m ahead and 0.25 m below the
+eyes, and leaving returns the viewport's camera, field of view, clipping planes, orbit
+controls, and background exactly. A part taken by touch moves with the hand as one undo step,
+stops at another part within the allowed overlap, and passes through once No clip is turned
+off on the panel. A part taken from 0.3 m away moves as far as the hand and turns about the
+point it was taken by. One hand carries the world, two resize it by the ratio of their spread,
+and Keep level decides whether they can tip it. A locked part holds the world. A pinch with a
+bare hand takes a part. The panel's buttons work by ray, the panel moves by its background,
+and B brings it back. A scene that replaces the one in view is set before the viewer again.
+In your room draws no background, and restores it on leaving.
+
+`tests/unit/mcp/sharing.test.ts` covers the network listener: the page that asks for the code,
+the scene's address given only for the right code, nothing else served without that address,
+the code replaced after five wrong ones and counted afresh after a right one, oversized and
+malformed codes, other host names refused, the loopback listener left without a way in by
+code, and the code sent only to tabs on the computer.
+
+`tests/e2e/headset-session.spec.ts` starts the built `kitbasher-headset.js` with its own home
+folder. A tab on the computer shows the address and code. An emulated headset in a separate
+browser context opens the network address over the self-made certificate, is refused a wrong
+code, joins with the right one, enters the headset view, and moves the sample's left arm by
+hand. The tab on the computer shows the arm 30 mm of hand travel away, with nothing of its
+own to undo.
+
+The emulated headset's view was captured and inspected: the panel's text and switches, the
+beam and tint on a part pointed at, a part held from a distance with its connected assembly,
+the scale readout between two hands, and the desktop viewport before and after a session,
+which match.
+
+With the hand 15 mm past a wall in the scene's millimeters and sliding along it at 1 mm a
+frame, a held block trailed the hand by about 5 mm, and closed to within 0.02 mm in 30 frames
+once the hand stopped. On the sample, lifting the head carried the torso and power pack with
+it, and a twist of the wrist turned the head about its neck joint alone.
 
 ## Part colors and lighting
 
