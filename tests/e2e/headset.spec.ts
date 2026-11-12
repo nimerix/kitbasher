@@ -1,6 +1,6 @@
 import { expect, test, type Page } from '@playwright/test';
 import { fileURLToPath } from 'node:url';
-import { BoxGeometry, Quaternion, Vector3 } from 'three';
+import { BoxGeometry, Quaternion, SphereGeometry, Vector3 } from 'three';
 import { serializeGeometry } from '../../src/core/geometry';
 
 // Meta's WebXR emulator stands in for the headset, its controllers, and its hands.
@@ -577,4 +577,68 @@ test('tips the world over once Keep level is off, and stands it up again', async
   expect(level.rig!.quaternion[0]).toBeCloseTo(0, 6);
   expect(level.rig!.quaternion[2]).toBeCloseTo(0, 6);
   expect(level.magnification).toBeCloseTo(tipped.magnification, 6);
+});
+
+test('shares display detail across a dense VR assembly and keeps original picking geometry', async ({
+  page,
+}) => {
+  test.setTimeout(60_000);
+  await setup(page, null);
+  const geometry = serializeGeometry(new SphereGeometry(10, 320, 192).translate(30, 20, 40));
+  await page.evaluate(async (geometry) => {
+    const storeUrl = '/src/core/store.ts',
+      geometryUrl = '/src/core/geometry.ts';
+    const { useEditor } = await import(storeUrl),
+      { deserializeGeometry } = await import(geometryUrl);
+    const mesh = deserializeGeometry(geometry);
+    useEditor.getState().setScene({
+      name: 'Dense VR bench',
+      joints: [],
+      parts: Array.from({ length: 8 }, (_, i) => ({
+        id: `dense-${i}`,
+        name: `Dense ${i}`,
+        geometry: mesh,
+        position: [(i % 4) * 24, Math.floor(i / 4) * 24, 0],
+        quaternion: [0, 0, 0, 1],
+        scale: [1, 1, 1],
+        color: '#aabbcc',
+        visible: true,
+        locked: false,
+        source: 'test',
+      })),
+    });
+    // A desktop surface tool must not force full-detail drawing in VR, where that tool is absent.
+    useEditor.getState().setTool('measure');
+  }, geometry);
+  await enter(page);
+  const counts = () =>
+    page.evaluate(async () => {
+      const storeUrl = '/src/core/store.ts',
+        meshesUrl = '/src/xr/part-meshes.ts';
+      const { useEditor } = await import(storeUrl),
+        { partMeshes } = await import(meshesUrl);
+      const parts = useEditor.getState().scene.parts;
+      const triangles = (geometry: any) =>
+        (geometry.index?.count ?? geometry.attributes.position.count) / 3;
+      return {
+        source: parts.reduce((sum: number, part: any) => sum + triangles(part.geometry), 0),
+        drawn: parts.reduce(
+          (sum: number, part: any) => sum + triangles(partMeshes.get(part.id).geometry),
+          0,
+        ),
+        indexed: parts.every((part: any) => !!part.geometry.boundsTree),
+      };
+    });
+  await expect
+    .poll(async () => (await counts()).drawn, { timeout: 20_000 })
+    .toBeLessThanOrEqual(300_000);
+  await expect.poll(async () => (await counts()).indexed).toBe(true);
+  expect((await counts()).source).toBeGreaterThan(900_000);
+  await click(page, 'exit');
+  await expect
+    .poll(async () => {
+      const result = await counts();
+      return result.drawn === result.source;
+    })
+    .toBe(true);
 });

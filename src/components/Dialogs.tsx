@@ -41,6 +41,7 @@ import { mergeParts } from '../core/merge';
 import { createSample } from '../core/sample';
 import { sceneSubset } from '../core/scene-file';
 import { Modal } from './ui';
+import { MeshProcessingDialog } from './MeshProcessingDialog';
 
 export type ExportFormat = 'glb' | '3mf' | 'stl' | 'kitbash' | 'blender';
 
@@ -758,6 +759,7 @@ export function Dialogs({ importFiles }: { importFiles: File[] }) {
   if (modal === 'export') return <ExportDialog />;
   if (modal === 'import') return <ImportDialog initialFiles={importFiles} />;
   if (modal === 'merge') return <MergeDialog />;
+  if (modal === 'mesh') return <MeshProcessingDialog />;
   if (modal === 'help') return <HelpDialog />;
   if (modal === 'new') return <NewDialog />;
   if (modal === 'rename') return <RenameDialog />;

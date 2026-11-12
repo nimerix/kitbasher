@@ -19,6 +19,7 @@ import { useEditor } from '../core/store';
 import { usePreferences, useShortcut, withShortcut } from '../core/preferences';
 import { clampPendingZoom, wheelZoom, zoomGlideStep } from '../core/zoom';
 import { IconButton } from './ui';
+import { markInteraction } from '../core/display-performance';
 
 const cameraStepEvent = 'kitbasher:camera-step';
 
@@ -293,7 +294,10 @@ export function CameraRig() {
     <OrbitControls
       ref={controls}
       makeDefault
-      onChange={carryPannedView}
+      onChange={() => {
+        carryPannedView();
+        markInteraction();
+      }}
       enableRotate
       enableDamping
       dampingFactor={0.12}

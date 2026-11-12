@@ -1,5 +1,6 @@
 import {
   Component,
+  memo,
   Suspense,
   useCallback,
   useEffect,
@@ -25,6 +26,15 @@ import {
   TransformControls,
 } from '@react-three/drei';
 import { DoubleSide, Group, Mesh, Object3D, Quaternion, Vector3 } from 'three';
+import type { BufferGeometry } from 'three';
+import {
+  displayProxy,
+  displayTarget,
+  proxyThreshold,
+  sourceRaycast,
+  useDisplayPerformance,
+  shouldDrawProxy,
+} from '../core/display-performance';
 import {
   ChevronDown,
   Focus,
@@ -101,12 +111,13 @@ const noRaycast = () => {};
 // A press on a gizmo handle also reaches whatever lies under it, but it is not a selection click.
 let gizmoPressed = false;
 
-function PartMesh({
+const PartMesh = memo(function PartMesh({
   part,
   frame,
   hidden,
   nearby,
   distinct,
+  target,
 }: {
   part: Part;
   frame?: ExplodeFrame;
@@ -116,6 +127,7 @@ function PartMesh({
   nearby?: NearbySurfaces;
   /** Its automatic color when every part is shown in a different one. */
   distinct?: string;
+  target: number;
 }) {
   const shown = part.visible && !hidden;
   const selected = useEditor((s) => s.selected.includes(part.id));
@@ -128,6 +140,32 @@ function PartMesh({
     explode = useEditor((s) => s.view.explode),
     navigationMode = useEditor((s) => (s.temporaryOrbit ? 'orbit' : s.navigationMode));
   const group = useRef<Group>(null);
+  const detail = useDisplayPerformance((s) => s.detail);
+  const moving = useDisplayPerformance((s) => s.moving);
+  const headset = useXR((s) => !!s.session);
+  const pivotPicking = useEditor((s) => s.pivotPicking);
+  const [proxy, setProxy] = useState<{ source: BufferGeometry; geometry: BufferGeometry } | null>(
+    null,
+  );
+  useEffect(() => {
+    if (!shown || detail === 'full') return;
+    let current = true;
+    void displayProxy(part.geometry, target).then((geometry) => {
+      if (current && geometry) setProxy({ source: part.geometry, geometry });
+    });
+    return () => {
+      current = false;
+    };
+  }, [part.geometry, shown, detail, target]);
+  const precision =
+    !!nearby ||
+    inspection.enabled ||
+    wireframe ||
+    (!headset && (pivotPicking || ['align', 'joint', 'measure', 'anchors'].includes(tool)));
+  const drawing =
+    proxy?.source === part.geometry && shouldDrawProxy(detail, moving, headset, precision)
+      ? proxy.geometry
+      : part.geometry;
   const [brushHit, setBrushHit] = useState<SurfacePoint | null>(null);
   const register = useCallback(
     (mesh: Mesh | null) => {
@@ -145,7 +183,10 @@ function PartMesh({
     // Hidden parts cannot be picked, so a dense one need not pay for this until shown.
     if (shown) prepareForPicking(part.geometry);
   }, [part.geometry, shown]);
-  const raycast = useMemo(() => (nearby ? nearbyRaycast(nearby.shows) : pickRaycast), [nearby]);
+  const raycast = useMemo(
+    () => sourceRaycast(part.geometry, nearby ? nearbyRaycast(nearby.shows) : pickRaycast),
+    [nearby, part.geometry],
+  );
   const exploded = useMemo(() => displayedPosition(part, explode, frame), [part, explode, frame]);
   const onClick = (event: ThreeEvent<MouseEvent>) => {
     if (event.button !== 0 || event.delta > 5) return;
@@ -186,7 +227,7 @@ function PartMesh({
         <mesh
           ref={register}
           name={`part:${part.id}`}
-          geometry={part.geometry}
+          geometry={drawing}
           // Raycasting ignores Object3D.visible, so a hidden part would still catch clicks.
           raycast={shown ? raycast : noRaycast}
           dispose={null}
@@ -276,7 +317,7 @@ function PartMesh({
           !inspection.enabled &&
           !wireframe &&
           !nearby &&
-          triangleCount(part.geometry) < 150000 ? (
+          triangleCount(part.geometry) < proxyThreshold ? (
             <Edges threshold={32} color="#e8aa6d" lineWidth={0.8} />
           ) : null}
         </mesh>
@@ -284,7 +325,7 @@ function PartMesh({
       <PaintCursor part={part} hit={brushHit} />
     </>
   );
-}
+});
 
 function ManagedTransformControls({
   onFinishDrag,
@@ -322,6 +363,7 @@ function TransformGizmo() {
   const start = useRef<{
     motion: PrecisionDrag;
     parts: Part[];
+    baseline: Part[];
     checkpointed: boolean;
     settle?: () => void;
   } | null>(null);
@@ -422,6 +464,7 @@ function TransformGizmo() {
           start.current = {
             motion: new PrecisionDrag(proxy.matrixWorld),
             parts: movable,
+            baseline: useEditor.getState().scene.parts,
             checkpointed: false,
           };
         }}
@@ -446,7 +489,14 @@ function TransformGizmo() {
             const before = useEditor.getState().scene;
             useEditor
               .getState()
-              .transformMany(patches, !drag.checkpointed, tool === 'translate', settle);
+              .transformMany(
+                patches,
+                !drag.checkpointed,
+                tool === 'translate',
+                settle,
+                undefined,
+                settle ? drag.baseline : undefined,
+              );
             if (useEditor.getState().scene !== before) drag.checkpointed = true;
           };
           apply(false);
@@ -908,6 +958,14 @@ function Scene({
   const headset = useXR((s) => !!s.session),
     passthrough = useXR((s) => s.passthrough);
   const nearby = useNearbySurfaces();
+  const target = useMemo(
+    () =>
+      displayTarget(
+        parts.filter((part) => !isolated || isolated.includes(part.id) || nearby?.ids.has(part.id)),
+        headset,
+      ),
+    [parts, isolated, nearby, headset],
+  );
   const exploding = view.explode > 0;
   const frame = useMemo(() => (exploding ? explodeFrame(parts) : undefined), [exploding, parts]);
   const distinct = useMemo(
@@ -960,6 +1018,7 @@ function Scene({
             hidden={outside && !surfaces}
             nearby={surfaces}
             distinct={distinct?.get(part.id)}
+            target={target}
           />
         );
       })}

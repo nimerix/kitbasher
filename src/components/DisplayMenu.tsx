@@ -10,6 +10,7 @@ import {
 } from '../core/lighting';
 import { sceneLighting, useEditor } from '../core/store';
 import { RadioGroup, RangeInput, useDismiss } from './ui';
+import { setDisplayDetail, useDisplayPerformance } from '../core/display-performance';
 
 /** Part colors and lighting, from the viewport's top bar. */
 export function DisplayMenu() {
@@ -48,6 +49,7 @@ export function DisplayMenu() {
 }
 
 function DisplayPopover({ close }: { close: () => void }) {
+  const detail = useDisplayPerformance((s) => s.detail);
   const mode = useEditor((s) => s.view.partColors),
     parts = useEditor((s) => s.scene.parts),
     lighting = useEditor(sceneLighting);
@@ -59,6 +61,24 @@ function DisplayPopover({ close }: { close: () => void }) {
   }, []);
   return (
     <div ref={popover} className="display-popover" role="dialog" aria-label="Display">
+      <section>
+        <h3>Scan detail</h3>
+        <RadioGroup
+          label="Scan detail"
+          className="display-segmented"
+          value={detail}
+          options={[
+            { id: 'auto', label: 'Automatic' },
+            { id: 'full', label: 'Full' },
+            { id: 'fast', label: 'Fast' },
+          ]}
+          onChange={setDisplayDetail}
+        />
+        <p className="display-help">
+          Automatic uses lighter display meshes while moving and in VR. Full detail returns for
+          surface tools. Mating, No clip, saving and export always use the original geometry.
+        </p>
+      </section>
       <section>
         <h3>Part colors</h3>
         <RadioGroup

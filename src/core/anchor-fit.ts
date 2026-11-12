@@ -71,6 +71,7 @@ export function fitAnchors(
       rotate: true,
       budget: clear.budget,
       settle: clear.settle,
+      baseline: clear.settle ? scene.parts : undefined,
     });
     placed = result.parts;
     clear.report?.(result.report);

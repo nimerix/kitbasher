@@ -1,0 +1,129 @@
+import { create } from 'zustand';
+import type { BufferGeometry, Intersection, Mesh, Raycaster } from 'three';
+import { triangleCount } from './geometry';
+import { processMeshInWorker } from './mesh-job';
+import type { Part } from './types';
+
+export type DisplayDetail = 'auto' | 'full' | 'fast';
+const key = 'kitbasher.display-detail';
+function readDetail(): DisplayDetail {
+  try {
+    const value = localStorage.getItem(key);
+    return value === 'full' || value === 'fast' ? value : 'auto';
+  } catch {
+    return 'auto';
+  }
+}
+
+export const useDisplayPerformance = create<{ detail: DisplayDetail; moving: boolean }>(() => ({
+  detail: readDetail(),
+  moving: false,
+}));
+export function setDisplayDetail(detail: DisplayDetail) {
+  useDisplayPerformance.setState({ detail });
+  try {
+    localStorage.setItem(key, detail);
+  } catch {
+    /* Session setting still works. */
+  }
+}
+let idle: ReturnType<typeof setTimeout> | undefined;
+export function markInteraction() {
+  if (!useDisplayPerformance.getState().moving) useDisplayPerformance.setState({ moving: true });
+  clearTimeout(idle);
+  idle = setTimeout(() => useDisplayPerformance.setState({ moving: false }), 180);
+}
+
+export const proxyThreshold = 100_000;
+export const proxyTarget = 50_000;
+const headsetTriangleBudget = 300_000;
+const proxyLevels = [50_000, 25_000, 12_500, 6_250] as const;
+
+/** A shared budget prevents each scan in a VR assembly from consuming the whole frame. */
+export function displayTarget(parts: Part[], headset: boolean) {
+  if (!headset) return proxyTarget;
+  let dense = 0,
+    original = 0;
+  for (const part of parts) {
+    if (!part.visible) continue;
+    const count = triangleCount(part.geometry);
+    if (count >= proxyThreshold) dense++;
+    else original += count;
+  }
+  const allowance = (headsetTriangleBudget - original) / Math.max(1, dense);
+  return proxyLevels.find((target) => target <= allowance) ?? proxyLevels[proxyLevels.length - 1];
+}
+
+/** One worker at a time; duplicates and undo share the proxy owned by their source geometry. */
+const proxies = new WeakMap<BufferGeometry, Map<number, Promise<BufferGeometry | null>>>();
+let queue: Promise<unknown> = Promise.resolve();
+export function displayProxy(
+  source: BufferGeometry,
+  target = proxyTarget,
+): Promise<BufferGeometry | null> {
+  if (triangleCount(source) < proxyThreshold) return Promise.resolve(null);
+  let levels = proxies.get(source);
+  if (!levels) proxies.set(source, (levels = new Map()));
+  const cached = levels.get(target);
+  if (cached) return cached;
+  const controller = new AbortController();
+  let proxy: BufferGeometry | null = null;
+  const dispose = () => {
+    controller.abort();
+    proxy?.dispose();
+    source.removeEventListener('dispose', dispose);
+    proxies.delete(source);
+  };
+  source.addEventListener('dispose', dispose);
+  const task = queue.then(async () => {
+    if (controller.signal.aborted) return null;
+    try {
+      const result = await processMeshInWorker(
+        source,
+        {
+          mode: 'decimate',
+          ratio: target / triangleCount(source),
+          error: 0.002,
+          lockBorder: true,
+        },
+        controller.signal,
+      );
+      if (
+        controller.signal.aborted ||
+        triangleCount(result.geometry) >= triangleCount(source) * 0.9
+      ) {
+        result.geometry.dispose();
+        return null;
+      }
+      proxy = result.geometry;
+      return proxy;
+    } catch {
+      return null;
+    } // A failed display optimization always leaves the original drawable.
+  });
+  levels.set(target, task);
+  queue = task.then(() => undefined);
+  return task;
+}
+
+/** Draw a proxy, but return original triangle ids, points and normals for every editing tool. */
+export function sourceRaycast(source: BufferGeometry, raycast: Mesh['raycast']): Mesh['raycast'] {
+  return function (this: Mesh, raycaster: Raycaster, hits: Intersection[]) {
+    const displayed = this.geometry;
+    this.geometry = source;
+    try {
+      raycast.call(this, raycaster, hits);
+    } finally {
+      this.geometry = displayed;
+    }
+  };
+}
+
+export function shouldDrawProxy(
+  detail: DisplayDetail,
+  moving: boolean,
+  headset: boolean,
+  precision: boolean,
+) {
+  return !precision && detail !== 'full' && (detail === 'fast' || moving || headset);
+}

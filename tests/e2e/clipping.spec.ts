@@ -63,13 +63,13 @@ async function handle(page: Page) {
   };
 }
 
-async function setup(page: Page) {
+async function setup(page: Page, scene = fixture) {
   await page.goto('/');
   await expect(page.locator('canvas')).toBeVisible();
   await page.getByLabel('Open Kitbasher scene').setInputFiles({
     name: 'clipping.kitbash',
     mimeType: 'application/json',
-    buffer: Buffer.from(JSON.stringify(fixture)),
+    buffer: Buffer.from(JSON.stringify(scene)),
   });
   await page.getByRole('button', { name: 'Open scene', exact: true }).click();
   await page.locator('.part-select[title="Block"]').click();
@@ -83,6 +83,41 @@ const typeX = async (page: Page, value: string) => {
   await field.fill(value);
   await field.press('Enter');
 };
+
+test('holds nearby moves while a dense scan prepares, then resumes full-surface collision checks', async ({
+  page,
+}) => {
+  let release!: () => void;
+  const paused = new Promise<void>((resolve) => (release = resolve));
+  await page.route(/\/src\/core\/bvh\.worker\.ts(?:\?.*)?$/, async (route) => {
+    await paused;
+    await route.continue();
+  });
+  try {
+    await setup(page, {
+      ...fixture,
+      parts: [
+        {
+          ...fixture.parts[0],
+          geometry: serializeGeometry(new BoxGeometry(10, 40, 40, 100, 100, 100)),
+        },
+        fixture.parts[1],
+      ],
+    });
+    await expect(page.locator('.status-context')).toContainText('Preparing a dense mesh');
+    await typeX(page, '20');
+    expect((await block(page)).x).toBe(20);
+    await typeX(page, '9');
+    expect((await block(page)).x).toBe(20);
+    await expect(page.getByText(/Dense meshes are still preparing/)).toBeVisible();
+    release();
+    await expect(page.locator('.status-context')).not.toContainText('Preparing a dense mesh');
+    await typeX(page, '9');
+    expect((await block(page)).x).toBeCloseTo(9.9, 2);
+  } finally {
+    release();
+  }
+});
 
 test('typed moves stop at other parts, by an allowance that is adjustable and remembered', async ({
   page,

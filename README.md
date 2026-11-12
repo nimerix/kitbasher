@@ -210,9 +210,51 @@ for an empty workbench or to reload the sample.
 World reference planes, wireframe, an exploded view, distance measurement,
 orthographic views, framing, [isolation](#isolate-a-part), visibility, and fixed part locks
 are included.
-Larger meshes use BVH-accelerated picking; rendering pauses when the view is idle. Above a
-million triangles, picking is prepared in the background: the mesh draws and can be selected
+Larger meshes use BVH-accelerated picking; rendering pauses when the view is idle. Above
+100,000 triangles, picking is prepared in the background: the mesh draws and can be selected
 in the parts list straight away, and can be clicked when the status bar notice clears.
+
+## High-poly scans
+
+**Display → Scan detail** defaults to **Automatic**. Scans with at least 100,000 triangles
+get a lightweight display mesh in a background worker. While moving the camera or parts, and
+throughout a VR session, the viewport uses that mesh. At rest on desktop it returns to the
+original. **Fast** keeps lightweight meshes visible; **Full** disables them. Proxies target
+50,000 triangles with an approximate 0.2% size error limit; topology and borders can prevent
+that target. VR shares an approximate 300,000-triangle display budget across visible parts,
+choosing lower proxy targets for larger assemblies while keeping the same error limit.
+The headset readout shows drawn and source triangle counts when they differ. Originals remain
+visible while processing or if a proxy cannot be built.
+
+These meshes are display-only. Picking, No clip, mating, anchors, saved scenes, and exports
+use the original geometry. Desktop surface tools, wireframe, and interference inspection draw full
+detail. Dense scenes also omit shadow passes while moving. These measures reduce rendering
+and contact work but do not guarantee a headset frame rate, especially in large assemblies.
+Collision checks reject distant parts by their bounds before building or querying surface
+indexes. Repeated moves reuse transforms and proven exterior clearance; no contact samples
+are removed by this cache. Stationary viewport meshes also skip React work during another
+part's movement. Index jobs stop when their source mesh is disposed.
+
+To profile the synthetic dense-contact and cold-start scenarios, run
+`KITBASHER_BENCH=current npx vitest run tests/unit/scan-benchmark.test.ts`.
+Results are written to `kitbasher-performance/current.json` under the OS temporary directory.
+These CPU measurements are separate from physical-headset FPS.
+
+Select one unlocked part, then choose **Mesh details → Decimate or remesh…** in the inspector
+to change geometry explicitly:
+
+- **Decimate** reduces triangles toward a percentage target within an approximate error limit
+  expressed as a percentage of mesh size. Open borders are preserved by default. Vertex colors
+  are retained, but this is not a guarantee that a precision mating surface remains unchanged.
+- **Voxel remesh** rebuilds a closed, manifold mesh at a resolution of 24–128. It can remove thin
+  details and change mating surfaces. Vertex colors are removed; material tint remains.
+
+**Prepare mesh** processes in a worker and reports the actual triangle count before applying.
+Cancel stops the worker. By default, applying creates an independent part in the same position
+and keeps the original hidden in the parts list. Parts with anchors, joints, or constraints
+always use this copy workflow, retaining those links on the original. Undo restores the entire
+change in one step. Hidden originals remain in saved scenes and in exports scoped to all parts;
+choose visible or selected parts to export only the processed result.
 
 ## Isolate a part
 
@@ -285,9 +327,14 @@ set it to 0 for hard contact.
 Contact is measured from about 3,000 points spread evenly over each part, plus the edges of
 coarse meshes, against the exact surface of the other part. Features much finer than that
 spacing, or thinner than twice the allowed overlap, can slip through. Open scans block from
-both sides, except within a hair of their open rim. Meshes above a million triangles join in
-once they are prepared for clicking. This does not replace
+both sides, except within a hair of their open rim. Meshes above 100,000 triangles join in
+once they are prepared for clicking. Until then, No clip holds nearby moves at their current
+position; moves in open space remain available. Retry a held move when preparation finishes.
+This does not replace
 [interference inspection](#inspect-contact-and-interference), which measures exact overlap volume.
+During a dense-mesh drag, a smaller set of about 256 original-surface samples reduces contact
+work. Releasing the part checks the placement with the full sample set. Very thin details can
+still evade sampling; use interference inspection for the final fit.
 
 ## Inspect contact and interference
 
@@ -591,8 +638,8 @@ Limits in a headset:
   colors, lighting, and files stay on the computer, as does everything typed.
 - **A headset draws far less than a computer.** Expect it to keep up with hundreds of thousands
   of triangles, not the millions a desktop shows. Ground shadows are off in a headset, and other
-  shadows are off above 300,000 triangles. Dense scans need decimating first, which Kitbasher
-  does not do.
+  shadows are off above 300,000 triangles. Automatic scan detail uses display proxies;
+  [decimation and remeshing](#high-poly-scans) can further reduce a model when needed.
 - **A held part can trail a fast hand** against other parts, more than a mouse drag does,
   because a headset frame leaves less time to keep it clear. It catches up when your hand slows.
 - **Anyone on your network with the code can edit the scene** while the session runs. Five wrong
