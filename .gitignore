@@ -3,5 +3,6 @@ dist/
 dist-mcp/
 playwright-report/
 test-results/
+test-results-drive/
 .DS_Store
 *.local

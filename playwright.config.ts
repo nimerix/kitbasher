@@ -2,6 +2,7 @@ import { defineConfig } from '@playwright/test';
 
 export default defineConfig({
   testDir: './tests/e2e',
+  testIgnore: 'google-drive.spec.ts',
   timeout: 45000,
   workers: 1,
   use: {

@@ -7,6 +7,7 @@ import {
   CheckCircle2,
   ChevronDown,
   CircleHelp,
+  Cloud,
   Copy,
   ClipboardPaste,
   Scissors,
@@ -44,8 +45,15 @@ import {
   Undo2,
   X,
 } from 'lucide-react';
-import { canRedo, canUndo, liveHost, useEditor } from './core/store';
-import { editorCommands, executeEditorCommand, saveCurrentScene } from './core/commands';
+import { canRedo, canUndo, liveHost, liveSession, useEditor } from './core/store';
+import {
+  downloadCurrentScene,
+  editorCommands,
+  executeEditorCommand,
+  saveCurrentScene,
+} from './core/commands';
+import { driveAutosave, flushDriveBeforeReplace, useDrive } from './core/drive-sync';
+import { DriveButton, GoogleDriveDialog } from './components/GoogleDrive';
 import type { CommandId } from './core/commands';
 import { isEditableTarget } from './core/context-menu';
 import { EditorContextMenu } from './components/EditorContextMenu';
@@ -68,7 +76,9 @@ const Viewport = lazy(() =>
 function Header({ openScene }: { openScene: () => void }) {
   const name = useEditor((s) => s.scene.name),
     revision = useEditor((s) => s.revision),
-    savedRevision = useEditor((s) => s.savedRevision);
+    savedRevision = useEditor((s) => s.savedRevision),
+    driveFile = useEditor((s) => s.driveFile);
+  const driveSavedRevision = useDrive((s) => s.savedRevision);
   useEditor((state) => state.past);
   useEditor((state) => state.future);
   useEditor((state) => state.sharedHistory);
@@ -133,6 +143,18 @@ function Header({ openScene }: { openScene: () => void }) {
                     {commandItem('import', Import)}
                     <hr />
                     {commandItem('save', Save)}
+                    {driveFile ? (
+                      <button onClick={() => act(() => void downloadCurrentScene())}>
+                        <ArrowDownToLine size={14} />
+                        Download scene copy
+                      </button>
+                    ) : null}
+                    {!liveSession ? (
+                      <button onClick={() => act(() => useDrive.setState({ dialogOpen: true }))}>
+                        <Cloud size={14} />
+                        Google Drive…
+                      </button>
+                    ) : null}
                     {commandItem('export', ArrowDownToLine)}
                     <hr />
                     {commandItem('preferences', Settings2)}
@@ -255,8 +277,11 @@ function Header({ openScene }: { openScene: () => void }) {
             }}
           >
             <span>{name}</span>
-            {revision !== savedRevision ? (
-              <span className="unsaved-dot" title="Changes since file download" />
+            {revision !== (driveFile ? driveSavedRevision : savedRevision) ? (
+              <span
+                className="unsaved-dot"
+                title={driveFile ? 'Changes not yet saved to Drive' : 'Changes since file download'}
+              />
             ) : null}
             <ChevronDown size={11} />
           </button>
@@ -276,10 +301,13 @@ function Header({ openScene }: { openScene: () => void }) {
         >
           <Settings2 size={17} />
         </IconButton>
-        <button className="button secondary save-button" onClick={save}>
-          <Save size={14} />
-          <span>Save scene</span>
-        </button>
+        <DriveButton />
+        {!driveFile ? (
+          <button className="button secondary save-button" aria-label="Save scene" onClick={save}>
+            <Save size={14} />
+            <span>Save scene</span>
+          </button>
+        ) : null}
         <button
           className="button primary export-button"
           onClick={() => useEditor.getState().setModal('export')}
@@ -663,6 +691,7 @@ export default function App() {
     pending: null as { target: Element; event: MouseEvent } | null,
   });
   useRecovery();
+  useEffect(() => driveAutosave.start(), []);
   useLiveSession();
   useKeyboard(openScene, searchParts);
   useEffect(() => {
@@ -932,6 +961,7 @@ export default function App() {
         key={modal === 'import' ? importFiles.map((f) => f.name).join('|') : 'dialogs'}
         importFiles={importFiles}
       />
+      <GoogleDriveDialog />
       {pendingScene ? (
         <Modal
           title={`Open ${pendingScene.name}?`}
@@ -953,7 +983,8 @@ export default function App() {
             </button>
             <button
               className="button primary"
-              onClick={() => {
+              onClick={async () => {
+                if (!(await flushDriveBeforeReplace())) return;
                 useEditor.getState().setScene(pendingScene);
                 setPendingScene(null);
                 useEditor.getState().notify('Scene opened');

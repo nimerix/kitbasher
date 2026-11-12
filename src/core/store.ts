@@ -1,4 +1,5 @@
 import { create } from 'zustand';
+import type { DriveFileBinding } from './types';
 import { Quaternion } from 'three';
 import type { BufferGeometry } from 'three';
 import { quat, triangleCount, uid, worldPoint } from './geometry';
@@ -150,6 +151,7 @@ interface EditorState {
   future: SceneDocument[];
   revision: number;
   savedRevision: number;
+  driveFile: DriveFileBinding | null;
   recoveryStatus: 'saving' | 'saved' | 'error';
   liveStatus: 'connecting' | 'connected' | 'disconnected' | null;
   /** This tab's own steps in a shared scene. Null when undo uses the local history. */
@@ -248,7 +250,11 @@ interface EditorState {
     epoch: number,
     label: string,
   ) => boolean;
-  setScene: (scene: SceneDocument, recovered?: boolean) => void;
+  setScene: (
+    scene: SceneDocument,
+    recovered?: boolean,
+    driveFile?: DriveFileBinding | null,
+  ) => void;
   /** Takes the shared scene from a live view's server, leaving camera, selection, and tools. */
   receiveScene: (scene: SceneDocument) => void;
   renameScene: (name: string) => void;
@@ -348,6 +354,7 @@ export const useEditor = create<EditorState>((set, get) => ({
   future: [],
   revision: 0,
   savedRevision: 0,
+  driveFile: null,
   recoveryStatus: 'saved',
   liveStatus: null,
   sharedHistory: null,
@@ -1381,9 +1388,10 @@ export const useEditor = create<EditorState>((set, get) => ({
       selected: [part.id],
       ...alsoIsolated(state, [part]),
     })),
-  setScene: (scene, recovered = false) =>
+  setScene: (scene, recovered = false, driveFile = null) =>
     set((state) => ({
       scene,
+      driveFile,
       sceneEpoch: state.sceneEpoch + 1,
       selected: [],
       isolated: null,
