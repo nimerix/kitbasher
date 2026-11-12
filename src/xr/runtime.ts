@@ -39,6 +39,7 @@ interface PartHold {
   kind: 'part';
   by: Trigger;
   start: Part[];
+  baseline: Part[];
   /** The hand and the point it took the part by, in the scene, when it took hold. */
   grab: HandPose & { pivot: Vector3 };
   near: boolean;
@@ -414,8 +415,7 @@ export class XRRuntime {
     let best: { id: string; point: Vector3; distance: number; size: number } | null = null;
     for (const part of state.scene.parts) {
       const mesh = partMeshes.get(part.id);
-      const tree = mesh && this.shown(part, state) ? treeOf(part.geometry) : null;
-      if (!mesh || !tree) continue;
+      if (!mesh || !this.shown(part, state)) continue;
       if (!part.geometry.boundingBox) part.geometry.computeBoundingBox();
       const box = part.geometry.boundingBox!;
       const elements = mesh.matrixWorld.elements;
@@ -425,6 +425,8 @@ export class XRRuntime {
       const smallest = Math.min(...stretch);
       local.copy(hand).applyMatrix4(this.inverse.copy(mesh.matrixWorld).invert());
       if (!(smallest > 0) || box.distanceToPoint(local) * smallest > reach) continue;
+      const tree = treeOf(part.geometry);
+      if (!tree) continue;
       if (!tree.closestPointToPoint(local, closest)) continue;
       readFace(part.geometry, closest.faceIndex, this.triangle).getNormal(normal);
       // Behind the nearest surface means inside the part, however far from that surface.
@@ -510,6 +512,7 @@ export class XRRuntime {
           !candidate.locked &&
           this.shown(candidate, state),
       ),
+      baseline: state.scene.parts,
       grab: { ...hand, pivot: hover.near ? hand.position.clone() : hover.point.clone() },
       near: hover.near,
       checkpointed: false,
@@ -593,7 +596,7 @@ export class XRRuntime {
   private settle(action: PartHold) {
     const state = useEditor.getState();
     if (!action.checkpointed || !action.patches || !state.view.clip.enabled) return;
-    state.transformMany(action.patches, false, true, true);
+    state.transformMany(action.patches, false, true, true, undefined, action.baseline);
     this.follow(state.scene.parts, useEditor.getState().scene.parts);
   }
 
@@ -643,10 +646,13 @@ export class XRRuntime {
     this.world = null;
   }
 
-  private triangles(state: Editor) {
+  private triangles(state: Editor, drawn = false) {
     let total = 0;
     for (const part of state.scene.parts)
-      if (this.shown(part, state)) total += triangleCount(part.geometry);
+      if (this.shown(part, state))
+        total += triangleCount(
+          drawn ? (partMeshes.get(part.id)?.geometry ?? part.geometry) : part.geometry,
+        );
     return total;
   }
 
@@ -752,11 +758,16 @@ export class XRRuntime {
     stats.last = now;
     if (now - stats.since < 1000) return;
     const rate = Math.round((stats.frames * 1000) / (now - stats.since));
+    const state = useEditor.getState();
+    const source = this.triangles(state),
+      drawn = this.triangles(state, true);
     stats.text = [
       `${rate} fps`,
       `slowest ${stats.slowest.toFixed(0)} ms`,
       ...(stats.moves ? [`moving ${(stats.moving / stats.moves).toFixed(1)} ms`] : []),
-      `${count(this.triangles(useEditor.getState()))} triangles`,
+      source === drawn
+        ? `${count(source)} triangles`
+        : `${count(drawn)} drawn / ${count(source)} source triangles`,
     ].join(' · ');
     Object.assign(stats, { since: now, frames: 0, slowest: 0, moving: 0, moves: 0 });
   }

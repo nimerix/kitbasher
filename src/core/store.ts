@@ -2,8 +2,10 @@ import { create } from 'zustand';
 import { Quaternion } from 'three';
 import type { BufferGeometry } from 'three';
 import { quat, triangleCount, uid, worldPoint } from './geometry';
+import { markInteraction } from './display-performance';
 import {
   anchorError,
+  connectedPartIds,
   constrainPart,
   isJointConnected,
   transformAssembly,
@@ -65,7 +67,7 @@ import type {
   Vec3,
 } from './types';
 
-export type Modal = 'export' | 'import' | 'merge' | 'help' | 'new' | 'rename' | null;
+export type Modal = 'export' | 'import' | 'merge' | 'mesh' | 'help' | 'new' | 'rename' | null;
 export interface EditorContextMenu {
   x: number;
   y: number;
@@ -222,6 +224,8 @@ interface EditorState {
     settle?: boolean,
     /** Milliseconds one step of a drag may spend avoiding other parts. */
     budget?: number,
+    /** Original poses of this gesture, used for the full-detail release check. */
+    baseline?: Part[],
   ) => void;
   patchParts: (ids: string[], patch: Partial<Part>, checkpoint?: boolean) => void;
   /** Sets or, with null, clears the viewport-only color of these parts. */
@@ -236,6 +240,14 @@ interface EditorState {
   deleteSelected: () => void;
   duplicateSelected: () => void;
   replaceWithMerged: (part: Part, ids: string[]) => void;
+  applyProcessedMesh: (
+    id: string,
+    source: BufferGeometry,
+    geometry: BufferGeometry,
+    keepOriginal: boolean,
+    epoch: number,
+    label: string,
+  ) => boolean;
   setScene: (scene: SceneDocument, recovered?: boolean) => void;
   /** Takes the shared scene from a live view's server, leaving camera, selection, and tools. */
   receiveScene: (scene: SceneDocument) => void;
@@ -1146,6 +1158,7 @@ export const useEditor = create<EditorState>((set, get) => ({
     moveConnected = false,
     settle = false,
     budget = gestureBudget,
+    baseline,
   ) =>
     set((state) => {
       const ids = new Set(patches.map((p) => p.id));
@@ -1175,6 +1188,24 @@ export const useEditor = create<EditorState>((set, get) => ({
         ...state.scene.parts.find((p) => p.id === id)!,
         ...patch,
       }));
+      let releaseBaseline: Part[] | undefined;
+      if (settle && baseline) {
+        const original = new Map(baseline.map((part) => [part.id, part]));
+        const related = new Set(
+          driven.flatMap(({ id }) => [...connectedPartIds(state.scene.joints, id)]),
+        );
+        releaseBaseline = state.scene.parts.map((part) => {
+          const start = original.get(part.id);
+          return related.has(part.id) && start?.geometry === part.geometry && !part.locked
+            ? {
+                ...part,
+                position: start.position,
+                quaternion: start.quaternion,
+                scale: start.scale,
+              }
+            : part;
+        });
+      }
       const { clip } = state.view;
       let parts: Part[];
       try {
@@ -1190,6 +1221,7 @@ export const useEditor = create<EditorState>((set, get) => ({
                 mode: 'drag',
                 budget: settle ? undefined : budget,
                 settle,
+                baseline: releaseBaseline,
               }).parts
             : place(target);
       } catch (error) {
@@ -1298,6 +1330,41 @@ export const useEditor = create<EditorState>((set, get) => ({
         ...alsoIsolated(state, copies.parts),
       };
     }),
+  applyProcessedMesh: (id, source, geometry, keepOriginal, epoch, label) => {
+    const state = get();
+    const part = state.scene.parts.find((p) => p.id === id);
+    if (!part || part.locked || part.geometry !== source || state.sceneEpoch !== epoch)
+      return false;
+    const linked =
+      part.anchors?.length ||
+      state.scene.joints.some((j) => j.childId === id || j.parentId === id) ||
+      state.scene.constraints?.some((c) => c.sourceId === id || c.targetId === id);
+    if (!keepOriginal && linked) return false;
+    const processed: Part = {
+      ...part,
+      geometry,
+      id: keepOriginal ? uid() : id,
+      name: keepOriginal ? `${part.name} · ${label}` : part.name,
+      source: `${label} · ${part.source}`,
+      anchors: undefined,
+      visible: keepOriginal ? true : part.visible,
+    };
+    set({
+      ...changed(state, {
+        ...state.scene,
+        parts: keepOriginal
+          ? [
+              ...state.scene.parts.map((p) => (p.id === id ? { ...p, visible: false } : p)),
+              processed,
+            ]
+          : state.scene.parts.map((p) => (p.id === id ? processed : p)),
+      }),
+      ...withoutRemovedParts(state, [id]),
+      selected: [processed.id],
+      ...alsoIsolated(state, [processed]),
+    });
+    return true;
+  },
   replaceWithMerged: (part, ids) =>
     set((state) => ({
       ...changed(state, {
@@ -1462,6 +1529,26 @@ function reachableGeometries(state: EditorState) {
 // The renderer keeps GPU buffers until a geometry is disposed. Undo history and the
 // clipboard share geometry with the scene, so release it only when nothing can restore it.
 let trackedGeometries = reachableGeometries(useEditor.getState());
+useEditor.subscribe((state, previous) => {
+  if (
+    state.scene.parts === previous.scene.parts ||
+    state.scene.parts.length !== previous.scene.parts.length
+  )
+    return;
+  if (
+    state.scene.parts.some((part, i) => {
+      const before = previous.scene.parts[i];
+      return (
+        part.id === before.id &&
+        part.geometry === before.geometry &&
+        (part.position !== before.position ||
+          part.quaternion !== before.quaternion ||
+          part.scale !== before.scale)
+      );
+    })
+  )
+    markInteraction();
+});
 useEditor.subscribe((state, previous) => {
   if (
     state.past === previous.past &&

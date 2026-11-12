@@ -6,6 +6,7 @@ import { isJointConnected } from './constraints';
 import { partMatrix, quat, triangleCount, vec } from './geometry';
 import { readFace } from './surfaces';
 import type { ClipSettings, Joint, Part } from './types';
+import { spatialIndexOptions, workerIndexTriangles } from './spatial-index';
 
 export const clipLimits = { min: 0, max: 5, step: 0.01 } as const;
 export const defaultClipSettings: ClipSettings = { enabled: true, overlap: 0.1 };
@@ -73,21 +74,28 @@ export function treeOf(geometry: BufferGeometry) {
   if (geometry.boundsTree) return geometry.boundsTree as MeshBVH;
   const triangles = triangleCount(geometry);
   if (triangles < 1 || triangles > syncTriangles) return null;
-  geometry.boundsTree = new MeshBVH(geometry, { indirect: true, targetLeafSize: 10 });
+  if (typeof Worker !== 'undefined' && triangles > workerIndexTriangles) return null;
+  geometry.boundsTree = new MeshBVH(geometry, spatialIndexOptions);
   return geometry.boundsTree as MeshBVH;
 }
 
 const probes = new WeakMap<BufferGeometry, Float32Array>();
+const gestureProbes = new WeakMap<BufferGeometry, Float32Array>();
 
 /**
  * Surface points with their normals, spread evenly by area so collision detail does not depend
  * on tessellation. Coarse meshes also get their corners and edges, which are what touches first.
  */
-function probesOf(geometry: BufferGeometry) {
-  const cached = probes.get(geometry);
-  if (cached) return cached;
+function probesOf(geometry: BufferGeometry, coarse = false) {
   const count = triangleCount(geometry);
-  const stride = Math.max(1, Math.ceil(count / sampledTriangles));
+  const interactive = coarse && count >= 40_000;
+  const cache = interactive ? gestureProbes : probes;
+  const cached = cache.get(geometry);
+  if (cached) return cached;
+  // A gesture must not pay for the full scan's sampling pass on its first frame.
+  // These are samples of the original surface, never of the display proxy.
+  const target = interactive ? 256 : probeTarget;
+  const stride = Math.max(1, Math.ceil(count / (interactive ? 8192 : sampledTriangles)));
   const faces = Math.ceil(count / stride);
   const areas = new Float64Array(faces);
   const triangle = new Triangle();
@@ -101,8 +109,8 @@ function probesOf(geometry: BufferGeometry) {
     normal = new Vector3();
   if (area > 0) {
     let face = 0;
-    for (let i = 0; i < probeTarget; i++) {
-      const position = ((i + 0.5) / probeTarget) * area;
+    for (let i = 0; i < target; i++) {
+      const position = ((i + 0.5) / target) * area;
       while (areas[face] < position) face++;
       readFace(geometry, face * stride, triangle).getNormal(normal);
       const u = Math.sqrt(((i + 1) * 0.7548776662466927) % 1),
@@ -146,37 +154,68 @@ function probesOf(geometry: BufferGeometry) {
     }
   }
   const result = new Float32Array(values);
-  probes.set(geometry, result);
+  cache.set(geometry, result);
   return result;
 }
 
-interface Body {
+interface Placement {
   part: Part;
-  tree: MeshBVH;
   matrix: Matrix4;
   inverse: Matrix4;
   normalMatrix: Matrix3;
   box: Box3;
   minScale: number;
   maxScale: number;
+  signature: string;
 }
 
-function bodyOf(part: Part): Body | null {
-  if (!part.visible) return null;
-  const tree = treeOf(part.geometry);
-  if (!tree) return null;
+interface Body extends Placement {
+  tree: MeshBVH;
+}
+
+const placements = new WeakMap<
+  Part,
+  { geometry: BufferGeometry; pose: number[]; value: Placement; body?: Body }
+>();
+
+/** Bounds and transforms are cheap; only touching pairs need a surface index. */
+function placementOf(part: Part): Placement {
+  const cached = placements.get(part);
+  if (
+    cached?.geometry === part.geometry &&
+    part.position.every((value, i) => value === cached.pose[i]) &&
+    part.quaternion.every((value, i) => value === cached.pose[i + 3]) &&
+    part.scale.every((value, i) => value === cached.pose[i + 7])
+  )
+    return cached.value;
   if (!part.geometry.boundingBox) part.geometry.computeBoundingBox();
   const matrix = partMatrix(part);
-  return {
+  const value: Placement = {
     part,
-    tree,
     matrix,
     inverse: matrix.clone().invert(),
     normalMatrix: new Matrix3().getNormalMatrix(matrix),
     box: part.geometry.boundingBox!.clone().applyMatrix4(matrix),
     minScale: Math.max(1e-6, Math.min(...part.scale.map(Math.abs))),
     maxScale: Math.max(1e-6, ...part.scale.map(Math.abs)),
+    signature: `${part.id}:${part.geometry.uuid}:${matrix.elements.join(',')}`,
   };
+  placements.set(part, {
+    geometry: part.geometry,
+    pose: [...part.position, ...part.quaternion, ...part.scale],
+    value,
+  });
+  return value;
+}
+
+function bodyOf(part: Part): Body | null {
+  if (!part.visible) return null;
+  const placement = placementOf(part);
+  const tree = treeOf(part.geometry);
+  if (!tree) return null;
+  const cached = placements.get(part)!;
+  if (cached.body?.tree !== tree) cached.body = { ...placement, tree };
+  return cached.body!;
 }
 
 const bodiesOf = (parts: Part[]) => parts.map(bodyOf).filter((body): body is Body => !!body);
@@ -294,8 +333,8 @@ function enclosed(tree: MeshBVH, origin: Vector3, direction: Vector3) {
  * region near a contact is measured again.
  */
 interface Memo {
-  at: Float32Array;
-  gap: Float32Array;
+  at: Float64Array;
+  gap: Float64Array;
 }
 const memos = new Map<string, Memo>();
 const memoLimit = 96;
@@ -305,7 +344,7 @@ function memoFor(from: Body, onto: Body, samples: number) {
   let memo = memos.get(key);
   memos.delete(key);
   if (!memo || memo.gap.length !== samples)
-    memo = { at: new Float32Array(samples * 3), gap: new Float32Array(samples) };
+    memo = { at: new Float64Array(samples * 3), gap: new Float64Array(samples) };
   memos.set(key, memo);
   if (memos.size > memoLimit) memos.delete(memos.keys().next().value!);
   return memo;
@@ -378,11 +417,12 @@ function probe(
     face: number,
   ) => void,
 ) {
-  const points = probesOf(from.part.geometry);
+  const points = probesOf(from.part.geometry, coarse);
   const geometry = onto.part.geometry;
   // Each search of a dense scan is slow, so a gesture samples it more sparsely until it settles.
   const triangles = triangleCount(geometry);
-  const stride = 6 * (!coarse || triangles < 40_000 ? 1 : triangles < 200_000 ? 2 : 3);
+  const stride =
+    6 * (!coarse || triangles < 40_000 ? 1 : Math.max(1, Math.ceil(points.length / 6 / 256)));
   const box = geometry.boundingBox!;
   const reach = band / onto.minScale;
   const wide = box.clone().expandByScalar(reach);
@@ -394,21 +434,33 @@ function probe(
     local.set(points[i], points[i + 1], points[i + 2]).applyMatrix4(toLocal);
     // A sample stays outside for as long as it has moved less than its last known clearance.
     const known = memo.gap[k];
-    const outside =
-      known > 0 &&
+    const clearance =
+      known -
       Math.hypot(
         local.x - memo.at[k * 3],
         local.y - memo.at[k * 3 + 1],
         local.z - memo.at[k * 3 + 2],
-      ) < known;
+      ) -
+      epsilon;
+    const outside = clearance > 0;
     local.toArray(memo.at, k * 3);
+    // Distance to a surface cannot shrink by more than the sample moved. Reuse only
+    // proven exterior clearance, and subtract motion each time so it cannot accumulate.
+    if (clearance > reach) {
+      memo.gap[k] = clearance;
+      continue;
+    }
     if (!wide.containsPoint(local)) {
       memo.gap[k] = Math.max(reach, box.distanceToPoint(local));
       continue;
     }
     // Searching a dense mesh costs more the farther the surface is, so look only as far as needed.
     // The search prunes by distance but can still return a farther triangle from a near box.
-    const found = onto.tree.closestPointToPoint(local, closest, 0, reach);
+    const exterior = outside || !box.containsPoint(local);
+    // Look a little farther for an exterior sample, amortizing the search over later
+    // frames. Contacts still use exactly `reach`; this does not widen the collision band.
+    const searchReach = exterior ? reach * 2 : reach;
+    const found = onto.tree.closestPointToPoint(local, closest, 0, searchReach);
     const hit = found && found.distance <= reach ? found : null;
     world.set(points[i], points[i + 1], points[i + 2]).applyMatrix4(from.matrix);
     own
@@ -420,8 +472,11 @@ function probe(
       .transformDirection(toLocal)
       .negate();
     if (!hit) {
-      memo.gap[k] = reach;
-      if (outside || !box.containsPoint(local)) continue;
+      memo.gap[k] = 0;
+      if (exterior) {
+        memo.gap[k] = found ? Math.min(found.distance, searchReach) : searchReach;
+        continue;
+      }
       const exits = exitsFrom(onto.tree, local, back);
       if (!exits) continue;
       // Deep inside. Leave by the nearest way out, or by the way this surface came in.
@@ -481,21 +536,23 @@ function probe(
   }
 }
 
-const signature = (body: Body) =>
-  `${body.part.id}:${body.part.geometry.uuid}:${body.matrix.elements.join(',')}`;
+const signature = (body: Placement) => `${body.signature}:${!!body.part.geometry.boundsTree}`;
 let recent: { key: string; contacts: Contact[] } | null = null;
 
 /**
  * Every place the moving parts come within `band` of the others. A gesture ends each step by
  * measuring where it stopped, which is where the next step starts, so that result is kept.
  */
-function collide(movers: Body[], obstacles: Body[], band: number, coarse = false) {
+function collide(movers: Body[], obstacles: Placement[], band: number, coarse = false) {
   const key = [band, coarse, ...movers.map(signature), '', ...obstacles.map(signature)].join('\n');
   if (recent?.key === key) return recent.contacts;
   const contacts: Contact[] = [];
-  for (const mover of movers)
-    for (const obstacle of obstacles) {
-      if (!mover.box.clone().expandByScalar(band).intersectsBox(obstacle.box)) continue;
+  for (const mover of movers) {
+    const nearby = mover.box.clone().expandByScalar(band);
+    for (const placement of obstacles) {
+      if (!nearby.intersectsBox(placement.box)) continue;
+      const obstacle = bodyOf(placement.part);
+      if (!obstacle) continue;
       const add = (
         moving: boolean,
         sample: Vector3,
@@ -528,6 +585,7 @@ function collide(movers: Body[], obstacles: Body[], band: number, coarse = false
         add(true, sample, point, distance, planes, at, face),
       );
     }
+  }
   recent = { key, contacts };
   return contacts;
 }
@@ -628,9 +686,9 @@ function smallestStep(rows: { row: number[]; bound: number }[], size: number) {
 
 const samePose = (a: Part, b: Part) =>
   a === b ||
-  [...a.position, ...a.quaternion, ...a.scale].every(
-    (value, i) => Math.abs(value - [...b.position, ...b.quaternion, ...b.scale][i]) < 1e-9,
-  );
+  (a.position.every((value, i) => Math.abs(value - b.position[i]) < 1e-9) &&
+    a.quaternion.every((value, i) => Math.abs(value - b.quaternion[i]) < 1e-9) &&
+    a.scale.every((value, i) => Math.abs(value - b.scale[i]) < 1e-9));
 
 /** The farthest any point of a part of this size moves between two poses. */
 function travel(from: Part[], to: Part[], radius: number) {
@@ -655,7 +713,7 @@ const blend = (from: Part, to: Part, amount: number): Part => ({
   scale: vec(from.scale).lerp(vec(to.scale), amount).toArray(),
 });
 
-function unionBox(bodies: Body[]) {
+function unionBox(bodies: Placement[]) {
   const box = new Box3();
   for (const body of bodies) box.union(body.box);
   return box;
@@ -689,17 +747,53 @@ export function placeClear(options: {
   budget?: number;
   /** The gesture has ended, so take the time to finish it at full detail. */
   settle?: boolean;
+  /** Start of the gesture, so final checks do not accept overlap introduced by coarse steps. */
+  baseline?: Part[];
 }): { parts: Part[]; report: ClipReport | null } {
   const { parts, ids, place, mode } = options;
   const started = performance.now();
   const overlap = Math.max(0, options.overlap);
   const open = place(options.target);
   const before = new Map(parts.map((part) => [part.id, part]));
+  const baseline = options.baseline ?? parts;
+  const original = options.baseline ? new Map(baseline.map((part) => [part.id, part])) : before;
   const moverIds = new Set(
-    open.filter((part) => !samePose(part, before.get(part.id) ?? part)).map((part) => part.id),
+    open
+      .filter(
+        (part) =>
+          !samePose(part, before.get(part.id) ?? part) ||
+          !samePose(part, original.get(part.id) ?? part),
+      )
+      .map((part) => part.id),
   );
   const moversIn = (list: Part[]) => bodiesOf(list.filter((part) => moverIds.has(part.id)));
-  const obstacles = bodiesOf(parts.filter((part) => !moverIds.has(part.id)));
+  const obstacles = parts.filter((part) => part.visible && !moverIds.has(part.id)).map(placementOf);
+  const gesture = mode === 'drag';
+  const bandMin = Math.max(0.5, overlap * 2);
+  const sweepParts = gesture ? [...open, ...parts] : open;
+  const swept = unionBox(
+    sweepParts.filter((part) => part.visible && moverIds.has(part.id)).map(placementOf),
+  ).expandByScalar(bandMin);
+  if (!obstacles.some((obstacle) => obstacle.box.intersectsBox(swept)))
+    return { parts: open, report: null };
+  // A missing background index is not evidence of empty space. Keep the current pose
+  // until nearby original surfaces can be tested, including isolated scans not yet picked.
+  if (typeof Worker !== 'undefined') {
+    const pending = new Set<BufferGeometry>();
+    const check = (part: Part) => {
+      if (!part.geometry.boundsTree && triangleCount(part.geometry) > workerIndexTriangles)
+        pending.add(part.geometry);
+    };
+    for (const part of open) if (part.visible && moverIds.has(part.id)) check(part);
+    for (const obstacle of obstacles) if (obstacle.box.intersectsBox(swept)) check(obstacle.part);
+    if (pending.size) {
+      // The browser scheduler reads editor state, so load it after core initialization.
+      void import('./bvh').then(({ prepareForPicking }) => {
+        for (const geometry of pending) prepareForPicking(geometry);
+      });
+      throw new Error('Dense meshes are still preparing. Try this move again when they finish.');
+    }
+  }
   const atTarget = moversIn(open);
   if (!atTarget.length || !obstacles.length) return { parts: open, report: null };
 
@@ -707,18 +801,10 @@ export function placeClear(options: {
   const target = posesOf(open);
   const radius = Math.max(1, unionBox(atTarget).getSize(new Vector3()).length() / 2);
   const slop = Math.max(0.002, overlap * 0.05);
-  const gesture = mode === 'drag';
   const coarse = gesture && !options.settle;
-  const bandMin = Math.max(0.5, overlap * 2);
   const bandMax = Math.max(1.5, Math.min(6, radius * 0.3));
   // A gesture takes short steps, because a search costs more the farther it has to look.
   const bandDrag = Math.max(0.5, Math.min(1.2, radius * 0.1)) + overlap;
-
-  const swept = unionBox(atTarget);
-  if (gesture) swept.union(unionBox(moversIn(parts)));
-  swept.expandByScalar(bandMin);
-  if (!obstacles.some((obstacle) => obstacle.box.intersectsBox(swept)))
-    return { parts: open, report: null };
 
   const zones: Zone[] = [];
   const limits = new Map<string, number>();
@@ -781,7 +867,8 @@ export function placeClear(options: {
     const measured = collide(movers, obstacles, band, coarse);
     // With nothing in reach the parts are in open space, where longer strides are safe.
     stride = measured.length ? 1 : Math.min(16, stride * 2);
-    if (gesture && !iteration) allow(measured);
+    if (gesture && !iteration)
+      allow(options.baseline ? collide(moversIn(baseline), obstacles, band, false) : measured);
     const contacts = zones.length ? measured.filter((contact) => !exempt(contact)) : measured;
     let excess = 0;
     for (const contact of contacts) {
@@ -791,7 +878,12 @@ export function placeClear(options: {
     last = { placed, contacts, excess };
     if (excess <= slop) clear = last;
     if (!best || excess < best.excess) best = last;
-    if ((excess <= slop && remaining < 1e-7) || iteration >= budget) break;
+    if (
+      (excess <= slop && remaining < 1e-7) ||
+      iteration >= budget ||
+      (iteration > 0 && options.budget && performance.now() - started >= options.budget)
+    )
+      break;
 
     const reach = Math.max(band * 0.9, Math.min(excess * 1.05, bandMax));
     // Get clear first, then close in on the request.
@@ -903,12 +995,6 @@ export function placeClear(options: {
     }
     const nextState = posesOf(nextPlaced);
     if (travel(state, nextState, radius) < (gesture ? 1e-3 : 1e-5)) break;
-    if (options.budget && iteration && performance.now() - started > options.budget) {
-      placed = nextPlaced;
-      state = nextState;
-      iteration = budget - 1;
-      continue;
-    }
     placed = nextPlaced;
     state = nextState;
   }
@@ -947,7 +1033,7 @@ export function placeClear(options: {
 /** The deepest overlap between these parts and every other visible part, in mm. */
 export function clippingDepth(parts: Part[], ids: string[]) {
   const movers = bodiesOf(parts.filter((part) => ids.includes(part.id)));
-  const obstacles = bodiesOf(parts.filter((part) => !ids.includes(part.id)));
+  const obstacles = parts.filter((part) => part.visible && !ids.includes(part.id)).map(placementOf);
   return deepest(collide(movers, obstacles, 0.25));
 }
 

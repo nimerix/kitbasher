@@ -5721,3 +5721,19 @@ optgroup {
     white-space: nowrap;
   }
 }
+.mesh-processing-options {
+  border: 0;
+  padding: 0;
+  margin: 0;
+  display: grid;
+  gap: 16px;
+}
+.mesh-check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+}
+.mesh-check input {
+  width: auto;
+}

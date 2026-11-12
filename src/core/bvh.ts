@@ -3,11 +3,9 @@ import type { Intersection, Raycaster } from 'three';
 import { acceleratedRaycast, computeBoundsTree, MeshBVH } from 'three-mesh-bvh';
 import { triangleCount } from './geometry';
 import { useEditor } from './store';
+import { spatialIndexOptions as bvhOptions, workerIndexTriangles } from './spatial-index';
 
-const bvhOptions = { indirect: true, targetLeafSize: 10 } as const;
 const indexedTriangles = 30000;
-// Building takes about 0.2 s per million triangles, which is too long to hold the main thread.
-const workerTriangles = 1000000;
 
 export interface BvhRequest {
   positions: Float32Array;
@@ -15,18 +13,28 @@ export interface BvhRequest {
   options: typeof bvhOptions;
 }
 
-function buildInWorker(geometry: BufferGeometry) {
+function buildInWorker(geometry: BufferGeometry, signal: AbortSignal) {
   return new Promise<void>((resolve, reject) => {
+    if (signal.aborted) return resolve();
     const worker = new Worker(new URL('./bvh.worker.ts', import.meta.url), { type: 'module' });
     const finish = (error?: string) => {
+      clearTimeout(timeout);
+      signal.removeEventListener('abort', cancel);
       worker.terminate();
       if (error === undefined) resolve();
       else reject(new Error(error));
     };
+    const cancel = () => finish();
+    const timeout = setTimeout(() => finish('Preparing the surface index timed out.'), 120_000);
+    signal.addEventListener('abort', cancel, { once: true });
     worker.onmessage = ({ data }) => {
       if (data.error) return finish(data.error);
-      geometry.boundsTree = MeshBVH.deserialize(data.bvh, geometry, { setIndex: false });
-      finish();
+      try {
+        geometry.boundsTree = MeshBVH.deserialize(data.bvh, geometry, { setIndex: false });
+        finish();
+      } catch (error) {
+        finish((error as Error).message);
+      }
     };
     worker.onerror = (event) => finish(event.message || 'The worker stopped.');
     worker.onmessageerror = () => finish('The worker could not return its result.');
@@ -48,7 +56,11 @@ function buildInWorker(geometry: BufferGeometry) {
     const transfer: Transferable[] = [positions.buffer];
     if (index) transfer.push(index.buffer);
     const request: BvhRequest = { positions, index, options: bvhOptions };
-    worker.postMessage(request, transfer);
+    try {
+      worker.postMessage(request, transfer);
+    } catch (error) {
+      finish((error as Error).message);
+    }
   });
 }
 
@@ -58,18 +70,21 @@ let queue: Promise<void> = Promise.resolve();
 export function prepareForPicking(geometry: BufferGeometry) {
   const triangles = triangleCount(geometry);
   if (triangles <= indexedTriangles || geometry.boundsTree || building.has(geometry)) return;
-  if (triangles <= workerTriangles) {
+  if (triangles <= workerIndexTriangles) {
     computeBoundsTree.call(geometry, bvhOptions);
     return;
   }
   building.add(geometry);
+  const controller = new AbortController();
+  const dispose = () => controller.abort();
+  geometry.addEventListener('dispose', dispose);
   const count = (change: number) =>
     useEditor.setState((state) => ({ indexingMeshes: state.indexingMeshes + change }));
   count(1);
   // One at a time, since each build briefly holds another copy of its mesh.
   queue = queue.then(async () => {
     try {
-      await buildInWorker(geometry);
+      await buildInWorker(geometry, controller.signal);
     } catch {
       useEditor
         .getState()
@@ -78,6 +93,7 @@ export function prepareForPicking(geometry: BufferGeometry) {
           'error',
         );
     } finally {
+      geometry.removeEventListener('dispose', dispose);
       building.delete(geometry);
       count(-1);
     }
@@ -86,6 +102,6 @@ export function prepareForPicking(geometry: BufferGeometry) {
 
 /** Testing every triangle of a dense mesh would freeze each pointer move until its index is built. */
 export function pickRaycast(this: Mesh, raycaster: Raycaster, intersects: Intersection[]) {
-  if (this.geometry.boundsTree || triangleCount(this.geometry) <= workerTriangles)
+  if (this.geometry.boundsTree || triangleCount(this.geometry) <= workerIndexTriangles)
     acceleratedRaycast.call(this, raycaster, intersects);
 }

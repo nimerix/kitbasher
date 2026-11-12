@@ -428,6 +428,13 @@ function PartProperties({ part }: { part: Part }) {
           <span>Triangles</span>
           <span>{triangleCount(part.geometry).toLocaleString()}</span>
         </div>
+        <button
+          className="button secondary"
+          disabled={part.locked}
+          onClick={() => useEditor.getState().setModal('mesh')}
+        >
+          Decimate or remesh…
+        </button>
       </Section>
       <div className="inspector-part-actions">
         <button

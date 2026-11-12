@@ -18,6 +18,7 @@ import { VerticalBlurShader } from 'three/addons/shaders/VerticalBlurShader.js';
 import { sceneBounds, triangleCount, vec } from '../core/geometry';
 import { sceneLighting, useEditor } from '../core/store';
 import { useXR } from '../core/xr-session';
+import { useDisplayPerformance } from '../core/display-performance';
 import type { Part, SceneLight } from '../core/types';
 
 export interface SceneFrame {
@@ -329,6 +330,7 @@ function GroundShadow({ frame }: { frame: SceneFrame }) {
  */
 export function SceneLighting() {
   const shadows = useEditor((s) => sceneLighting(s).shadows);
+  const moving = useDisplayPerformance((s) => s.moving);
   const headset = useXR((s) => !!s.session);
   const sparse = useEditor(
     (s) =>
@@ -338,11 +340,12 @@ export function SceneLighting() {
       ) <= headsetShadowTriangles,
   );
   const frame = useSceneFrame();
+  const drawShadows = shadows && (sparse || (!headset && !moving));
   return (
     <>
-      <Lights frame={frame} shadows={shadows && (!headset || sparse)} />
+      <Lights frame={frame} shadows={drawShadows} />
       {/* The ground shadow is drawn to a texture with its own camera, which a headset replaces. */}
-      {shadows && !headset ? <GroundShadow frame={frame} /> : null}
+      {drawShadows && !headset ? <GroundShadow frame={frame} /> : null}
     </>
   );
 }
