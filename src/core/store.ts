@@ -1,4 +1,5 @@
 import { create } from 'zustand';
+import { notify as recordNotification } from './activity';
 import type { DriveFileBinding } from './types';
 import { Quaternion } from 'three';
 import type { BufferGeometry } from 'three';
@@ -1506,6 +1507,13 @@ export const useEditor = create<EditorState>((set, get) => ({
     set((state) => ({ focusRequest: { id: state.focusRequest.id + 1, view, all } })),
   markSaved: (revision) => set({ savedRevision: revision }),
 }));
+
+// Capture every editor alert, including messages emitted directly by constraint handling.
+// The transient toast remains available to headset UI and existing duplicate suppression.
+useEditor.subscribe((state, previous) => {
+  if (state.toast && state.toast.id !== previous.toast?.id)
+    recordNotification(state.toast.message, state.toast.kind);
+});
 
 let sharedHandlers: { undo: () => void; redo: () => void } | null = null;
 

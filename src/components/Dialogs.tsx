@@ -421,23 +421,43 @@ function MergeDialog() {
     [name, setName] = useState('Merged assembly'),
     [busy, setBusy] = useState(false),
     [error, setError] = useState('');
-  const worker = useRef<Worker | null>(null);
-  useEffect(() => () => worker.current?.terminate(), []);
+  const [progress, setProgress] = useState<{ detail: string; progress: number | null } | null>(
+    null,
+  );
+  const pending = useRef<AbortController | null>(null);
+  useEffect(() => () => pending.current?.abort(), []);
   const close = () => {
-    if (busy) {
-      worker.current?.terminate();
-      worker.current = null;
-    }
+    pending.current?.abort();
     useEditor.getState().setModal(null);
   };
   const doMerge = async () => {
     setBusy(true);
     setError('');
+    setProgress({ detail: `Preparing ${parts.length} parts`, progress: null });
+    const controller = new AbortController();
+    pending.current = controller;
+    const epoch = useEditor.getState().sceneEpoch;
     try {
-      const part = await mergeParts(parts, mode, name, (w) => {
-        worker.current = w;
+      const part = await mergeParts(parts, mode, name, {
+        signal: controller.signal,
+        onProgress: setProgress,
       });
+      if (controller.signal.aborted) {
+        part.geometry.dispose();
+        return;
+      }
       const state = useEditor.getState();
+      if (
+        state.sceneEpoch !== epoch ||
+        parts.some(
+          (input) => state.scene.parts.find((current) => current.id === input.id) !== input,
+        )
+      ) {
+        part.geometry.dispose();
+        throw new Error(
+          'The source parts changed while merging. Review the selection and try again.',
+        );
+      }
       state.replaceWithMerged(
         part,
         parts.map((p) => p.id),
@@ -447,8 +467,17 @@ function MergeDialog() {
         `${parts.length} parts ${mode === 'union' ? 'united' : 'combined'} into one mesh`,
       );
     } catch (error) {
-      setError((error as Error).message);
-      setBusy(false);
+      if (!controller.signal.aborted) {
+        setError(
+          (error as Error).name === 'AbortError'
+            ? 'Merge cancelled. Original parts retained.'
+            : (error as Error).message,
+        );
+        setProgress(null);
+        setBusy(false);
+      }
+    } finally {
+      if (pending.current === controller) pending.current = null;
     }
   };
   return (
@@ -470,7 +499,7 @@ function MergeDialog() {
       </div>
       <label className="form-field">
         <span>Merged part name</span>
-        <input value={name} onChange={(e) => setName(e.target.value)} />
+        <input value={name} disabled={busy} onChange={(e) => setName(e.target.value)} />
       </label>
       <div className="merge-options">
         <button
@@ -509,6 +538,15 @@ function MergeDialog() {
       </div>
       {parts.some((p) => p.locked) ? (
         <p className="form-error">Unlock the selected parts before merging.</p>
+      ) : null}
+      {busy && progress ? (
+        <div className="job-inline-progress" role="status" aria-live="polite">
+          <p>{progress.detail}</p>
+          <progress aria-label="Merge progress" max={1} value={progress.progress ?? undefined} />
+          {progress.progress !== null ? (
+            <span> {Math.round(progress.progress * 100)}% of stage</span>
+          ) : null}
+        </div>
       ) : null}
       {error ? (
         <p className="form-error" role="alert">

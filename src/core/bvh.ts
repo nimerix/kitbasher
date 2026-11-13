@@ -2,6 +2,7 @@ import { BufferAttribute, BufferGeometry, Mesh } from 'three';
 import type { Intersection, Raycaster } from 'three';
 import { acceleratedRaycast, computeBoundsTree, MeshBVH } from 'three-mesh-bvh';
 import { triangleCount } from './geometry';
+import { cancelTask, completeTask, failTask, startTask, updateTask } from './activity';
 import { useEditor } from './store';
 import { spatialIndexOptions as bvhOptions, workerIndexTriangles } from './spatial-index';
 
@@ -13,53 +14,61 @@ export interface BvhRequest {
   options: typeof bvhOptions;
 }
 
-function buildInWorker(geometry: BufferGeometry, signal: AbortSignal) {
+function buildInWorker(geometry: BufferGeometry, signal: AbortSignal, taskId: string) {
   return new Promise<void>((resolve, reject) => {
     if (signal.aborted) return resolve();
-    const worker = new Worker(new URL('./bvh.worker.ts', import.meta.url), { type: 'module' });
+    let worker: Worker | undefined;
+    let settled = false;
     const finish = (error?: string) => {
-      clearTimeout(timeout);
+      if (settled) return;
+      settled = true;
       signal.removeEventListener('abort', cancel);
-      worker.terminate();
+      worker?.terminate();
       if (error === undefined) resolve();
       else reject(new Error(error));
     };
     const cancel = () => finish();
-    const timeout = setTimeout(() => finish('Preparing the surface index timed out.'), 120_000);
     signal.addEventListener('abort', cancel, { once: true });
-    worker.onmessage = ({ data }) => {
-      if (data.error) return finish(data.error);
-      try {
-        geometry.boundsTree = MeshBVH.deserialize(data.bvh, geometry, { setIndex: false });
-        finish();
-      } catch (error) {
-        finish((error as Error).message);
-      }
-    };
-    worker.onerror = (event) => finish(event.message || 'The worker stopped.');
-    worker.onmessageerror = () => finish('The worker could not return its result.');
-
-    // Copies, because the renderer keeps drawing the mesh while the worker reads it.
-    const position = geometry.getAttribute('position');
-    let positions: Float32Array;
-    if (position instanceof BufferAttribute && position.array instanceof Float32Array) {
-      positions = position.array.slice();
-    } else {
-      positions = new Float32Array(position.count * 3);
-      for (let i = 0; i < position.count; i++) {
-        positions[i * 3] = position.getX(i);
-        positions[i * 3 + 1] = position.getY(i);
-        positions[i * 3 + 2] = position.getZ(i);
-      }
-    }
-    const index = geometry.index?.array.slice() as BvhRequest['index'];
-    const transfer: Transferable[] = [positions.buffer];
-    if (index) transfer.push(index.buffer);
-    const request: BvhRequest = { positions, index, options: bvhOptions };
+    updateTask(taskId, { status: 'running', detail: 'Preparing surface data', progress: null });
     try {
+      worker = new Worker(new URL('./bvh.worker.ts', import.meta.url), { type: 'module' });
+      worker.onmessage = ({ data }) => {
+        if (settled || signal.aborted) return;
+        if (data.type === 'progress') {
+          updateTask(taskId, { detail: 'Building surface index', progress: data.progress });
+          return;
+        }
+        if (data.error) return finish(data.error);
+        try {
+          geometry.boundsTree = MeshBVH.deserialize(data.bvh, geometry, { setIndex: false });
+          finish();
+        } catch (error) {
+          finish((error as Error).message);
+        }
+      };
+      worker.onerror = (event) => finish(event.message || 'The worker stopped.');
+      worker.onmessageerror = () => finish('The worker could not return its result.');
+
+      // Copies, because the renderer keeps drawing the mesh while the worker reads it.
+      const position = geometry.getAttribute('position');
+      let positions: Float32Array;
+      if (position instanceof BufferAttribute && position.array instanceof Float32Array) {
+        positions = position.array.slice();
+      } else {
+        positions = new Float32Array(position.count * 3);
+        for (let i = 0; i < position.count; i++) {
+          positions[i * 3] = position.getX(i);
+          positions[i * 3 + 1] = position.getY(i);
+          positions[i * 3 + 2] = position.getZ(i);
+        }
+      }
+      const index = geometry.index?.array.slice() as BvhRequest['index'];
+      const transfer: Transferable[] = [positions.buffer];
+      if (index) transfer.push(index.buffer);
+      const request: BvhRequest = { positions, index, options: bvhOptions };
       worker.postMessage(request, transfer);
     } catch (error) {
-      finish((error as Error).message);
+      finish(error instanceof Error ? error.message : String(error));
     }
   });
 }
@@ -76,6 +85,20 @@ export function prepareForPicking(geometry: BufferGeometry) {
   }
   building.add(geometry);
   const controller = new AbortController();
+  const name = useEditor.getState().scene.parts.find((part) => part.geometry === geometry)?.name;
+  const taskId = startTask({
+    title: name ? `Prepare surfaces · ${name}` : 'Prepare surfaces for picking',
+    detail: `${triangles.toLocaleString()} triangles · waiting for another mesh`,
+    status: 'queued',
+    progress: null,
+    notify: false,
+    cancel: () => controller.abort(),
+  });
+  controller.signal.addEventListener(
+    'abort',
+    () => cancelTask(taskId, 'Surface preparation cancelled. Select this mesh in the parts list.'),
+    { once: true },
+  );
   const dispose = () => controller.abort();
   geometry.addEventListener('dispose', dispose);
   const count = (change: number) =>
@@ -84,14 +107,14 @@ export function prepareForPicking(geometry: BufferGeometry) {
   // One at a time, since each build briefly holds another copy of its mesh.
   queue = queue.then(async () => {
     try {
-      await buildInWorker(geometry, controller.signal);
-    } catch {
-      useEditor
-        .getState()
-        .notify(
-          'A dense mesh could not be prepared for clicking. Select it in the parts list.',
-          'error',
-        );
+      await buildInWorker(geometry, controller.signal, taskId);
+      if (!controller.signal.aborted)
+        completeTask(taskId, 'Surface index ready for picking and fitting.');
+    } catch (error) {
+      failTask(
+        taskId,
+        `${error instanceof Error ? error.message : String(error)} Select this mesh in the parts list.`,
+      );
     } finally {
       geometry.removeEventListener('dispose', dispose);
       building.delete(geometry);

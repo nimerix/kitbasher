@@ -346,6 +346,21 @@ During a dense-mesh drag, a smaller set of about 256 original-surface samples re
 work. Releasing the part checks the placement with the full sample set. Very thin details can
 still evade sampling; use interference inspection for the final fit.
 
+## Background activity and notifications
+
+The **Background activity** button in the header shows queued and running interference
+checks, surface indexing, viewport optimization, mesh processing, Boolean merges, and
+Drive uploads. Each job shows its current stage, elapsed time, and measured progress
+when available. Percentages describe the named stage; operations without measurable
+progress show an indeterminate bar. Cancel supported jobs from the panel. Mesh and
+merge dialogs also show progress while open.
+
+The **Notifications** bell keeps completion messages and errors after their banners
+close. Errors remain on screen until dismissed. Mark messages read, remove individual
+messages, or clear the history. Routine mesh preparation and Drive autosaves finish
+quietly, while failures still alert you. History belongs to this tab's current session
+and retains the latest 50 finished jobs and 100 notifications.
+
 ## Inspect contact and interference
 
 Click **Interference** beside the projection selector to inspect the assembled
@@ -363,6 +378,9 @@ about half a millimeter from the other part's surface, including near an interfa
 - Part movement, alignment, undo/redo, and visibility changes update the analysis.
   Superseded analysis is canceled and its old overlays are cleared. Camera tools
   remain available; the inspection panel can be collapsed for more viewport space.
+- Detailed checks continue without a fixed time cutoff. Follow the current stage
+  in the inspection controls or Background activity, and use **Cancel inspection**
+  to stop the worker. **Retry** starts a fresh check.
 
 This inspection preserves the editable source meshes and scene history. It uses a
 background worker, with a short pause after dragging before recalculating. The

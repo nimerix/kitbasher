@@ -5,6 +5,7 @@ import { prepareForPicking } from '../../src/core/bvh';
 import { placeClear, treeOf } from '../../src/core/clipping';
 import { useEditor } from '../../src/core/store';
 import type { Part } from '../../src/core/types';
+import { requestTaskCancellation, useActivity } from '../../src/core/activity';
 
 afterEach(() => vi.unstubAllGlobals());
 
@@ -119,3 +120,34 @@ it.each(['obstacle', 'mover'] as const)(
     expect(move(9).parts[1].position[0]).toBeCloseTo(9.9, 2);
   },
 );
+
+it('shows measured index progress and cancels queued and running work without accepting late results', async () => {
+  useActivity.setState({ tasks: [], notifications: [] });
+  const workers = workerMock(),
+    first = new BoxGeometry(10, 10, 10, 100, 100, 100),
+    second = first.clone();
+  const pending = useEditor.getState().indexingMeshes;
+  prepareForPicking(first);
+  const firstId = useActivity.getState().tasks[0].id;
+  prepareForPicking(second);
+  const secondId = useActivity.getState().tasks[0].id;
+  expect(useActivity.getState().tasks.every((task) => task.status === 'queued')).toBe(true);
+  await vi.waitFor(() => expect(workers).toHaveLength(1));
+  workers[0].onmessage!({ data: { type: 'progress', progress: 0.45 } });
+  expect(useActivity.getState().tasks.find((task) => task.id === firstId)).toMatchObject({
+    status: 'running',
+    progress: 0.45,
+  });
+  expect(workers[0].terminate).not.toHaveBeenCalled();
+  requestTaskCancellation(secondId);
+  requestTaskCancellation(firstId);
+  // A message already queued by a terminated worker cannot attach its index.
+  workers[0].onmessage!({ data: { bvh: null } });
+  await vi.waitFor(() => expect(useEditor.getState().indexingMeshes).toBe(pending));
+  expect(workers).toHaveLength(1);
+  expect(workers[0].terminate).toHaveBeenCalledOnce();
+  expect(first.boundsTree).toBeUndefined();
+  expect(useActivity.getState().tasks.every((task) => task.status === 'cancelled')).toBe(true);
+  first.dispose();
+  second.dispose();
+});

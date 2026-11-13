@@ -261,3 +261,74 @@ test('reports unavailable solid results for open scans, keeps proximity, and fit
   await page.getByRole('button', { name: 'Close interference view' }).click();
   await expect(panel).toHaveCount(0);
 });
+
+test('keeps long inspection work running, exposes progress, and cancels without accepting stale results', async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    const NativeWorker = window.Worker;
+    const testWindow = window as typeof window & { inspectionWorkers: any[] };
+    testWindow.inspectionWorkers = [];
+    window.Worker = class extends NativeWorker {
+      constructor(url: string | URL, options?: WorkerOptions) {
+        if (!String(url).includes('inspection.worker')) {
+          super(url, options);
+          return;
+        }
+        const worker = {
+          onmessage: null as null | ((event: { data: unknown }) => void),
+          onerror: null,
+          onmessageerror: null,
+          terminated: false,
+          posted: false,
+          postMessage() {
+            this.posted = true;
+            this.onmessage?.({
+              data: {
+                progress: {
+                  stage: 'indexing',
+                  detail: 'Indexing detailed scan',
+                  fraction: 0.4,
+                },
+              },
+            });
+          },
+          terminate() {
+            this.terminated = true;
+          },
+        };
+        testWindow.inspectionWorkers.push(worker);
+        return worker as unknown as Worker;
+      }
+    };
+  });
+  await fixture(page);
+  await page.getByRole('button', { name: 'Interference', exact: true }).click();
+  await expect(page.locator('.inspection-status')).toContainText('Indexing detailed scan');
+  await expect(
+    page.getByRole('progressbar', { name: 'Interference stage progress' }),
+  ).toHaveAttribute('value', '0.4');
+  await page.clock.install();
+  await page.clock.fastForward(65_000);
+  await expect(page.locator('.inspection-status')).toHaveAttribute('aria-busy', 'true');
+  expect(await page.evaluate(() => (window as any).inspectionWorkers[0].terminated)).toBe(false);
+  await page.getByRole('button', { name: 'Cancel inspection', exact: true }).click();
+  await expect(page.locator('.inspection-status')).toContainText('Inspection cancelled.');
+  expect(await page.evaluate(() => (window as any).inspectionWorkers[0].terminated)).toBe(true);
+  await page.evaluate(() =>
+    (window as any).inspectionWorkers[0].onmessage({
+      data: {
+        error: 'A stale worker must not replace the cancellation',
+      },
+    }),
+  );
+  await expect(page.locator('.inspection-status')).toContainText('Inspection cancelled.');
+  await expect(page.locator('.inspection-status')).not.toContainText('stale');
+  await page.getByRole('button', { name: 'Try again', exact: true }).click();
+  await page.clock.runFor(350);
+  await expect(page.locator('.inspection-status')).toContainText('Indexing detailed scan');
+  expect(await page.evaluate(() => (window as any).inspectionWorkers.length)).toBe(2);
+  await page.evaluate(() => (window as any).inspectionWorkers[1].onmessageerror());
+  await expect(page.locator('.inspection-status')).toContainText('unreadable result');
+  expect(await page.evaluate(() => (window as any).inspectionWorkers[1].terminated)).toBe(true);
+});

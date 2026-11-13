@@ -3,6 +3,7 @@ import { DriveAutosave, useDrive } from '../../src/core/drive-sync';
 import { DriveError } from '../../src/core/google-auth';
 import { useEditor } from '../../src/core/store';
 import type { DriveFile } from '../../src/core/google-drive';
+import { useActivity } from '../../src/core/activity';
 
 const file = { id: 'cloud-1', name: 'Assembly.kitbash', version: '2' };
 const save = vi.fn();
@@ -24,6 +25,7 @@ beforeEach(() => {
   vi.stubGlobal('window', new EventTarget());
   vi.stubGlobal('navigator', { onLine: true });
   save.mockReset().mockResolvedValue(file);
+  useActivity.setState({ tasks: [], notifications: [] });
   useEditor.getState().setScene({ name: 'Assembly', parts: [], joints: [] });
   useDrive.setState({
     connected: true,
@@ -191,5 +193,49 @@ describe('Drive autosave coordination', () => {
     edit('Renamed');
     await vi.advanceTimersByTimeAsync(1500);
     expect(save).toHaveBeenCalledTimes(1);
+  });
+
+  it('shows queued and measured upload progress without routine completion notifications', async () => {
+    const upload = deferred();
+    save.mockReturnValueOnce(upload.promise);
+    bound();
+    expect(useActivity.getState().tasks[0].status).toBe('queued');
+    await vi.advanceTimersByTimeAsync(1500);
+    expect(useActivity.getState().tasks[0]).toMatchObject({ status: 'running', progress: null });
+    save.mock.calls[0][3](0.4);
+    expect(useActivity.getState().tasks[0]).toMatchObject({ status: 'running', progress: 0.4 });
+    upload.resolve(file);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(useActivity.getState().tasks[0]).toMatchObject({ status: 'completed', progress: 1 });
+    expect(useActivity.getState().notifications).toHaveLength(0);
+  });
+
+  it('immediately closes activity when a scene changes and ignores stale upload progress', async () => {
+    const upload = deferred();
+    save.mockReturnValueOnce(upload.promise);
+    bound();
+    await vi.advanceTimersByTimeAsync(1500);
+    const oldId = useActivity.getState().tasks[0].id;
+    useEditor.getState().setScene({ name: 'New scene', parts: [], joints: [] });
+    expect(useActivity.getState().tasks[0]).toMatchObject({ id: oldId, status: 'cancelled' });
+    save.mock.calls[0][3](0.8);
+    upload.resolve(file);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(useActivity.getState().tasks[0]).toMatchObject({ id: oldId, status: 'cancelled' });
+    expect(useActivity.getState().notifications).toHaveLength(0);
+  });
+
+  it('retains a failed attempt and tracks its queued retry separately', async () => {
+    save.mockRejectedValueOnce(new DriveError('Network', 'retryable'));
+    bound();
+    await vi.advanceTimersByTimeAsync(1500);
+    const tasks = useActivity.getState().tasks;
+    expect(tasks.map((task) => task.status)).toEqual(['queued', 'failed']);
+    expect(useActivity.getState().notifications[0].message).toContain('Autosave will retry');
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(useActivity.getState().tasks.map((task) => task.status)).toEqual([
+      'completed',
+      'failed',
+    ]);
   });
 });

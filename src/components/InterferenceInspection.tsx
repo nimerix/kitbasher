@@ -152,19 +152,33 @@ export function InspectionControls({ inspection }: { inspection: InspectionState
         aria-busy={inspection.status === 'working'}
       >
         {inspection.status === 'working' ? (
-          <span>
-            <LoaderCircle size={12} className="spin" />
-            Checking {inspection.count} parts…
-          </span>
+          <>
+            <span>
+              <LoaderCircle size={12} className="spin" />
+              {inspection.progress?.detail ?? `Preparing to check ${inspection.count} parts…`}
+            </span>
+            <progress
+              aria-label="Interference stage progress"
+              aria-valuetext={inspection.progress?.detail}
+              value={inspection.progress?.fraction ?? undefined}
+              max={1}
+            />
+            <small>
+              Progress is for the current stage. Detailed models can take several minutes.
+            </small>
+            <button onClick={inspection.cancel}>
+              <X size={12} /> Cancel inspection
+            </button>
+          </>
         ) : inspection.status === 'empty' ? (
           <span>
             {settings.scope === 'selected'
               ? 'Select at least two visible parts to compare.'
               : 'Add at least two visible parts to compare.'}
           </span>
-        ) : inspection.status === 'error' ? (
+        ) : inspection.status === 'error' || inspection.status === 'cancelled' ? (
           <>
-            <p>{inspection.error}</p>
+            <p>{inspection.status === 'cancelled' ? 'Inspection cancelled.' : inspection.error}</p>
             <button onClick={inspection.retry}>
               <RotateCw size={12} />
               Try again

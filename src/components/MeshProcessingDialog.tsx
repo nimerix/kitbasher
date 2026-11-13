@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import type { BufferGeometry } from 'three';
 import { triangleCount } from '../core/geometry';
 import { processMeshInWorker } from '../core/mesh-job';
+import { useActivity } from '../core/activity';
 import { useEditor } from '../core/store';
 import { Modal, RadioGroup } from './ui';
 
@@ -20,6 +21,8 @@ export function MeshProcessingDialog() {
   const [lockBorder, setLockBorder] = useState(true);
   const [keepOriginal, setKeepOriginal] = useState(true);
   const [busy, setBusy] = useState(false);
+  const [taskId, setTaskId] = useState<string | null>(null);
+  const task = useActivity((state) => state.tasks.find((item) => item.id === taskId));
   const [error, setError] = useState('');
   const [result, setResult] = useState<{ geometry: BufferGeometry; error: number | null } | null>(
     null,
@@ -60,6 +63,10 @@ export function MeshProcessingDialog() {
           ? { mode, ratio: percent / 100, error: errorLimit / 100, lockBorder }
           : { mode, resolution },
         controller.signal,
+        {
+          title: `${mode === 'decimate' ? 'Reduce mesh' : 'Remesh surface'} · ${part.name}`,
+          onTask: setTaskId,
+        },
       );
       if (controller.signal.aborted) {
         processed.geometry.dispose();
@@ -68,7 +75,8 @@ export function MeshProcessingDialog() {
       owned.current = processed.geometry;
       setResult(processed);
     } catch (error) {
-      if (!controller.signal.aborted) setError((error as Error).message);
+      if (!controller.signal.aborted && (error as Error).name !== 'AbortError')
+        setError((error as Error).message);
     } finally {
       if (!controller.signal.aborted) setBusy(false);
     }
@@ -213,6 +221,16 @@ export function MeshProcessingDialog() {
           </p>
         ) : null}
       </fieldset>
+      {busy && task ? (
+        <div className="job-inline-progress" role="status">
+          <p>{task.detail}</p>
+          <progress
+            aria-label="Mesh processing progress"
+            max={1}
+            value={task.progress ?? undefined}
+          />
+        </div>
+      ) : null}
       {result ? (
         <p role="status" className="export-note">
           Ready: {triangleCount(result.geometry).toLocaleString()} triangles
