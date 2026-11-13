@@ -36,7 +36,8 @@ import {
   triangleCount,
 } from '../core/geometry';
 import { referencePlanes } from '../core/references';
-import type { AlignmentMode, AxisLocks, Part, Vec3 } from '../core/types';
+import type { AlignmentMode, AlignmentView, AxisLocks, Part, Vec3 } from '../core/types';
+import { alignmentPartIds } from '../core/alignment-visibility';
 import { completedSurfacePairs } from '../core/surfaces';
 import { SurfacePaintControls } from './SurfacePaintControls';
 import { planeKindLabels } from '../core/plane-constraints';
@@ -492,6 +493,8 @@ function AssemblyInspector() {
     setOperation = useEditor((s) => s.setOperation);
   const parts = scene.parts;
   const isJoint = tool === 'joint';
+  const alignmentParts = alignmentPartIds(op);
+  const canFocus = alignmentParts?.every((id) => parts.some((p) => p.id === id && p.visible));
   const painting = useEditor((s) => s.painting);
   const isSurface = !isJoint && op.mode === 'surface';
   const modes: { id: AlignmentMode; label: string }[] = [
@@ -617,6 +620,39 @@ function AssemblyInspector() {
               ) : null}
             </select>
           </div>
+          {!isJoint ? (
+            <div className="part-picker">
+              <label htmlFor="alignment-view">Alignment view</label>
+              <select
+                id="alignment-view"
+                value={op.view ?? 'scene'}
+                onChange={(event) => setOperation({ view: event.target.value as AlignmentView })}
+                aria-describedby="alignment-view-help"
+              >
+                <option value="scene">Full scene</option>
+                <option value="pair" disabled={!canFocus}>
+                  Isolate both parts
+                </option>
+                <option value="active" disabled={!canFocus}>
+                  Active part only
+                </option>
+                <option value="ghost" disabled={!canFocus}>
+                  Ghost other part
+                </option>
+              </select>
+              <p className="field-help" id="alignment-view-help">
+                {!canFocus
+                  ? 'Choose two visible parts to isolate them while aligning.'
+                  : op.view === 'active'
+                    ? 'Shows only the part for the next pick or painted patch. Switches as you go.'
+                    : op.view === 'ghost'
+                      ? 'The active part stays solid. The other is translucent and click-through.'
+                      : op.view === 'pair'
+                        ? 'Hides the rest of the scene until you finish or cancel alignment.'
+                        : 'Choose a focused view to make picking in a crowded scene easier.'}
+              </p>
+            </div>
+          ) : null}
           {isSurface ? (
             <SurfacePaintControls
               rms={preview?.result?.rms}

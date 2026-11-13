@@ -14,6 +14,7 @@ import {
   validateJoint,
 } from './constraints';
 import { solveAlignment } from './alignment';
+import { alignmentPartDisplay } from './alignment-visibility';
 import { fitAnchors } from './anchor-fit';
 import {
   clipNote,
@@ -513,6 +514,7 @@ export const useEditor = create<EditorState>((set, get) => ({
         measurement: [],
         operation: {
           ...blankOperation(mode),
+          ...(tool === state.tool ? { view: state.operation.view } : {}),
           sourceId: state.selected[0] ?? null,
           targetId: state.selected[1] ?? null,
           surfacePairs: pair ? [pair] : [],
@@ -709,6 +711,8 @@ export const useEditor = create<EditorState>((set, get) => ({
   paintSurface: (point, face, erase = false, begin = false) => {
     const state = get(),
       op = state.operation;
+    const display = alignmentPartDisplay(state.tool, op, point.partId);
+    if (display === 'hidden' || display === 'ghost') return false;
     let active = op.activeSurface;
     if (
       state.tool !== 'align' ||
@@ -894,6 +898,8 @@ export const useEditor = create<EditorState>((set, get) => ({
     })),
   pick: (point) => {
     const state = get();
+    const display = alignmentPartDisplay(state.tool, state.operation, point.partId);
+    if (display === 'hidden' || display === 'ghost') return;
     if (state.tool === 'measure') {
       set({
         measurement: state.measurement.length === 2 ? [point] : [...state.measurement, point],

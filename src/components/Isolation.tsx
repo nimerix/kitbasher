@@ -18,6 +18,7 @@ import { bakeProximityInWorker } from '../core/proximity-job';
 import type { ProximityField } from '../core/proximity';
 import { useShortcut } from '../core/preferences';
 import { useEditor } from '../core/store';
+import { hasAlignmentView } from '../core/alignment-visibility';
 import { NumericInput } from './ui';
 
 /** How the parts around an isolated one are drawn and picked. */
@@ -43,7 +44,9 @@ export function useNearbySurfaces() {
   const parts = useEditor((s) => s.scene.parts),
     isolated = useEditor((s) => s.isolated),
     distance = useEditor((s) => s.view.isolation.distance),
-    active = useEditor((s) => !!s.isolated && showsNearby(s.view));
+    active = useEditor(
+      (s) => !!s.isolated && showsNearby(s.view) && !hasAlignmentView(s.tool, s.operation),
+    );
   const gl = useThree((s) => s.gl),
     invalidate = useThree((s) => s.invalidate);
   const [baked, setBaked] = useState<Baked | null>(null);
@@ -230,13 +233,14 @@ export function nearbyRaycast(shows: NearbySurfaces['shows']) {
 }
 
 export function IsolationNotice() {
+  const alignment = useEditor((s) => hasAlignmentView(s.tool, s.operation));
   const isolated = useEditor((s) => s.isolated),
     parts = useEditor((s) => s.scene.parts),
     settings = useEditor((s) => s.view.isolation),
     paused = useEditor((s) => s.view.explode > 0 || s.view.inspection.enabled),
     detail = useEditor((s) => s.nearbyDetail);
   const keys = { isolate: useShortcut('isolate'), nearby: useShortcut('isolateNearby') };
-  if (!isolated) return null;
+  if (!isolated || alignment) return null;
   const shown = isolated.flatMap((id) => parts.find((part) => part.id === id) ?? []);
   const names = shown.map((part) => part.name);
   const waiting =

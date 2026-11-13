@@ -4,7 +4,7 @@ import { useEditor } from '../core/store';
 import { contactColors, patchGeometry } from '../core/surfaces';
 import { worldNormal, worldPoint } from '../core/geometry';
 import { solveAlignment } from '../core/alignment';
-import { hiddenByIsolation } from '../core/isolation';
+import { partDisplay } from '../core/alignment-visibility';
 import type { Part, SurfacePatch, SurfacePoint } from '../core/types';
 
 /** The patch's S/T label is drawn by the annotation layer. */
@@ -14,8 +14,8 @@ function PaintedPatch({ part, patch, color }: { part: Part; patch: SurfacePatch;
     [part.geometry, patch.faces],
   );
   useEffect(() => () => geometry.dispose(), [geometry]);
-  const hidden = useEditor((s) => hiddenByIsolation(s.isolated, s.nearbyParts, part.id));
-  if (!part.visible || hidden || !patch.faces.length) return null;
+  const display = useEditor((s) => partDisplay(s, part.id));
+  if (!part.visible || display === 'hidden' || !patch.faces.length) return null;
   return (
     <group position={part.position} quaternion={part.quaternion} scale={part.scale}>
       <mesh geometry={geometry} raycast={() => {}} renderOrder={5}>
@@ -23,7 +23,7 @@ function PaintedPatch({ part, patch, color }: { part: Part; patch: SurfacePatch;
           color={color}
           side={DoubleSide}
           transparent
-          opacity={0.65}
+          opacity={display === 'ghost' ? 0.12 : 0.65}
           depthWrite={false}
           polygonOffset
           polygonOffsetFactor={-3}
@@ -63,6 +63,9 @@ export function SurfacePaintOverlay() {
 }
 
 function FlushPreview() {
+  const isolated = useEditor((s) => s.isolated),
+    nearbyParts = useEditor((s) => s.nearbyParts),
+    tool = useEditor((s) => s.tool);
   const material = useMemo(
     () =>
       new MeshBasicMaterial({
@@ -86,6 +89,7 @@ function FlushPreview() {
         const original = scene.parts.find((entry) => entry.id === part.id)!;
         return (
           part.visible &&
+          partDisplay({ tool, operation, isolated, nearbyParts }, part.id) === 'solid' &&
           [...part.position, ...part.quaternion].some(
             (value, index) =>
               Math.abs(value - [...original.position, ...original.quaternion][index]) > 1e-6,
@@ -95,7 +99,7 @@ function FlushPreview() {
     } catch {
       return [];
     }
-  }, [scene, operation, painting, clip]);
+  }, [scene, operation, painting, clip, tool, isolated, nearbyParts]);
   return (
     <>
       {parts.map((part) => (

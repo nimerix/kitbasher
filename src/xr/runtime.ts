@@ -2,7 +2,7 @@ import { Box3, Group, Matrix4, Quaternion, Raycaster, Triangle, Vector3 } from '
 import type { Camera, Mesh, Scene, WebGLRenderer } from 'three';
 import { treeOf } from '../core/clipping';
 import { sceneBounds, triangleCount } from '../core/geometry';
-import { hiddenByIsolation } from '../core/isolation';
+import { partDisplay } from '../core/alignment-visibility';
 import { canRedo, canUndo, useEditor } from '../core/store';
 import { readFace } from '../core/surfaces';
 import type { Part, Quat, SurfacePoint, Tool, Vec3 } from '../core/types';
@@ -556,7 +556,7 @@ export class XRRuntime {
   }
 
   private shown(part: Part, state: Editor) {
-    return part.visible && !hiddenByIsolation(state.isolated, state.nearbyParts, part.id);
+    return part.visible && partDisplay(state, part.id) !== 'hidden';
   }
 
   /** What a press would act on: a part within touch, the panel, or a part pointed at. */
@@ -636,7 +636,8 @@ export class XRRuntime {
     const meshes: Mesh[] = [];
     for (const part of state.scene.parts) {
       const mesh = partMeshes.get(part.id);
-      if (mesh && this.shown(part, state)) meshes.push(mesh);
+      if (mesh && this.shown(part, state) && partDisplay(state, part.id) === 'solid')
+        meshes.push(mesh);
     }
     this.raycaster.set(
       toScene(rig, origin),
