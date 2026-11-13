@@ -15,6 +15,7 @@ import {
   forgetDriveToken,
   googleClientId,
   loadGoogleIdentity,
+  restoreDriveSession,
 } from '../core/google-auth';
 import { googleDrive } from '../core/google-drive';
 import type { DriveFile } from '../core/google-drive';
@@ -23,6 +24,7 @@ import {
   driveAutosave,
   driveStatusText,
   openDriveScene,
+  overwriteDriveScene,
   saveNewDriveScene,
   stopDriveAutosave,
   useDrive,
@@ -63,7 +65,7 @@ export function GoogleDriveDialog() {
 }
 
 function DriveDialog() {
-  const { connected, status, message, progress } = useDrive();
+  const { connected, status, message, progress, conflict } = useDrive();
   const binding = useEditor((state) => state.driveFile);
   const name = useEditor((state) => state.scene.name);
   const [ready, setReady] = useState(false);
@@ -74,6 +76,7 @@ function DriveDialog() {
   const [nextPage, setNextPage] = useState<string | undefined>();
   const [selected, setSelected] = useState<DriveFile | null>(null);
   const [refresh, setRefresh] = useState(0);
+  const [resolution, setResolution] = useState<'load' | 'overwrite' | null>(null);
   const close = () => useDrive.setState({ dialogOpen: false });
   const failed = (failure: unknown) => {
     setError(
@@ -98,9 +101,12 @@ function DriveDialog() {
   useEffect(() => {
     if (!googleClientId) return;
     let active = true;
-    loadGoogleIdentity()
-      .then(() => {
-        if (active) setReady(true);
+    Promise.all([loadGoogleIdentity(), restoreDriveSession()])
+      .then(([, restored]) => {
+        if (active) {
+          setReady(true);
+          if (restored && !useDrive.getState().connected) driveAutosave.connected();
+        }
       })
       .catch((failure) => {
         if (active) setError(failure.message);
@@ -183,6 +189,7 @@ function DriveDialog() {
                     onClick={() =>
                       void perform(async () => {
                         await loadGoogleIdentity();
+                        if (await restoreDriveSession()) driveAutosave.connected();
                         setReady(true);
                       })
                     }
@@ -236,6 +243,81 @@ function DriveDialog() {
                     </button>
                   )}
                 </section>
+                {binding && status === 'conflict' ? (
+                  <section className="drive-open-confirmation" aria-label="Resolve Drive conflict">
+                    <strong>Choose which scene to keep</strong>
+                    <p>
+                      Your local edits are safe in this browser. Drive has a different version
+                      {conflict?.modifiedTime
+                        ? ` saved ${new Date(conflict.modifiedTime).toLocaleString()}`
+                        : ''}
+                      .
+                    </p>
+                    {resolution ? (
+                      <>
+                        <p>
+                          {resolution === 'load'
+                            ? 'Load the Drive version and discard the current local edits? Download a scene copy first if you want to keep them.'
+                            : 'Replace the Drive version with your current local scene? Other devices will see this version.'}
+                        </p>
+                        <div className="drive-inline-actions">
+                          <button
+                            className="button secondary"
+                            disabled={working}
+                            onClick={() => setResolution(null)}
+                          >
+                            Cancel
+                          </button>
+                          <button
+                            className="button primary"
+                            disabled={working}
+                            onClick={() =>
+                              void perform(async () => {
+                                if (resolution === 'load') {
+                                  if (await openDriveScene(binding.id, true)) close();
+                                } else if (conflict) {
+                                  await overwriteDriveScene(conflict);
+                                }
+                                setResolution(null);
+                              })
+                            }
+                          >
+                            {resolution === 'load'
+                              ? 'Discard local edits and load'
+                              : 'Confirm overwrite'}
+                          </button>
+                        </div>
+                      </>
+                    ) : (
+                      <div className="drive-inline-actions">
+                        <button
+                          className="button secondary"
+                          disabled={working}
+                          onClick={() => setResolution('load')}
+                        >
+                          Load Drive version
+                        </button>
+                        <button
+                          className="button secondary"
+                          disabled={working || !conflict}
+                          onClick={() => setResolution('overwrite')}
+                        >
+                          Overwrite Drive version
+                        </button>
+                        <button
+                          className="button secondary"
+                          disabled={working}
+                          onClick={() => {
+                            setError(null);
+                            driveAutosave.retry();
+                          }}
+                        >
+                          Check again
+                        </button>
+                      </div>
+                    )}
+                  </section>
+                ) : null}
                 <div className="drive-list-heading">
                   <strong>Your Drive scenes</strong>
                   <button
@@ -329,12 +411,6 @@ function DriveDialog() {
             {error ?? message}
           </p>
         ) : null}
-        {status === 'conflict' ? (
-          <p>
-            Download your edits or save a new Drive copy. To open the cloud version, stop autosave
-            first.
-          </p>
-        ) : null}
         {binding ? (
           <div className="drive-inline-actions">
             {connected ? (
@@ -353,13 +429,17 @@ function DriveDialog() {
         ) : null}
         <p className="drive-note">
           Local recovery continues while offline. Wait for “Saved to Drive” before closing. Use one
-          editor at a time for each Drive scene. Google may ask you to reconnect when access
-          expires.
+          editor at a time for each Drive scene. Your connection is restored when possible; Google
+          may occasionally ask you to reconnect.
         </p>
       </div>
       <div className="modal-footer">
         {connected ? (
-          <button className="button secondary" disabled={working} onClick={disconnectDrive}>
+          <button
+            className="button secondary"
+            disabled={working}
+            onClick={() => void perform(disconnectDrive)}
+          >
             Disconnect
           </button>
         ) : null}

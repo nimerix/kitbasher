@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { BoxGeometry, BufferAttribute, BufferGeometry } from 'three';
 import { GoogleDriveClient, readDriveBinding } from '../../src/core/google-drive';
 import { DriveError } from '../../src/core/google-auth';
-import { readSceneFile } from '../../src/core/scene-file';
+import { readSceneFile, sceneFileBlob } from '../../src/core/scene-file';
 import type { SceneDocument } from '../../src/core/types';
 
 const file = { id: 'scene-1', name: 'Assembly.kitbash', version: '2' };
@@ -28,7 +28,13 @@ const scene = (geometry: BufferGeometry = new BoxGeometry(1, 2, 3)): SceneDocume
   ],
   joints: [],
 });
-const client = () => new GoogleDriveClient(() => 'test-access-token');
+const client = () =>
+  new GoogleDriveClient(
+    () => 'test-access-token',
+    async () => {
+      throw new DriveError('Reconnect', 'auth');
+    },
+  );
 const signal = () => new AbortController().signal;
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -61,25 +67,32 @@ describe('Google Drive scene files', () => {
   });
 
   it('uses a reserved id to create a scene and recognizes its own upload after a lost response', async () => {
+    const document = scene();
     const fetcher = vi
       .fn()
       .mockResolvedValueOnce(json({}, 404))
       .mockResolvedValueOnce(init())
       .mockResolvedValueOnce(json(file))
       .mockResolvedValueOnce(json({ ...file, appProperties: { kitbasherWrite: 'write-1' } }))
-      .mockResolvedValueOnce(init())
-      .mockResolvedValueOnce(json({ ...file, version: '3' }));
+      .mockResolvedValueOnce(new Response(await sceneFileBlob(document)))
+      .mockResolvedValueOnce(json(file));
     vi.stubGlobal('fetch', fetcher);
     const pending = { ...binding, version: null };
-    await client().save(scene(), pending, signal(), () => {});
+    await client().save(document, pending, signal(), () => {});
     expect(fetcher.mock.calls[1][1].method).toBe('POST');
     expect(JSON.parse(fetcher.mock.calls[1][1].body).id).toBe(file.id);
-    await client().save(scene(), pending, signal(), () => {});
-    expect(fetcher.mock.calls[4][1].method).toBe('PATCH');
+    await client().save(document, pending, signal(), () => {});
+    expect(fetcher.mock.calls[4][0]).toContain('alt=media');
+    expect(fetcher).toHaveBeenCalledTimes(6);
   });
 
   it('refuses to overwrite a remotely changed file or recreate a removed existing file', async () => {
-    const fetcher = vi.fn().mockResolvedValueOnce(json(file)).mockResolvedValueOnce(json({}, 404));
+    const fetcher = vi
+      .fn()
+      .mockResolvedValueOnce(json(file))
+      .mockResolvedValueOnce(new Response('different remote bytes'))
+      .mockResolvedValueOnce(json(file))
+      .mockResolvedValueOnce(json({}, 404));
     vi.stubGlobal('fetch', fetcher);
     await expect(client().save(scene(), binding, signal(), () => {})).rejects.toMatchObject({
       kind: 'conflict',
@@ -87,7 +100,83 @@ describe('Google Drive scene files', () => {
     await expect(client().save(scene(), binding, signal(), () => {})).rejects.toMatchObject({
       status: 404,
     });
-    expect(fetcher).toHaveBeenCalledTimes(2);
+    expect(fetcher).toHaveBeenCalledTimes(4);
+  });
+
+  it('allows metadata-only version changes using the last saved content checksum', async () => {
+    const md5Checksum = 'a'.repeat(32);
+    const fetcher = vi
+      .fn()
+      .mockResolvedValueOnce(json({ ...file, version: '50', md5Checksum }))
+      .mockResolvedValueOnce(init())
+      .mockResolvedValueOnce(json({ ...file, version: '51' }));
+    vi.stubGlobal('fetch', fetcher);
+    await client().save(scene(), { ...binding, md5Checksum }, signal(), () => {});
+    expect(fetcher.mock.calls[1][1].method).toBe('PATCH');
+    expect(fetcher).toHaveBeenCalledTimes(3);
+  });
+
+  it('compares old recovery records with the actual cloud bytes before reporting a conflict', async () => {
+    const document = scene();
+    const fetcher = vi
+      .fn()
+      .mockResolvedValueOnce(json(file))
+      .mockResolvedValueOnce(new Response(await sceneFileBlob(document)))
+      .mockResolvedValueOnce(json(file));
+    vi.stubGlobal('fetch', fetcher);
+    expect(await client().save(document, binding, signal(), () => {})).toEqual(file);
+    expect(fetcher.mock.calls.every(([, init]) => !init.method)).toBe(true);
+  });
+
+  it('does not trust a preserved upload marker if an external editor changed the bytes', async () => {
+    const changed = { ...file, appProperties: { kitbasherWrite: binding.pendingWriteId } };
+    const fetcher = vi
+      .fn()
+      .mockResolvedValueOnce(json(changed))
+      .mockResolvedValueOnce(new Response('external changes'))
+      .mockResolvedValueOnce(json(changed));
+    vi.stubGlobal('fetch', fetcher);
+    await expect(client().save(scene(), binding, signal(), () => {})).rejects.toMatchObject({
+      kind: 'conflict',
+      file: changed,
+    });
+  });
+
+  it('opens a stable scene when only metadata changes during download', async () => {
+    const md5Checksum = 'b'.repeat(32);
+    const fetcher = vi
+      .fn()
+      .mockResolvedValueOnce(json({ ...file, md5Checksum }))
+      .mockResolvedValueOnce(new Response(await sceneFileBlob(scene())))
+      .mockResolvedValueOnce(json({ ...file, version: '50', md5Checksum }));
+    vi.stubGlobal('fetch', fetcher);
+    const opened = await client().open(file.id);
+    expect(opened.scene.name).toBe('Assembly');
+    expect(opened.file.version).toBe('50');
+  });
+
+  it('rejects a cloud version that changes while downloading', async () => {
+    const fetcher = vi
+      .fn()
+      .mockResolvedValueOnce(json({ ...file, md5Checksum: 'a'.repeat(32) }))
+      .mockResolvedValueOnce(new Response(await sceneFileBlob(scene())))
+      .mockResolvedValueOnce(json({ ...file, version: '50', md5Checksum: 'b'.repeat(32) }));
+    vi.stubGlobal('fetch', fetcher);
+    await expect(client().open(file.id)).rejects.toMatchObject({ kind: 'conflict' });
+  });
+
+  it('renews once on HTTP 401 and retries the same request', async () => {
+    const fetcher = vi
+      .fn()
+      .mockResolvedValueOnce(json({}, 401))
+      .mockResolvedValueOnce(json({ ids: ['new-id'] }));
+    const refresh = vi.fn().mockResolvedValue('renewed');
+    vi.stubGlobal('fetch', fetcher);
+    expect(await new GoogleDriveClient(() => 'expired', refresh).allocateId()).toBe('new-id');
+    expect(refresh).toHaveBeenCalledExactlyOnceWith('expired');
+    expect(new Headers(fetcher.mock.calls[1][1].headers).get('Authorization')).toBe(
+      'Bearer renewed',
+    );
   });
 
   it('resumes at the server-acknowledged byte after an interrupted chunk', async () => {
