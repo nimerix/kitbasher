@@ -28,6 +28,7 @@ import {
   Maximize,
   MousePointer2,
   Move3D,
+  Move,
   PanelLeftClose,
   PanelLeftOpen,
   PanelRightClose,
@@ -347,6 +348,7 @@ function Toolbar({
     move: useShortcut('move'),
     rotate: useShortcut('rotate'),
     scale: useShortcut('scale'),
+    transform: useShortcut('transform'),
     undo: useShortcut('undo'),
     redo: useShortcut('redo'),
     pivot: useShortcut('pivot'),
@@ -361,6 +363,7 @@ function Toolbar({
     { id: 'translate', label: 'Move', shortcut: keys.move, icon: Move3D },
     { id: 'rotate', label: 'Rotate', shortcut: keys.rotate, icon: Rotate3D },
     { id: 'scale', label: 'Scale', shortcut: keys.scale, icon: Scaling },
+    { id: 'transform', label: 'Transform', shortcut: keys.transform, icon: Move },
   ];
   return (
     <div className="toolbar" role="toolbar" aria-label="Assembly tools">
@@ -395,7 +398,7 @@ function Toolbar({
               onClick={() => useEditor.getState().setTool(id)}
             >
               <Icon size={17} />
-              {id === 'translate' || id === 'rotate' ? (
+              {id === 'translate' || id === 'rotate' || id === 'transform' ? (
                 <span className="transform-tool-name">{label}</span>
               ) : null}
             </IconButton>
@@ -609,7 +612,7 @@ function StatusBar() {
                         ? 'Add surface anchors · Drag a target to fit · Shift for fine adjustment'
                         : tool === 'joint'
                           ? 'Pick anchors to connect parts'
-                          : ['translate', 'rotate', 'scale'].includes(tool)
+                          : ['translate', 'rotate', 'scale', 'transform'].includes(tool)
                             ? 'Hold Shift while dragging for 10× finer adjustment'
                             : 'Shift + click to select multiple'}
         </span>

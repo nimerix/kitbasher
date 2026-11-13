@@ -6392,3 +6392,24 @@ optgroup {
     background: #373a40;
   }
 }
+
+.transform-mode-buttons > button[data-combined='true'] {
+  grid-column: 1 / -1;
+}
+.combined-transform-options {
+  margin-block: 12px;
+}
+.transform-scale-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 32px;
+  cursor: pointer;
+  color: var(--text);
+}
+.transform-scale-option input {
+  accent-color: var(--accent);
+  width: 16px;
+  height: 16px;
+  margin: 0;
+}

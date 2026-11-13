@@ -19,6 +19,7 @@ export const keyActions = {
   freeMove: { group: 'Tools', label: 'Free move with pointer', keys: ['Shift+G'] },
   freeRotate: { group: 'Tools', label: 'Free rotate with pointer', keys: ['Shift+R'] },
   scale: { group: 'Tools', label: 'Scale', keys: ['S'] },
+  transform: { group: 'Tools', label: 'Transform', keys: ['T'] },
   pivot: { group: 'Tools', label: 'Pick pivot on model', keys: ['P'] },
   align: { group: 'Tools', label: 'Align parts', keys: ['A'] },
   paint: { group: 'Tools', label: 'Paint contact surfaces', keys: ['B'] },

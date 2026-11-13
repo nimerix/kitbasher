@@ -27,6 +27,7 @@ export interface MarkerSettings {
 }
 
 export interface Preferences {
+  transform: { scaling: boolean };
   zoom: ZoomSettings;
   markers: MarkerSettings;
   keybindings: KeyBindingOverrides;
@@ -35,6 +36,7 @@ export interface Preferences {
 export type PreferencesTab = 'navigation' | 'markers' | 'keyboard' | 'headset';
 
 export const defaultPreferences: Preferences = {
+  transform: { scaling: true },
   zoom: { sensitivity: 1, curve: 0.5, smoothing: 40, invert: false },
   markers: {
     size: 8,
@@ -73,9 +75,11 @@ export function sanitizePreferences(value: unknown): Preferences {
   const source = (value && typeof value === 'object' ? value : {}) as Record<string, unknown>;
   const zoom = (source.zoom ?? {}) as Record<string, unknown>;
   const markers = (source.markers ?? {}) as Record<string, unknown>;
+  const transform = (source.transform ?? {}) as Record<string, unknown>;
   const z = defaultPreferences.zoom,
     m = defaultPreferences.markers;
   return {
+    transform: { scaling: typeof transform.scaling === 'boolean' ? transform.scaling : true },
     zoom: {
       sensitivity: number(zoom.sensitivity, preferenceLimits.sensitivity, z.sensitivity),
       curve: number(zoom.curve, preferenceLimits.curve, z.curve),
@@ -103,9 +107,12 @@ function readPreferences(): Preferences {
   }
 }
 
-function writePreferences({ zoom, markers, keybindings }: Preferences) {
+function writePreferences({ zoom, markers, keybindings, transform }: Preferences) {
   try {
-    localStorage.setItem(storageKey, JSON.stringify({ version: 1, zoom, markers, keybindings }));
+    localStorage.setItem(
+      storageKey,
+      JSON.stringify({ version: 1, zoom, markers, keybindings, transform }),
+    );
   } catch {
     // Preferences still apply for this session when browser storage is unavailable.
   }
@@ -117,6 +124,7 @@ interface PreferencesState extends Preferences {
   closePanel: () => void;
   setZoom: (patch: Partial<ZoomSettings>) => void;
   setMarkers: (patch: Partial<MarkerSettings>) => void;
+  setTransformScaling: (scaling: boolean) => void;
   /** Returns the actions that lost the binding to this one. */
   assignBinding: (id: KeyActionId, binding: string, replace?: string) => KeyActionId[];
   removeBinding: (id: KeyActionId, binding: string) => void;
@@ -134,6 +142,7 @@ export const usePreferences = create<PreferencesState>((set, get) => {
     panel: null,
     openPanel: (tab) => set((state) => ({ panel: tab ?? state.panel ?? 'navigation' })),
     closePanel: () => set({ panel: null }),
+    setTransformScaling: (scaling) => update({ transform: { scaling } }),
     setZoom: (patch) =>
       update({ zoom: sanitizePreferences({ zoom: { ...get().zoom, ...patch } }).zoom }),
     setMarkers: (patch) =>

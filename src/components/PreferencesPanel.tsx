@@ -414,6 +414,7 @@ function HeadsetPreferences() {
 
 function NavigationPreferences() {
   const zoom = usePreferences((state) => state.zoom);
+  const scaling = usePreferences((state) => state.transform.scaling);
   const orbitSelection = useEditor((state) => state.view.orbitSelection);
   const setZoom = usePreferences((state) => state.setZoom);
   return (
@@ -467,6 +468,15 @@ function NavigationPreferences() {
       <p className="preferences-tip">
         This panel stays open, so you can scroll over the viewport to try each change.
       </p>
+      <section className="preferences-section">
+        <SectionHeading title="Transform tool" />
+        <SwitchField
+          label="Enable scaling in Transform tool"
+          checked={scaling}
+          help="Show scale cubes alongside the move arrows and rotation rings. Turn off to remove scale handles from this tool."
+          onChange={(value) => usePreferences.getState().setTransformScaling(value)}
+        />
+      </section>
     </>
   );
 }

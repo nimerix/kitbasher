@@ -1537,7 +1537,9 @@ export const useEditor = create<EditorState>((set, get) => ({
                 ...restoredIsolated(state, state.past.at(-1)!),
                 operation: blankOperation(),
                 // Keep placement tools ready for another adjustment after undo.
-                tool: ['translate', 'rotate', 'scale'].includes(state.tool) ? state.tool : 'select',
+                tool: ['translate', 'rotate', 'scale', 'transform'].includes(state.tool)
+                  ? state.tool
+                  : 'select',
                 navigationMode: null,
                 pivotPicking: false,
                 painting: false,
@@ -1561,7 +1563,9 @@ export const useEditor = create<EditorState>((set, get) => ({
                 ),
                 ...restoredIsolated(state, state.future[0]),
                 operation: blankOperation(),
-                tool: ['translate', 'rotate', 'scale'].includes(state.tool) ? state.tool : 'select',
+                tool: ['translate', 'rotate', 'scale', 'transform'].includes(state.tool)
+                  ? state.tool
+                  : 'select',
                 navigationMode: null,
                 pivotPicking: false,
                 painting: false,

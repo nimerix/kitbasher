@@ -1,7 +1,7 @@
 import { useMemo } from 'react';
-import { Crosshair, Info, Magnet, Minus, Move3D, Plus, Rotate3D } from 'lucide-react';
+import { Crosshair, Info, Magnet, Minus, Move3D, Move, Plus, Rotate3D } from 'lucide-react';
 import { useEditor } from '../core/store';
-import { useShortcut, withShortcut } from '../core/preferences';
+import { usePreferences, useShortcut, withShortcut } from '../core/preferences';
 import { stepTransform, transformSelection } from '../core/transform-selection';
 import { NumericInput } from './ui';
 
@@ -9,6 +9,7 @@ export const moveSteps = [0.01, 0.1, 0.5, 1, 5, 10];
 export const rotationSteps = [0.1, 1, 5, 15, 45, 90];
 
 export function TransformAdjustments() {
+  const scaling = usePreferences((s) => s.transform.scaling);
   const scene = useEditor((s) => s.scene),
     selected = useEditor((s) => s.selected),
     view = useEditor((s) => s.view),
@@ -22,6 +23,7 @@ export function TransformAdjustments() {
     rotateKey = useShortcut('rotate'),
     freeMoveKey = useShortcut('freeMove'),
     freeRotateKey = useShortcut('freeRotate');
+  const transformKey = useShortcut('transform');
   const selection = useMemo(
     () =>
       transformSelection(
@@ -71,12 +73,14 @@ export function TransformAdjustments() {
       <div className="transform-mode-buttons" role="group" aria-label="Transform tool">
         {(
           [
+            ['transform', 'Transform', Move, transformKey],
             ['translate', 'Move', Move3D, moveKey],
             ['rotate', 'Rotate', Rotate3D, rotateKey],
           ] as const
         ).map(([mode, label, Icon, key]) => (
           <button
             key={mode}
+            data-combined={mode === 'transform' ? true : undefined}
             aria-pressed={tool === mode}
             title={withShortcut(label, key)}
             onClick={() => useEditor.getState().setTool(mode)}
@@ -85,6 +89,58 @@ export function TransformAdjustments() {
           </button>
         ))}
       </div>
+      {tool === 'transform' ? (
+        <div className="combined-transform-options">
+          <label className="transform-scale-option">
+            <input
+              type="checkbox"
+              checked={scaling}
+              onChange={(event) =>
+                usePreferences.getState().setTransformScaling(event.target.checked)
+              }
+            />{' '}
+            Enable scaling
+          </label>
+          <p className="transform-help">
+            Drag an arrow to move, a ring to rotate{scaling ? ', or a cube to scale' : ''}.{' '}
+            {scaling ? 'Turn off scaling to hide its handles.' : 'Scale handles are disabled.'}
+          </p>
+          <p className="transform-help">
+            Shift: fine adjustment · Uses Snap and the selected pivot.
+          </p>
+          <div className="transform-setting-row">
+            <span>Move snap</span>
+            <div className="transform-step-input">
+              <NumericInput
+                label="Transform move snap"
+                value={view.snapStep}
+                min={0.001}
+                step={0.1}
+                onCommit={(snapStep) => useEditor.getState().setView({ snapStep })}
+              />
+              <span>mm</span>
+            </div>
+          </div>
+          <div className="transform-setting-row">
+            <span>Rotation snap</span>
+            <div className="transform-step-input">
+              <NumericInput
+                label="Transform rotation snap"
+                value={view.rotationSnapStep}
+                min={0.001}
+                max={180}
+                onCommit={(rotationSnapStep) => useEditor.getState().setView({ rotationSnapStep })}
+              />
+              <span>°</span>
+            </div>
+          </div>
+          {selection.blocked ? (
+            <p className="transform-help" role="status">
+              {selection.blocked}
+            </p>
+          ) : null}
+        </div>
+      ) : null}
       {freeMoveKey || freeRotateKey ? (
         <p className="transform-help free-transform-shortcuts">
           Free with pointer:

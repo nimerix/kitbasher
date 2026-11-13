@@ -5,7 +5,15 @@ export type Vec3 = [number, number, number];
 export type Quat = [number, number, number, number];
 export type AxisLocks = [boolean, boolean, boolean];
 export type Tool =
-  'select' | 'translate' | 'rotate' | 'scale' | 'align' | 'joint' | 'measure' | 'anchors';
+  | 'select'
+  | 'translate'
+  | 'rotate'
+  | 'scale'
+  | 'transform'
+  | 'align'
+  | 'joint'
+  | 'measure'
+  | 'anchors';
 export type AlignmentMode = 'point' | 'point-plane' | 'plane' | 'multi' | 'surface';
 
 export interface FitAnchor {

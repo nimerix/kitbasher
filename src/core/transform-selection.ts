@@ -55,7 +55,7 @@ export function transformSelection(state: TransformState, tool: Tool) {
         : parts.length > 1
           ? 'Selection center'
           : 'Mesh center';
-  const locks = tool === 'rotate' ? joint?.rotationLocks : undefined;
+  const locks = tool === 'rotate' || tool === 'transform' ? joint?.rotationLocks : undefined;
   const blocked = !selected.length
     ? 'Select a part in the viewport or parts list.'
     : view.explode > 0
@@ -69,7 +69,7 @@ export function transformSelection(state: TransformState, tool: Tool) {
             : tool === 'translate' &&
                 parts.some((part) => translationIsPinned(scene.parts, scene.joints, part.id))
               ? 'A locked connected part prevents movement. Unlock it or turn Keep connected off.'
-              : locks?.every(Boolean)
+              : tool === 'rotate' && locks?.every(Boolean)
                 ? 'All joint rotation axes are locked. Free an axis in Connections.'
                 : null;
   return {

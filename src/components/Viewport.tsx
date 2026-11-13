@@ -58,6 +58,7 @@ import {
 import { measureDistance, sceneLighting, useEditor } from '../core/store';
 import { PrecisionDrag } from '../core/precision';
 import { FreeTransformController, FreeTransformPrompt } from './FreeTransform';
+import { CombinedTransform } from './CombinedTransform';
 import { transformSelection } from '../core/transform-selection';
 import { referencePlanes, resolvePart } from '../core/references';
 import type { Part, SurfacePoint, FitAnchor, SceneDocument, SceneLight } from '../core/types';
@@ -1046,6 +1047,13 @@ function Scene({
         <>
           <FreeTransformController />
           <TransformGizmo />
+          {tool === 'transform' ? (
+            <CombinedTransform
+              onPress={() => {
+                gizmoPressed = true;
+              }}
+            />
+          ) : null}
           <AnchorOverlay />
           <LightHandles />
           <AssemblyAnnotations />

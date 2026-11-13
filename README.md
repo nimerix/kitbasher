@@ -521,6 +521,15 @@ overlapping geometry.
 
 ## Navigation and shortcuts
 
+Press **T** or select **Transform** for a combined gizmo: arrows move, squares move
+within a plane, rings rotate, and cubes scale. The white cube scales uniformly.
+In the inspector, uncheck **Enable scaling** to remove every scale handle while
+keeping movement and rotation available. This choice is saved in this browser
+and also appears in Preferences → Navigation → Transform tool. The separate
+Scale tool and numeric scale fields remain available for deliberate resizing.
+World/Local axes, custom pivots, joints, snapping, and Shift fine adjustment apply;
+each drag is one undo step. Move and Rotate preserve the exact scale values.
+
 Select a part, place the pointer over the viewport, and press **Shift + G** for free
 movement or **Shift + R** for free rotation. Release the shortcut keys, then move the
 pointer without holding a mouse button. Move follows the view plane; rotation behaves
@@ -556,6 +565,7 @@ During contact painting, undo removes the last brush stroke before scene changes
 | Isolate / with nearby surfaces        | `I` / `Shift + I`                                                                |
 | Center orbit / toggle orbit selection | `.` / `Shift + .`                                                                |
 | Select / move / rotate / scale        | `V` / `G` / `R` / `S`                                                            |
+| Combined Transform tool               | `T`                                                                              |
 | Free move / free rotate with pointer  | `Shift + G` / `Shift + R`                                                        |
 | Constrain free placement to an axis   | `X` / `Y` / `Z`; press again to release                                          |
 | Confirm / cancel free placement       | `Enter` or left-click / `Esc` or right-click                                     |

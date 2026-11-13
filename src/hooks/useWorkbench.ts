@@ -129,6 +129,7 @@ export function useKeyboard(openScene: () => void, searchParts: () => void) {
         move: 'translate',
         rotate: 'rotate',
         scale: 'scale',
+        transform: 'transform',
         align: 'align',
         joint: 'joint',
         anchors: 'anchors',
