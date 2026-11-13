@@ -52,11 +52,19 @@ for an empty workbench or to reload the sample.
    and up axis can be overridden. Automatic mode uses meters / Y up for glTF,
    millimeters / Z up for STL and OBJ, and declared 3MF units / Z up.
 2. Select parts in the viewport or the searchable part tree. Shift-click selects
-   several parts. Move, rotate, and scale using gizmos or numeric fields. Snapping
-   supports 0.1, 0.5, 1, and 5 mm translation increments and 15° rotation steps.
+   several parts. Move, rotate, and scale using gizmos or numeric fields. The
+   inspector’s **Move** and **Rotate** controls also offer X/Y/Z −/+ buttons for
+   precise adjustments, including whole selections. Enter a **Step** in millimeters
+   or degrees; **Snap dragging** uses that same increment for the handles. The
+   toolbar shows distance for Move, angle for Rotate, and 10% for Scale.
+   World/Local applies to handles and step buttons; absolute numeric fields show
+   their coordinate system separately. Connected joints use their joint axes,
+   and groups use world axes. Rotation shows the pivot in use, and unavailable
+   controls explain the selection, lock, or view restriction.
    Hold **Shift** during a gizmo drag for one-tenth movement, rotation, or scale
    sensitivity. Press or release it mid-drag without jumping; the whole drag is
-   one undo step.
+   one undo step. Each −/+ adjustment is also one undo step. Undo and redo keep
+   Move, Rotate, or Scale active so you can continue adjusting.
    Gizmos sit on the visible geometry, including scans with distant scanner
    origins. Press **P** (or **Pick surface pivot** in the Camera panel), then click a
    spot on a model to set its rotation, scale, and orbit pivot. A visible marker

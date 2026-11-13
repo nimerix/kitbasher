@@ -457,6 +457,7 @@ optgroup {
 }
 .toolbar-right {
   gap: 8px;
+  flex-shrink: 0;
 }
 .tool-divider {
   display: block;
@@ -566,6 +567,11 @@ optgroup {
   font-size: 11px;
   color: #aaafb9;
   min-width: 75px;
+  min-height: 29px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--panel);
+  padding: 4px 6px;
 }
 .world-icon {
   font-size: 19px;
@@ -1603,6 +1609,203 @@ optgroup {
 .coordinate-switch > button.active {
   background: #363d45;
   color: #c8d0d9;
+}
+.transform-tool-name {
+  display: none;
+}
+.toolbar .tool-button,
+.toolbar .snap-toggle,
+.toolbar .clip-toggle {
+  white-space: nowrap;
+}
+@media (min-width: 1251px) and (max-width: 1600px) {
+  .toolbar-left .tool-button kbd {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    overflow: hidden;
+    clip-path: inset(50%);
+  }
+}
+.scale-snap-step {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+@media (min-width: 1250px) {
+  .transform-tools .icon-button.is-active:has(.transform-tool-name) {
+    width: auto;
+    gap: 6px;
+    padding: 0 8px;
+  }
+  .transform-tools .is-active .transform-tool-name {
+    display: inline;
+    font-size: 11px;
+  }
+}
+.transform-adjustments {
+  margin-block: 3px 16px;
+  color: var(--text);
+  font-size: 11px;
+  line-height: 1.5;
+}
+.transform-mode-buttons {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+}
+.transform-mode-buttons > button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  min-height: 34px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--raised);
+}
+.transform-mode-buttons kbd {
+  color: var(--muted);
+  font-size: 10px;
+}
+.transform-mode-buttons > button[aria-pressed='true'],
+.transform-snap[aria-pressed='true'] {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: #332a23;
+}
+.transform-setting-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-block-start: 12px;
+  flex-wrap: wrap;
+}
+.transform-setting-row > :first-child {
+  margin-inline-end: auto;
+}
+.transform-setting-row strong {
+  font-weight: 550;
+}
+.transform-setting-row .coordinate-switch > button {
+  min-height: 26px;
+  padding-inline: 9px;
+  font-size: 11px;
+  color: var(--muted);
+}
+.transform-setting-row .coordinate-switch > button[aria-pressed='true'] {
+  background: var(--raised);
+  color: var(--text);
+  box-shadow: inset 0 -2px var(--accent);
+}
+.transform-help {
+  color: var(--muted);
+  margin-block: 7px 0;
+  line-height: 1.5;
+}
+.transform-step-input {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 7px;
+  min-height: 32px;
+  border: 1px solid #727984;
+  border-radius: 4px;
+  background: var(--raised);
+  font-variant-numeric: tabular-nums;
+}
+.transform-step-input input {
+  width: 49px;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+}
+.transform-step-input > span {
+  color: var(--muted);
+}
+.transform-snap {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 7px;
+  min-height: 32px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+}
+.transform-step-buttons {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+  margin-block-start: 12px;
+}
+.transform-axis {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 3px;
+}
+.transform-axis > span {
+  grid-column: 1 / -1;
+  text-align: center;
+  font-weight: 600;
+  margin-block-end: 2px;
+}
+.transform-axis > button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 32px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--raised);
+}
+.transform-pivot,
+.transform-availability:not(:empty) {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  margin-block-start: 10px;
+  line-height: 1.5;
+}
+.transform-pivot > svg,
+.transform-availability > svg {
+  margin-block-start: 2px;
+}
+.transform-availability:not(:empty) {
+  border-inline-start: 2px solid var(--accent);
+  padding-inline-start: 8px;
+}
+.transform-adjustments ~ .vector-control .field-label,
+.transform-adjustments ~ .vector-control .field-label small {
+  color: var(--muted);
+  font-size: 10px;
+}
+.transform-adjustments ~ .vector-control .axis-field {
+  min-height: 32px;
+  border-color: #727984;
+}
+.axis-field:has(input:focus-visible) {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.inspector-scroll {
+  overscroll-behavior: contain;
+}
+@media (hover: hover) {
+  .transform-axis > button:hover:enabled,
+  .transform-mode-buttons > button:hover:enabled,
+  .transform-snap:hover:enabled {
+    background: #373a40;
+  }
+}
+@media (max-width: 760px) {
+  .transform-step-input input,
+  .transform-adjustments ~ .vector-control input {
+    font-size: 16px;
+  }
+  .transform-axis > button,
+  .transform-mode-buttons > button {
+    min-height: 36px;
+  }
 }
 .field-label {
   display: flex;
@@ -6104,4 +6307,18 @@ optgroup {
 }
 .mesh-check input {
   width: auto;
+}
+
+/* Keep transform settings reachable when both snap and clipping controls are shown. */
+@media (min-width: 761px) and (max-width: 1500px) {
+  .toolbar {
+    height: auto;
+    min-height: 46px;
+    flex-wrap: wrap;
+    padding-block: 6px;
+    row-gap: 6px;
+  }
+  .toolbar-right {
+    margin-inline-start: auto;
+  }
 }

@@ -222,6 +222,7 @@ export function Keyboard({ children }: { children: ReactNode }) {
 }
 
 export function NumericInput({
+  id,
   value,
   onCommit,
   label,
@@ -230,6 +231,7 @@ export function NumericInput({
   min,
   max,
 }: {
+  id?: string;
   value: number;
   onCommit: (value: number) => void;
   label: string;
@@ -243,6 +245,7 @@ export function NumericInput({
   useEffect(() => setDraft(String(Number(value.toFixed(3)))), [value]);
   return (
     <input
+      id={id}
       aria-label={label}
       type="number"
       value={draft}

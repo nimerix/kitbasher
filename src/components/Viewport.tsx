@@ -49,9 +49,7 @@ import {
 import { pickRaycast, prepareForPicking } from '../core/bvh';
 import {
   partMatrix,
-  partPivot,
   quat,
-  sceneBounds,
   transformFromMatrix,
   triangleCount,
   vec,
@@ -59,7 +57,7 @@ import {
 } from '../core/geometry';
 import { measureDistance, sceneLighting, useEditor } from '../core/store';
 import { PrecisionDrag } from '../core/precision';
-import { isJointConnected, translationIsPinned } from '../core/constraints';
+import { transformSelection } from '../core/transform-selection';
 import { referencePlanes, resolvePart } from '../core/references';
 import type { Part, SurfacePoint, FitAnchor, SceneDocument, SceneLight } from '../core/types';
 import { distinctColors, shownColor } from '../core/appearance';
@@ -349,8 +347,7 @@ function ManagedTransformControls({
 function TransformGizmo() {
   const selected = useEditor((s) => s.selected),
     tool = useEditor((s) => s.tool),
-    parts = useEditor((s) => s.scene.parts),
-    joints = useEditor((s) => s.scene.joints),
+    scene = useEditor((s) => s.scene),
     view = useEditor((s) => s.view),
     isolated = useEditor((s) => s.isolated),
     nearbyParts = useEditor((s) => s.nearbyParts),
@@ -393,54 +390,36 @@ function TransformGizmo() {
       window.removeEventListener('pointercancel', cancel);
     };
   }, [finishDrag]);
-  const movable = parts.filter(
-    (p) =>
-      selected.includes(p.id) &&
-      p.visible &&
-      !p.locked &&
-      !hiddenByIsolation(isolated, nearbyParts, p.id),
+  const selection = useMemo(
+    () =>
+      transformSelection(
+        {
+          scene,
+          selected,
+          view,
+          isolated,
+          nearbyParts,
+          navigationMode,
+          pivotPicking,
+          temporaryOrbit: false,
+        },
+        tool,
+      ),
+    [scene, selected, view, isolated, nearbyParts, navigationMode, pivotPicking, tool],
   );
-  const singleJoint =
-    movable.length === 1
-      ? joints.find((j) => j.childId === movable[0].id && isJointConnected(j))
-      : undefined;
+  const movable = selection.parts;
   useLayoutEffect(() => {
     if (dragging.current || !movable.length) return;
     // Use visible geometry, never a scanner's possibly distant object origin.
     // Connected parts rotate and scale around their actual surface anchor.
-    const center =
-      singleJoint && tool !== 'translate'
-        ? vec(singleJoint.childAnchor).applyMatrix4(partMatrix(movable[0]))
-        : movable.find((part) => part.id === selected[0])?.pivot
-          ? partPivot(movable.find((part) => part.id === selected[0])!)
-          : sceneBounds(movable).getCenter(new Vector3());
-    proxy.position.copy(center);
+    proxy.position.copy(selection.pivot);
     proxy.scale.set(1, 1, 1);
-    const jointParent = singleJoint ? parts.find((p) => p.id === singleJoint.parentId) : undefined;
-    const jointFrame =
-      singleJoint && jointParent
-        ? quat(jointParent.quaternion).multiply(quat(singleJoint.restRotation))
-        : null;
-    proxy.quaternion.copy(
-      jointFrame ??
-        (view.space === 'local' && movable.length === 1
-          ? quat(movable[0].quaternion)
-          : new Quaternion()),
-    );
+    proxy.quaternion.copy(selection.orientation);
     proxy.updateMatrixWorld(true);
     invalidate();
-  }, [parts, selected, joints, tool, view.space, proxy, invalidate, movable.length, dragVersion]);
-  if (
-    navigationMode ||
-    pivotPicking ||
-    !movable.length ||
-    !['translate', 'rotate', 'scale'].includes(tool) ||
-    view.explode > 0
-  )
-    return null;
-  if (tool === 'translate' && movable.some((part) => translationIsPinned(parts, joints, part.id)))
-    return null;
-  const locks = tool === 'rotate' ? singleJoint?.rotationLocks : undefined;
+  }, [selection, proxy, invalidate, movable.length, dragVersion]);
+  if (selection.blocked || !['translate', 'rotate', 'scale'].includes(tool)) return null;
+  const locks = selection.locks;
   return (
     <>
       <primitive object={proxy} />
@@ -449,13 +428,13 @@ function TransformGizmo() {
         onFinishDrag={finishDrag}
         object={proxy}
         mode={tool as 'translate' | 'rotate' | 'scale'}
-        space={singleJoint ? 'local' : view.space}
+        space={selection.axes === 'world' ? 'world' : 'local'}
         size={0.85}
         showX={!locks?.[0]}
         showY={!locks?.[1]}
         showZ={!locks?.[2]}
         translationSnap={view.snap ? view.snapStep : null}
-        rotationSnap={view.snap ? Math.PI / 12 : null}
+        rotationSnap={view.snap ? (view.rotationSnapStep * Math.PI) / 180 : null}
         scaleSnap={view.snap ? 0.1 : null}
         onMouseDown={() => {
           gizmoPressed = true;

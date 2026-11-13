@@ -275,6 +275,8 @@ export interface ViewSettings {
   wireframe: boolean;
   snap: boolean;
   snapStep: number;
+  /** Rotation step in degrees, shared by handles and precise adjustments. */
+  rotationSnapStep: number;
   projection: 'perspective' | 'orthographic';
   explode: number;
   space: 'world' | 'local';
