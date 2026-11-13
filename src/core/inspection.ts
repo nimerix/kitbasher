@@ -2,7 +2,12 @@ import { Box3, BufferAttribute, BufferGeometry, Matrix4, Triangle, Vector3 } fro
 import { Brush, Evaluator, INTERSECTION } from 'three-bvh-csg';
 import { ExtendedTriangle, MeshBVH } from 'three-mesh-bvh';
 import { assertClosed } from './merge';
-import type { InspectionMesh, InspectionRequest, InspectionResult } from './inspection-types';
+import type {
+  InspectionMesh,
+  InspectionProgress,
+  InspectionRequest,
+  InspectionResult,
+} from './inspection-types';
 import type { Part } from './types';
 
 const identity = new Matrix4();
@@ -88,6 +93,7 @@ function surfaceBand(
   threshold: number,
   resolution: number,
   budget: BandBudget,
+  onProgress?: (fraction: number) => void,
 ) {
   const positions: number[] = [];
   const source = geometry.getAttribute('position');
@@ -183,19 +189,26 @@ function surfaceBand(
     i < count && !budget.exhausted;
     i += 3
   ) {
+    if (i % 1536 === 0) onProgress?.(i / count);
     const points = [0, 1, 2].map((j) =>
       new Vector3().fromBufferAttribute(source, geometry.index?.getX(i + j) ?? i + j),
     );
     if (!new Box3().setFromPoints(points).intersectsBox(targetBox)) continue;
     visit(sample(points[0]), sample(points[1]), sample(points[2]), 0);
   }
+  if (!budget.exhausted) onProgress?.(1);
   return positions;
 }
 
-export function inspectMeshes(request: InspectionRequest): InspectionResult {
+export function inspectMeshes(
+  request: InspectionRequest,
+  onProgress?: (progress: InspectionProgress) => void,
+): InspectionResult {
   if (!Number.isFinite(request.distance) || request.distance < 0)
     throw new Error('Enter a non-negative inspection distance in mm.');
-  const geometries = request.meshes.map(inspectionGeometry);
+  const report = (stage: InspectionProgress['stage'], detail: string, fraction: number | null) =>
+    onProgress?.({ stage, detail, fraction });
+  const geometries: BufferGeometry[] = [];
   const brushes: Brush[] = [];
   const result: InspectionResult = {
     overlaps: [],
@@ -207,18 +220,37 @@ export function inspectMeshes(request: InspectionRequest): InspectionResult {
     warnings: [],
   };
   try {
+    request.meshes.forEach((mesh, i) => {
+      report(
+        'preparing',
+        `Preparing part ${i + 1} of ${request.meshes.length}: ${mesh.name}`,
+        null,
+      );
+      geometries.push(inspectionGeometry(mesh));
+    });
     const maxSize = geometries.reduce(
       (size, geometry) => Math.max(size, ...geometry.boundingBox!.getSize(new Vector3()).toArray()),
       1,
     );
     result.resolution = Math.max(request.distance / 4, maxSize / 2048, 0.0001);
-    const bvh = geometries.map(
-      (geometry) => new MeshBVH(geometry, { indirect: true, targetLeafSize: 8 }),
-    );
+    const bvh = geometries.map((geometry, i) => {
+      const detail = `Indexing part ${i + 1} of ${geometries.length}: ${request.meshes[i].name}`;
+      report('indexing', detail, 0);
+      return new MeshBVH(geometry, {
+        indirect: true,
+        targetLeafSize: 8,
+        onProgress: (fraction) => report('indexing', detail, fraction),
+      });
+    });
     geometries.forEach((geometry, i) => {
       geometry.boundsTree = bvh[i];
     });
     const closed = geometries.map((geometry, i) => {
+      report(
+        'validating',
+        `Checking solid geometry ${i + 1} of ${geometries.length}: ${request.meshes[i].name}`,
+        null,
+      );
       try {
         assertClosed({ name: request.meshes[i].name, geometry } as Part);
         return true;
@@ -234,8 +266,13 @@ export function inspectMeshes(request: InspectionRequest): InspectionResult {
     evaluator.useGroups = false;
     const bands = geometries.map(() => [] as number[]);
     const budget: BandBudget = { queries: 0, triangles: 0, exhausted: false };
+    const totalPairs = (geometries.length * (geometries.length - 1)) / 2;
     for (let a = 0; a < geometries.length; a++) {
       for (let b = a + 1; b < geometries.length; b++) {
+        const meshA = request.meshes[a],
+          meshB = request.meshes[b];
+        const pairLabel = `pair ${result.checkedPairs + 1} of ${totalPairs}: ${meshA.name} / ${meshB.name}`;
+        report('pairs', `Checking ${pairLabel}`, result.checkedPairs / totalPairs);
         result.checkedPairs++;
         if (closed[a] && closed[b]) result.solidPairs++;
         const geometryA = geometries[a],
@@ -250,12 +287,12 @@ export function inspectMeshes(request: InspectionRequest): InspectionResult {
         const one = { point: new Vector3(), distance: 0, faceIndex: 0 };
         const two = { point: new Vector3(), distance: 0, faceIndex: 0 };
         bvh[a].closestPointToGeometry(geometryB, identity, one, two);
-        const meshA = request.meshes[a],
-          meshB = request.meshes[b];
         let volume: number | null = closed[a] && closed[b] ? 0 : null;
         if (volume !== null && geometryA.boundingBox!.intersectsBox(geometryB.boundingBox!)) {
           let intersection: Brush | null = null;
           try {
+            // The solid evaluator is synchronous and has no progress callback.
+            report('overlap', `Calculating solid overlap for ${pairLabel}`, null);
             const brushA = (brushes[a] ??= new Brush(geometryA));
             const brushB = (brushes[b] ??= new Brush(geometryB));
             brushA.updateMatrixWorld(true);
@@ -295,12 +332,15 @@ export function inspectMeshes(request: InspectionRequest): InspectionResult {
           });
         }
         if (request.surfaces !== false && one.distance <= request.distance + 1e-7) {
+          const detail = `Checking nearby surfaces for ${pairLabel}`;
+          report('surfaces', detail, 0);
           for (const value of surfaceBand(
             geometryA,
             bvh[b],
             request.distance,
             result.resolution,
             budget,
+            (fraction) => report('surfaces', detail, fraction / 2),
           ))
             bands[a].push(value);
           for (const value of surfaceBand(
@@ -309,11 +349,13 @@ export function inspectMeshes(request: InspectionRequest): InspectionResult {
             request.distance,
             result.resolution,
             budget,
+            (fraction) => report('surfaces', detail, 0.5 + fraction / 2),
           ))
             bands[b].push(value);
         }
       }
     }
+    report('finishing', `Preparing results for ${result.checkedPairs} checked pairs`, null);
     if (budget.exhausted)
       result.warnings.push(
         'Surface band is incomplete: the scan exceeded the inspection detail budget. Inspect fewer selected parts or simplify the scan. Solid overlap results are separate.',

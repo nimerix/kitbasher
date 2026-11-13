@@ -1,4 +1,5 @@
 import { create } from 'zustand';
+import { cancelTask, completeTask, failTask, startTask, updateTask } from './activity';
 import { DriveError, forgetDriveToken } from './google-auth';
 import { googleDrive } from './google-drive';
 import { liveSession, useEditor } from './store';
@@ -54,6 +55,7 @@ export class DriveAutosave {
   private pendingSince = 0;
   private failures = 0;
   private stopped = true;
+  private activityId: string | undefined;
 
   constructor(private readonly client: Pick<GoogleDriveClient, 'save'> = googleDrive) {}
 
@@ -104,6 +106,8 @@ export class DriveAutosave {
     this.timer = undefined;
     this.pendingSince = 0;
     this.controller?.abort();
+    if (this.activityId) cancelTask(this.activityId, 'Drive save stopped for this scene.');
+    this.activityId = undefined;
   }
 
   private dirty() {
@@ -123,18 +127,29 @@ export class DriveAutosave {
     if (useDrive.getState().status === 'offline' || this.failures) this.retry();
   };
   private offline = () => {
-    if (this.dirty()) useDrive.setState({ status: 'offline' });
+    if (this.dirty()) {
+      useDrive.setState({ status: 'offline' });
+      if (this.activityId)
+        updateTask(this.activityId, { detail: 'Waiting for a network connection', progress: null });
+    }
   };
 
   private schedule(delay?: number) {
     if (this.stopped || !this.dirty()) return;
     const state = useDrive.getState();
     if (!state.connected) {
+      if (this.activityId)
+        updateTask(this.activityId, {
+          detail: 'Waiting to reconnect Google Drive',
+          progress: null,
+        });
       useDrive.setState({ status: 'reconnect' });
       return;
     }
     if (['conflict', 'error', 'reconnect'].includes(state.status)) return;
     if (!navigator.onLine) {
+      if (this.activityId)
+        updateTask(this.activityId, { detail: 'Waiting for a network connection', progress: null });
       useDrive.setState({ status: 'offline' });
       return;
     }
@@ -150,6 +165,16 @@ export class DriveAutosave {
         : Math.min(1500, Math.max(0, 8000 - (Date.now() - this.pendingSince))));
     clearTimeout(this.timer);
     useDrive.setState({ status: 'pending' });
+    const detail = this.failures ? 'Waiting to retry the upload' : 'Waiting for edits to settle';
+    if (this.activityId) updateTask(this.activityId, { status: 'queued', detail, progress: null });
+    else
+      this.activityId = startTask({
+        title: `Save to Drive · ${useEditor.getState().scene.name}`,
+        detail,
+        status: 'queued',
+        progress: null,
+        notify: false,
+      });
     this.timer = setTimeout(() => {
       this.timer = undefined;
       void this.run();
@@ -179,12 +204,29 @@ export class DriveAutosave {
     const pending = { ...binding, pendingWriteId: binding.pendingWriteId ?? crypto.randomUUID() };
     useEditor.setState({ driveFile: pending });
     useDrive.setState({ status: 'saving', progress: 0, message: null });
+    const taskId =
+      this.activityId ??
+      startTask({
+        title: `Save to Drive · ${state.scene.name}`,
+        notify: false,
+      });
+    this.activityId = taskId;
+    updateTask(taskId, { status: 'running', detail: 'Preparing scene for upload', progress: null });
     this.inFlight = (async () => {
       try {
         const file = await this.client.save(state.scene, pending, controller.signal, (progress) => {
-          if (current()) useDrive.setState({ progress });
+          if (current()) {
+            useDrive.setState({ progress });
+            updateTask(taskId, {
+              detail: progress < 1 ? 'Uploading scene' : 'Confirming saved scene',
+              progress,
+            });
+          }
         });
-        if (!current()) return;
+        if (!current()) {
+          cancelTask(taskId, 'Drive save stopped for this scene.');
+          return;
+        }
         // Acknowledgements only cover the captured revision, never edits made during upload.
         useEditor.setState({ driveFile: { id: file.id, version: file.version } });
         this.failures = 0;
@@ -194,14 +236,24 @@ export class DriveAutosave {
           progress: 1,
           message: null,
         });
+        completeTask(taskId, `${state.scene.name} saved to Google Drive.`);
       } catch (error) {
-        if (!current() || controller.signal.aborted) return;
+        if (!current() || controller.signal.aborted) {
+          cancelTask(taskId, 'Drive save stopped for this scene.');
+          return;
+        }
         const failure =
           error instanceof DriveError
             ? error
             : new DriveError(
                 error instanceof Error ? error.message : 'Google Drive could not save this scene.',
               );
+        failTask(
+          taskId,
+          failure.kind === 'retryable'
+            ? `${failure.message} Autosave will retry when connected.`
+            : failure.message,
+        );
         if (failure.kind === 'auth') {
           forgetDriveToken();
           useDrive.setState({ connected: false, status: 'reconnect', message: failure.message });
@@ -217,6 +269,7 @@ export class DriveAutosave {
             message: failure.message,
           });
       } finally {
+        if (this.activityId === taskId) this.activityId = undefined;
         this.inFlight = undefined;
         if (this.controller === controller) this.controller = undefined;
         this.schedule();
@@ -250,6 +303,8 @@ export class DriveAutosave {
   }
 
   acceptOpenedScene() {
+    if (this.activityId) cancelTask(this.activityId, 'This revision is already saved to Drive.');
+    this.activityId = undefined;
     clearTimeout(this.timer);
     this.timer = undefined;
     useDrive.setState({

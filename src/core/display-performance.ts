@@ -3,6 +3,7 @@ import type { BufferGeometry, Intersection, Mesh, Raycaster } from 'three';
 import { triangleCount } from './geometry';
 import { processMeshInWorker } from './mesh-job';
 import type { Part } from './types';
+import { cancelTask, completeTask, failTask, startTask } from './activity';
 
 export type DisplayDetail = 'auto' | 'full' | 'fast';
 const key = 'kitbasher.display-detail';
@@ -67,6 +68,19 @@ export function displayProxy(
   const cached = levels.get(target);
   if (cached) return cached;
   const controller = new AbortController();
+  const taskId = startTask({
+    title: 'Optimize viewport mesh',
+    detail: `${triangleCount(source).toLocaleString()} triangles · waiting for another mesh`,
+    status: 'queued',
+    progress: null,
+    notify: false,
+    cancel: () => controller.abort(),
+  });
+  controller.signal.addEventListener(
+    'abort',
+    () => cancelTask(taskId, 'Viewport optimization cancelled.'),
+    { once: true },
+  );
   let proxy: BufferGeometry | null = null;
   const dispose = () => {
     controller.abort();
@@ -87,21 +101,45 @@ export function displayProxy(
           lockBorder: true,
         },
         controller.signal,
+        { taskId },
       );
       if (
         controller.signal.aborted ||
         triangleCount(result.geometry) >= triangleCount(source) * 0.9
       ) {
         result.geometry.dispose();
+        if (!controller.signal.aborted)
+          completeTask(taskId, 'Original mesh retained: reduction was below the useful threshold.');
         return null;
       }
       proxy = result.geometry;
+      completeTask(
+        taskId,
+        `Viewport mesh ready · ${triangleCount(proxy).toLocaleString()} triangles`,
+      );
       return proxy;
-    } catch {
+    } catch (error) {
+      if (controller.signal.aborted) cancelTask(taskId, 'Viewport optimization cancelled.');
+      else
+        failTask(
+          taskId,
+          `${error instanceof Error ? error.message : String(error)} The original mesh remains available.`,
+        );
       return null;
     } // A failed display optimization always leaves the original drawable.
   });
   levels.set(target, task);
+  const releaseCancelled = () => {
+    if (levels.get(target) === task) levels.delete(target);
+    source.removeEventListener('dispose', dispose);
+  };
+  // A later Full → Fast switch or hide/show can retry an explicitly cancelled job.
+  // Waiting for its queue turn would leave a cancelled entry cached behind a slow mesh.
+  controller.signal.addEventListener('abort', releaseCancelled, { once: true });
+  void task.then(() => {
+    if (!controller.signal.aborted)
+      controller.signal.removeEventListener('abort', releaseCancelled);
+  });
   queue = task.then(() => undefined);
   return task;
 }

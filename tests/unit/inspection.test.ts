@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { BoxGeometry, Matrix4, PlaneGeometry, Quaternion, Vector3 } from 'three';
 import { MeshBVH } from 'three-mesh-bvh';
 import { inspectMeshes, inspectionGeometry, solidVolume } from '../../src/core/inspection';
-import type { InspectionMesh } from '../../src/core/inspection-types';
+import type { InspectionMesh, InspectionProgress } from '../../src/core/inspection-types';
 
 function box(id: string, x = 0, size = 10): InspectionMesh {
   const geometry = new BoxGeometry(size, size, size);
@@ -16,6 +16,29 @@ function box(id: string, x = 0, size = 10): InspectionMesh {
 }
 
 describe('interference inspection', () => {
+  it('reports real stages and pair counts while leaving exact analysis unchanged', () => {
+    const meshes = [box('a'), box('b', 8), box('far', 30)];
+    const progress: InspectionProgress[] = [];
+    const result = inspectMeshes({ meshes, distance: 0.5 }, (value) => progress.push(value));
+    expect(result.pairs[0].volume).toBeCloseTo(200, 4);
+    expect(result.checkedPairs).toBe(3);
+    expect(
+      progress.filter((value) => value.stage === 'pairs').map((value) => value.fraction),
+    ).toEqual([0, 1 / 3, 2 / 3]);
+    expect(progress.some((value) => value.stage === 'indexing' && value.fraction === 1)).toBe(true);
+    expect(progress.find((value) => value.stage === 'overlap')).toMatchObject({
+      detail: 'Calculating solid overlap for pair 1 of 3: a / b',
+      fraction: null,
+    });
+    expect(progress.some((value) => value.stage === 'surfaces' && value.fraction === 1)).toBe(true);
+    expect(progress.at(-1)).toMatchObject({ stage: 'finishing' });
+    expect(
+      progress.every(
+        (value) => value.fraction === null || (value.fraction >= 0 && value.fraction <= 1),
+      ),
+    ).toBe(true);
+  });
+
   it('returns the actual solid intersection and nearby surfaces without changing source meshes', () => {
     const meshes = [box('a'), box('b', 8)];
     const original = meshes.map((mesh) => Array.from(mesh.positions));

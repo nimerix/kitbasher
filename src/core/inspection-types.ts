@@ -25,6 +25,16 @@ export interface InspectionRequest {
   surfaces?: boolean;
 }
 
+/** Progress is for the named stage, not an estimate of the total remaining time. */
+export interface InspectionProgress {
+  stage: 'preparing' | 'indexing' | 'validating' | 'pairs' | 'overlap' | 'surfaces' | 'finishing';
+  detail: string;
+  fraction: number | null;
+}
+
+export type InspectionResponse =
+  { progress: InspectionProgress } | { result: InspectionResult } | { error: string };
+
 export interface InspectionPair {
   a: string;
   b: string;

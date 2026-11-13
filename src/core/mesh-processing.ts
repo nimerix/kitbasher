@@ -39,16 +39,20 @@ export async function decimateMesh(
   ratio: number,
   error: number,
   lockBorder = true,
+  onProgress?: (detail: string) => void,
 ) {
   if (!(ratio > 0 && ratio <= 1) || !(error >= 0 && error <= 1))
     throw new Error(
       'Choose a triangle percentage above 0 and at most 100, and a valid error limit.',
     );
+  onProgress?.('Loading mesh processor');
   await MeshoptSimplifier.ready;
+  onProgress?.('Welding identical vertices');
   data = compact(data, weldedIndices(data));
   const indices = data.indices as Uint32Array;
   const target = Math.max(3, Math.floor((indices.length / 3) * ratio) * 3);
   const flags = lockBorder ? ['LockBorder' as const] : [];
+  onProgress?.('Reducing triangles');
   const [reduced, deviation] = data.colors
     ? MeshoptSimplifier.simplifyWithAttributes(
         indices,
@@ -65,6 +69,7 @@ export async function decimateMesh(
     : MeshoptSimplifier.simplify(indices, data.positions, 3, target, error, flags);
   if (!reduced.length)
     throw new Error('The reduction would remove the entire mesh. Use a higher triangle target.');
+  onProgress?.('Packing reduced mesh');
   return { mesh: compact(data, reduced), error: deviation };
 }
 
@@ -72,14 +77,18 @@ export async function decimateMesh(
 export async function remeshMesh(
   data: BinaryGeometry,
   resolution: number,
+  onProgress?: (detail: string) => void,
 ): Promise<BinaryGeometry> {
   if (!Number.isInteger(resolution) || resolution < 24 || resolution > 128)
     throw new Error('Voxel resolution must be between 24 and 128.');
+  onProgress?.('Loading mesh processor');
   await MeshoptSimplifier.ready;
+  onProgress?.('Welding identical vertices');
   data = compact(data, weldedIndices(data));
   const indices = data.indices as Uint32Array;
   // Open surfaces have no unambiguous interior. Reject instead of silently sealing holes.
   // Sorted numeric keys keep this check bounded to eight bytes per triangle edge.
+  onProgress?.('Checking closed surface');
   const vertices = data.positions.length / 3;
   if (vertices * vertices > Number.MAX_SAFE_INTEGER)
     throw new Error('This scan is too large to remesh. Decimate it first.');
@@ -104,6 +113,7 @@ export async function remeshMesh(
       );
     i = end;
   }
+  onProgress?.('Rebuilding surface on voxel grid');
   const positions = MeshoptSimplifier.remesh(indices, data.positions, 3, resolution);
   if (!positions.length)
     throw new Error('No surface survived at this resolution. Increase voxel resolution.');
@@ -113,11 +123,16 @@ export async function remeshMesh(
   return { positions };
 }
 
-export async function processMesh(data: BinaryGeometry, options: MeshProcessOptions) {
+export async function processMesh(
+  data: BinaryGeometry,
+  options: MeshProcessOptions,
+  onProgress?: (detail: string) => void,
+) {
+  onProgress?.('Validating mesh');
   // Validate worker input using the same rules as imported geometry.
   const validated = deserializeGeometry(data);
   validated.dispose();
   if (options.mode === 'decimate')
-    return decimateMesh(data, options.ratio, options.error, options.lockBorder);
-  return { mesh: await remeshMesh(data, options.resolution), error: null };
+    return decimateMesh(data, options.ratio, options.error, options.lockBorder, onProgress);
+  return { mesh: await remeshMesh(data, options.resolution, onProgress), error: null };
 }

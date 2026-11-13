@@ -7,7 +7,10 @@ self.onmessage = async ({
   data,
 }: MessageEvent<{ mesh: BinaryGeometry; options: MeshProcessOptions }>) => {
   try {
-    const result = await processMesh(data.mesh, data.options);
+    const result = await processMesh(data.mesh, data.options, (detail) => {
+      self.postMessage({ type: 'progress', detail });
+    });
+    self.postMessage({ type: 'progress', detail: 'Returning processed mesh' });
     const transfer = Object.values(result.mesh)
       .filter((array) => array !== undefined)
       .map((array) => array.buffer);

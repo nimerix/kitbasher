@@ -54,6 +54,7 @@ import {
 } from './core/commands';
 import { driveAutosave, flushDriveBeforeReplace, useDrive } from './core/drive-sync';
 import { DriveButton, GoogleDriveDialog } from './components/GoogleDrive';
+import { ActivityCenter, NotificationToasts } from './components/ActivityCenter';
 import type { CommandId } from './core/commands';
 import { isEditableTarget } from './core/context-menu';
 import { EditorContextMenu } from './components/EditorContextMenu';
@@ -289,6 +290,7 @@ function Header({ openScene }: { openScene: () => void }) {
         <span className="document-type">Assembly</span>
       </div>
       <div className="header-actions">
+        <ActivityCenter />
         <IconButton
           label="Help and keyboard shortcuts"
           onClick={() => useEditor.getState().setModal('help')}
@@ -635,33 +637,6 @@ function BusyOverlay() {
   ) : null;
 }
 
-function Toast() {
-  const toast = useEditor((s) => s.toast);
-  useEffect(() => {
-    if (!toast) return;
-    const timeout = window.setTimeout(
-      () => useEditor.setState({ toast: null }),
-      toast.kind === 'error' ? 7000 : 3500,
-    );
-    return () => clearTimeout(timeout);
-  }, [toast]);
-  return toast ? (
-    <div className={`toast toast-${toast.kind}`} role="status">
-      {toast.kind === 'success' ? (
-        <CheckCircle2 size={16} />
-      ) : toast.kind === 'error' ? (
-        <CircleHelp size={16} />
-      ) : (
-        <Check size={16} />
-      )}
-      <span>{toast.message}</span>
-      <button aria-label="Dismiss notification" onClick={() => useEditor.setState({ toast: null })}>
-        <X size={14} />
-      </button>
-    </div>
-  ) : null;
-}
-
 export default function App() {
   const [left, setLeft] = useState(() => window.innerWidth > 800),
     [right, setRight] = useState(() => window.innerWidth > 1050),
@@ -959,7 +934,7 @@ export default function App() {
         </nav>
       </footer>
       <BusyOverlay />
-      <Toast />
+      <NotificationToasts />
       <Dialogs
         key={modal === 'import' ? importFiles.map((f) => f.name).join('|') : 'dialogs'}
         importFiles={importFiles}

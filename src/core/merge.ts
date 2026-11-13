@@ -1,4 +1,4 @@
-import { Vector3 } from 'three';
+import { BufferAttribute, Vector3 } from 'three';
 import type { BufferGeometry } from 'three';
 import { mergeVertices } from 'three/addons/utils/BufferGeometryUtils.js';
 import {
@@ -12,16 +12,21 @@ import {
   uid,
 } from './geometry';
 import type { BinaryGeometry, Part } from './types';
+import { cancelTask, completeTask, failTask, startTask, updateTask } from './activity';
 
-// The check below holds the main thread for 14 s at this size, and fails by 24 million.
+// Bound memory use while checking every edge of a solid.
 const maxUnionTriangles = 10_000_000;
 
-/** Reject open/non-manifold inputs before attempting a solid Boolean. */
-export function assertClosed(part: Part) {
+function assertUnionSize(part: Part) {
   if (triangleCount(part.geometry) > maxUnionTriangles)
     throw new Error(
       `${part.name} has too many triangles for a Boolean union. The limit is 10 million per part. Use Combine meshes instead.`,
     );
+}
+
+/** Reject open/non-manifold inputs before attempting a solid Boolean. */
+export function assertClosed(part: Part) {
+  assertUnionSize(part);
   const geometry = part.geometry.clone();
   for (const name of Object.keys(geometry.attributes))
     if (name !== 'position') geometry.deleteAttribute(name);
@@ -49,53 +54,197 @@ export function assertClosed(part: Part) {
     );
 }
 
+export interface MergeProgress {
+  detail: string;
+  progress: number | null;
+}
+interface MergeOptions {
+  signal?: AbortSignal;
+  onProgress?: (progress: MergeProgress) => void;
+  onWorker?: (worker: Worker) => void;
+}
+export interface MergeValidationMesh {
+  name: string;
+  positions: Float32Array | Float64Array;
+  indices?: BinaryGeometry['indices'];
+}
+export type MergeWorkerRequest =
+  | { type: 'validate'; meshes: MergeValidationMesh[] }
+  | { type: 'evaluate'; meshes: BinaryGeometry[] };
+
+const yieldToUi = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
+const cancelled = () => new DOMException('Merge cancelled', 'AbortError');
+
+/** Capture exact positions for the original local-space closed-surface check. */
+function validationMesh(part: Part): MergeValidationMesh {
+  const position = part.geometry.getAttribute('position');
+  let positions: Float32Array | Float64Array;
+  if (
+    position instanceof BufferAttribute &&
+    !position.normalized &&
+    position.itemSize === 3 &&
+    (position.array instanceof Float32Array || position.array instanceof Float64Array)
+  )
+    positions = position.array;
+  else {
+    positions = new Float64Array(position.count * 3);
+    for (let i = 0; i < position.count; i++) {
+      positions[i * 3] = position.getX(i);
+      positions[i * 3 + 1] = position.getY(i);
+      positions[i * 3 + 2] = position.getZ(i);
+    }
+  }
+  return {
+    name: part.name,
+    positions,
+    indices: part.geometry.index?.array as BinaryGeometry['indices'],
+  };
+}
+
+function unionInWorker(
+  parts: Part[],
+  signal: AbortSignal,
+  progress: (value: MergeProgress) => void,
+  onWorker?: (worker: Worker) => void,
+) {
+  return new Promise<BinaryGeometry>((resolve, reject) => {
+    if (signal.aborted) return reject(cancelled());
+    let worker: Worker | undefined;
+    let terminate = () => {};
+    let settled = false;
+    const finish = () => {
+      if (settled) return false;
+      settled = true;
+      signal.removeEventListener('abort', cancel);
+      terminate();
+      return true;
+    };
+    const fail = (error: unknown) => {
+      if (finish()) reject(error instanceof Error ? error : new Error(String(error)));
+    };
+    const cancel = () => fail(cancelled());
+    signal.addEventListener('abort', cancel, { once: true });
+    const bake = async () => {
+      const meshes: BinaryGeometry[] = [];
+      for (let i = 0; i < parts.length; i++) {
+        if (settled) return;
+        progress({
+          detail: `Preparing transforms and colors · ${i + 1} of ${parts.length} parts`,
+          progress: i / parts.length,
+        });
+        await yieldToUi();
+        if (settled) return;
+        const geometry = bakedPartGeometry(parts[i]);
+        try {
+          meshes.push(binaryGeometry(geometry));
+        } finally {
+          geometry.dispose();
+        }
+      }
+      if (settled) return;
+      progress({ detail: 'Fusing volumes', progress: null });
+      // Only these temporary baked buffers are transferred. Source meshes remain owned by the editor.
+      const transfer = [
+        ...new Set(
+          meshes.flatMap((mesh) =>
+            Object.values(mesh)
+              .filter((array) => array !== undefined)
+              .map((array) => array.buffer),
+          ),
+        ),
+      ];
+      worker!.postMessage({ type: 'evaluate', meshes } satisfies MergeWorkerRequest, transfer);
+    };
+    try {
+      worker = new Worker(new URL('./merge.worker.ts', import.meta.url), { type: 'module' });
+      terminate = worker.terminate.bind(worker);
+      // Preserve the old worker callback, including cancellation by calling terminate().
+      worker.terminate = cancel;
+      worker.onmessage = ({ data }) => {
+        if (settled) return;
+        if (data.type === 'progress') {
+          progress(data.progress);
+          return;
+        }
+        if (data.type === 'validated') {
+          void bake().catch(fail);
+          return;
+        }
+        if (data.error) return fail(new Error(data.error));
+        if (finish()) resolve(data.result);
+      };
+      worker.onerror = (event) => fail(new Error(event.message || 'The Boolean worker stopped.'));
+      worker.onmessageerror = () =>
+        fail(new Error('The Boolean worker returned an unreadable result.'));
+      onWorker?.(worker);
+      if (settled) return;
+      progress({ detail: 'Checking closed surfaces', progress: null });
+      // Structured cloning copies these source buffers; they are never transferred or detached.
+      worker.postMessage({
+        type: 'validate',
+        meshes: parts.map(validationMesh),
+      } satisfies MergeWorkerRequest);
+    } catch (error) {
+      fail(error);
+    }
+  });
+}
+
 export async function mergeParts(
   parts: Part[],
   mode: 'combine' | 'union',
   name: string,
-  onWorker?: (worker: Worker) => void,
+  options: MergeOptions | ((worker: Worker) => void) = {},
 ): Promise<Part> {
   if (parts.length < 2) throw new Error('Select at least two parts to merge.');
-  let geometry;
-  if (mode === 'combine') geometry = combineParts(parts);
-  else {
-    parts.forEach(assertClosed);
-    const worker = new Worker(new URL('./merge.worker.ts', import.meta.url), { type: 'module' });
-    onWorker?.(worker);
-    const meshes = parts.map((part) => {
-      const geometry = bakedPartGeometry(part);
-      const data = binaryGeometry(geometry);
-      geometry.dispose();
-      return data;
-    });
-    try {
-      const result = await new Promise<BinaryGeometry>((resolve, reject) => {
-        const timeout = window.setTimeout(() => {
-          worker.terminate();
-          reject(
-            new Error('Boolean union exceeded 90 seconds. Try fewer parts or simplify the scan.'),
-          );
-        }, 90000);
-        worker.onmessage = (event) => {
-          clearTimeout(timeout);
-          event.data.error ? reject(new Error(event.data.error)) : resolve(event.data.result);
-        };
-        worker.onerror = (event) => {
-          clearTimeout(timeout);
-          reject(new Error(event.message || 'The Boolean worker stopped.'));
-        };
-        worker.postMessage({ meshes });
-      });
+  const settings = typeof options === 'function' ? { onWorker: options } : options;
+  if (settings.signal?.aborted) throw cancelled();
+  const controller = new AbortController();
+  const abort = () => controller.abort();
+  settings.signal?.addEventListener('abort', abort, { once: true });
+  const taskId = startTask({
+    title: mode === 'union' ? 'Boolean union' : 'Combine meshes',
+    detail: `Preparing ${parts.length} parts`,
+    progress: null,
+    cancel: abort,
+    notify: false,
+  });
+  const progress = (value: MergeProgress) => {
+    updateTask(taskId, value);
+    settings.onProgress?.(value);
+  };
+  let geometry: BufferGeometry | undefined;
+  try {
+    if (mode === 'union') parts.forEach(assertUnionSize);
+    await yieldToUi();
+    if (controller.signal.aborted) throw cancelled();
+    if (mode === 'combine') {
+      progress({ detail: `Combining ${parts.length} meshes`, progress: null });
+      geometry = combineParts(parts);
+    } else {
+      const result = await unionInWorker(parts, controller.signal, progress, settings.onWorker);
+      if (controller.signal.aborted) throw cancelled();
+      progress({ detail: 'Preparing merged mesh', progress: null });
       geometry = deserializeGeometry(result);
-    } finally {
-      worker.terminate();
     }
+    if (controller.signal.aborted) throw cancelled();
+    const part = mergedPart(
+      geometry,
+      name,
+      `${mode === 'union' ? 'Boolean union' : 'Combined'} · ${parts.length} parts`,
+    );
+    geometry = undefined;
+    completeTask(taskId, 'Merged mesh ready to apply.');
+    return part;
+  } catch (error) {
+    geometry?.dispose();
+    if (controller.signal.aborted || (error instanceof Error && error.name === 'AbortError'))
+      cancelTask(taskId, 'Merge cancelled. Original parts retained.');
+    else failTask(taskId, error instanceof Error ? error.message : String(error));
+    throw error;
+  } finally {
+    settings.signal?.removeEventListener('abort', abort);
   }
-  return mergedPart(
-    geometry,
-    name,
-    `${mode === 'union' ? 'Boolean union' : 'Combined'} · ${parts.length} parts`,
-  );
 }
 
 /** Wraps world-space merged geometry in a part, without moving the surface. */

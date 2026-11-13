@@ -12,7 +12,11 @@ const emptyResults = {
 };
 
 /** Applies the operation left to right: the first mesh is the base for a subtraction. */
-export function evaluateBoolean(meshes: BinaryGeometry[], operation: BooleanOperation = 'union') {
+export function evaluateBoolean(
+  meshes: BinaryGeometry[],
+  operation: BooleanOperation = 'union',
+  onProgress?: (completed: number, total: number) => void,
+) {
   const brushes: Brush[] = [];
   try {
     const evaluator = new Evaluator();
@@ -27,10 +31,12 @@ export function evaluateBoolean(meshes: BinaryGeometry[], operation: BooleanOper
     }
     let result = brushes[0];
     for (let i = 1; i < brushes.length; i++) {
+      onProgress?.(i - 1, brushes.length - 1);
       const next = evaluator.evaluate(result, brushes[i], operations[operation]);
       if (!brushes.includes(result)) result.geometry.dispose();
       result = next;
     }
+    onProgress?.(brushes.length - 1, brushes.length - 1);
     if (!result.geometry.getAttribute('position')?.count) throw new Error(emptyResults[operation]);
     return binaryGeometry(result.geometry);
   } finally {
