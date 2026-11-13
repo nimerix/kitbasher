@@ -628,26 +628,85 @@ the terminal ends the session.
 
 The model starts within reach, about 40 cm across. In the headset:
 
-- **Trigger on a part** holds it, and letting go puts it down. Touch the part, or point at it
+- **Trigger on a part with Grab, Move, Rotate, or Scale selected** holds it, and letting go puts it down. Touch the part, or point at it
   from a distance. Either way it moves exactly as far as your hand does and turns with your
   wrist, about the point you took it by. The part a press would take is tinted.
 - [No clip](#avoid-clipping) applies as it does to a drag: a held part stops at the surface of
   other parts and slides along them, and the controller taps when it is first held back. Joints,
   locks, and kept plane constraints hold too. A part on a joint turns about its anchor and
   carries its connected assembly with it.
-- **Trigger on empty space, or the grip anywhere,** holds the world, which moves with your
-  hand. A locked part holds the world as well.
+- **Grip anywhere** holds the world, which follows the physical controller grip one-to-one.
+  Gripping ends an active part grab or paint stroke without clearing alignment picks. Controller
+  trigger misses leave the world still; a trigger on a locked part selects it for unlocking.
+  **Trigger drags empty space**, off by default in World settings, restores the older behavior
+  for empty space and locked parts in grab tools.
 - **Both hands** holding the world resize it, turn it, and carry it. Move them apart to make
   everything larger, which also makes your hands steadier in the model's own millimeters. The
-  scale shows between your hands.
-- **Bare hands** work like controllers: pinch for the trigger. A pinch on empty space holds
-  the world.
+  scale shows between your hands. Scaling and turning pause when hands nearly meet or cross,
+  then resume from their new positions without a jump. Keep level pauses ambiguous yaw when
+  the hands align vertically. Precision slows two-hand scaling and turning, while dragging
+  stays one-to-one.
+- **One controller:** hold grip and use its thumbstick up/down to zoom, left/right to turn one
+  step. Center the stick before turning again. The zoom pivot is captured from the aimed surface,
+  the visible selection, or the visible assembly. Zoom stops immediately on release.
+- **Bare hands** use pinch as the trigger. Pinching empty space in Grab, Move, Rotate, or Scale
+  holds the world; surface-tool misses remain inert. View buttons provide one-handed zoom/turn.
 
-A panel hangs to your lower left, with the world scale, **1:1** for true size, **Reset view**,
-**Undo** and **Redo**, **No clip**, **Keep level**, and **Leave headset view**. Point at a control
-and pull the trigger. Take the panel by its background to move it, and press **B** or **Y** to
-bring it back in front of you. **Keep level**, on to start, keeps the model upright while two
+A panel hangs to your lower left. Its **View** page has **Zoom −/+**, stepped turns, **1:1**,
+**Frame visible**, **Focus selection**, **Previous view**, **Undo/Redo**, **No clip**, **Keep level**,
+and **Leave headset view**. Framing respects isolation. Previous view restores the last navigation
+gesture or view command, including its Keep level setting, without using scene undo. View changes end any held edit before moving
+the world, and the wrist palette hides during navigation. Point at a control
+and pull the trigger. Take the panel by its background to move it, and click the **left
+thumbstick** to bring it back in front of you. **Keep level**, on to start, keeps the model upright while two
 hands turn it, like a turntable. Turn it off to tip the model over and look underneath.
+**World settings** controls zoom speed, 15°/30°/45° turns, and legacy trigger navigation. These
+settings persist in this browser and also appear under **Preferences → Headset**. You can bind
+**World zoom / turn** to either stick for navigation without holding grip, or bind buttons to
+**Frame visible** and **Previous view**. Normal edit bindings remain unchanged. Release navigation
+and return sticks to neutral before editing resumes. The headset pose is never smoothed and
+world movement has no inertia. Losing session focus or hand tracking ends the gesture;
+release and press again to resume from the current view.
+
+The [VR navigation review](docs/vr-navigation-review.md) records the independent feedback,
+tradeoffs, regression coverage, and remaining physical-headset checks.
+
+The **off-hand wrist palette** selects Grab, Move, Rotate, Scale, Align / paint, Joint,
+Measure, and Anchors. Point with the other controller and pull its trigger. **Y** toggles the
+palette. The panel's **Active tool** page shows the current source/target stage and controls:
+
+- **Align / paint:** cycle point, point-to-plane, plane, 3+ point, and painted surface modes.
+  Trigger or **A** picks the moving point, then the matching target. **B** steps back.
+  Once enough pairs are ready, **A** or **Apply fit** applies the fit. More point pairs can
+  still be added with the trigger. In surface mode, hold the trigger to paint; **A** advances
+  moving patch → target patch → finished pair → new pair. **Apply fit** is explicit for paint.
+  Contact fits need three complete pairs; flush seams and plane methods need one.
+- **Joint:** pick the moving and target anchors, set rotation locks and connectivity, then
+  create the joint. **Measure:** pick two surfaces to read the distance in millimeters.
+- **Anchors:** add fixed attachment points, finish adding, then pick a target surface or nudge
+  the selected anchor. Fitting remains rigid; markers show attachment and target positions.
+- **Selection tools:** duplicate, isolate, lock/unlock, hide, or show all. **Multi-select** lets
+  trigger clicks add/remove selections. **Precision** slows grabs and stick adjustments to 10%.
+
+Quest controller defaults (also work with the Quest 3S Touch Plus controllers):
+
+| Control                  | Default action                                                              |
+| ------------------------ | --------------------------------------------------------------------------- |
+| A / B                    | Advance or confirm / step back                                              |
+| X / Y                    | Undo (paint stroke when painting) / toggle wrist tools                      |
+| Left / right stick click | Bring panel here / toggle precision                                         |
+| Left stick               | Move selection: horizontal X, vertical chosen axis                          |
+| Right stick              | Active tool: rotate selection, move, scale, brush size, or alignment offset |
+
+**Axis** cycles X/Y/Z for adjustments. Rotation uses that axis horizontally and a perpendicular
+axis vertically. Paint's context stick changes radius vertically and surface offset horizontally;
+for angled planes, horizontal changes the angle. Both sticks share one undo step until released.
+The original meshes supply picks even when the headset draws lightweight display meshes.
+
+Change face-button and stick-click actions, both stick modes, and the main hand from the panel's
+**Bindings** page. The same controls, plus the stick deadzone, are under **Preferences → Headset**
+on desktop. Changes save in this browser; **Reset bindings** restores defaults. The palette
+moves to the other hand when the main hand changes. Trigger/pinch and grip keep their fixed roles.
 
 The last line of the panel shows how the headset is coping: frames per second, the slowest
 frame in the last second, the time spent moving a held part, and the triangles drawn.
@@ -657,8 +716,9 @@ opened in the headset's browser. It works on that browser's own scene, with noth
 
 Limits in a headset:
 
-- **Placing by hand only.** Alignment, contact paint, anchors, joints, measuring, merging,
-  colors, lighting, and files stay on the computer, as does everything typed.
+- **Some desktop operations remain on the computer:** file import/save, merging and mesh
+  processing, colors, lighting, typed numeric entry, and reference-plane selection. The headset
+  exposes the assembly tools above; it does not mirror every desktop inspector control.
 - **A headset draws far less than a computer.** Expect it to keep up with hundreds of thousands
   of triangles, not the millions a desktop shows. Ground shadows are off in a headset, and other
   shadows are off above 300,000 triangles. Automatic scan detail uses display proxies;

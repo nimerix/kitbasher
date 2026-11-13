@@ -4832,7 +4832,8 @@ optgroup {
   color: #8a9bad;
 }
 .preferences-tabs {
-  display: flex;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 4px;
   padding: 0 14px 12px;
   border-bottom: 1px solid var(--border);
@@ -4906,6 +4907,24 @@ optgroup {
 }
 .preference-help.section-help {
   margin-top: -6px;
+}
+.preference-select {
+  display: grid;
+  grid-template-columns: 104px minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  color: #c1c8d0;
+  font-size: 11px;
+}
+.preference-select select {
+  min-width: 0;
+  width: 100%;
+  padding: 7px 5px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: #22262b;
+  color: var(--text);
+  font: inherit;
 }
 .preference-range {
   display: grid;

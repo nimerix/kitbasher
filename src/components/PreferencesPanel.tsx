@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { KeyboardEvent as ReactKeyboardEvent, ReactNode } from 'react';
-import { Keyboard, MousePointer2, Plus, RotateCcw, ScanSearch, X } from 'lucide-react';
+import { Gamepad2, Keyboard, MousePointer2, Plus, RotateCcw, ScanSearch, X } from 'lucide-react';
 import {
   bindingFromEvent,
   bindingsFor,
@@ -17,11 +17,21 @@ import { notchPixels, zoomResponse } from '../core/zoom';
 import type { ZoomSettings } from '../core/zoom';
 import { layoutCallouts } from '../core/callouts';
 import { IconButton, NumericInput } from './ui';
+import {
+  defaultXRInputSettings,
+  useXRInput,
+  xrAxisActions,
+  xrButtonActions,
+  xrButtonLabels,
+  xrButtons,
+} from '../core/xr-input';
+import type { XRAxisAction, XRButtonAction } from '../core/xr-input';
 
 const tabs: { id: PreferencesTab; label: string; icon: typeof Keyboard }[] = [
   { id: 'navigation', label: 'Navigation', icon: MousePointer2 },
   { id: 'markers', label: 'Markers', icon: ScanSearch },
   { id: 'keyboard', label: 'Keyboard', icon: Keyboard },
+  { id: 'headset', label: 'Headset', icon: Gamepad2 },
 ];
 
 export function PreferencesPanel() {
@@ -122,8 +132,10 @@ function OpenPreferences({ tab }: { tab: PreferencesTab }) {
           <NavigationPreferences />
         ) : tab === 'markers' ? (
           <MarkerPreferences />
-        ) : (
+        ) : tab === 'keyboard' ? (
           <KeyboardPreferences />
+        ) : (
+          <HeadsetPreferences />
         )}
       </div>
     </aside>
@@ -268,6 +280,137 @@ function SegmentedField<T extends string>({
 const same = <T extends object>(a: T, b: T) =>
   (Object.keys(a) as (keyof T)[]).every((key) => a[key] === b[key]);
 const percent = (amount: number) => `${Math.round((Math.exp(amount) - 1) * 100)}%`;
+
+function HeadsetPreferences() {
+  const settings = useXRInput((state) => state.settings);
+  const setSettings = useXRInput((state) => state.setSettings);
+  return (
+    <>
+      <section className="preferences-section">
+        <SectionHeading
+          title="Quest controller bindings"
+          modified={JSON.stringify(settings) !== JSON.stringify(defaultXRInputSettings)}
+          onReset={() => useXRInput.getState().reset()}
+        />
+        <p className="preference-help section-help">
+          Trigger uses the active tool; grip moves the world. Button and stick changes apply
+          immediately, including during a headset session.
+        </p>
+        {xrButtons.map((button) => (
+          <label className="preference-select" key={button}>
+            <span>{xrButtonLabels[button]}</span>
+            <select
+              aria-label={`${xrButtonLabels[button]} action`}
+              value={settings.buttons[button]}
+              onChange={(event) =>
+                setSettings({
+                  buttons: {
+                    ...settings.buttons,
+                    [button]: event.target.value as XRButtonAction,
+                  },
+                })
+              }
+            >
+              {xrButtonActions.map((action) => (
+                <option key={action.id} value={action.id}>
+                  {action.label}
+                </option>
+              ))}
+            </select>
+          </label>
+        ))}
+      </section>
+      <section className="preferences-section">
+        <SectionHeading title="World navigation" />
+        <p className="preference-help section-help">
+          Hold either grip to move the world. With that controller's stick, up/down zooms and
+          left/right turns. One controller is enough. Release the grip and center the stick to
+          return to editing.
+        </p>
+        <RangeField
+          label="World zoom speed"
+          value={settings.zoomSpeed}
+          display={`${settings.zoomSpeed.toFixed(2)}×`}
+          limit={{ min: 0.25, max: 2, step: 0.05 }}
+          help="Adjusts thumbstick zoom speed. Zoom stops when you release the stick."
+          onChange={(zoomSpeed) => setSettings({ zoomSpeed })}
+        />
+        <SegmentedField
+          label="World turn step"
+          value={String(settings.turnAngle)}
+          options={[
+            { id: '15', label: '15°' },
+            { id: '30', label: '30°' },
+            { id: '45', label: '45°' },
+          ]}
+          onChange={(turnAngle) => setSettings({ turnAngle: Number(turnAngle) as 15 | 30 | 45 })}
+        />
+        <SwitchField
+          label="Trigger drags empty space"
+          checked={settings.triggerWorld}
+          help="Legacy controller behavior: a trigger miss or locked part moves the world. Off keeps trigger clicks for editing. Bare-hand pinches on empty space can still move the world."
+          onChange={(triggerWorld) => setSettings({ triggerWorld })}
+        />
+        <p className="preference-help">
+          The headset's View page also offers zoom, turn, frame, and Previous view controls.
+        </p>
+      </section>
+      <section className="preferences-section">
+        <SectionHeading title="Thumbsticks" />
+        {(['left', 'right'] as const).map((hand) => (
+          <label className="preference-select" key={hand}>
+            <span>{hand === 'left' ? 'Left stick' : 'Right stick'}</span>
+            <select
+              aria-label={`${hand === 'left' ? 'Left' : 'Right'} thumbstick action`}
+              value={settings.axes[hand]}
+              onChange={(event) =>
+                setSettings({
+                  axes: { ...settings.axes, [hand]: event.target.value as XRAxisAction },
+                })
+              }
+            >
+              {xrAxisActions.map((action) => (
+                <option key={action.id} value={action.id}>
+                  {action.label}
+                </option>
+              ))}
+            </select>
+          </label>
+        ))}
+        <p className="preference-help">
+          Active tool adjustment changes brush size while painting, alignment offset while fitting,
+          and moves, rotates, or scales the selection with those tools. Precision makes adjustments
+          smaller. World zoom / turn dedicates a stick to navigation without holding a grip.
+        </p>
+        <RangeField
+          label="Stick deadzone"
+          value={settings.deadzone}
+          display={`${Math.round(settings.deadzone * 100)}%`}
+          limit={{ min: 0.05, max: 0.5, step: 0.01 }}
+          help="Ignore small stick movements to prevent drift."
+          onChange={(deadzone) => setSettings({ deadzone })}
+        />
+        <SegmentedField
+          label="Tool hand"
+          value={settings.dominantHand}
+          options={[
+            { id: 'left', label: 'Left' },
+            { id: 'right', label: 'Right' },
+          ]}
+          onChange={(dominantHand) => setSettings({ dominantHand })}
+        />
+        <p className="preference-help">
+          The wrist palette sits on the opposite hand. Face button names stay on their physical
+          controllers when the tool hand changes.
+        </p>
+      </section>
+      <p className="preferences-tip">
+        Bindings and world navigation settings are also available on the headset panel. Meta and
+        menu buttons remain reserved by the headset.
+      </p>
+    </>
+  );
+}
 
 function NavigationPreferences() {
   const zoom = usePreferences((state) => state.zoom);

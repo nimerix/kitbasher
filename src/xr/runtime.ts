@@ -1,19 +1,42 @@
-import { Group, Matrix4, Quaternion, Raycaster, Triangle, Vector3 } from 'three';
+import { Box3, Group, Matrix4, Quaternion, Raycaster, Triangle, Vector3 } from 'three';
 import type { Camera, Mesh, Scene, WebGLRenderer } from 'three';
 import { treeOf } from '../core/clipping';
 import { sceneBounds, triangleCount } from '../core/geometry';
 import { hiddenByIsolation } from '../core/isolation';
 import { canRedo, canUndo, useEditor } from '../core/store';
 import { readFace } from '../core/surfaces';
-import type { Part, Quat, Vec3 } from '../core/types';
+import type { Part, Quat, SurfacePoint, Tool, Vec3 } from '../core/types';
+import {
+  readXRButtons,
+  readXRStick,
+  useXRInput,
+  xrButtons,
+  xrButtonActions,
+  xrAxisActions,
+} from '../core/xr-input';
+import type { XRButton, XRButtonAction } from '../core/xr-input';
+import {
+  xrAdvance,
+  xrFinishAdjustment,
+  xrBack,
+  xrAdjust,
+  xrPick,
+  xrRunToolAction,
+  xrToolButtons,
+  xrToolStatus,
+} from './editor-tools';
+import type { XRToolAction, XRAdjustmentGesture } from './editor-tools';
+import { WristPalette } from './wrist';
+import { ToolVisuals } from './tool-visuals';
 import {
   cloneRig,
-  dragRig,
+  WorldGesture,
+  turnRig,
   frameRig,
   heldPose,
   levelRig,
   magnification,
-  pinchRig,
+  magnificationLimits,
   rescaleRig,
   scaleLabel,
   toRoom,
@@ -30,10 +53,18 @@ import type { Tone } from './visuals';
 type Editor = ReturnType<typeof useEditor.getState>;
 type Trigger = 'select' | 'squeeze';
 type Patch = { id: string; patch: { position: Vec3; quaternion: Quat } };
+type WorldView = { rig: Rig; level: boolean };
 
 type Hover =
-  | { kind: 'panel'; action: PanelAction | null; point: Vector3 }
-  | { kind: 'part'; id: string; point: Vector3; near: boolean };
+  | { kind: 'panel'; action: PanelAction | null; point: Vector3; wrist?: boolean }
+  | {
+      kind: 'part';
+      id: string;
+      point: Vector3;
+      near: boolean;
+      surface?: SurfacePoint;
+      face?: number;
+    };
 
 interface PartHold {
   kind: 'part';
@@ -54,7 +85,18 @@ interface PartHold {
 type Action =
   | PartHold
   | { kind: 'world'; by: Trigger }
-  | { kind: 'press'; by: Trigger; action: PanelAction }
+  | { kind: 'press'; by: Trigger; action: PanelAction; wrist?: boolean }
+  | {
+      kind: 'paint';
+      by: Trigger;
+      tool: Tool;
+      last: Vector3;
+      partId: string;
+      erase: boolean;
+      radius: number;
+      time: number;
+    }
+  | { kind: 'pick'; by: Trigger }
   | { kind: 'panel'; by: Trigger; offset: Matrix4 };
 
 /** A camera of either projection, and the orbit controls that normally move it. */
@@ -93,8 +135,13 @@ class Pointer {
   hover: Hover | null = null;
   action: Action | null = null;
   events: { trigger: Trigger; down: boolean }[] = [];
-  summoning = false;
-  constructor(readonly source: XRInputSource) {}
+  buttons = new Set<XRButton>();
+  stickActive = false;
+  stickBlocked = true;
+  worldTurnArmed = true;
+  constructor(readonly source: XRInputSource) {
+    this.buttons = readXRButtons(source.handedness, source.gamepad).pressed;
+  }
 
   origin(target = new Vector3()) {
     return target.setFromMatrixPosition(this.aim);
@@ -136,6 +183,11 @@ export class XRRuntime {
   /** Everything in the room: the camera, the hands, and the panel. Scaled into the scene. */
   readonly root = new Group();
   readonly panel = new Panel();
+  readonly wrist = new WristPalette();
+  toolsVisible = true;
+  precision = false;
+  multiSelect = false;
+  adjustmentAxis: 'x' | 'y' | 'z' = 'y';
   /** The head, in the room. Standing height until the headset reports where it is. */
   readonly head = new Matrix4().makeTranslation(0, 1.6, 0);
   rig: Rig;
@@ -143,10 +195,20 @@ export class XRRuntime {
   placed = false;
   private readonly pointers = new Map<XRInputSource, Pointer>();
   private readonly readout = new Readout();
+  private readonly toolVisuals = new ToolVisuals();
+  private inputTime = 0;
+  private adjustment: XRAdjustmentGesture | null = null;
+  private adjustmentCheckpointed = false;
+  private sceneEpoch = useEditor.getState().sceneEpoch;
+  private tool = useEditor.getState().tool;
   private readonly raycaster = new Raycaster();
   private readonly triangle = new Triangle();
   private readonly inverse = new Matrix4();
-  private world: { key: string; rig: Rig; hands: Vector3[] } | null = null;
+  private world: { key: string; gesture: WorldGesture } | null = null;
+  private previousView: WorldView | null = null;
+  private viewGesture: { start: WorldView; changed: boolean } | null = null;
+  private navigationPivot: Vector3 | null = null;
+  private worldStickOwner: Pointer | null = null;
   private parts: Part[] = useEditor.getState().scene.parts;
   private view: {
     camera: ViewCamera;
@@ -166,13 +228,19 @@ export class XRRuntime {
     private readonly session: XRSession,
   ) {
     this.raycaster.firstHitOnly = true;
-    this.rig = frameRig(this.head, sceneBounds(useEditor.getState().scene.parts));
+    this.rig = frameRig(this.head, this.navigationBounds());
     this.applyRig();
-    this.root.add(this.panel.object, this.readout.object);
+    this.root.add(this.panel.object, this.wrist.object, this.readout.object);
+    this.scene.add(this.toolVisuals.object);
     this.panel.object.visible = false;
     scene.add(this.root);
-    const queue = (trigger: Trigger, down: boolean) => (event: XRInputSourceEvent) =>
-      this.pointerFor(event.inputSource).events.push({ trigger, down });
+    const queue = (trigger: Trigger, down: boolean) => (event: XRInputSourceEvent) => {
+      if (session.visibilityState === 'visible')
+        this.pointerFor(event.inputSource).events.push({ trigger, down });
+    };
+    // Hidden sessions stop delivering animation frames, so cancel at the event itself.
+    const visibility = () => this.suspendInput();
+    session.addEventListener('visibilitychange', visibility);
     const listeners = {
       selectstart: queue('select', true),
       selectend: queue('select', false),
@@ -182,6 +250,7 @@ export class XRRuntime {
     for (const [type, listener] of Object.entries(listeners))
       session.addEventListener(type as 'selectstart', listener);
     this.stop = () => {
+      session.removeEventListener('visibilitychange', visibility);
       for (const [type, listener] of Object.entries(listeners))
         session.removeEventListener(type as 'selectstart', listener);
     };
@@ -237,18 +306,24 @@ export class XRRuntime {
     this.release();
     this.scene.remove(this.root);
     this.panel.dispose();
+    this.wrist.dispose();
+    this.toolVisuals.dispose();
+    this.toolVisuals.object.removeFromParent();
     this.readout.dispose();
   }
 
   update(frame: XRFrame | undefined) {
     const space = this.gl.xr.getReferenceSpace();
     const viewer = frame && space ? frame.getViewerPose(space) : null;
-    if (!frame || !space || !viewer) return;
+    if (!frame || !space || !viewer || this.session.visibilityState !== 'visible') {
+      this.suspendInput();
+      return;
+    }
     this.head.fromArray(viewer.transform.matrix);
     const state = useEditor.getState();
     if (!this.placed) {
       this.placed = true;
-      this.rig = frameRig(this.head, sceneBounds(state.scene.parts));
+      this.rig = frameRig(this.head, this.navigationBounds());
       this.panel.place(this.head);
       this.panel.object.visible = true;
     }
@@ -257,20 +332,46 @@ export class XRRuntime {
       this.parts = state.scene.parts;
       // A different scene, or the first parts of an empty one, is set before the viewer afresh.
       if (this.parts.length && !this.parts.some((part) => before.has(part.id))) {
-        this.rig = frameRig(this.head, sceneBounds(this.parts));
+        this.rig = frameRig(this.head, this.navigationBounds());
         this.world = null;
       }
     }
+    if (state.sceneEpoch !== this.sceneEpoch) {
+      this.cancelGestures(false);
+      this.previousView = null;
+      this.sceneEpoch = state.sceneEpoch;
+    }
+    if (state.tool !== this.tool) {
+      this.cancelGestures();
+      this.tool = state.tool;
+    }
     this.track(frame, space);
+    const offHand = useXRInput.getState().settings.dominantHand === 'right' ? 'left' : 'right';
+    const wrist = [...this.pointers.values()].find(
+      (p) => p.tracked && p.source.handedness === offHand,
+    );
+    this.wrist.object.visible = this.toolsVisible && !!wrist && !this.navigating();
+    if (wrist) this.wrist.place(wrist.matrix(), this.head);
+    // Draw hit targets before reading input, including on the first session frame.
+    this.draw();
     this.moveWorld();
     this.applyRig();
+    for (const pointer of this.pointers.values()) this.point(pointer, useEditor.getState());
+    this.prepareWorldInput();
     for (const pointer of this.pointers.values()) {
-      this.point(pointer, state);
       for (const event of pointer.events.splice(0))
         if (event.down) this.press(pointer, event.trigger);
         else this.letGo(pointer, event.trigger);
     }
+    const now = performance.now();
+    const dt = this.inputTime ? Math.min(0.05, (now - this.inputTime) / 1000) : 0;
+    this.inputTime = now;
+    for (const pointer of this.pointers.values()) this.controllerInput(pointer, dt);
+    if (![...this.pointers.values()].some((pointer) => pointer.stickActive))
+      this.finishAdjustment();
     for (const pointer of this.pointers.values()) this.hold(pointer);
+    this.wrist.object.visible = this.toolsVisible && !!wrist && !this.navigating();
+    if (!this.navigating()) this.endNavigation();
     // A button may have moved the viewer.
     this.applyRig();
     this.draw();
@@ -299,11 +400,16 @@ export class XRRuntime {
 
   private drop(pointer: Pointer) {
     if (pointer.action?.kind === 'part') this.settle(pointer.action);
+    if (pointer.action?.kind === 'paint') useEditor.getState().endPaintStroke();
+    pointer.stickActive = false;
+    if (this.worldStickOwner === pointer) this.worldStickOwner = null;
     this.root.remove(pointer.visual.object);
     this.scene.remove(pointer.highlight.object);
     pointer.visual.dispose();
     pointer.highlight.dispose();
     this.pointers.delete(pointer.source);
+    if (![...this.pointers.values()].some((pointer) => pointer.stickActive))
+      this.finishAdjustment();
   }
 
   private track(frame: XRFrame, space: XRReferenceSpace) {
@@ -313,20 +419,34 @@ export class XRRuntime {
       present.add(source);
       const pointer = this.pointerFor(source);
       const aim = frame.getPose(source.targetRaySpace, space);
-      pointer.tracked = !!aim;
-      if (!aim) continue;
+      const grip = source.gripSpace ? frame.getPose(source.gripSpace, space) : null;
+      pointer.tracked = !!aim && (!source.gripSpace || !!grip || !!source.hand);
+      if (!aim || !pointer.tracked) {
+        this.loseTracking(pointer);
+        continue;
+      }
       pointer.aim.fromArray(aim.transform.matrix);
-      pointer.hand.position.setFromMatrixPosition(pointer.aim);
-      pointer.hand.quaternion.setFromRotationMatrix(pointer.aim);
+      const hand = grip ? new Matrix4().fromArray(grip.transform.matrix) : pointer.aim;
+      pointer.hand.position.setFromMatrixPosition(hand);
+      pointer.hand.quaternion.setFromRotationMatrix(hand);
       pointer.joints.length = 0;
-      if (source.hand) this.trackHand(frame, space, source.hand, pointer);
-      // B or Y brings the panel back in front of the viewer.
-      const summoning = !!source.gamepad?.buttons[5]?.pressed;
-      if (summoning && !pointer.summoning) this.panel.place(this.head);
-      pointer.summoning = summoning;
+      if (source.hand && !this.trackHand(frame, space, source.hand, pointer))
+        this.loseTracking(pointer);
     }
     for (const [source, pointer] of [...this.pointers])
       if (!present.has(source)) this.drop(pointer);
+  }
+
+  private loseTracking(pointer: Pointer) {
+    pointer.tracked = false;
+    if (pointer.action?.kind === 'paint') useEditor.getState().endPaintStroke();
+    if (pointer.action?.kind === 'part') this.settle(pointer.action);
+    pointer.action = null;
+    if (this.worldStickOwner === pointer) this.worldStickOwner = null;
+    pointer.events.length = 0;
+    pointer.buttons = readXRButtons(pointer.source.handedness, pointer.source.gamepad).pressed;
+    pointer.stickActive = false;
+    pointer.stickBlocked = true;
   }
 
   /** A bare hand holds things at its pinch, and turns them with the wrist. */
@@ -346,38 +466,93 @@ export class XRRuntime {
         pointer.hand.quaternion.set(turn.x, turn.y, turn.z, turn.w);
       }
     }
-    if (thumb && index) pointer.hand.position.copy(thumb).add(index).multiplyScalar(0.5);
+    if (!thumb || !index) return false;
+    pointer.hand.position.copy(thumb).add(index).multiplyScalar(0.5);
+    return true;
   }
 
-  /** Hands holding the world carry it, and two of them also resize and turn it. */
-  private moveWorld() {
-    const hands = [...this.pointers.values()]
+  private worldHands() {
+    return [...this.pointers.values()]
       .filter((pointer) => pointer.tracked && pointer.action?.kind === 'world')
       .slice(0, 2);
+  }
+
+  private navigating() {
+    return !!this.worldStickOwner || this.worldHands().length > 0;
+  }
+
+  /** Frame only the work the headset can actually see, including isolation. */
+  private navigationBounds(selection = false) {
+    const state = useEditor.getState();
+    const parts = state.scene.parts.filter(
+      (part) => this.shown(part, state) && (!selection || state.selected.includes(part.id)),
+    );
+    return selection && !parts.length ? new Box3() : sceneBounds(parts);
+  }
+
+  private pivotFor(pointer?: Pointer) {
+    if (pointer?.hover?.kind === 'part') return pointer.hover.point.clone();
+    const selection = this.navigationBounds(true);
+    return (selection.isEmpty() ? this.navigationBounds() : selection).getCenter(new Vector3());
+  }
+
+  private beginNavigation(pointer?: Pointer) {
+    if (this.viewGesture) return;
+    this.viewGesture = { start: this.worldView(), changed: false };
+    this.navigationPivot = this.pivotFor(pointer);
+  }
+
+  private endNavigation() {
+    this.viewGesture = null;
+    this.navigationPivot = null;
+    this.world = null;
+  }
+
+  private worldView(): WorldView {
+    return { rig: cloneRig(this.rig), level: useXR.getState().settings.level };
+  }
+
+  private changeRig(next: Rig, level = useXR.getState().settings.level) {
+    if (
+      next.position.distanceToSquared(this.rig.position) < 1e-12 &&
+      Math.abs(next.scale - this.rig.scale) < 1e-9 &&
+      next.quaternion.angleTo(this.rig.quaternion) < 1e-8 &&
+      level === useXR.getState().settings.level
+    )
+      return;
+    if (!this.viewGesture || !this.viewGesture.changed) {
+      this.previousView = this.viewGesture?.start ?? this.worldView();
+      if (this.viewGesture) this.viewGesture.changed = true;
+    }
+    this.rig = next;
+    if (level !== useXR.getState().settings.level) setXRSettings({ level });
+  }
+
+  private takeWorld(pointer: Pointer, by: Trigger) {
+    // A world clutch ends scene edits before the coordinate frame can change beneath them.
+    if (!this.navigating()) {
+      this.cancelGestures();
+      this.beginNavigation(pointer);
+    }
+    pointer.action = { kind: 'world', by };
+  }
+
+  /** Hands translate immediately; the math helper pauses ambiguous scale/yaw spans. */
+  private moveWorld(rebase = false) {
+    const hands = this.worldHands();
     const key = hands.map((pointer) => [...this.pointers.values()].indexOf(pointer)).join();
     if (!hands.length) {
       this.world = null;
       return;
     }
-    // Each time a hand joins or leaves, the others start again from where they are.
-    if (this.world?.key !== key) {
-      this.world = {
-        key,
-        rig: cloneRig(this.rig),
-        hands: hands.map((pointer) => pointer.hand.position.clone()),
-      };
+    this.beginNavigation();
+    const poses = hands.map((pointer) => pointer.hand.position.clone());
+    const level = useXR.getState().settings.level;
+    if (rebase || this.world?.key !== key) {
+      this.world = { key, gesture: new WorldGesture(this.rig, poses, level, this.precision) };
       return;
     }
-    const [from, other] = this.world.hands;
-    this.rig =
-      hands.length === 1
-        ? dragRig(this.world.rig, from, hands[0].hand.position)
-        : pinchRig(
-            this.world.rig,
-            [from, other],
-            [hands[0].hand.position, hands[1].hand.position],
-            useXR.getState().settings.level,
-          );
+    this.changeRig(this.world.gesture.update(poses, level, this.precision));
   }
 
   private shown(part: Part, state: Editor) {
@@ -388,19 +563,30 @@ export class XRRuntime {
   private point(pointer: Pointer, state: Editor) {
     pointer.hover = null;
     const action = pointer.action;
-    if (!pointer.tracked || (action && action.kind !== 'press')) return;
+    if (!pointer.tracked || (action && !['press', 'paint'].includes(action.kind))) return;
     const origin = pointer.origin(),
       direction = pointer.direction();
-    const panel = this.panel.hit(origin, direction);
+    const offHand = useXRInput.getState().settings.dominantHand === 'right' ? 'left' : 'right';
+    const wrist =
+      this.wrist.object.visible && pointer.source.handedness !== offHand
+        ? this.wrist.hit(origin, direction)
+        : null;
+    const panel = this.panel.object.visible ? this.panel.hit(origin, direction) : null;
+    const hit =
+      wrist && (!panel || wrist.distance <= panel.distance) ? { ...wrist, wrist: true } : panel;
+    const ui: Hover | null = hit
+      ? { kind: 'panel', action: hit.action, point: hit.point, wrist: 'wrist' in hit }
+      : null;
     // A press only needs to know whether it is still over its button.
-    if (action) {
-      if (panel) pointer.hover = { kind: 'panel', action: panel.action, point: panel.point };
+    if (action?.kind === 'press') {
+      pointer.hover = ui;
       return;
     }
-    // A part in the hand comes first. The panel is drawn over everything, so it comes next.
+    // UI consumes the ray even with a part behind it. Surface tools always use exact ray hits.
+    const surfaceTool = ['align', 'joint', 'measure', 'anchors'].includes(state.tool);
     pointer.hover =
-      this.touch(pointer, state) ??
-      (panel ? { kind: 'panel', action: panel.action, point: panel.point } : null) ??
+      ui ??
+      (!surfaceTool ? this.touch(pointer, state) : null) ??
       this.cast(origin, direction, state);
   }
 
@@ -463,6 +649,15 @@ export class XRRuntime {
           id: hit.object.name.slice('part:'.length),
           point: hit.point.clone(),
           near: false,
+          face: hit.faceIndex ?? undefined,
+          surface: {
+            partId: hit.object.name.slice('part:'.length),
+            point: hit.point
+              .clone()
+              .applyMatrix4(this.inverse.copy(hit.object.matrixWorld).invert())
+              .toArray(),
+            normal: hit.face?.normal.toArray() ?? [0, 1, 0],
+          },
         }
       : null;
   }
@@ -476,21 +671,74 @@ export class XRRuntime {
   }
 
   private press(pointer: Pointer, by: Trigger) {
-    if (pointer.action || !pointer.tracked) return;
+    if (!pointer.tracked) return;
+    if (by === 'squeeze') {
+      this.takeWorld(pointer, by);
+      return;
+    }
+    if (pointer.action) return;
     const hover = pointer.hover;
     if (by === 'select' && hover?.kind === 'panel') {
       pointer.action = hover.action
-        ? { kind: 'press', by, action: hover.action }
+        ? { kind: 'press', by, action: hover.action, wrist: hover.wrist }
         : {
             kind: 'panel',
             by,
             offset: pointer.matrix().invert().multiply(this.panel.object.matrix),
           };
+      if (hover.wrist && !hover.action) pointer.action = { kind: 'pick', by };
+      return;
+    }
+    if (this.navigating()) {
+      pointer.action = { kind: 'pick', by };
+      return;
+    }
+    const state = useEditor.getState();
+    if (by === 'select' && ['align', 'joint', 'measure', 'anchors'].includes(state.tool)) {
+      // A surface-tool miss must never move the assembly or the world.
+      pointer.action = { kind: 'pick', by };
+      if (hover?.kind === 'part' && hover.surface) {
+        if (state.tool === 'align' && state.operation.mode === 'surface') {
+          if (
+            hover.face !== undefined &&
+            !state.painting &&
+            state.paintSurface(hover.surface, hover.face, false, true)
+          )
+            pointer.action = {
+              kind: 'paint',
+              by,
+              tool: state.tool,
+              last: hover.point.clone(),
+              partId: hover.id,
+              erase: state.brushErase,
+              radius: state.brushRadius,
+              time: performance.now(),
+            };
+        } else {
+          xrPick(hover.surface, hover.face ?? null);
+          pulse(pointer.source, 0.25, 20);
+        }
+      }
+      return;
+    }
+    if (by === 'select' && this.multiSelect) {
+      state.select(hover?.kind === 'part' ? hover.id : null, true);
+      pointer.action = { kind: 'pick', by };
       return;
     }
     if (by === 'select' && hover?.kind === 'part' && this.take(pointer, hover, by)) return;
-    // Empty space, the grip, and parts that are locked in place all hold the world itself.
-    pointer.action = { kind: 'world', by };
+    // A missed controller grab cannot unexpectedly move the whole view. Bare hands retain
+    // their pinch-empty navigation path because they have no physical grip button.
+    const legacyWorld =
+      useXRInput.getState().settings.triggerWorld &&
+      (!hover ||
+        (hover.kind === 'part' && state.scene.parts.find((part) => part.id === hover.id)?.locked));
+    if ((!hover && pointer.source.hand) || legacyWorld) {
+      this.takeWorld(pointer, by);
+    } else {
+      if (hover?.kind === 'part') state.select(hover.id);
+      pointer.action = { kind: 'pick', by };
+    }
   }
 
   private take(pointer: Pointer, hover: Extract<Hover, { kind: 'part' }>, by: Trigger) {
@@ -530,10 +778,12 @@ export class XRRuntime {
     if (!action || action.by !== by) return;
     pointer.action = null;
     if (action.kind === 'part') this.settle(action);
+    else if (action.kind === 'paint') useEditor.getState().endPaintStroke();
     else if (
       action.kind === 'press' &&
       pointer.hover?.kind === 'panel' &&
-      pointer.hover.action === action.action
+      pointer.hover.action === action.action &&
+      pointer.hover.wrist === action.wrist
     )
       this.run(action.action);
   }
@@ -541,7 +791,31 @@ export class XRRuntime {
   private hold(pointer: Pointer) {
     const action = pointer.action;
     if (!action || !pointer.tracked) return;
-    if (action.kind === 'part') this.carry(pointer, action);
+    if (action.kind === 'paint') {
+      const state = useEditor.getState(),
+        hover = pointer.hover;
+      if (state.tool !== action.tool || !state.painting) {
+        pointer.action = null;
+        return;
+      }
+      if (
+        hover?.kind === 'part' &&
+        hover.surface &&
+        hover.face !== undefined &&
+        performance.now() - action.time >= 30 &&
+        (hover.id !== action.partId ||
+          action.erase !== state.brushErase ||
+          action.radius !== state.brushRadius ||
+          hover.point.distanceTo(action.last) > state.brushRadius * 0.1)
+      ) {
+        state.paintSurface(hover.surface, hover.face);
+        action.last.copy(hover.point);
+        action.partId = hover.id;
+        action.erase = state.brushErase;
+        action.radius = state.brushRadius;
+        action.time = performance.now();
+      }
+    } else if (action.kind === 'part') this.carry(pointer, action);
     else if (action.kind === 'panel') {
       const panel = this.panel.object;
       panel.matrix.copy(pointer.matrix()).multiply(action.offset);
@@ -556,7 +830,13 @@ export class XRRuntime {
       pointer.action = null;
       return;
     }
-    const hand = this.sceneHand(pointer);
+    const rawHand = this.sceneHand(pointer);
+    const hand = this.precision
+      ? {
+          position: action.grab.position.clone().lerp(rawHand.position, 0.1),
+          quaternion: action.grab.quaternion.clone().slerp(rawHand.quaternion, 0.1),
+        }
+      : rawHand;
     // A part held back by another keeps closing on a hand that has stopped, until it is there.
     if (
       action.arrived &&
@@ -611,33 +891,406 @@ export class XRRuntime {
     });
   }
 
-  private run(action: PanelAction) {
+  /** One transform/undo gesture spans both sticks until they both return to neutral. */
+  private finishAdjustment(settle = true) {
+    if (settle && this.adjustment && this.adjustmentCheckpointed) {
+      const before = useEditor.getState().scene.parts;
+      xrFinishAdjustment(this.adjustment);
+      this.follow(before, useEditor.getState().scene.parts);
+      this.rebaseHolds();
+    }
+    this.adjustment = null;
+    this.adjustmentCheckpointed = false;
+  }
+
+  /** Release transient input before a tool, history, scene, or tracking change. */
+  private cancelGestures(settle = true) {
+    useEditor.getState().endPaintStroke();
+    this.finishAdjustment(settle);
+    for (const pointer of this.pointers.values()) {
+      if (settle && pointer.action?.kind === 'part') this.settle(pointer.action);
+      pointer.action = null;
+      pointer.stickActive = false;
+      pointer.stickBlocked = true;
+    }
+    this.worldStickOwner = null;
+    this.endNavigation();
+  }
+
+  private suspendInput() {
+    this.cancelGestures();
+    this.inputTime = 0;
+    for (const pointer of this.pointers.values()) {
+      pointer.events.length = 0;
+      pointer.buttons = readXRButtons(pointer.source.handedness, pointer.source.gamepad).pressed;
+    }
+  }
+
+  /** Continue holding from the adjusted pose without snapping back on the next frame. */
+  private rebaseHolds() {
+    const parts = useEditor.getState().scene.parts;
+    for (const pointer of this.pointers.values()) {
+      const hold = pointer.action;
+      if (hold?.kind !== 'part') continue;
+      hold.start = parts.filter((part) => hold.start.some((before) => before.id === part.id));
+      if (!hold.start.length) {
+        pointer.action = null;
+        continue;
+      }
+      const hand = this.sceneHand(pointer);
+      hold.grab = { ...hand, pivot: hand.position.clone() };
+      hold.patches = null;
+      hold.applied = null;
+      hold.arrived = false;
+    }
+  }
+
+  /** Resolve mapped navigation before either controller can edit in this frame. */
+  private prepareWorldInput() {
+    if (this.navigating()) return;
+    const input = useXRInput.getState().settings;
+    const pointer = [...this.pointers.values()].find((pointer) => {
+      const hand = pointer.source.handedness;
+      return (
+        pointer.tracked &&
+        !pointer.stickBlocked &&
+        pointer.hover?.kind !== 'panel' &&
+        (hand === 'left' || hand === 'right') &&
+        input.axes[hand] === 'world' &&
+        readXRStick(pointer.source.gamepad, input.deadzone).some((value) => value !== 0)
+      );
+    });
+    if (!pointer) return;
+    this.cancelGestures();
+    pointer.stickBlocked = false;
+    this.beginNavigation(pointer);
+    this.worldStickOwner = pointer;
+  }
+
+  private controllerInput(pointer: Pointer, dt: number) {
+    if (!pointer.tracked) return;
+    const input = useXRInput.getState().settings;
+    const buttons = readXRButtons(
+      pointer.source.handedness,
+      pointer.source.gamepad,
+      pointer.buttons,
+    );
+    pointer.buttons = buttons.pressed;
+    for (const button of buttons.down) this.boundAction(input.buttons[button], pointer);
+    const hand = pointer.source.handedness;
+    if (hand !== 'left' && hand !== 'right') return;
+    const [x, y] = readXRStick(pointer.source.gamepad, input.deadzone);
+    const worldHands = this.worldHands();
+    const worldMode = input.axes[hand] === 'world';
+    if (worldHands.length || this.worldStickOwner || worldMode || this.viewGesture) {
+      this.worldInput(pointer, dt, x, y, worldMode);
+      return;
+    }
+    if (!x && !y) {
+      pointer.stickActive = false;
+      pointer.stickBlocked = false;
+      return;
+    }
+    pointer.stickActive = false;
+    if (pointer.stickBlocked) return;
+    const mode = input.axes[hand];
+    if (
+      !dt ||
+      mode === 'none' ||
+      mode === 'world' ||
+      buttons.down.length ||
+      pointer.hover?.kind === 'panel' ||
+      [...this.pointers.values()].some(
+        (p) => p.action?.kind === 'world' || p.action?.kind === 'press',
+      )
+    )
+      return;
+    const axis = Math.abs(x) >= Math.abs(y) ? 'x' : 'y';
+    const held = [...this.pointers.values()].find((p) => p.action?.kind === 'part')?.action as
+      PartHold | undefined;
     const state = useEditor.getState();
-    const center = () => sceneBounds(state.scene.parts).getCenter(new Vector3());
-    const rig = this.rig;
+    pointer.stickActive = true;
+    this.adjustment ??= { baseline: state.scene.parts, patches: null };
+    const changed = xrAdjust(
+      axis,
+      (axis === 'x' ? x : -y) * dt,
+      mode,
+      this.precision,
+      !this.adjustmentCheckpointed && !held?.checkpointed,
+      this.adjustmentAxis,
+      this.adjustment,
+    );
+    if (changed && useEditor.getState().scene.parts !== state.scene.parts) {
+      this.adjustmentCheckpointed = true;
+      if (held) held.checkpointed = true;
+      this.follow(state.scene.parts, useEditor.getState().scene.parts);
+      this.rebaseHolds();
+    }
+  }
+
+  /** One controller can navigate; grips clutch into this without replacing edit bindings. */
+  private worldInput(pointer: Pointer, dt: number, x: number, y: number, mapped: boolean) {
+    pointer.stickActive = false;
+    const hands = this.worldHands();
+    if (!x && !y) {
+      pointer.stickBlocked = false;
+      pointer.worldTurnArmed = true;
+      if (this.worldStickOwner === pointer) this.worldStickOwner = null;
+      return;
+    }
+    const gripped = hands.length === 1 && hands[0] === pointer;
+    if (
+      hands.length > 1 ||
+      (!gripped && (!mapped || hands.length)) ||
+      pointer.stickBlocked ||
+      (this.worldStickOwner && this.worldStickOwner !== pointer) ||
+      (!gripped && pointer.hover?.kind === 'panel')
+    ) {
+      // Deflections made in another navigation mode must be released before editing resumes.
+      pointer.stickBlocked = true;
+      return;
+    }
+    if (!this.navigating()) {
+      this.cancelGestures();
+      // This is an explicit world mapping, so the deflection itself starts navigation.
+      pointer.stickBlocked = false;
+      this.beginNavigation(pointer);
+    }
+    this.worldStickOwner = pointer;
+    const pivot = this.navigationPivot ?? this.pivotFor(pointer);
+    const settings = useXRInput.getState().settings;
+    const before = this.rig;
+    if (Math.abs(y) > Math.abs(x)) {
+      if (dt)
+        this.changeRig(
+          rescaleRig(
+            this.rig,
+            pivot,
+            this.magnification *
+              Math.exp(-y * dt * settings.zoomSpeed * (this.precision ? 0.1 : 1)),
+          ),
+        );
+    } else if (Math.abs(x) >= 0.65 && pointer.worldTurnArmed) {
+      this.changeRig(turnRig(this.rig, pivot, (Math.sign(x) * settings.turnAngle * Math.PI) / 180));
+      pointer.worldTurnArmed = false;
+      pulse(pointer.source, 0.25, 20);
+    }
+    // The hand drag continues from the new view, never from a pre-zoom baseline.
+    if (this.rig !== before) this.moveWorld(true);
+  }
+
+  private boundAction(action: XRButtonAction, pointer: Pointer) {
+    const state = useEditor.getState();
+    if (this.navigating() && ['advance', 'back', 'erase'].includes(action)) return;
     switch (action) {
+      case 'none':
+        return;
+      case 'tools':
+        this.toolsVisible = !this.toolsVisible;
+        break;
+      case 'panel':
+        this.panel.place(this.head);
+        break;
+      case 'frame':
+        this.run('reset');
+        break;
+      case 'previousView':
+        this.run('previousView');
+        break;
+      case 'precision':
+        this.precision = !this.precision;
+        this.rebaseHolds();
+        break;
+      case 'erase':
+        state.setBrush({ erase: !state.brushErase });
+        break;
       case 'undo':
       case 'redo':
-        // A part still in the other hand would be put straight back.
-        for (const pointer of this.pointers.values())
-          if (pointer.action?.kind === 'part') pointer.action = null;
-        state[action]();
+        this.run(action);
+        break;
+      case 'back':
+        this.cancelGestures();
+        xrBack();
+        break;
+      case 'advance': {
+        const dominant =
+          [...this.pointers.values()].find(
+            (p) => p.tracked && p.source.handedness === useXRInput.getState().settings.dominantHand,
+          ) ?? pointer;
+        const hover = dominant.hover;
+        // UI rays are never interpreted as a surface selection behind the panel.
+        if (hover?.kind === 'panel') return;
+        this.cancelGestures();
+        xrAdvance(hover?.kind === 'part' ? hover.surface : null);
+        break;
+      }
+    }
+    pulse(pointer.source, 0.2, 15);
+  }
+
+  private inputHints() {
+    const input = useXRInput.getState().settings;
+    const key = (action: XRButtonAction) =>
+      xrButtons
+        .filter((button) => input.buttons[button] === action)
+        .map((button) =>
+          button === 'leftStick'
+            ? 'L click'
+            : button === 'rightStick'
+              ? 'R click'
+              : button.toUpperCase(),
+        )
+        .join('/') || 'Panel';
+    if (this.navigating() || this.panel.page === 'view' || this.panel.page === 'world')
+      return [
+        'Grip: move world · two grips: resize / turn',
+        `Grip + stick: up/down zoom · left/right turn ${input.turnAngle}°`,
+        `${key('panel')}: panel · Previous view restores navigation`,
+      ];
+    return [
+      `${key('advance')}: next · ${key('back')}: back · ${key('precision')}: precision`,
+      `Grip: move world · ${key('tools')}: wrist · ${key('panel')}: panel`,
+      `L stick: ${xrAxisActions.find((a) => a.id === input.axes.left)?.label} · R: ${xrAxisActions.find((a) => a.id === input.axes.right)?.label}`,
+    ];
+  }
+
+  private run(action: PanelAction) {
+    if (action === 'noop') return;
+    if (this.panel.navigate(action)) return;
+    if (action.startsWith('tool:')) {
+      this.cancelGestures();
+      useEditor.getState().setTool(action.slice(5) as Tool);
+      this.panel.page = 'tool';
+      return;
+    }
+    if (action.startsWith('edit:')) {
+      this.cancelGestures();
+      xrRunToolAction(action.slice(5) as XRToolAction);
+      return;
+    }
+    if (action.startsWith('bind:')) {
+      const { settings, setSettings, reset } = useXRInput.getState();
+      if (action === 'bind:reset') reset();
+      else if (action === 'bind:zoomSpeed') {
+        const choices = [0.25, 0.5, 1, 1.5, 2];
+        setSettings({
+          zoomSpeed: choices.find((speed) => speed > settings.zoomSpeed) ?? choices[0],
+        });
+      } else if (action === 'bind:turnAngle') {
+        setSettings({
+          turnAngle: settings.turnAngle === 15 ? 30 : settings.turnAngle === 30 ? 45 : 15,
+        });
+      } else if (action === 'bind:triggerWorld')
+        setSettings({ triggerWorld: !settings.triggerWorld });
+      else if (action === 'bind:dominantHand')
+        setSettings({ dominantHand: settings.dominantHand === 'left' ? 'right' : 'left' });
+      else if (action.startsWith('bind:button:')) {
+        const button = action.slice(12) as XRButton;
+        const index = xrButtonActions.findIndex((option) => option.id === settings.buttons[button]);
+        setSettings({
+          buttons: {
+            ...settings.buttons,
+            [button]: xrButtonActions[(index + 1) % xrButtonActions.length].id,
+          },
+        });
+      } else if (action.startsWith('bind:axis:')) {
+        const hand = action.slice(10) as 'left' | 'right';
+        const index = xrAxisActions.findIndex((option) => option.id === settings.axes[hand]);
+        setSettings({
+          axes: { ...settings.axes, [hand]: xrAxisActions[(index + 1) % xrAxisActions.length].id },
+        });
+      }
+      return;
+    }
+    const state = useEditor.getState();
+    const center = () => this.pivotFor();
+    const rig = this.rig;
+    if (
+      [
+        'level',
+        'trueSize',
+        'reset',
+        'zoomIn',
+        'zoomOut',
+        'turnLeft',
+        'turnRight',
+        'focusSelection',
+        'previousView',
+      ].includes(action)
+    ) {
+      this.cancelGestures();
+    }
+    switch (action) {
+      case 'precision':
+        this.precision = !this.precision;
+        this.rebaseHolds();
+        break;
+      case 'multiSelect':
+        this.multiSelect = !this.multiSelect;
+        break;
+      case 'axis':
+        this.adjustmentAxis =
+          this.adjustmentAxis === 'x' ? 'y' : this.adjustmentAxis === 'y' ? 'z' : 'x';
+        break;
+      case 'undo':
+      case 'redo':
+        this.cancelGestures();
+        if (
+          action === 'undo' &&
+          state.tool === 'align' &&
+          state.operation.mode === 'surface' &&
+          state.paintHistory.length
+        )
+          state.undoPaintStroke();
+        else state[action]();
         break;
       case 'clip':
         state.setView({ clip: { ...state.view.clip, enabled: !state.view.clip.enabled } });
         break;
       case 'level': {
         const level = !useXR.getState().settings.level;
-        setXRSettings({ level });
-        if (level) this.rig = levelRig(rig, center());
+        this.changeRig(level ? levelRig(rig, center()) : rig, level);
         break;
       }
       case 'trueSize':
-        this.rig = rescaleRig(rig, center(), 1);
+        this.changeRig(rescaleRig(rig, center(), 1));
         break;
       case 'reset':
-        this.rig = frameRig(this.head, sceneBounds(state.scene.parts));
+        this.changeRig(frameRig(this.head, this.navigationBounds()));
         break;
+      case 'zoomIn':
+      case 'zoomOut':
+        this.changeRig(
+          rescaleRig(rig, center(), this.magnification * (action === 'zoomIn' ? 1.25 : 0.8)),
+        );
+        break;
+      case 'turnLeft':
+      case 'turnRight':
+        this.changeRig(
+          turnRig(
+            rig,
+            center(),
+            ((action === 'turnRight' ? 1 : -1) *
+              useXRInput.getState().settings.turnAngle *
+              Math.PI) /
+              180,
+          ),
+        );
+        break;
+      case 'focusSelection': {
+        const bounds = this.navigationBounds(true);
+        if (!bounds.isEmpty()) this.changeRig(frameRig(this.head, bounds));
+        break;
+      }
+      case 'previousView': {
+        if (this.previousView) {
+          const previous = this.previousView;
+          this.previousView = this.worldView();
+          this.rig = cloneRig(previous.rig);
+          setXRSettings({ level: previous.level });
+        }
+        break;
+      }
       case 'exit':
         exitXR();
         break;
@@ -724,16 +1377,51 @@ export class XRRuntime {
           .setY(Math.max(world[0].hand.position.y, world[1].hand.position.y) + 0.05),
         head,
       );
-    else this.readout.hide();
+    else if (this.navigating()) {
+      const hand = this.worldStickOwner ?? world[0];
+      if (hand)
+        this.readout.show(
+          scaleLabel(magnification(rig)),
+          hand.hand.position.clone().add(new Vector3(0, 0.08, 0)),
+          head,
+        );
+    } else this.readout.hide();
 
     const held = holding as PartHold | null;
     const selected = state.scene.parts.find((part) => part.id === state.selected[0]);
+    this.wrist.hovered = null;
+    this.wrist.pressed = null;
+    for (const pointer of this.pointers.values()) {
+      if (pointer.hover?.kind === 'panel' && pointer.hover.wrist) {
+        this.wrist.hovered = pointer.hover.action;
+        if (pointer.action?.kind === 'press') this.wrist.pressed = pointer.action.action;
+      }
+    }
+    this.wrist.update(state.tool);
     this.panel.hovered = hovered;
     this.panel.pressed = pressed;
     this.panel.update({
       name: state.scene.name,
+      canFocusSelection: !this.navigationBounds(true).isEmpty(),
+      canRestoreView: !!this.previousView,
+      canZoomIn: this.magnification < magnificationLimits.max - 1e-8,
+      canZoomOut: this.magnification > magnificationLimits.min + 1e-8,
+      tool: state.tool,
+      toolStatus: this.navigating()
+        ? `World navigation · ${scaleLabel(this.magnification)} · release to stop`
+        : (state.toast?.message ?? xrToolStatus()),
+      toolButtons: xrToolButtons(),
+      precision: this.precision,
+      multiSelect: this.multiSelect,
+      axis: this.adjustmentAxis.toUpperCase(),
+      inputSettings: useXRInput.getState().settings,
+      hints: this.inputHints(),
       scale: scaleLabel(magnification(rig)),
-      canUndo: canUndo(state),
+      canUndo:
+        canUndo(state) ||
+        (state.tool === 'align' &&
+          state.operation.mode === 'surface' &&
+          state.paintHistory.length > 0),
       canRedo: canRedo(state),
       clip: state.view.clip.enabled,
       level: useXR.getState().settings.level,
@@ -746,6 +1434,15 @@ export class XRRuntime {
             : `${state.scene.parts.length} parts`,
       stats: this.stats.text,
     });
+    const aimed =
+      [...this.pointers.values()].find(
+        (p) => p.tracked && p.source.handedness === useXRInput.getState().settings.dominantHand,
+      ) ?? [...this.pointers.values()].find((p) => p.tracked);
+    this.toolVisuals.update(
+      state,
+      rig.scale,
+      aimed?.hover?.kind === 'part' ? aimed.hover.surface : undefined,
+    );
   }
 
   /** Once a second, sums up how fast the headset is drawing, for the panel. */

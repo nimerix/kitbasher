@@ -99,6 +99,12 @@ test('a headset joins with the code, and what it moves moves on the computer', a
     const device = new iwer.XRDevice(iwer.metaQuest3);
     device.installRuntime({ forceInstall: true });
     (window as any).xrDevice = device;
+    const requestSession = navigator.xr!.requestSession.bind(navigator.xr!);
+    navigator.xr!.requestSession = async (...args) => {
+      const session = await requestSession(...args);
+      (window as any).xrSession = session;
+      return session;
+    };
   });
   await headset.goto(address);
   await headset.getByLabel('Code').fill(code === '123456' ? '654321' : '123456');
@@ -122,6 +128,21 @@ test('a headset joins with the code, and what it moves moves on the computer', a
     controller.position.set(...position);
   }, arm);
   await frames(headset);
+  // The emulator positions the pointing ray. Put the physical grip at the arm instead.
+  const start = await headset.evaluate(async (position) => {
+    const session: XRSession = (window as any).xrSession;
+    const space = await session.requestReferenceSpace('local-floor');
+    return new Promise<number[]>((resolve) => {
+      session.requestAnimationFrame((_time, frame) => {
+        const source = [...session.inputSources].find((source) => source.handedness === 'right')!;
+        const grip = frame.getPose(source.gripSpace!, space)!.transform.position;
+        const ray = [2 * position[0] - grip.x, 2 * position[1] - grip.y, 2 * position[2] - grip.z];
+        (window as any).xrDevice.controllers.right.position.set(...ray);
+        resolve(ray);
+      });
+    });
+  }, arm);
+  await frames(headset);
   await headset.evaluate(() =>
     (window as any).xrDevice.controllers.right.updateButtonValue('trigger', 1),
   );
@@ -134,7 +155,7 @@ test('a headset joins with the code, and what it moves moves on the computer', a
           (position as number[])[1],
           (position as number[])[2],
         ),
-      [arm, (reach * i) / 10] as const,
+      [start, (reach * i) / 10] as const,
     );
     await frames(headset, 1);
   }
