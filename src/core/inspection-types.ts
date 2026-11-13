@@ -47,10 +47,13 @@ export interface InspectionPair {
 
 export interface InspectionResult {
   overlaps: { a: string; b: string; positions: Float32Array }[];
-  surfaces: { id: string; positions: Float32Array }[];
+  surfaces: { id: string; otherId: string; positions: Float32Array }[];
   pairs: InspectionPair[];
+  /** Closed parts, including those too far apart to appear in `pairs`. */
+  solidParts: string[];
   checkedPairs: number;
   solidPairs: number;
   resolution: number;
-  warnings: string[];
+  /** Empty partIds means the warning applies to the entire analysis. */
+  warnings: { partIds: string[]; message: string }[];
 }

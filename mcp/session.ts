@@ -1324,7 +1324,7 @@ export class Session {
       })),
       // Parts near nothing else are often an assembly mistake.
       isolated: parts.filter((part) => !connected.has(part.id)).map((part) => part.id),
-      warnings: result.warnings,
+      warnings: result.warnings.map((warning) => warning.message),
     };
   }
 

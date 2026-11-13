@@ -17,7 +17,7 @@ test.afterEach(async ({ page }) => {
   await expect(page.locator('vite-error-overlay')).toHaveCount(0);
 });
 
-async function fixture(page: Page, open = false) {
+async function fixture(page: Page, open = false, thirdX = 40) {
   const geometry = serializeGeometry(new BoxGeometry(10, 10, 10));
   const scene = {
     format: 'kitbasher',
@@ -25,7 +25,7 @@ async function fixture(page: Page, open = false) {
     units: 'mm',
     name: 'Interference workbench',
     joints: [],
-    parts: [-4, 4, 40].map((x, i) => ({
+    parts: [-4, 4, thirdX].map((x, i) => ({
       id: `part-${i}`,
       name: ['Moving block', 'Target block', 'Distant block'][i],
       geometry: i === 0 && open ? serializeGeometry(new PlaneGeometry(10, 10)) : geometry,
@@ -235,6 +235,76 @@ test('limits analysis to selected visible parts and handles insufficient selecti
   expect((await snapshot(page)).meshes.some((mesh) => mesh.name.startsWith('overlap:'))).toBe(
     false,
   );
+});
+
+test('reuses completed work across scope, selection, visibility, and enable toggles', async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    const NativeWorker = window.Worker;
+    (window as any).inspectionWorkerCount = 0;
+    window.Worker = class extends NativeWorker {
+      constructor(url: string | URL, options?: WorkerOptions) {
+        super(url, options);
+        if (String(url).includes('inspection.worker')) (window as any).inspectionWorkerCount++;
+      }
+    };
+  });
+  // The middle part touches both others, so its bands must filter by pair and render together.
+  await fixture(page, false, 12);
+  await page.getByRole('button', { name: 'Interference', exact: true }).click();
+  await ready(page);
+  await expect(page.locator('.inspection-status')).toContainText('3 pairs checked');
+  const original = (await snapshot(page)).meshes.filter((mesh) =>
+    /^(nearby:|overlap:)/.test(mesh.name),
+  );
+  expect(original.filter((mesh) => mesh.name.startsWith('nearby:'))).toHaveLength(3);
+  const noNewWork = async () => {
+    // Cross the debounce window so a redundant worker cannot hide behind a fast assertion.
+    await page.waitForTimeout(400);
+    expect(await page.evaluate(() => (window as any).inspectionWorkerCount)).toBe(1);
+    await ready(page);
+  };
+
+  await page.locator('.part-select[title="Target block"]').click({ modifiers: ['Shift'] });
+  await page.getByRole('combobox', { name: 'Inspection scope' }).selectOption('selected');
+  await noNewWork();
+  await expect(page.locator('.inspection-status')).toContainText('1 pair checked');
+  await expect(page.locator('.inspection-status')).toContainText('1 overlapping pair');
+
+  await page.locator('.part-select[title="Moving block"]').click();
+  await expect(page.locator('.inspection-status')).toContainText('Select at least two');
+  await page.locator('.part-select[title="Distant block"]').click({ modifiers: ['Shift'] });
+  await noNewWork();
+  await expect(page.locator('.inspection-status')).toContainText('0 overlapping pairs');
+  expect(
+    (await snapshot(page)).meshes.filter((mesh) => /^(nearby:|overlap:)/.test(mesh.name)),
+  ).toEqual([]);
+
+  await page.getByRole('combobox', { name: 'Inspection scope' }).selectOption('all');
+  await noNewWork();
+  expect(
+    (await snapshot(page)).meshes.filter((mesh) => /^(nearby:|overlap:)/.test(mesh.name)),
+  ).toEqual(original);
+  await page.getByRole('button', { name: 'Hide Target block', exact: true }).click();
+  await noNewWork();
+  await expect(page.locator('.inspection-status')).toContainText('0 overlapping pairs');
+  await page.getByRole('button', { name: 'Show Target block', exact: true }).click();
+  await noNewWork();
+  await expect(page.locator('.inspection-status')).toContainText('2 overlapping pairs');
+
+  await page.getByRole('button', { name: 'Interference', exact: true }).click();
+  await page.getByRole('button', { name: 'Interference', exact: true }).click();
+  await noNewWork();
+
+  // Actual input changes must still start fresh work and clear stale results.
+  await moveTarget(page, 30);
+  await ready(page);
+  expect(await page.evaluate(() => (window as any).inspectionWorkerCount)).toBe(2);
+  await expect(page.locator('.inspection-status')).toContainText('0 overlapping pairs');
+  await distance(page, '0.75');
+  await ready(page);
+  expect(await page.evaluate(() => (window as any).inspectionWorkerCount)).toBe(3);
 });
 
 test('reports unavailable solid results for open scans, keeps proximity, and fits narrow screens', async ({

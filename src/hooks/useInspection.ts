@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { partMatrix } from '../core/geometry';
 import { useEditor } from '../core/store';
+import { InspectionCache, inspectionInput } from '../core/inspection-cache';
 import { cancelTask, completeTask, failTask, startTask, updateTask } from '../core/activity';
 import type {
   InspectionMesh,
@@ -15,23 +16,26 @@ export function useInspection() {
   const isolated = useEditor((state) => state.isolated);
   const settings = useEditor((state) => state.view.inspection);
   const [retryId, setRetryId] = useState(0);
+  const [cache] = useState(() => new InspectionCache());
   const cancelCurrent = useRef<(() => void) | null>(null);
   const selectionKey = settings.scope === 'selected' ? selected.join('\0') : '';
-  const request = useMemo(
-    () => ({
-      // An isolated view compares what it shows, not parts that are out of sight.
-      parts: parts.filter(
-        (part) =>
-          part.visible &&
-          (!isolated || isolated.includes(part.id)) &&
-          (settings.scope === 'all' || selected.includes(part.id)),
-      ),
+  const request = useMemo(() => {
+    // An isolated view compares what it shows, not parts that are out of sight.
+    const comparedParts = parts.filter(
+      (part) =>
+        part.visible &&
+        (!isolated || isolated.includes(part.id)) &&
+        (settings.scope === 'all' || selected.includes(part.id)),
+    );
+    return {
+      parts: comparedParts,
+      input: inspectionInput(comparedParts, settings.distance),
       distance: settings.distance,
       enabled: settings.enabled,
       retryId,
-    }),
-    [parts, selectionKey, isolated, settings.scope, settings.distance, settings.enabled, retryId],
-  );
+    };
+  }, [parts, selectionKey, isolated, settings.scope, settings.distance, settings.enabled, retryId]);
+  const cached = useMemo(() => cache.get(request.input), [cache, request]);
   const [completed, setCompleted] = useState<{
     request: typeof request;
     result?: InspectionResult;
@@ -43,7 +47,7 @@ export function useInspection() {
     value: InspectionProgress;
   } | null>(null);
   useEffect(() => {
-    if (!request.enabled || request.parts.length < 2) return;
+    if (!request.enabled || request.parts.length < 2 || cached) return;
     let worker: Worker | null = null;
     let taskId: string | null = null;
     let active = true;
@@ -58,6 +62,7 @@ export function useInspection() {
         response = { error: 'The inspection worker returned an unreadable result.' };
       active = false;
       worker?.terminate();
+      if (response.result) cache.set(request.input, response.result);
       if (taskId) {
         if (response.error) failTask(taskId, response.error);
         else if (response.result) {
@@ -167,8 +172,9 @@ export function useInspection() {
         cancelTask(taskId, 'Inspection stopped because the view or parts changed');
       if (cancelCurrent.current === cancel) cancelCurrent.current = null;
     };
-  }, [request]);
+  }, [request, cache, cached]);
   const current = completed?.request === request ? completed : null;
+  const result = request.enabled && request.parts.length >= 2 ? (current?.result ?? cached) : null;
   return {
     settings,
     count: request.parts.length,
@@ -180,10 +186,10 @@ export function useInspection() {
           ? 'cancelled'
           : current?.error
             ? 'error'
-            : current?.result
+            : result
               ? 'ready'
               : 'working',
-    result: current?.result ?? null,
+    result,
     error: current?.error,
     progress: progress?.request === request ? progress.value : null,
     cancel: () => cancelCurrent.current?.(),
