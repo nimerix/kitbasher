@@ -1,6 +1,7 @@
 import { MeshoptSimplifier } from 'meshoptimizer/simplifier';
 import { deserializeGeometry } from './geometry';
 import type { BinaryGeometry } from './types';
+import { hasClosedEdges } from './mesh-topology';
 
 export type MeshProcessOptions =
   | { mode: 'decimate'; ratio: number; error: number; lockBorder: boolean }
@@ -22,7 +23,11 @@ function compact(data: BinaryGeometry, indices: Uint32Array): BinaryGeometry {
     const target = new Float32Array(count * 3);
     for (let i = 0; i < remap.length; i++) {
       if (remap[i] === 0xffffffff) continue;
-      target.set(source.subarray(i * 3, i * 3 + 3), remap[i] * 3);
+      const from = i * 3,
+        to = remap[i] * 3;
+      target[to] = source[from];
+      target[to + 1] = source[from + 1];
+      target[to + 2] = source[from + 2];
     }
     return target;
   };
@@ -34,93 +39,78 @@ function compact(data: BinaryGeometry, indices: Uint32Array): BinaryGeometry {
   };
 }
 
-export async function decimateMesh(
-  data: BinaryGeometry,
-  ratio: number,
-  error: number,
-  lockBorder = true,
-  onProgress?: (detail: string) => void,
-) {
-  if (!(ratio > 0 && ratio <= 1) || !(error >= 0 && error <= 1))
-    throw new Error(
-      'Choose a triangle percentage above 0 and at most 100, and a valid error limit.',
-    );
-  onProgress?.('Loading mesh processor');
-  await MeshoptSimplifier.ready;
-  onProgress?.('Welding identical vertices');
-  data = compact(data, weldedIndices(data));
-  const indices = data.indices as Uint32Array;
-  const target = Math.max(3, Math.floor((indices.length / 3) * ratio) * 3);
-  const flags = lockBorder ? ['LockBorder' as const] : [];
-  onProgress?.('Reducing triangles');
-  const [reduced, deviation] = data.colors
-    ? MeshoptSimplifier.simplifyWithAttributes(
-        indices,
-        data.positions,
-        3,
-        data.colors,
-        3,
-        [1, 1, 1],
-        null,
-        target,
-        error,
-        flags,
-      )
-    : MeshoptSimplifier.simplify(indices, data.positions, 3, target, error, flags);
-  if (!reduced.length)
-    throw new Error('The reduction would remove the entire mesh. Use a higher triangle target.');
-  onProgress?.('Packing reduced mesh');
-  return { mesh: compact(data, reduced), error: deviation };
-}
+/** Owns one immutable source snapshot and reuses its welded topology across attempts. */
+export class MeshProcessor {
+  private prepared?: BinaryGeometry;
+  private closed?: boolean;
+  constructor(private data: BinaryGeometry | undefined) {}
 
-/** Rebuilds a closed surface on a voxel grid using meshoptimizer's WASM remesher. */
-export async function remeshMesh(
-  data: BinaryGeometry,
-  resolution: number,
-  onProgress?: (detail: string) => void,
-): Promise<BinaryGeometry> {
-  if (!Number.isInteger(resolution) || resolution < 24 || resolution > 128)
-    throw new Error('Voxel resolution must be between 24 and 128.');
-  onProgress?.('Loading mesh processor');
-  await MeshoptSimplifier.ready;
-  onProgress?.('Welding identical vertices');
-  data = compact(data, weldedIndices(data));
-  const indices = data.indices as Uint32Array;
-  // Open surfaces have no unambiguous interior. Reject instead of silently sealing holes.
-  // Sorted numeric keys keep this check bounded to eight bytes per triangle edge.
-  onProgress?.('Checking closed surface');
-  const vertices = data.positions.length / 3;
-  if (vertices * vertices > Number.MAX_SAFE_INTEGER)
-    throw new Error('This scan is too large to remesh. Decimate it first.');
-  const edges = new Float64Array(indices.length);
-  let count = 0;
-  for (let i = 0; i < indices.length; i += 3) {
-    const a = indices[i],
-      b = indices[i + 1],
-      c = indices[i + 2];
-    if (a === b || b === c || a === c) continue;
-    edges[count++] = Math.min(a, b) * vertices + Math.max(a, b);
-    edges[count++] = Math.min(b, c) * vertices + Math.max(b, c);
-    edges[count++] = Math.min(c, a) * vertices + Math.max(c, a);
-  }
-  const sorted = edges.subarray(0, count).sort();
-  for (let i = 0; i < count;) {
-    let end = i + 1;
-    while (end < count && sorted[end] === sorted[i]) end++;
-    if (end - i !== 2)
+  async process(options: MeshProcessOptions, onProgress?: (detail: string) => void) {
+    if (options.mode === 'decimate') {
+      if (!(options.ratio > 0 && options.ratio <= 1) || !(options.error >= 0 && options.error <= 1))
+        throw new Error(
+          'Choose a triangle percentage above 0 and at most 100, and a valid error limit.',
+        );
+    } else if (
+      !Number.isInteger(options.resolution) ||
+      options.resolution < 24 ||
+      options.resolution > 128
+    ) {
+      throw new Error('Voxel resolution must be between 24 and 128.');
+    }
+    if (!this.prepared) {
+      onProgress?.('Validating mesh');
+      // Check imported data without computing normals and bounds only to discard them.
+      deserializeGeometry(this.data!, false).dispose();
+      onProgress?.('Loading mesh processor');
+      await MeshoptSimplifier.ready;
+      onProgress?.('Welding identical vertices');
+      this.prepared = compact(this.data!, weldedIndices(this.data!));
+      this.data = undefined;
+    } else onProgress?.('Reusing prepared mesh');
+    const data = this.prepared;
+    const indices = data.indices as Uint32Array;
+    if (options.mode === 'decimate') {
+      const target = Math.max(3, Math.floor((indices.length / 3) * options.ratio) * 3);
+      const flags = options.lockBorder ? ['LockBorder' as const] : [];
+      onProgress?.('Reducing triangles');
+      const [reduced, deviation] = data.colors
+        ? MeshoptSimplifier.simplifyWithAttributes(
+            indices,
+            data.positions,
+            3,
+            data.colors,
+            3,
+            [1, 1, 1],
+            null,
+            target,
+            options.error,
+            flags,
+          )
+        : MeshoptSimplifier.simplify(indices, data.positions, 3, target, options.error, flags);
+      if (!reduced.length)
+        throw new Error(
+          'The reduction would remove the entire mesh. Use a higher triangle target.',
+        );
+      onProgress?.('Packing reduced mesh');
+      return { mesh: compact(data, reduced), error: deviation as number | null };
+    }
+    if (this.closed === undefined) {
+      onProgress?.('Checking closed surface');
+      this.closed = hasClosedEdges(indices, data.positions.length / 3, true);
+    }
+    if (!this.closed)
       throw new Error(
         'Voxel remeshing requires a closed, manifold mesh. Repair open edges first, or use Decimate.',
       );
-    i = end;
+    onProgress?.('Rebuilding surface on voxel grid');
+    const positions = MeshoptSimplifier.remesh(indices, data.positions, 3, options.resolution);
+    if (!positions.length)
+      throw new Error('No surface survived at this resolution. Increase voxel resolution.');
+    if (positions.length / 9 > 1_000_000)
+      throw new Error('The remesh exceeded one million triangles. Lower voxel resolution.');
+    return { mesh: { positions } as BinaryGeometry, error: null };
   }
-  onProgress?.('Rebuilding surface on voxel grid');
-  const positions = MeshoptSimplifier.remesh(indices, data.positions, 3, resolution);
-  if (!positions.length)
-    throw new Error('No surface survived at this resolution. Increase voxel resolution.');
-  if (positions.length / 9 > 1_000_000)
-    throw new Error('The remesh exceeded one million triangles. Lower voxel resolution.');
-  // Normals are regenerated on load. Material tint remains on the part.
-  return { positions };
 }
 
 export async function processMesh(
@@ -128,11 +118,23 @@ export async function processMesh(
   options: MeshProcessOptions,
   onProgress?: (detail: string) => void,
 ) {
-  onProgress?.('Validating mesh');
-  // Validate worker input using the same rules as imported geometry.
-  const validated = deserializeGeometry(data);
-  validated.dispose();
-  if (options.mode === 'decimate')
-    return decimateMesh(data, options.ratio, options.error, options.lockBorder, onProgress);
-  return { mesh: await remeshMesh(data, options.resolution, onProgress), error: null };
+  return new MeshProcessor(data).process(options, onProgress);
+}
+
+export async function decimateMesh(
+  data: BinaryGeometry,
+  ratio: number,
+  error: number,
+  lockBorder = true,
+  onProgress?: (detail: string) => void,
+) {
+  return processMesh(data, { mode: 'decimate', ratio, error, lockBorder }, onProgress);
+}
+
+export async function remeshMesh(
+  data: BinaryGeometry,
+  resolution: number,
+  onProgress?: (detail: string) => void,
+): Promise<BinaryGeometry> {
+  return (await processMesh(data, { mode: 'remesh', resolution }, onProgress)).mesh;
 }

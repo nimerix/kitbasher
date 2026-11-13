@@ -1,5 +1,6 @@
 import type { BufferGeometry } from 'three';
-import { binaryGeometry, deserializeGeometry } from './geometry';
+import { binaryGeometry } from './geometry';
+import { geometryKey, restoreGeometry } from './geometry-transfer';
 import type { MeshProcessOptions } from './mesh-processing';
 import { cancelTask, completeTask, failTask, startTask, updateTask } from './activity';
 
@@ -9,6 +10,34 @@ interface MeshJobActivity {
   title?: string;
   notify?: boolean;
   onTask?: (id: string) => void;
+}
+
+// Retain at most one idle worker, for at most 30 seconds. Large jobs release their
+// WASM heaps immediately; source disposal also evicts the worker's prepared copy.
+let idle: { worker: Worker; key: string; release: () => void; claim: () => void } | undefined;
+export function releaseIdleMeshWorker() {
+  idle?.release();
+}
+if (typeof window !== 'undefined') window.addEventListener('pagehide', releaseIdleMeshWorker);
+
+function keepWorker(worker: Worker, source: BufferGeometry, key: string) {
+  idle?.release();
+  const entry = {
+    worker,
+    key,
+    release: () => {
+      entry.claim();
+      worker.terminate();
+    },
+    claim: () => {
+      clearTimeout(timer);
+      source.removeEventListener('dispose', entry.release);
+      if (idle === entry) idle = undefined;
+    },
+  };
+  const timer = setTimeout(entry.release, 30_000);
+  source.addEventListener('dispose', entry.release);
+  idle = entry;
 }
 
 /** Never transfer the scene's buffers: exports, undo and picking continue to own them. */
@@ -23,12 +52,22 @@ export function processMeshInWorker(
     let worker: Worker | undefined;
     let settled = false;
     let taskId: string;
+    const key = geometryKey(geometry);
+    let reusable = false;
+    let disposed = false;
+    const dispose = () => {
+      disposed = true;
+    };
+    geometry.addEventListener('dispose', dispose);
     const owned = !activity.taskId;
-    const finish = () => {
+    const finish = (success = false) => {
       if (settled) return false;
       settled = true;
       signal?.removeEventListener('abort', cancel);
-      worker?.terminate();
+      geometry.removeEventListener('dispose', dispose);
+      if (success && reusable && !disposed && worker) {
+        keepWorker(worker, geometry, key);
+      } else worker?.terminate();
       return true;
     };
     const cancel = () => {
@@ -55,9 +94,16 @@ export function processMeshInWorker(
     signal?.addEventListener('abort', cancel, { once: true });
     try {
       activity.onTask?.(taskId);
-      worker = new Worker(new URL('./mesh-processing.worker.ts', import.meta.url), {
-        type: 'module',
-      });
+      if (settled) return;
+      const previous = idle;
+      const reuse = previous?.key === key;
+      if (previous) {
+        previous.claim();
+        worker = previous.worker;
+      } else
+        worker = new Worker(new URL('./mesh-processing.worker.ts', import.meta.url), {
+          type: 'module',
+        });
       worker.onmessage = ({ data }) => {
         if (settled) return;
         if (data.type === 'progress') {
@@ -66,8 +112,8 @@ export function processMeshInWorker(
         }
         try {
           if (data.errorMessage) throw new Error(data.errorMessage);
-          const result = { geometry: deserializeGeometry(data.mesh), error: data.error };
-          finish();
+          const result = { geometry: restoreGeometry(data.geometry), error: data.error };
+          finish(true);
           if (owned) completeTask(taskId, 'Mesh ready to review and apply.');
           resolve(result);
         } catch (error) {
@@ -77,7 +123,12 @@ export function processMeshInWorker(
       worker.onerror = (event) => fail(new Error(event.message || 'Mesh processing failed.'));
       worker.onmessageerror = () =>
         fail(new Error('The mesh worker returned an unreadable result.'));
-      worker.postMessage({ mesh: binaryGeometry(geometry), options });
+      const mesh = reuse ? undefined : binaryGeometry(geometry);
+      const size = mesh
+        ? Object.values(mesh).reduce((sum, array) => sum + (array?.byteLength ?? 0), 0)
+        : 0;
+      reusable = size <= 128 * 1024 * 1024;
+      worker.postMessage({ mesh, key, retain: reusable, options });
     } catch (error) {
       fail(error);
     }

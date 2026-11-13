@@ -791,15 +791,15 @@ export class Session {
       let geometry;
       if (mode === 'combine') geometry = combineParts(parts);
       else {
-        parts.forEach(assertClosed);
         const total = parts.reduce((sum, part) => sum + triangleCount(part.geometry), 0);
         // Booleans run on the server's only thread, so the limit stays well inside a tool timeout.
         if (total > maxBooleanTriangles)
           throw new Error(
             `A Boolean through MCP is limited to ${maxBooleanTriangles.toLocaleString('en-US')} triangles in total. These parts have ${total.toLocaleString('en-US')}.`,
           );
+        parts.forEach(assertClosed);
         const meshes = parts.map((part) => {
-          const baked = bakedPartGeometry(part);
+          const baked = bakedPartGeometry(part, true);
           return binaryGeometry(baked);
         });
         geometry = deserializeGeometry(evaluateBoolean(meshes, mode));

@@ -268,7 +268,8 @@ describe('durable scene and mesh operations', () => {
     const expected = sceneBounds([a, b]);
     close(result.boundingBox!.min, expected.min);
     close(result.boundingBox!.max, expected.max);
-    expect(result.getAttribute('position').count).toBe(72);
+    expect(result.index!.count).toBe(72);
+    expect(result.getAttribute('position').count).toBe(48);
   });
   it('rejects open Boolean input and accepts a closed box', () => {
     expect(() => assertClosed(part())).not.toThrow();

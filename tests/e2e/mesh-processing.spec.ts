@@ -49,6 +49,54 @@ async function parts(page: Page) {
   });
 }
 
+test('reuses worker preparation across reductions and remeshing without detaching cached data', async ({
+  page,
+}) => {
+  await page.goto('/');
+  await expect(page.locator('canvas')).toBeVisible();
+  await seed(page);
+  const result = await page.evaluate(async () => {
+    const storeUrl = '/src/core/store.ts',
+      jobUrl = '/src/core/mesh-job.ts',
+      transferUrl = '/src/core/geometry-transfer.ts';
+    const { useEditor } = await import(storeUrl);
+    const { processMeshInWorker, releaseIdleMeshWorker } = await import(jobUrl);
+    const { geometryKey } = await import(transferUrl);
+    releaseIdleMeshWorker();
+    const geometry = useEditor.getState().scene.parts[0].geometry;
+    const key = geometryKey(geometry);
+    const NativeWorker = window.Worker;
+    let created = 0;
+    const sent: boolean[] = [];
+    window.Worker = class extends NativeWorker {
+      constructor(url: string | URL, options?: WorkerOptions) {
+        super(url, options);
+        if (String(url).includes('mesh-processing.worker')) created++;
+      }
+      postMessage(message: any, transfer: Transferable[] | StructuredSerializeOptions = []) {
+        if (message.key === key) sent.push(!!message.mesh);
+        if (Array.isArray(transfer)) super.postMessage(message, transfer);
+        else super.postMessage(message, transfer);
+      }
+    };
+    try {
+      for (const options of [
+        { mode: 'decimate', ratio: 0.5, error: 0.01, lockBorder: true },
+        { mode: 'remesh', resolution: 32 },
+        { mode: 'decimate', ratio: 0.25, error: 0.01, lockBorder: true },
+      ]) {
+        const result = await processMeshInWorker(geometry, options);
+        result.geometry.dispose();
+      }
+      return { created, sent, intact: geometry.attributes.position.array.byteLength > 0 };
+    } finally {
+      releaseIdleMeshWorker();
+      window.Worker = NativeWorker;
+    }
+  });
+  expect(result).toEqual({ created: 1, sent: [true, false, false], intact: true });
+});
+
 test('decimates in a worker, keeps the original, saves both, and restores with undo', async ({
   page,
 }, testInfo) => {

@@ -1,11 +1,15 @@
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { BoxGeometry } from 'three';
-import { binaryGeometry } from '../../src/core/geometry';
+import { snapshotGeometry } from '../../src/core/geometry-transfer';
+import { releaseIdleMeshWorker } from '../../src/core/mesh-job';
 import { displayProxy } from '../../src/core/display-performance';
 import { requestTaskCancellation, useActivity } from '../../src/core/activity';
 
 beforeEach(() => useActivity.setState({ tasks: [], notifications: [] }));
-afterEach(() => vi.unstubAllGlobals());
+afterEach(() => {
+  releaseIdleMeshWorker();
+  vi.unstubAllGlobals();
+});
 
 it('tracks queued display work once, skips a cancelled queued mesh, and keeps source buffers intact', async () => {
   const workers: {
@@ -39,7 +43,7 @@ it('tracks queued display work once, skips a cancelled queued mesh, and keeps so
     status: 'running',
     progress: null,
   });
-  workers[0].onmessage!({ data: { mesh: binaryGeometry(new BoxGeometry()), error: 0 } });
+  workers[0].onmessage!({ data: { geometry: snapshotGeometry(new BoxGeometry()), error: 0 } });
   const result = await task;
   expect(await queued).toBeNull();
   expect(workers).toHaveLength(1);
@@ -54,8 +58,8 @@ it('tracks queued display work once, skips a cancelled queued mesh, and keeps so
   expect(source.attributes.position.array).toEqual(original);
   const retry = displayProxy(second);
   expect(retry).not.toBe(queued);
-  await vi.waitFor(() => expect(workers).toHaveLength(2));
-  workers[1].onmessage!({ data: { mesh: binaryGeometry(new BoxGeometry()), error: 0 } });
+  await vi.waitFor(() => expect(workers[0].postMessage).toHaveBeenCalledTimes(2));
+  workers[0].onmessage!({ data: { geometry: snapshotGeometry(new BoxGeometry()), error: 0 } });
   expect(await retry).not.toBeNull();
   source.dispose();
   second.dispose();
