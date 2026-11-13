@@ -1,8 +1,13 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { BoxGeometry, Matrix4, PlaneGeometry, Quaternion, Vector3 } from 'three';
 import { MeshBVH } from 'three-mesh-bvh';
 import { inspectMeshes, inspectionGeometry, solidVolume } from '../../src/core/inspection';
-import type { InspectionMesh, InspectionProgress } from '../../src/core/inspection-types';
+import type {
+  InspectionMesh,
+  InspectionProgress,
+  InspectionRequest,
+  InspectionResponse,
+} from '../../src/core/inspection-types';
 
 function box(id: string, x = 0, size = 10): InspectionMesh {
   const geometry = new BoxGeometry(size, size, size);
@@ -16,6 +21,38 @@ function box(id: string, x = 0, size = 10): InspectionMesh {
 }
 
 describe('interference inspection', () => {
+  it('announces each worker part immediately while throttling repeated indexing and pair updates', async () => {
+    const messages: InspectionResponse[] = [];
+    const host = {
+      onmessage: null as ((event: MessageEvent<InspectionRequest>) => void) | null,
+      postMessage: (message: InspectionResponse) => messages.push(message),
+    };
+    vi.stubGlobal('self', host);
+    // Force consecutive parts into the same throttle window, independent of machine speed.
+    const clock = vi.spyOn(performance, 'now').mockReturnValue(0);
+    try {
+      await import('../../src/core/inspection.worker');
+      host.onmessage!({
+        data: { meshes: [box('first'), box('second', 100), box('third', 200)], distance: 0 },
+      } as MessageEvent<InspectionRequest>);
+      const progress = messages.flatMap((message) =>
+        'progress' in message ? [message.progress] : [],
+      );
+      for (const stage of ['validating', 'preparing', 'indexing']) {
+        expect(
+          progress
+            .filter((message) => message.stage === stage)
+            .map((message) => message.detail.split(': ').at(-1)),
+        ).toEqual(['first', 'second', 'third']);
+      }
+      expect(progress.filter((message) => message.stage === 'pairs')).toHaveLength(1);
+      expect(messages.at(-1)).toMatchObject({ result: { checkedPairs: 3 } });
+    } finally {
+      clock.mockRestore();
+      vi.unstubAllGlobals();
+    }
+  });
+
   it('reports real stages and pair counts while leaving exact analysis unchanged', () => {
     const meshes = [box('a'), box('b', 8), box('far', 30)];
     const progress: InspectionProgress[] = [];
