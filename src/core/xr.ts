@@ -31,6 +31,20 @@ const minimumSpan = 0.01;
 const clampMagnification = (value: number) =>
   Math.max(magnificationLimits.min, Math.min(magnificationLimits.max, value));
 
+const finitePoint = (point: Vector3) =>
+  [point.x, point.y, point.z].every(Number.isFinite) && Number.isFinite(point.lengthSq());
+
+// Close hands give an unreliable distance and heading. Separate thresholds prevent chatter.
+export const worldGestureSpan = { resume: 0.05, pause: 0.03 } as const;
+
+/** A quick crossing can pass through an unstable span between two otherwise valid frames. */
+function spanStaysSeparated(before: Vector3, after: Vector3) {
+  const delta = after.clone().sub(before);
+  const length = delta.lengthSq();
+  const fraction = length ? Math.max(0, Math.min(1, -before.dot(delta) / length)) : 0;
+  return before.clone().addScaledVector(delta, fraction).length() >= worldGestureSpan.pause;
+}
+
 export const magnification = (rig: Rig) => 1000 / rig.scale;
 
 export const cloneRig = (rig: Rig): Rig => ({
@@ -107,6 +121,7 @@ export function pinchRig(
   to: [Vector3, Vector3],
   level: boolean,
 ): Rig {
+  if (![...from, ...to].every(finitePoint)) return cloneRig(start);
   const before = from[1].clone().sub(from[0]),
     after = to[1].clone().sub(to[0]);
   const stretch =
@@ -137,12 +152,119 @@ export function pinchRig(
 
 /** Changes the magnification around a scene point, which stays where it is in the room. */
 export function rescaleRig(rig: Rig, center: Vector3, wanted: number): Rig {
+  if (!Number.isFinite(wanted) || !finitePoint(center)) return cloneRig(rig);
   return anchored(
     center,
     toRoom(rig, center),
     rig.quaternion.clone(),
     1000 / clampMagnification(wanted),
   );
+}
+
+/** Turns the displayed world about the room's vertical, keeping its pivot fixed in the room. */
+export function turnRig(rig: Rig, center: Vector3, radians: number): Rig {
+  if (!Number.isFinite(radians) || !finitePoint(center)) return cloneRig(rig);
+  return anchored(
+    center,
+    toRoom(rig, center),
+    rig.quaternion.clone().multiply(new Quaternion().setFromAxisAngle(up, -radians)).normalize(),
+    rig.scale,
+  );
+}
+
+/**
+ * Incremental world manipulation. Hand-count changes and unstable spans establish a fresh
+ * baseline; a returning hand never replays movement from before tracking was lost. Translation
+ * remains one-to-one. Precision reduces only two-hand scale and rotation, without camera lag.
+ */
+export class WorldGesture {
+  private rig: Rig;
+  private previous: Vector3[] = [];
+  private level: boolean;
+  private precision: boolean;
+  private scaling = false;
+  private turning = false;
+
+  constructor(rig: Rig, hands: Vector3[], level: boolean, precision = false) {
+    this.rig = cloneRig(rig);
+    this.level = level;
+    this.precision = precision;
+    this.rebase(hands);
+  }
+
+  update(hands: Vector3[], level: boolean, precision = false): Rig {
+    const next = hands.slice(0, 2);
+    if (!next.every(finitePoint)) {
+      this.rebase([]);
+      return cloneRig(this.rig);
+    }
+    if (
+      next.length !== this.previous.length ||
+      this.level !== level ||
+      this.precision !== precision
+    ) {
+      this.level = level;
+      this.precision = precision;
+      this.rebase(next);
+      return cloneRig(this.rig);
+    }
+    if (next.length === 1) this.rig = dragRig(this.rig, this.previous[0], next[0]);
+    else if (next.length === 2) {
+      const before = this.previous[1].clone().sub(this.previous[0]);
+      const after = next[1].clone().sub(next[0]);
+      const previousSpan = before.length(),
+        span = after.length();
+      const gain = precision ? 0.1 : 1;
+      let scale = this.rig.scale;
+      if (this.scaling && span >= worldGestureSpan.pause && spanStaysSeparated(before, after)) {
+        const wanted = magnification(this.rig) * Math.pow(span / previousSpan, gain);
+        scale = 1000 / clampMagnification(wanted);
+      } else this.scaling = !this.scaling && span >= worldGestureSpan.resume;
+
+      if (level) {
+        before.y = 0;
+        after.y = 0;
+      }
+      const turn = new Quaternion();
+      if (
+        this.turning &&
+        after.length() >= worldGestureSpan.pause &&
+        spanStaysSeparated(before, after)
+      ) {
+        if (level) {
+          const delta = Math.atan2(after.x, after.z) - Math.atan2(before.x, before.z);
+          // Choose the short turn across the atan2 branch cut, including in precision mode.
+          turn.setFromAxisAngle(up, Math.atan2(Math.sin(delta), Math.cos(delta)) * gain);
+        } else {
+          turn.setFromUnitVectors(before.normalize(), after.normalize());
+          if (precision) turn.slerp(new Quaternion(), 1 - gain);
+        }
+      } else this.turning = !this.turning && after.length() >= worldGestureSpan.resume;
+
+      const previousMiddle = this.previous[0].clone().add(this.previous[1]).multiplyScalar(0.5);
+      const middle = next[0].clone().add(next[1]).multiplyScalar(0.5);
+      this.rig = anchored(
+        toScene(this.rig, previousMiddle),
+        middle,
+        this.rig.quaternion.clone().multiply(turn.invert()).normalize(),
+        scale,
+      );
+    }
+    this.previous = next.map((point) => point.clone());
+    return cloneRig(this.rig);
+  }
+
+  private rebase(hands: Vector3[]) {
+    this.previous = hands.slice(0, 2).every(finitePoint)
+      ? hands.slice(0, 2).map((point) => point.clone())
+      : [];
+    this.scaling = this.turning = false;
+    if (this.previous.length !== 2) return;
+    const span = this.previous[1].clone().sub(this.previous[0]);
+    this.scaling = span.length() >= worldGestureSpan.resume;
+    if (this.level) span.y = 0;
+    this.turning = span.length() >= worldGestureSpan.resume;
+  }
 }
 
 /** Stands a tilted scene upright around a scene point, keeping the way it faces. */

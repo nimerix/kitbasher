@@ -146,6 +146,8 @@ test('rebinding a tool key updates the shortcut, its labels, and survives a relo
   await panel.getByRole('button', { name: 'Add shortcut for Move', exact: true }).click();
   await page.keyboard.press('r');
   await expect(panel.getByRole('status')).toContainText('moved here from Rotate');
+  // The recorder restores row focus on the next frame before Escape can close the panel.
+  await expect(panel.getByRole('button', { name: 'Change M for Move', exact: true })).toBeFocused();
   await page.keyboard.press('Escape');
   await expect(panel).toHaveCount(0);
 
@@ -172,6 +174,47 @@ test('rebinding a tool key updates the shortcut, its labels, and survives a relo
   await page.getByRole('button', { name: 'Reset all', exact: true }).click();
   await expect(page.getByRole('button', { name: 'Move (G)', exact: true })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Rotate (R)', exact: true })).toBeVisible();
+});
+
+test('headset bindings can be changed, restored after reload, and reset from preferences', async ({
+  page,
+}) => {
+  const open = async () => {
+    await page.getByRole('button', { name: /^Preferences \(/ }).click();
+    await page.getByRole('tab', { name: 'Headset' }).click();
+    return page.getByRole('dialog', { name: 'Preferences' });
+  };
+  const panel = await open();
+  await panel.getByRole('combobox', { name: 'A · right action', exact: true }).selectOption('redo');
+  await panel.getByRole('combobox', { name: 'Right thumbstick action' }).selectOption('rotate');
+  await panel.getByRole('radio', { name: 'Left', exact: true }).click();
+  await expect
+    .poll(() => page.evaluate(() => JSON.parse(localStorage.getItem('kitbasher.xr-input')!)))
+    .toMatchObject({ buttons: { a: 'redo' }, axes: { right: 'rotate' }, dominantHand: 'left' });
+  await page.reload();
+  await expect(page.locator('canvas')).toBeVisible();
+  const restored = await open();
+  await expect(
+    restored.getByRole('combobox', { name: 'A · right action', exact: true }),
+  ).toHaveValue('redo');
+  await expect(restored.getByRole('combobox', { name: 'Right thumbstick action' })).toHaveValue(
+    'rotate',
+  );
+  await expect(restored.getByRole('radio', { name: 'Left', exact: true })).toHaveAttribute(
+    'aria-checked',
+    'true',
+  );
+  await restored.getByRole('button', { name: 'Reset', exact: true }).click();
+  await expect(
+    restored.getByRole('combobox', { name: 'A · right action', exact: true }),
+  ).toHaveValue('advance');
+  await expect(restored.getByRole('combobox', { name: 'Right thumbstick action' })).toHaveValue(
+    'context',
+  );
+  await expect(restored.getByRole('radio', { name: 'Right', exact: true })).toHaveAttribute(
+    'aria-checked',
+    'true',
+  );
 });
 
 test('markers keep a fixed screen size and callouts stay vertically aligned above the model', async ({

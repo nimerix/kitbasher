@@ -32,7 +32,7 @@ export interface Preferences {
   keybindings: KeyBindingOverrides;
 }
 
-export type PreferencesTab = 'navigation' | 'markers' | 'keyboard';
+export type PreferencesTab = 'navigation' | 'markers' | 'keyboard' | 'headset';
 
 export const defaultPreferences: Preferences = {
   zoom: { sensitivity: 1, curve: 0.5, smoothing: 40, invert: false },

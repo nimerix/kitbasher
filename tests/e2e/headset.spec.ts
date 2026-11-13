@@ -203,6 +203,33 @@ const turn = (page: Page, hand: Hand, quaternion: [number, number, number, numbe
     [hand, quaternion] as const,
   );
 
+/** IWER places the ray origin; a Quest grip is offset from that origin. */
+async function placeGrip(page: Page, side: Hand, position: Vec): Promise<Vec> {
+  await place(page, side, position);
+  await frames(page);
+  const actual = await hand(page, side);
+  const ray = position.map((value, i) => value + position[i] - actual[i]) as Vec;
+  await place(page, side, ray);
+  await frames(page);
+  return ray;
+}
+
+/** Rotate the physical grip in place, compensating the emulator's ray-space offset. */
+async function turnAtGrip(page: Page, side: Hand, quaternion: [number, number, number, number]) {
+  const before = await hand(page, side);
+  await turn(page, side, quaternion);
+  await frames(page);
+  const after = await hand(page, side);
+  await page.evaluate(
+    ({ side, delta }) => {
+      const position = (window as any).xrDevice.controllers[side].position;
+      position.set(position.x + delta[0], position.y + delta[1], position.z + delta[2]);
+    },
+    { side, delta: before.map((value, i) => value - after[i]) },
+  );
+  await frames(page);
+}
+
 async function press(page: Page, hand: Hand, id: 'trigger' | 'squeeze', down = true) {
   await page.evaluate(
     ([hand, id, value]) =>
@@ -283,8 +310,7 @@ test('holds a part in the hand, and stops it at another part', async ({ page }) 
   await setup(page);
   await enter(page);
   const { rig } = await read(page);
-  const start = await toRoom(page, [30, 20, 0]);
-  await place(page, 'right', start);
+  const start = await placeGrip(page, 'right', await toRoom(page, [30, 20, 0]));
   await frames(page);
   await press(page, 'right', 'trigger');
   expect((await read(page)).selected).toEqual(['block']);
@@ -323,9 +349,8 @@ test('passes through other parts once No clip is turned off on the panel', async
   await click(page, 'clip');
   expect((await read(page)).clip).toBe(false);
   const { rig } = await read(page);
-  const start = await toRoom(page, [30, 20, 0]);
   await turn(page, 'right', [0, 0, 0, 1]);
-  await place(page, 'right', start);
+  const start = await placeGrip(page, 'right', await toRoom(page, [30, 20, 0]));
   await frames(page);
   await press(page, 'right', 'trigger');
   await move(page, 'right', start, add(start, [-30 / rig!.scale, 0, 0]));
@@ -357,7 +382,7 @@ test('holds a part pointed at from a distance, turning it about where it was tak
   expect(block.position[2]).toBeCloseTo(0, 2);
 
   // A quarter turn of the wrist about the pointing direction turns the block about that point.
-  await turn(page, 'right', [0, 0, Math.SQRT1_2, Math.SQRT1_2]);
+  await turnAtGrip(page, 'right', [0, 0, Math.SQRT1_2, Math.SQRT1_2]);
   await frames(page);
   await press(page, 'right', 'trigger', false);
   block = (await read(page)).parts.block;
@@ -416,25 +441,23 @@ test('one hand carries the world, and two resize it', async ({ page }) => {
   expect((await read(page)).magnification).toBeCloseTo(before.magnification, 4);
 });
 
-test('a locked part holds the world instead of moving', async ({ page }) => {
+test('a locked part is selected without moving the part or world', async ({ page }) => {
   await setup(page, {
     ...fixture,
     parts: [box('wall', 'Wall', [10, 40, 40], [0, 20, 0], true), fixture.parts[1]],
   });
   await enter(page);
-  const start = await toRoom(page, [0, 20, 0]);
-  await place(page, 'right', start);
+  const start = await placeGrip(page, 'right', await toRoom(page, [0, 20, 0]));
   await frames(page);
-  const held = await toScene(page, await hand(page, 'right'));
+  const before = await read(page);
   await press(page, 'right', 'trigger');
   await move(page, 'right', start, add(start, [0.05, 0, 0]));
   await press(page, 'right', 'trigger', false);
   const state = await read(page);
   expect(state.parts.wall.position).toEqual([0, 20, 0]);
   expect(state.past).toBe(0);
-  (await toScene(page, await hand(page, 'right'))).forEach((value, i) =>
-    expect(value).toBeCloseTo(held[i], 3),
-  );
+  expect(state.rig).toEqual(before.rig);
+  expect(state.selected).toEqual(['wall']);
 });
 
 test('a bare hand takes a part by pinching it', async ({ page }) => {
@@ -476,7 +499,7 @@ test('shows the room behind the model when asked to', async ({ page }) => {
   await expect.poll(() => desktopView(page).then((view) => view.background)).toBe(true);
 });
 
-test('the panel moves by its background, and B brings it back in front of the viewer', async ({
+test('the panel moves by its background, and the left stick click brings it back', async ({
   page,
 }) => {
   await setup(page);
@@ -513,11 +536,11 @@ test('the panel moves by its background, and B brings it back in front of the vi
   expect((await read(page)).past).toBe(0);
 
   await page.evaluate(() =>
-    (window as any).xrDevice.controllers.right.updateButtonValue('b-button', 1),
+    (window as any).xrDevice.controllers.left.updateButtonValue('thumbstick', 1),
   );
   await frames(page);
   await page.evaluate(() =>
-    (window as any).xrDevice.controllers.right.updateButtonValue('b-button', 0),
+    (window as any).xrDevice.controllers.left.updateButtonValue('thumbstick', 0),
   );
   await frames(page);
   (await panel()).position.forEach((value, i) => expect(value).toBeCloseTo(before.position[i], 4));
@@ -607,7 +630,7 @@ test('shares display detail across a dense VR assembly and keeps original pickin
         source: 'test',
       })),
     });
-    // A desktop surface tool must not force full-detail drawing in VR, where that tool is absent.
+    // Surface tools use original picking geometry while keeping display detail within the VR budget.
     useEditor.getState().setTool('measure');
   }, geometry);
   await enter(page);

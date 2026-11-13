@@ -14,6 +14,8 @@ import {
   scaleLabel,
   toRoom,
   toScene,
+  turnRig,
+  WorldGesture,
 } from '../../src/core/xr';
 import type { Rig } from '../../src/core/xr';
 
@@ -124,6 +126,18 @@ describe('moving the world by hand', () => {
     expect(moved.quaternion.angleTo(start.quaternion)).toBeCloseTo(0, 9);
   });
 
+  it('ignores invalid pinch poses instead of corrupting the view transform', () => {
+    const start = rig(),
+      a = new Vector3(-0.1, 1, 0),
+      b = new Vector3(0.1, 1, 0);
+    for (const invalid of [NaN, Infinity, -Infinity, 1e308]) {
+      const moved = pinchRig(start, [a, b], [a, new Vector3(invalid, 1, 0)], true);
+      close(moved.position, start.position);
+      expect(moved.scale).toBe(start.scale);
+      expect(moved.quaternion.angleTo(start.quaternion)).toBeCloseTo(0, 9);
+    }
+  });
+
   it('stops resizing at the limits', () => {
     const a = new Vector3(-0.01, 1, 0),
       b = new Vector3(0.01, 1, 0);
@@ -150,6 +164,136 @@ describe('moving the world by hand', () => {
     // A world that was only turned about the vertical is left as it was.
     const turned = { ...rig(), quaternion: new Quaternion().setFromAxisAngle(up, 1.3) };
     expect(levelRig(turned, center).quaternion.angleTo(turned.quaternion)).toBeCloseTo(0, 9);
+  });
+});
+
+describe('stable world gestures', () => {
+  const pair = (span: number, center = new Vector3(0, 1.2, -0.3)): [Vector3, Vector3] => [
+    center.clone().add(new Vector3(-span / 2, 0, 0)),
+    center.clone().add(new Vector3(span / 2, 0, 0)),
+  ];
+  const unchanged = (actual: Rig, expected: Rig) => {
+    close(actual.position, expected.position, 8);
+    expect(actual.scale).toBeCloseTo(expected.scale, 8);
+    expect(actual.quaternion.angleTo(expected.quaternion)).toBeLessThan(1e-7);
+  };
+
+  it('keeps one-hand dragging one-to-one even with precision enabled', () => {
+    const start = rig(),
+      from = new Vector3(0.2, 1.1, -0.3);
+    const gesture = new WorldGesture(start, [from], true, true);
+    const to = from.clone().add(new Vector3(0.03, -0.02, 0.04));
+    unchanged(gesture.update([to], true, true), dragRig(start, from, to));
+  });
+
+  it('holds both scene points through incremental unconstrained movement', () => {
+    const start = rig(),
+      from = pair(0.3);
+    const gesture = new WorldGesture(start, from, false);
+    const points = from.map((point) => toScene(start, point));
+    for (const next of [
+      [new Vector3(-0.2, 1.25, -0.3), new Vector3(0.2, 1.1, -0.25)],
+      [new Vector3(-0.1, 1.3, -0.4), new Vector3(0.3, 1.2, -0.2)],
+    ]) {
+      const current = gesture.update(next, false);
+      next.forEach((point, index) => close(toScene(current, point), points[index], 6));
+    }
+  });
+
+  it('pauses close-hand scale and resumes from the new baseline without a jump', () => {
+    const start = rig(),
+      gesture = new WorldGesture(start, pair(0.2), true);
+    const approaching = gesture.update(pair(0.04), true);
+    expect(magnification(approaching)).toBeCloseTo(magnification(start) * 0.2);
+    for (const span of [0.029, 0.01, 0, 0.035, 0.049, 0.051])
+      unchanged(gesture.update(pair(span), true), approaching);
+    expect(magnification(gesture.update(pair(0.102), true))).toBeCloseTo(
+      magnification(approaching) * 2,
+    );
+  });
+
+  it('starts with close hands without disabling zoom for the rest of the gesture', () => {
+    const start = rig(),
+      gesture = new WorldGesture(start, pair(0.01), true);
+    unchanged(gesture.update(pair(0.06), true), start);
+    expect(magnification(gesture.update(pair(0.12), true))).toBeCloseTo(magnification(start) * 2);
+  });
+
+  it('does not flip the world when hands cross between samples', () => {
+    const start = rig(),
+      gesture = new WorldGesture(start, pair(0.2), true);
+    unchanged(gesture.update(pair(-0.2), true), start);
+    unchanged(gesture.update(pair(-0.21), true), start);
+    expect(magnification(gesture.update(pair(-0.42), true))).toBeCloseTo(magnification(start) * 2);
+  });
+
+  it('pauses yaw independently when a tall hand span becomes nearly vertical', () => {
+    const start = { ...rig(), quaternion: new Quaternion() };
+    const center = new Vector3(0, 1.2, -0.3);
+    const tiltedPair = (x: number, z: number) => {
+      const half = new Vector3(x, 0.3, z).multiplyScalar(0.5);
+      return [center.clone().sub(half), center.clone().add(half)];
+    };
+    const gesture = new WorldGesture(start, tiltedPair(0.2, 0), true);
+    const turned = gesture.update(tiltedPair(0.03, 0.04), true);
+    for (const [x, z] of [
+      [0.005, 0.005],
+      [-0.005, -0.005],
+      [-0.04, -0.04],
+    ]) {
+      const next = gesture.update(tiltedPair(x, z), true);
+      expect(next.quaternion.angleTo(turned.quaternion)).toBeLessThan(1e-7);
+    }
+  });
+
+  it('rebases count changes, missing poses, and precision toggles without moving the view', () => {
+    const start = rig(),
+      hands = pair(0.2);
+    const gesture = new WorldGesture(start, [hands[0]], true);
+    unchanged(gesture.update(hands, true), start);
+    const enlarged = gesture.update(pair(0.4), true);
+    unchanged(gesture.update([new Vector3(0.4, 1.2, -0.3)], true), enlarged);
+    unchanged(gesture.update([new Vector3(NaN, 0, 0)], true), enlarged);
+    unchanged(gesture.update([new Vector3(5, 6, 7)], true), enlarged);
+    unchanged(gesture.update(pair(0.2), true, true), enlarged);
+    expect(magnification(gesture.update(pair(0.4), true, true))).toBeCloseTo(
+      magnification(enlarged) * Math.pow(2, 0.1),
+    );
+  });
+
+  it('reverses immediately away from a magnification limit', () => {
+    const start = { ...rig(), scale: 1000 / 190 };
+    const gesture = new WorldGesture(start, pair(0.2), true);
+    expect(magnification(gesture.update(pair(0.4), true))).toBe(magnificationLimits.max);
+    expect(magnification(gesture.update(pair(0.3), true))).toBeCloseTo(150);
+  });
+
+  it('takes the short yaw through the angle branch cut in precision mode', () => {
+    const start = { ...rig(), quaternion: new Quaternion() };
+    const atAngle = (degrees: number) => {
+      const angle = (degrees * Math.PI) / 180;
+      const span = new Vector3(Math.sin(angle), 0, Math.cos(angle)).multiplyScalar(0.1);
+      return [span.clone().negate(), span];
+    };
+    const gesture = new WorldGesture(start, atAngle(179), true, true);
+    const next = gesture.update(atAngle(-179), true, true);
+    expect(next.quaternion.angleTo(start.quaternion)).toBeCloseTo((0.2 * Math.PI) / 180, 8);
+  });
+
+  it('turns around a fixed pivot in room coordinates and ignores non-finite requests', () => {
+    const start = rig(),
+      pivot = new Vector3(12, 45, -18),
+      point = new Vector3(42, 80, 22);
+    const angle = Math.PI / 6,
+      roomPivot = toRoom(start, pivot);
+    const rotated = turnRig(start, pivot, angle);
+    close(toRoom(rotated, pivot), roomPivot);
+    const expected = toRoom(start, point).sub(roomPivot).applyAxisAngle(up, angle).add(roomPivot);
+    close(toRoom(rotated, point), expected);
+    expect(rotated.scale).toBe(start.scale);
+    unchanged(turnRig(start, pivot, NaN), start);
+    unchanged(rescaleRig(start, pivot, Infinity), start);
+    unchanged(rescaleRig(start, new Vector3(NaN, 0, 0), 2), start);
   });
 });
 
