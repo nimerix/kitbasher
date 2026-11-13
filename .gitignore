@@ -4,5 +4,6 @@ dist-mcp/
 playwright-report/
 test-results/
 test-results-drive/
+test-results-acceleration/
 .DS_Store
 *.local

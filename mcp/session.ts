@@ -38,6 +38,10 @@ import {
   worldPoint,
 } from '../src/core/geometry';
 import { inspectMeshes } from '../src/core/inspection';
+import type { InspectionResult } from '../src/core/inspection-types';
+import { geometryKey, restoreGeometry, snapshotGeometry } from '../src/core/geometry-transfer';
+import type { BufferGeometry } from 'three';
+import { runCompute } from './compute';
 import { assertClosed, mergedPart } from '../src/core/merge';
 import {
   planeConstraintResidual,
@@ -791,47 +795,109 @@ export class Session {
       let geometry;
       if (mode === 'combine') geometry = combineParts(parts);
       else {
-        parts.forEach(assertClosed);
         const total = parts.reduce((sum, part) => sum + triangleCount(part.geometry), 0);
-        // Booleans run on the server's only thread, so the limit stays well inside a tool timeout.
+        // Keep the established input budget for predictable memory use.
         if (total > maxBooleanTriangles)
           throw new Error(
             `A Boolean through MCP is limited to ${maxBooleanTriangles.toLocaleString('en-US')} triangles in total. These parts have ${total.toLocaleString('en-US')}.`,
           );
+        parts.forEach(assertClosed);
         const meshes = parts.map((part) => {
-          const baked = bakedPartGeometry(part);
+          const baked = bakedPartGeometry(part, true);
           return binaryGeometry(baked);
         });
         geometry = deserializeGeometry(evaluateBoolean(meshes, mode));
       }
-      const label = {
-        combine: 'Combined',
-        union: 'Boolean union',
-        subtract: 'Boolean subtraction',
-        intersect: 'Boolean intersection',
-      }[mode];
-      const merged = mergedPart(
-        geometry,
-        name ?? `${parts[0].name} ${mode}`,
-        `${label} · ${parts.length} parts`,
-      );
-      const [result] = withFriendlyIds([merged]);
-      const before = editor().scene;
-      if (keepOriginals) editor().addParts([result]);
-      else
-        editor().replaceWithMerged(
-          result,
-          parts.map((part) => part.id),
-        );
-      const after = editor().scene;
-      return {
-        part: describePart(requirePart(result.id)),
-        removed: keepOriginals ? [] : parts.map((part) => part.id),
-        removed_joints: before.joints.length - after.joints.length,
-        removed_plane_constraints:
-          (before.constraints?.length ?? 0) - (after.constraints?.length ?? 0),
-      };
+      return this.applyMerge(parts, geometry, mode, name, keepOriginals);
     });
+  }
+
+  async mergePartsAsync(
+    ids: string[],
+    mode: 'combine' | BooleanOperation,
+    name?: string,
+    keepOriginals = false,
+    signal?: AbortSignal,
+  ) {
+    if (ids.length < 2) throw new Error('List at least two parts to merge.');
+    const parts = ids.map(keepOriginals ? requirePart : requireUnlocked);
+    const total = parts.reduce((sum, part) => sum + triangleCount(part.geometry), 0);
+    if (mode !== 'combine' && total > maxBooleanTriangles)
+      throw new Error(
+        `A Boolean through MCP is limited to ${maxBooleanTriangles.toLocaleString('en-US')} triangles in total. These parts have ${total.toLocaleString('en-US')}.`,
+      );
+    const scene = editor().scene;
+    const version = sharedDocument.version;
+    const keys = parts.map((part) => geometryKey(part.geometry));
+    const result = await runCompute(
+      {
+        kind: 'merge',
+        mode,
+        name,
+        parts: parts.map((part, i) => ({
+          name: part.name,
+          position: part.position,
+          quaternion: part.quaternion,
+          scale: part.scale,
+          color: part.color,
+          geometry: snapshotGeometry(part.geometry),
+          key: keys[i],
+          validated: false,
+        })),
+      },
+      signal,
+    );
+    if (signal?.aborted) throw new DOMException('Cancelled', 'AbortError');
+    if (
+      editor().scene !== scene ||
+      sharedDocument.version !== version ||
+      parts.some((part, i) => geometryKey(part.geometry) !== keys[i])
+    )
+      throw new Error('The scene changed while merging. Review the current parts and try again.');
+    const geometry = restoreGeometry(result.geometry);
+    try {
+      return transaction(() =>
+        this.applyMerge(parts, geometry, mode, name, keepOriginals, { ...result.part, geometry }),
+      );
+    } catch (error) {
+      geometry.dispose();
+      throw error;
+    }
+  }
+
+  private applyMerge(
+    parts: Part[],
+    geometry: BufferGeometry,
+    mode: 'combine' | BooleanOperation,
+    name: string | undefined,
+    keepOriginals: boolean,
+    prepared?: Part,
+  ) {
+    const label = {
+      combine: 'Combined',
+      union: 'Boolean union',
+      subtract: 'Boolean subtraction',
+      intersect: 'Boolean intersection',
+    }[mode];
+    const merged =
+      prepared ??
+      mergedPart(geometry, name ?? `${parts[0].name} ${mode}`, `${label} · ${parts.length} parts`);
+    const [result] = withFriendlyIds([merged]);
+    const before = editor().scene;
+    if (keepOriginals) editor().addParts([result]);
+    else
+      editor().replaceWithMerged(
+        result,
+        parts.map((part) => part.id),
+      );
+    const after = editor().scene;
+    return {
+      part: describePart(requirePart(result.id)),
+      removed: keepOriginals ? [] : parts.map((part) => part.id),
+      removed_joints: before.joints.length - after.joints.length,
+      removed_plane_constraints:
+        (before.constraints?.length ?? 0) - (after.constraints?.length ?? 0),
+    };
   }
 
   alignParts(args: {
@@ -1211,6 +1277,37 @@ export class Session {
       distance,
       surfaces: false,
     });
+    return this.inspectionReport(parts, distance, result);
+  }
+
+  async inspectAsync(ids: string[] | undefined, distance: number, signal?: AbortSignal) {
+    const scene = editor().scene;
+    const version = sharedDocument.version;
+    const parts = ids ? ids.map(requirePart) : scene.parts.filter((part) => part.visible);
+    if (parts.length < 2) throw new Error('Inspection compares at least two parts.');
+    const result = await runCompute(
+      {
+        kind: 'inspect',
+        request: {
+          meshes: parts.map((part) => ({
+            id: part.id,
+            name: part.name,
+            positions: binaryGeometry(part.geometry).positions,
+            indices: part.geometry.index ? new Uint32Array(part.geometry.index.array) : undefined,
+            matrix: partMatrix(part).toArray(),
+          })),
+          distance,
+          surfaces: false,
+        },
+      },
+      signal,
+    );
+    if (editor().scene !== scene || sharedDocument.version !== version)
+      throw new Error('The scene changed during inspection. Inspect again for current results.');
+    return this.inspectionReport(parts, distance, result);
+  }
+
+  private inspectionReport(parts: Part[], distance: number, result: InspectionResult) {
     const connected = new Set(result.pairs.flatMap((pair) => [pair.a, pair.b]));
     return {
       distance_mm: distance,

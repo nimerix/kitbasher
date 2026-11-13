@@ -1,21 +1,12 @@
-import { expect, it, vi } from 'vitest';
+import { expect, it } from 'vitest';
 import { BufferAttribute, BufferGeometry } from 'three';
-import { mergeParts } from '../../src/core/merge';
+import { mergeParts, mergedPart } from '../../src/core/merge';
 import type { Part } from '../../src/core/types';
 
-vi.mock('../../src/core/geometry', async (original) => ({
-  ...(await original<typeof import('../../src/core/geometry')>()),
-  combineParts: () => {
-    const geometry = new BufferGeometry();
-    geometry.attributes.position = {
-      array: { byteLength: 2 ** 31 },
-    } as unknown as BufferAttribute;
-    return geometry;
-  },
-}));
-
-it('refuses to merge meshes into one too large to draw', async () => {
-  await expect(mergeParts([{} as Part, {} as Part], 'combine', 'Too large')).rejects.toThrow(
+it('refuses a merged mesh too large to draw', () => {
+  const geometry = new BufferGeometry();
+  geometry.attributes.position = { array: { byteLength: 2 ** 31 } } as unknown as BufferAttribute;
+  expect(() => mergedPart(geometry, 'Too large', 'test')).toThrow(
     'merged mesh would be too large for a browser to draw',
   );
 });

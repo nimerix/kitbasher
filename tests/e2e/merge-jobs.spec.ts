@@ -1,5 +1,54 @@
 import { expect, test, type Page } from '@playwright/test';
 
+test('combines through a real worker while retaining indexed vertices and source data', async ({
+  page,
+}) => {
+  await page.goto('/');
+  await expect(page.locator('canvas')).toBeVisible();
+  const result = await page.evaluate(async () => {
+    const storeUrl = '/src/core/store.ts',
+      mergeUrl = '/src/core/merge.ts',
+      geometryUrl = '/src/core/geometry.ts';
+    const { useEditor } = await import(storeUrl);
+    const { deserializeGeometry } = await import(geometryUrl);
+    const inputs = useEditor
+      .getState()
+      .scene.parts.slice(0, 2)
+      .map((part: any) => ({
+        ...part,
+        geometry: deserializeGeometry({
+          positions: [
+            -1, -1, -1, 1, -1, -1, 1, 1, -1, -1, 1, -1, -1, -1, 1, 1, -1, 1, 1, 1, 1, -1, 1, 1,
+          ],
+          indices: [
+            0, 2, 1, 0, 3, 2, 4, 5, 6, 4, 6, 7, 0, 1, 5, 0, 5, 4, 3, 7, 6, 3, 6, 2, 0, 4, 7, 0, 7,
+            3, 1, 2, 6, 1, 6, 5,
+          ],
+        }),
+      }));
+    const count = (part: any) =>
+      part.geometry.index?.count ?? part.geometry.attributes.position.count;
+    const triangleVertices = inputs.reduce((sum: number, part: any) => sum + count(part), 0);
+    const before = inputs.map((part: any) => part.geometry.attributes.position.array.slice());
+    const merged = await (await import(mergeUrl)).mergeParts(inputs, 'combine', 'Combined');
+    const result = {
+      indices: merged.geometry.index?.count,
+      expected: triangleVertices,
+      compact: merged.geometry.attributes.position.count < triangleVertices,
+      bounds: !!merged.geometry.boundingBox && !!merged.geometry.boundingSphere,
+      intact: inputs.every((part: any, i: number) =>
+        before[i].every(
+          (value: number, j: number) => value === part.geometry.attributes.position.array[j],
+        ),
+      ),
+    };
+    merged.geometry.dispose();
+    return result;
+  });
+  expect(result.indices).toBe(result.expected);
+  expect(result).toMatchObject({ compact: true, bounds: true, intact: true });
+});
+
 async function startControlledMerge(page: Page) {
   await page.goto('/');
   await expect(page.locator('canvas')).toBeVisible();
@@ -88,14 +137,23 @@ test('rejects a finished merge when a source part changed while it was running',
   const original = await sceneParts(page);
   const changedId = await page.evaluate(async () => {
     const storeUrl = '/src/core/store.ts',
-      geometryUrl = '/src/core/geometry.ts';
+      geometryUrl = '/src/core/geometry.ts',
+      transferUrl = '/src/core/geometry-transfer.ts',
+      mergeUrl = '/src/core/merge.ts';
     const { useEditor } = await import(storeUrl);
     const geometry = await import(geometryUrl);
     const state = useEditor.getState();
     const source = state.scene.parts.find((part: any) => part.id === state.selected[0]);
     const baked = geometry.bakedPartGeometry(source);
     state.patchParts([source.id], { name: 'Changed during merge' });
-    (window as any).__mergeWorker.onmessage({ data: { result: geometry.binaryGeometry(baked) } });
+    const { geometry: result, ...part } = (await import(mergeUrl)).mergedPart(
+      baked,
+      'Merged',
+      'test',
+    );
+    (window as any).__mergeWorker.onmessage({
+      data: { part, geometry: (await import(transferUrl)).snapshotGeometry(result) },
+    });
     return source.id;
   });
   await expect(

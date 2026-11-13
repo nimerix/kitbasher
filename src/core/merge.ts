@@ -1,18 +1,11 @@
-import { BufferAttribute, Vector3 } from 'three';
-import type { BufferGeometry } from 'three';
+import { BufferGeometry, Vector3 } from 'three';
 import { mergeVertices } from 'three/addons/utils/BufferGeometryUtils.js';
-import {
-  bakedPartGeometry,
-  binaryGeometry,
-  combineParts,
-  deserializeGeometry,
-  drawLimit,
-  exceedsDrawLimit,
-  triangleCount,
-  uid,
-} from './geometry';
-import type { BinaryGeometry, Part } from './types';
+import { drawLimit, exceedsDrawLimit, triangleCount, uid } from './geometry';
+import type { Part } from './types';
 import { cancelTask, completeTask, failTask, startTask, updateTask } from './activity';
+import { hasClosedEdges, weldedPositionIndex } from './mesh-topology';
+import { geometryKey, restoreGeometry, snapshotGeometry } from './geometry-transfer';
+import type { GeometrySnapshot } from './geometry-transfer';
 
 // Bound memory use while checking every edge of a solid.
 const maxUnionTriangles = 10_000_000;
@@ -27,31 +20,28 @@ function assertUnionSize(part: Part) {
 /** Reject open/non-manifold inputs before attempting a solid Boolean. */
 export function assertClosed(part: Part) {
   assertUnionSize(part);
-  const geometry = part.geometry.clone();
-  for (const name of Object.keys(geometry.attributes))
-    if (name !== 'position') geometry.deleteAttribute(name);
-  const welded = mergeVertices(geometry, 1e-5);
-  geometry.dispose();
-  const index = welded.index!,
-    edges = new Map<string, number>();
-  for (let i = 0; i < index.count; i += 3) {
-    const a = index.getX(i),
-      b = index.getX(i + 1),
-      c = index.getX(i + 2);
-    for (const [from, to] of [
-      [a, b],
-      [b, c],
-      [c, a],
-    ]) {
-      const key = from < to ? `${from}:${to}` : `${to}:${from}`;
-      edges.set(key, (edges.get(key) ?? 0) + 1);
-    }
+  const key = geometryKey(part.geometry);
+  if (validated.get(part.geometry) === key) return;
+  let closed: boolean;
+  if (part.geometry.getAttribute('position').itemSize === 3) {
+    const { indices, vertices } = weldedPositionIndex(part.geometry);
+    closed = hasClosedEdges(indices, vertices);
+  } else {
+    const geometry = new BufferGeometry().setAttribute(
+      'position',
+      part.geometry.getAttribute('position'),
+    );
+    geometry.setIndex(part.geometry.index);
+    const welded = mergeVertices(geometry, 1e-5);
+    closed = hasClosedEdges(welded.index!.array, welded.getAttribute('position').count);
+    welded.dispose();
+    geometry.dispose();
   }
-  welded.dispose();
-  if ([...edges.values()].some((count) => count !== 2))
+  if (!closed)
     throw new Error(
       `${part.name} has open or non-manifold edges. Use Combine meshes, or repair the scan before a Boolean union.`,
     );
+  validated.set(part.geometry, key);
 }
 
 export interface MergeProgress {
@@ -63,60 +53,73 @@ interface MergeOptions {
   onProgress?: (progress: MergeProgress) => void;
   onWorker?: (worker: Worker) => void;
 }
-export interface MergeValidationMesh {
+export interface MergeWorkerRequest {
+  mode: 'combine' | 'union';
   name: string;
-  positions: Float32Array | Float64Array;
-  indices?: BinaryGeometry['indices'];
+  parts: (Pick<Part, 'name' | 'position' | 'quaternion' | 'scale' | 'color'> & {
+    geometry: GeometrySnapshot;
+    key: string;
+    validated: boolean;
+  })[];
 }
-export type MergeWorkerRequest =
-  | { type: 'validate'; meshes: MergeValidationMesh[] }
-  | { type: 'evaluate'; meshes: BinaryGeometry[] };
 
+const validated = new WeakMap<BufferGeometry, string>();
 const yieldToUi = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
 const cancelled = () => new DOMException('Merge cancelled', 'AbortError');
 
-/** Capture exact positions for the original local-space closed-surface check. */
-function validationMesh(part: Part): MergeValidationMesh {
-  const position = part.geometry.getAttribute('position');
-  let positions: Float32Array | Float64Array;
-  if (
-    position instanceof BufferAttribute &&
-    !position.normalized &&
-    position.itemSize === 3 &&
-    (position.array instanceof Float32Array || position.array instanceof Float64Array)
-  )
-    positions = position.array;
-  else {
-    positions = new Float64Array(position.count * 3);
-    for (let i = 0; i < position.count; i++) {
-      positions[i * 3] = position.getX(i);
-      positions[i * 3 + 1] = position.getY(i);
-      positions[i * 3 + 2] = position.getZ(i);
-    }
-  }
-  return {
-    name: part.name,
-    positions,
-    indices: part.geometry.index?.array as BinaryGeometry['indices'],
+let idleMerge: { worker: Worker; claim: () => void; release: () => void } | undefined;
+export function releaseIdleMergeWorker() {
+  idleMerge?.release();
+}
+if (typeof window !== 'undefined') window.addEventListener('pagehide', releaseIdleMergeWorker);
+
+function keepMergeWorker(worker: Worker, parts: Part[]) {
+  idleMerge?.release();
+  const geometries = [...new Set(parts.map((part) => part.geometry))];
+  const entry = {
+    worker,
+    claim: () => {
+      clearTimeout(timer);
+      geometries.forEach((g) => g.removeEventListener('dispose', entry.release));
+      if (idleMerge === entry) idleMerge = undefined;
+    },
+    release: () => {
+      entry.claim();
+      worker.terminate();
+    },
   };
+  const timer = setTimeout(entry.release, 30_000);
+  geometries.forEach((g) => g.addEventListener('dispose', entry.release));
+  idleMerge = entry;
 }
 
-function unionInWorker(
+function mergeInWorker(
   parts: Part[],
+  mode: 'combine' | 'union',
+  name: string,
   signal: AbortSignal,
   progress: (value: MergeProgress) => void,
   onWorker?: (worker: Worker) => void,
 ) {
-  return new Promise<BinaryGeometry>((resolve, reject) => {
+  return new Promise<Part>((resolve, reject) => {
     if (signal.aborted) return reject(cancelled());
     let worker: Worker | undefined;
     let terminate = () => {};
     let settled = false;
-    const finish = () => {
+    let disposed = false;
+    const geometries = [...new Set(parts.map((part) => part.geometry))];
+    const dispose = () => {
+      disposed = true;
+    };
+    geometries.forEach((geometry) => geometry.addEventListener('dispose', dispose));
+    const finish = (retain = false) => {
       if (settled) return false;
       settled = true;
       signal.removeEventListener('abort', cancel);
-      terminate();
+      geometries.forEach((geometry) => geometry.removeEventListener('dispose', dispose));
+      if (worker) worker.terminate = terminate;
+      if (retain && worker && !onWorker && !disposed) keepMergeWorker(worker, parts);
+      else terminate();
       return true;
     };
     const fail = (error: unknown) => {
@@ -124,39 +127,12 @@ function unionInWorker(
     };
     const cancel = () => fail(cancelled());
     signal.addEventListener('abort', cancel, { once: true });
-    const bake = async () => {
-      const meshes: BinaryGeometry[] = [];
-      for (let i = 0; i < parts.length; i++) {
-        if (settled) return;
-        progress({
-          detail: `Preparing transforms and colors · ${i + 1} of ${parts.length} parts`,
-          progress: i / parts.length,
-        });
-        await yieldToUi();
-        if (settled) return;
-        const geometry = bakedPartGeometry(parts[i]);
-        try {
-          meshes.push(binaryGeometry(geometry));
-        } finally {
-          geometry.dispose();
-        }
-      }
-      if (settled) return;
-      progress({ detail: 'Fusing volumes', progress: null });
-      // Only these temporary baked buffers are transferred. Source meshes remain owned by the editor.
-      const transfer = [
-        ...new Set(
-          meshes.flatMap((mesh) =>
-            Object.values(mesh)
-              .filter((array) => array !== undefined)
-              .map((array) => array.buffer),
-          ),
-        ),
-      ];
-      worker!.postMessage({ type: 'evaluate', meshes } satisfies MergeWorkerRequest, transfer);
-    };
+    const keys = parts.map((part) => geometryKey(part.geometry));
     try {
-      worker = new Worker(new URL('./merge.worker.ts', import.meta.url), { type: 'module' });
+      if (idleMerge) {
+        worker = idleMerge.worker;
+        idleMerge.claim();
+      } else worker = new Worker(new URL('./merge.worker.ts', import.meta.url), { type: 'module' });
       terminate = worker.terminate.bind(worker);
       // Preserve the old worker callback, including cancellation by calling terminate().
       worker.terminate = cancel;
@@ -167,22 +143,41 @@ function unionInWorker(
           return;
         }
         if (data.type === 'validated') {
-          void bake().catch(fail);
+          for (const i of data.indices as number[])
+            if (parts[i] && geometryKey(parts[i].geometry) === keys[i])
+              validated.set(parts[i].geometry, keys[i]);
           return;
         }
         if (data.error) return fail(new Error(data.error));
-        if (finish()) resolve(data.result);
+        try {
+          const geometry = restoreGeometry(data.geometry);
+          if (finish(data.retain === true)) resolve({ ...data.part, geometry });
+          else geometry.dispose();
+        } catch (error) {
+          fail(error);
+        }
       };
       worker.onerror = (event) => fail(new Error(event.message || 'The Boolean worker stopped.'));
       worker.onmessageerror = () =>
         fail(new Error('The Boolean worker returned an unreadable result.'));
       onWorker?.(worker);
       if (settled) return;
-      progress({ detail: 'Checking closed surfaces', progress: null });
-      // Structured cloning copies these source buffers; they are never transferred or detached.
+      progress({ detail: 'Preparing meshes in background', progress: null });
+      // One clone of source data. Validation, transforms, colors, merging, normals
+      // and bounds all run in the worker; no baked meshes return to the UI midway.
       worker.postMessage({
-        type: 'validate',
-        meshes: parts.map(validationMesh),
+        mode,
+        name,
+        parts: parts.map((part, i) => ({
+          name: part.name,
+          position: part.position,
+          quaternion: part.quaternion,
+          scale: part.scale,
+          color: part.color,
+          geometry: snapshotGeometry(part.geometry),
+          key: keys[i],
+          validated: validated.get(part.geometry) === keys[i],
+        })),
       } satisfies MergeWorkerRequest);
     } catch (error) {
       fail(error);
@@ -213,31 +208,25 @@ export async function mergeParts(
     updateTask(taskId, value);
     settings.onProgress?.(value);
   };
-  let geometry: BufferGeometry | undefined;
   try {
     if (mode === 'union') parts.forEach(assertUnionSize);
     await yieldToUi();
     if (controller.signal.aborted) throw cancelled();
-    if (mode === 'combine') {
-      progress({ detail: `Combining ${parts.length} meshes`, progress: null });
-      geometry = combineParts(parts);
-    } else {
-      const result = await unionInWorker(parts, controller.signal, progress, settings.onWorker);
-      if (controller.signal.aborted) throw cancelled();
-      progress({ detail: 'Preparing merged mesh', progress: null });
-      geometry = deserializeGeometry(result);
-    }
-    if (controller.signal.aborted) throw cancelled();
-    const part = mergedPart(
-      geometry,
+    const part = await mergeInWorker(
+      parts,
+      mode,
       name,
-      `${mode === 'union' ? 'Boolean union' : 'Combined'} · ${parts.length} parts`,
+      controller.signal,
+      progress,
+      settings.onWorker,
     );
-    geometry = undefined;
+    if (controller.signal.aborted) {
+      part.geometry.dispose();
+      throw cancelled();
+    }
     completeTask(taskId, 'Merged mesh ready to apply.');
     return part;
   } catch (error) {
-    geometry?.dispose();
     if (controller.signal.aborted || (error instanceof Error && error.name === 'AbortError'))
       cancelTask(taskId, 'Merge cancelled. Original parts retained.');
     else failTask(taskId, error instanceof Error ? error.message : String(error));

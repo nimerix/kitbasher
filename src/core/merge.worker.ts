@@ -1,49 +1,82 @@
 /// <reference lib="webworker" />
-import { BufferAttribute, BufferGeometry } from 'three';
-import { evaluateBoolean } from './boolean';
-import { assertClosed } from './merge';
-import type { MergeWorkerRequest } from './merge';
+import { BooleanProcessor } from './boolean';
+import { assertClosed, mergedPart } from './merge';
+import type { MergeWorkerRequest, MergeProgress } from './merge';
+import { bakedPartGeometry, binaryGeometry, combineParts, deserializeGeometry } from './geometry';
+import { restoreGeometry, snapshotGeometry, snapshotBuffers } from './geometry-transfer';
 import type { Part } from './types';
+import type { BufferGeometry } from 'three';
+
+const processor = new BooleanProcessor();
 
 self.onmessage = (event: MessageEvent<MergeWorkerRequest>) => {
+  const { mode, name } = event.data;
+  const owned: BufferGeometry[] = [];
+  const progress = (value: MergeProgress) =>
+    self.postMessage({ type: 'progress', progress: value });
   try {
-    if (event.data.type === 'validate') {
-      const { meshes } = event.data;
-      for (let i = 0; i < meshes.length; i++) {
-        const mesh = meshes[i];
-        self.postMessage({
-          type: 'progress',
-          progress: {
-            detail: `Checking closed surface · ${mesh.name} (${i + 1} of ${meshes.length})`,
-            progress: null,
-          },
+    const parts = event.data.parts.map((source) => {
+      const geometry = restoreGeometry(source.geometry);
+      owned.push(geometry);
+      return { ...source, geometry } as unknown as Part;
+    });
+    let geometry: BufferGeometry;
+    if (mode === 'combine') {
+      progress({ detail: `Combining ${parts.length} meshes`, progress: null });
+      geometry = combineParts(parts);
+    } else {
+      const checked = new Set<string>();
+      for (let i = 0; i < parts.length; i++) {
+        progress({
+          detail: `Checking closed surface · ${parts[i].name} (${i + 1} of ${parts.length})`,
+          progress: null,
         });
-        const geometry = new BufferGeometry();
-        geometry.setAttribute('position', new BufferAttribute(mesh.positions, 3));
-        if (mesh.indices) geometry.setIndex(new BufferAttribute(mesh.indices, 1));
-        try {
-          assertClosed({ name: mesh.name, geometry } as Part);
-        } finally {
-          geometry.dispose();
-        }
+        const source = event.data.parts[i];
+        if (!source.validated && !checked.has(source.key)) assertClosed(parts[i]);
+        checked.add(source.key);
       }
-      self.postMessage({ type: 'validated' });
-      return;
-    }
-    const result = evaluateBoolean(event.data.meshes, 'union', (completed, total) => {
-      self.postMessage({
-        type: 'progress',
-        progress: {
+      self.postMessage({ type: 'validated', indices: parts.map((_, i) => i) });
+      const meshes = parts.map((part, i) => ({
+        key: JSON.stringify([
+          event.data.parts[i].key,
+          part.position,
+          part.quaternion,
+          part.scale,
+          part.color,
+        ]),
+        create: () => {
+          progress({
+            detail: `Preparing transforms and colors · ${i + 1} of ${parts.length} parts`,
+            progress: null,
+          });
+          return bakedPartGeometry(part, true);
+        },
+      }));
+      const result = processor.evaluate(meshes, 'union', (completed, total) => {
+        progress({
           detail: `Fusing volumes · ${completed} of ${total} joins complete`,
           progress: completed / total,
-        },
+        });
       });
-    });
-    const transfer = Object.values(result)
-      .filter((array) => array !== undefined)
-      .map((array) => array.buffer);
-    self.postMessage({ result }, { transfer });
+      owned.push(result);
+      geometry = deserializeGeometry(binaryGeometry(result), false);
+    }
+    owned.push(geometry);
+    progress({ detail: 'Preparing merged mesh', progress: null });
+    const { geometry: result, ...part } = mergedPart(
+      geometry,
+      name,
+      `${mode === 'union' ? 'Boolean union' : 'Combined'} · ${parts.length} parts`,
+    );
+    result.computeBoundingSphere();
+    const snapshot = snapshotGeometry(result);
+    self.postMessage(
+      { part, geometry: snapshot, retain: mode === 'union' && processor.retainedBytes > 0 },
+      { transfer: snapshotBuffers(snapshot) },
+    );
   } catch (error) {
     self.postMessage({ error: (error as Error).message });
+  } finally {
+    owned.forEach((geometry) => geometry.dispose());
   }
 };

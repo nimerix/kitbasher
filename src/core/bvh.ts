@@ -5,6 +5,8 @@ import { triangleCount } from './geometry';
 import { cancelTask, completeTask, failTask, startTask, updateTask } from './activity';
 import { useEditor } from './store';
 import { spatialIndexOptions as bvhOptions, workerIndexTriangles } from './spatial-index';
+import { backgroundWork, meshWorkBytes } from './work-queue';
+import { geometryKey } from './geometry-transfer';
 
 const indexedTriangles = 30000;
 
@@ -15,6 +17,7 @@ export interface BvhRequest {
 }
 
 function buildInWorker(geometry: BufferGeometry, signal: AbortSignal, taskId: string) {
+  const key = geometryKey(geometry);
   return new Promise<void>((resolve, reject) => {
     if (signal.aborted) return resolve();
     let worker: Worker | undefined;
@@ -40,6 +43,8 @@ function buildInWorker(geometry: BufferGeometry, signal: AbortSignal, taskId: st
         }
         if (data.error) return finish(data.error);
         try {
+          if (geometryKey(geometry) !== key)
+            throw new Error('The mesh changed while preparing its surface index.');
           geometry.boundsTree = MeshBVH.deserialize(data.bvh, geometry, { setIndex: false });
           finish();
         } catch (error) {
@@ -74,7 +79,31 @@ function buildInWorker(geometry: BufferGeometry, signal: AbortSignal, taskId: st
 }
 
 const building = new WeakSet<BufferGeometry>();
-let queue: Promise<void> = Promise.resolve();
+
+async function buildIndex(geometry: BufferGeometry, signal: AbortSignal, taskId: string) {
+  if (
+    globalThis.crossOriginIsolated &&
+    typeof SharedArrayBuffer !== 'undefined' &&
+    triangleCount(geometry) >= 500_000 &&
+    navigator.hardwareConcurrency >= 4
+  ) {
+    try {
+      const { buildParallelIndex } = await import('./parallel-bvh');
+      await buildParallelIndex(geometry, signal, (progress) =>
+        updateTask(taskId, {
+          status: 'running',
+          detail: 'Building surface index across CPU cores',
+          progress,
+        }),
+      );
+      return;
+    } catch {
+      if (signal.aborted) return;
+      // Shared-memory builds can fail under a browser's resource limits.
+    }
+  }
+  await buildInWorker(geometry, signal, taskId);
+}
 
 export function prepareForPicking(geometry: BufferGeometry) {
   const triangles = triangleCount(geometry);
@@ -104,23 +133,31 @@ export function prepareForPicking(geometry: BufferGeometry) {
   const count = (change: number) =>
     useEditor.setState((state) => ({ indexingMeshes: state.indexingMeshes + change }));
   count(1);
-  // One at a time, since each build briefly holds another copy of its mesh.
-  queue = queue.then(async () => {
-    try {
-      await buildInWorker(geometry, controller.signal, taskId);
-      if (!controller.signal.aborted)
-        completeTask(taskId, 'Surface index ready for picking and fitting.');
-    } catch (error) {
-      failTask(
-        taskId,
-        `${error instanceof Error ? error.message : String(error)} Select this mesh in the parts list.`,
-      );
-    } finally {
+  void backgroundWork
+    .run(
+      meshWorkBytes(geometry),
+      async () => {
+        try {
+          await buildIndex(geometry, controller.signal, taskId);
+          if (!controller.signal.aborted)
+            completeTask(taskId, 'Surface index ready for picking and fitting.');
+        } catch (error) {
+          failTask(
+            taskId,
+            `${error instanceof Error ? error.message : String(error)} Select this mesh in the parts list.`,
+          );
+        }
+      },
+      controller.signal,
+    )
+    .catch((error) => {
+      if (!controller.signal.aborted) failTask(taskId, String(error));
+    })
+    .finally(() => {
       geometry.removeEventListener('dispose', dispose);
       building.delete(geometry);
       count(-1);
-    }
-  });
+    });
 }
 
 /** Testing every triangle of a dense mesh would freeze each pointer move until its index is built. */

@@ -10,7 +10,8 @@ import { sharedDocument } from '../../../mcp/document';
 import { LiveView } from '../../../mcp/live';
 import { Session } from '../../../mcp/session';
 import { createServer } from '../../../mcp/tools';
-import { appendGeometry } from '../../../src/core/scene-file';
+import { appendGeometry, readGeometry } from '../../../src/core/scene-file';
+import { releaseComputeWorkers } from '../../../mcp/compute';
 
 interface SharedPart {
   id: string;
@@ -60,9 +61,43 @@ beforeEach(async () => {
   stream = listen(`${base}live/events`);
 });
 afterEach(async () => {
+  releaseComputeWorkers();
   stream.close();
   live.stop();
   await client.close();
+});
+
+it('processes a local mesh preview without changing the shared scene', async () => {
+  const before = sharedDocument.version;
+  const parts: BlobPart[] = [];
+  const { layout } = appendGeometry(new BoxGeometry(10, 8, 6), parts, 0);
+  const response = await fetch(`${base}live/process`, {
+    method: 'POST',
+    body: new Blob(parts),
+    headers: {
+      'X-Kitbasher-Layout': JSON.stringify(layout),
+      'X-Kitbasher-Options': JSON.stringify({ mode: 'remesh', resolution: 24 }),
+    },
+  });
+  expect(response.status).toBe(200);
+  expect(['native', 'wasm']).toContain(response.headers.get('X-Kitbasher-Backend'));
+  const geometry = await readGeometry(
+    await response.blob(),
+    JSON.parse(response.headers.get('X-Kitbasher-Layout')!),
+  );
+  expect(geometry.attributes.position.count).toBeGreaterThan(36);
+  expect(sharedDocument.version).toBe(before);
+  geometry.dispose();
+  const invalid = await fetch(`${base}live/process`, {
+    method: 'POST',
+    body: new Blob(parts),
+    headers: {
+      'X-Kitbasher-Layout': JSON.stringify(layout),
+      'X-Kitbasher-Options': JSON.stringify({ mode: 'unknown', resolution: 24 }),
+    },
+  });
+  expect(invalid.ok).toBe(false);
+  expect(sharedDocument.version).toBe(before);
 });
 
 /** Calls a tool, returning its JSON and any note about changes made in the live view. */

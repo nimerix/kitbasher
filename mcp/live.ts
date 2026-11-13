@@ -18,6 +18,11 @@ import { sharedScene } from '../src/core/sync';
 import type { GeometryLayout } from '../src/core/types';
 import { EditConflict, agent, sharedDocument } from './document';
 import type { SharedDocument } from './document';
+import { runCompute } from './compute';
+import { nativeMeshPolicy } from './native-mesh';
+import { binaryGeometry } from '../src/core/geometry';
+import { restoreGeometry } from '../src/core/geometry-transfer';
+import type { MeshProcessOptions } from '../src/core/mesh-processing';
 
 const contentTypes: Record<string, string> = {
   '.html': 'text/html; charset=utf-8',
@@ -157,6 +162,7 @@ export class LiveView {
   private url: string | null = null;
   private readonly token = randomBytes(16).toString('hex');
   private readonly clients = new Set<ServerResponse>();
+  private readonly computing = new Set<AbortController>();
   /** The tabs on this computer, which are shown how another device joins. */
   private readonly local = new Set<ServerResponse>();
   private code = '';
@@ -246,6 +252,7 @@ export class LiveView {
   }
 
   stop() {
+    for (const controller of this.computing) controller.abort();
     this.unsubscribe?.();
     if (this.pending) clearTimeout(this.pending);
     if (this.keepAlive) clearInterval(this.keepAlive);
@@ -348,6 +355,7 @@ export class LiveView {
     }
     const path = decodeURIComponent(url.pathname.slice(prefix.length));
     const post = request.method === 'POST';
+    if (post && path === 'live/process') return this.processMesh(request, response);
     if (post && path === 'live/edit') return this.edit(request, response);
     if (post && (path === 'live/undo' || path === 'live/redo'))
       return this.history(request, response, path === 'live/undo' ? 'undo' : 'redo');
@@ -358,6 +366,7 @@ export class LiveView {
       return;
     }
     if (path === 'live/events') return this.events(response, network);
+    if (path === 'live/compute') return this.reply(response, 200, nativeMeshPolicy());
     if (path.startsWith('live/geometry/'))
       return this.geometry(path.slice('live/geometry/'.length), response);
     this.file(path || 'index.html', response);
@@ -473,6 +482,55 @@ export class LiveView {
     response.writeHead(204).end();
   }
 
+  /** Compute a preview only. Applying it remains an explicit, undoable editor action. */
+  private async processMesh(request: IncomingMessage, response: ServerResponse) {
+    const controller = new AbortController();
+    this.computing.add(controller);
+    const cancel = () => controller.abort();
+    response.once('close', cancel);
+    let geometry: BufferGeometry | undefined;
+    let resultGeometry: BufferGeometry | undefined;
+    try {
+      let layout: GeometryLayout;
+      let options: MeshProcessOptions;
+      try {
+        layout = JSON.parse(String(request.headers['x-kitbasher-layout']));
+        options = JSON.parse(String(request.headers['x-kitbasher-options']));
+      } catch {
+        throw new RequestError(400, 'The mesh or processing options are missing.');
+      }
+      const data = new Blob((await readBody(request, 256 * 1024 * 1024)) as BlobPart[]);
+      try {
+        validateLayout(layout, 0, data.size);
+        geometry = await readGeometry(data, layout);
+      } catch (error) {
+        throw new RequestError(400, (error as Error).message);
+      }
+      const result = await runCompute(
+        { kind: 'process', mesh: binaryGeometry(geometry), options },
+        controller.signal,
+      );
+      if (controller.signal.aborted) return;
+      resultGeometry = restoreGeometry(result.geometry);
+      const body = bodyOf(resultGeometry);
+      const blob = new Blob(body.parts);
+      response.writeHead(200, {
+        'Content-Type': 'application/octet-stream',
+        'Content-Length': blob.size,
+        'Cache-Control': 'no-store',
+        'X-Kitbasher-Layout': JSON.stringify(body.layout),
+        'X-Kitbasher-Error': JSON.stringify(result.error),
+        'X-Kitbasher-Backend': result.backend,
+      });
+      response.end(Buffer.from(await blob.arrayBuffer()));
+    } finally {
+      this.computing.delete(controller);
+      response.removeListener('close', cancel);
+      geometry?.dispose();
+      resultGeometry?.dispose();
+    }
+  }
+
   private events(response: ServerResponse, network: boolean) {
     response.writeHead(200, {
       'Content-Type': 'text/event-stream',
@@ -525,6 +583,12 @@ export class LiveView {
     }
     response.writeHead(200, {
       'Content-Type': contentTypes[extname(file).toLowerCase()] ?? 'application/octet-stream',
+      ...(process.env.KITBASHER_CROSS_ORIGIN_ISOLATED === '1'
+        ? {
+            'Cross-Origin-Opener-Policy': 'same-origin',
+            'Cross-Origin-Embedder-Policy': 'require-corp',
+          }
+        : {}),
     });
     createReadStream(file).pipe(response);
   }

@@ -4,6 +4,7 @@ import { triangleCount } from './geometry';
 import { processMeshInWorker } from './mesh-job';
 import type { Part } from './types';
 import { cancelTask, completeTask, failTask, startTask } from './activity';
+import { backgroundWork, meshWorkBytes } from './work-queue';
 
 export type DisplayDetail = 'auto' | 'full' | 'fast';
 const key = 'kitbasher.display-detail';
@@ -55,9 +56,8 @@ export function displayTarget(parts: Part[], headset: boolean) {
   return proxyLevels.find((target) => target <= allowance) ?? proxyLevels[proxyLevels.length - 1];
 }
 
-/** One worker at a time; duplicates and undo share the proxy owned by their source geometry. */
+/** Bounded background workers; duplicates and undo share the source's proxy. */
 const proxies = new WeakMap<BufferGeometry, Map<number, Promise<BufferGeometry | null>>>();
-let queue: Promise<unknown> = Promise.resolve();
 export function displayProxy(
   source: BufferGeometry,
   target = proxyTarget,
@@ -89,45 +89,57 @@ export function displayProxy(
     proxies.delete(source);
   };
   source.addEventListener('dispose', dispose);
-  const task = queue.then(async () => {
-    if (controller.signal.aborted) return null;
-    try {
-      const result = await processMeshInWorker(
-        source,
-        {
-          mode: 'decimate',
-          ratio: target / triangleCount(source),
-          error: 0.002,
-          lockBorder: true,
-        },
-        controller.signal,
-        { taskId },
-      );
-      if (
-        controller.signal.aborted ||
-        triangleCount(result.geometry) >= triangleCount(source) * 0.9
-      ) {
-        result.geometry.dispose();
-        if (!controller.signal.aborted)
-          completeTask(taskId, 'Original mesh retained: reduction was below the useful threshold.');
-        return null;
-      }
-      proxy = result.geometry;
-      completeTask(
-        taskId,
-        `Viewport mesh ready · ${triangleCount(proxy).toLocaleString()} triangles`,
-      );
-      return proxy;
-    } catch (error) {
-      if (controller.signal.aborted) cancelTask(taskId, 'Viewport optimization cancelled.');
-      else
-        failTask(
-          taskId,
-          `${error instanceof Error ? error.message : String(error)} The original mesh remains available.`,
-        );
-      return null;
-    } // A failed display optimization always leaves the original drawable.
-  });
+  const task = backgroundWork
+    .run(
+      meshWorkBytes(source),
+      async () => {
+        if (controller.signal.aborted) return null;
+        try {
+          const result = await processMeshInWorker(
+            source,
+            {
+              mode: 'decimate',
+              ratio: target / triangleCount(source),
+              error: 0.002,
+              lockBorder: true,
+            },
+            controller.signal,
+            { taskId },
+          );
+          if (
+            controller.signal.aborted ||
+            triangleCount(result.geometry) >= triangleCount(source) * 0.9
+          ) {
+            result.geometry.dispose();
+            if (!controller.signal.aborted)
+              completeTask(
+                taskId,
+                'Original mesh retained: reduction was below the useful threshold.',
+              );
+            return null;
+          }
+          proxy = result.geometry;
+          completeTask(
+            taskId,
+            `Viewport mesh ready · ${triangleCount(proxy).toLocaleString()} triangles`,
+          );
+          return proxy;
+        } catch (error) {
+          if (controller.signal.aborted) cancelTask(taskId, 'Viewport optimization cancelled.');
+          else
+            failTask(
+              taskId,
+              `${error instanceof Error ? error.message : String(error)} The original mesh remains available.`,
+            );
+          return null;
+        } // A failed display optimization always leaves the original drawable.
+      },
+      controller.signal,
+    )
+    .catch((error) => {
+      if (controller.signal.aborted) return null;
+      throw error;
+    });
   levels.set(target, task);
   const releaseCancelled = () => {
     if (levels.get(target) === task) levels.delete(target);
@@ -140,7 +152,6 @@ export function displayProxy(
     if (!controller.signal.aborted)
       controller.signal.removeEventListener('abort', releaseCancelled);
   });
-  queue = task.then(() => undefined);
   return task;
 }
 

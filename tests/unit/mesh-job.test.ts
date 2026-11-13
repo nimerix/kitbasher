@@ -1,11 +1,15 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { BoxGeometry } from 'three';
-import { processMeshInWorker } from '../../src/core/mesh-job';
-import { binaryGeometry } from '../../src/core/geometry';
+import { processMeshInWorker, releaseIdleMeshWorker } from '../../src/core/mesh-job';
+import { snapshotGeometry } from '../../src/core/geometry-transfer';
 import { requestTaskCancellation, useActivity } from '../../src/core/activity';
 
-beforeEach(() => useActivity.setState({ tasks: [], notifications: [] }));
+beforeEach(() => {
+  releaseIdleMeshWorker();
+  useActivity.setState({ tasks: [], notifications: [] });
+});
 afterEach(() => {
+  releaseIdleMeshWorker();
   vi.unstubAllGlobals();
   vi.useRealTimers();
 });
@@ -30,6 +34,50 @@ describe('mesh workers', () => {
     return worker;
   }
   const options = { mode: 'decimate' as const, ratio: 0.5, error: 0.01, lockBorder: true };
+
+  it('reuses prepared input, invalidates changed attributes, and evicts on disposal', async () => {
+    const worker = mockWorker(),
+      source = new BoxGeometry();
+    const complete = () =>
+      worker.onmessage!({ data: { geometry: snapshotGeometry(new BoxGeometry()), error: 0 } });
+    const first = processMeshInWorker(source, options);
+    complete();
+    (await first).geometry.dispose();
+    const second = processMeshInWorker(source, { ...options, ratio: 0.25 });
+    expect(worker.postMessage.mock.calls[1][0].mesh).toBeUndefined();
+    complete();
+    (await second).geometry.dispose();
+    source.attributes.position.needsUpdate = true;
+    const third = processMeshInWorker(source, options);
+    expect(worker.postMessage.mock.calls[2][0].mesh.positions).toBe(
+      source.attributes.position.array,
+    );
+    expect(worker.postMessage.mock.calls[2][0].key).not.toBe(
+      worker.postMessage.mock.calls[0][0].key,
+    );
+    complete();
+    (await third).geometry.dispose();
+    expect(worker.terminate).not.toHaveBeenCalled();
+    source.dispose();
+    expect(worker.terminate).toHaveBeenCalledOnce();
+  });
+
+  it('expires idle workers but never expires a claimed running job', async () => {
+    vi.useFakeTimers();
+    const worker = mockWorker(),
+      source = new BoxGeometry();
+    const first = processMeshInWorker(source, options);
+    worker.onmessage!({ data: { geometry: snapshotGeometry(new BoxGeometry()), error: 0 } });
+    (await first).geometry.dispose();
+    await vi.advanceTimersByTimeAsync(29_000);
+    const second = processMeshInWorker(source, options);
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(worker.terminate).not.toHaveBeenCalled();
+    worker.onmessage!({ data: { geometry: snapshotGeometry(new BoxGeometry()), error: 0 } });
+    (await second).geometry.dispose();
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(worker.terminate).toHaveBeenCalledOnce();
+  });
 
   it('cancels running work, terminates the worker, and never transfers source buffers', async () => {
     const worker = mockWorker(),
@@ -63,6 +111,17 @@ describe('mesh workers', () => {
     expect(worker.postMessage).not.toHaveBeenCalled();
   });
 
+  it('does not create a worker when the task callback cancels immediately', async () => {
+    const worker = mockWorker();
+    await expect(
+      processMeshInWorker(new BoxGeometry(), options, undefined, {
+        onTask: (id) => requestTaskCancellation(id),
+      }),
+    ).rejects.toMatchObject({ name: 'AbortError' });
+    expect(worker.postMessage).not.toHaveBeenCalled();
+    expect(worker.terminate).not.toHaveBeenCalled();
+  });
+
   it('keeps a long-running job active, accepts progress without settling, and completes once', async () => {
     vi.useFakeTimers();
     const worker = mockWorker();
@@ -77,12 +136,14 @@ describe('mesh workers', () => {
       detail: 'Reducing triangles',
       progress: null,
     });
-    worker.onmessage!({ data: { mesh: binaryGeometry(new BoxGeometry()), error: 0 } });
+    worker.onmessage!({ data: { geometry: snapshotGeometry(new BoxGeometry()), error: 0 } });
     const result = await task;
     expect(useActivity.getState().tasks[0].status).toBe('completed');
     expect(useActivity.getState().notifications).toHaveLength(1);
     worker.onerror!({ message: 'Late failure' });
     expect(useActivity.getState().tasks[0].status).toBe('completed');
+    expect(worker.terminate).not.toHaveBeenCalled();
+    releaseIdleMeshWorker();
     expect(worker.terminate).toHaveBeenCalledOnce();
     result.geometry.dispose();
   });
@@ -93,7 +154,7 @@ describe('mesh workers', () => {
     const rejected = expect(task).rejects.toMatchObject({ name: 'AbortError' });
     requestTaskCancellation(useActivity.getState().tasks[0].id);
     await rejected;
-    worker.onmessage!({ data: { mesh: binaryGeometry(new BoxGeometry()), error: 0 } });
+    worker.onmessage!({ data: { geometry: snapshotGeometry(new BoxGeometry()), error: 0 } });
     expect(useActivity.getState().tasks[0].status).toBe('cancelled');
     expect(worker.terminate).toHaveBeenCalledOnce();
     expect(useActivity.getState().notifications).toHaveLength(0);

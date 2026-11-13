@@ -4,7 +4,7 @@ import { unzipSync, strFromU8 } from 'fflate';
 import { exportBlenderPackage, export3mf, exportGlb, exportStl } from '../../src/core/files';
 import { bakedPartGeometry, combineParts } from '../../src/core/geometry';
 import { lightingPresets, presetLighting } from '../../src/core/lighting';
-import { mergeParts } from '../../src/core/merge';
+import { mergedPart } from '../../src/core/merge';
 import { sceneLighting, useEditor } from '../../src/core/store';
 import type { Part, SceneDocument, SceneLighting } from '../../src/core/types';
 
@@ -381,8 +381,10 @@ describe('exports ignore editor colors', () => {
       );
     const colors = combined.getAttribute('color');
     // The red part comes first: its editor color is green, its vertices stay red.
-    for (let i = 0; i < 36; i++)
+    for (let faceVertex = 0; faceVertex < 36; faceVertex++) {
+      const i = combined.index!.getX(faceVertex);
       expect([colors.getX(i), colors.getY(i), colors.getZ(i)]).toEqual([1, 0, 0]);
+    }
   });
 
   it('writes the same STL and 3MF with or without editor colors', () => {
@@ -431,7 +433,7 @@ describe('exports ignore editor colors', () => {
 
   it('merges into a part that keeps material colors and has no editor color', async () => {
     const parts = exportParts();
-    const merged = await mergeParts(parts, 'combine', 'Merged');
+    const merged = mergedPart(combineParts(parts), 'Merged', 'Combined');
     expect('displayColor' in merged).toBe(false);
     expect(merged.color).toBe('#ffffff');
     const plain = combineParts(stripped(parts));

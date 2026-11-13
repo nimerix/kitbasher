@@ -7,6 +7,12 @@ import { useEditor } from '../../src/core/store';
 import type { Part } from '../../src/core/types';
 import { requestTaskCancellation, useActivity } from '../../src/core/activity';
 
+// Keep queued-job assertions deterministic; the WorkQueue suite separately covers parallel admission.
+vi.mock('../../src/core/work-queue', async (importOriginal) => {
+  const module = await importOriginal<typeof import('../../src/core/work-queue')>();
+  return { ...module, backgroundWork: new module.WorkQueue(1) };
+});
+
 afterEach(() => vi.unstubAllGlobals());
 
 function workerMock() {

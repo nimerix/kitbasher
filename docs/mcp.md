@@ -19,7 +19,10 @@ npm install
 npm run build
 ```
 
-This produces one self-contained file, `dist-mcp/kitbasher-mcp.js`. Use its absolute path below.
+This produces `dist-mcp/kitbasher-mcp.js` and its background compute bundle,
+`dist-mcp/kitbasher-compute.js`. Keep both files together when copying an installation.
+Use the server's absolute path below. Optional native mesh kernels are described in
+[mesh acceleration](acceleration-opportunities.md).
 
 **Claude Code**
 

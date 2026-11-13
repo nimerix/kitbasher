@@ -166,7 +166,10 @@ function allFinite(values: ArrayLike<number>) {
 const floatAttribute = (values: ArrayLike<number>) =>
   new BufferAttribute(values instanceof Float32Array ? values : new Float32Array(values), 3);
 
-export function deserializeGeometry(data: SerializedGeometry | BinaryGeometry): BufferGeometry {
+export function deserializeGeometry(
+  data: SerializedGeometry | BinaryGeometry,
+  prepare = true,
+): BufferGeometry {
   const positions = data?.positions as ArrayLike<number> | undefined;
   if (
     !isNumberList(positions) ||
@@ -206,8 +209,10 @@ export function deserializeGeometry(data: SerializedGeometry | BinaryGeometry): 
     geometry.setAttribute(name, floatAttribute(values));
   }
   // Scenes saved before normals were stored fall back to computed shading.
-  if (!data.normals) geometry.computeVertexNormals();
-  geometry.computeBoundingSphere();
+  if (prepare) {
+    if (!data.normals) geometry.computeVertexNormals();
+    geometry.computeBoundingSphere();
+  }
   return geometry;
 }
 
@@ -303,20 +308,45 @@ export function alignmentTransform(source: Part, target: Part, operation: Assemb
 
 export const isMirrored = (part: Part) => part.scale[0] * part.scale[1] * part.scale[2] < 0;
 
-export function bakedPartGeometry(part: Part) {
+function canKeepIndex(geometry: BufferGeometry) {
+  if (!geometry.index || !geometry.getAttribute('normal')) return false;
+  // Expanding used to discard unreferenced vertices. Keeping outliers would change
+  // the merged bounds/pivot, and generating indexed normals would smooth flat faces.
+  const used = new Uint8Array(geometry.getAttribute('position').count);
+  let remaining = used.length;
+  for (let i = 0; i < geometry.index.count && remaining; i++) {
+    const vertex = geometry.index.getX(i);
+    if (!used[vertex]) {
+      used[vertex] = 1;
+      remaining--;
+    }
+  }
+  return remaining === 0;
+}
+
+export function bakedPartGeometry(part: Part, preserveIndex = false) {
+  const indexed = preserveIndex && canKeepIndex(part.geometry);
   const geometry = (
-    part.geometry.index ? part.geometry.toNonIndexed() : part.geometry.clone()
+    part.geometry.index && !indexed ? part.geometry.toNonIndexed() : part.geometry.clone()
   ).applyMatrix4(partMatrix(part));
   if (isMirrored(part)) {
     // A baked reflection needs its triangle winding reversed as well.
-    for (const attribute of Object.values(geometry.attributes)) {
-      for (let i = 0; i < attribute.count; i += 3)
-        for (let component = 0; component < attribute.itemSize; component++) {
-          const a = attribute.getComponent(i + 1, component);
-          attribute.setComponent(i + 1, component, attribute.getComponent(i + 2, component));
-          attribute.setComponent(i + 2, component, a);
-        }
-    }
+    if (geometry.index) {
+      const index = geometry.index;
+      for (let i = 0; i < index.count; i += 3) {
+        const b = index.getX(i + 1);
+        index.setX(i + 1, index.getX(i + 2));
+        index.setX(i + 2, b);
+      }
+    } else
+      for (const attribute of Object.values(geometry.attributes)) {
+        for (let i = 0; i < attribute.count; i += 3)
+          for (let component = 0; component < attribute.itemSize; component++) {
+            const a = attribute.getComponent(i + 1, component);
+            attribute.setComponent(i + 1, component, attribute.getComponent(i + 2, component));
+            attribute.setComponent(i + 2, component, a);
+          }
+      }
   }
   const tint = new Color(part.color),
     count = geometry.getAttribute('position').count,
@@ -336,11 +366,26 @@ export function bakedPartGeometry(part: Part) {
 }
 
 export function combineParts(parts: Part[]): BufferGeometry {
-  const geometries = parts.map(bakedPartGeometry);
-  const combined = mergeGeometries(geometries);
-  geometries.forEach((g) => g.dispose());
-  if (!combined) throw new Error('These mesh attributes could not be combined.');
-  return combined;
+  const geometries: BufferGeometry[] = [];
+  // Use a shared index format when mixing scans and indexed meshes. This preserves
+  // every triangle, including its order, without duplicating indexed vertex data.
+  try {
+    for (const part of parts) geometries.push(bakedPartGeometry(part, true));
+    const indexed = geometries.some((geometry) => !!geometry.index);
+    for (const geometry of geometries) {
+      if (indexed && !geometry.index) {
+        const count = geometry.getAttribute('position').count;
+        const indices = count > 65535 ? new Uint32Array(count) : new Uint16Array(count);
+        for (let i = 0; i < count; i++) indices[i] = i;
+        geometry.setIndex(new BufferAttribute(indices, 1));
+      }
+    }
+    const combined = mergeGeometries(geometries);
+    if (!combined) throw new Error('These mesh attributes could not be combined.');
+    return combined;
+  } finally {
+    geometries.forEach((geometry) => geometry.dispose());
+  }
 }
 
 export function rotationDegrees(part: Part): Vec3 {

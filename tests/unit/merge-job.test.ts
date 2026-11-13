@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { BoxGeometry } from 'three';
-import { binaryGeometry } from '../../src/core/geometry';
-import { mergeParts } from '../../src/core/merge';
+import { snapshotGeometry } from '../../src/core/geometry-transfer';
+import { mergeParts, releaseIdleMergeWorker } from '../../src/core/merge';
 import { requestTaskCancellation, useActivity } from '../../src/core/activity';
 import type { Part } from '../../src/core/types';
 
@@ -39,11 +39,48 @@ function mockWorker() {
 }
 beforeEach(() => useActivity.setState({ tasks: [], notifications: [] }));
 afterEach(() => {
+  releaseIdleMergeWorker();
   vi.unstubAllGlobals();
   vi.useRealTimers();
 });
 
 describe('Boolean background jobs', () => {
+  it('reuses a successful cached worker and releases it when its source is disposed', async () => {
+    vi.useFakeTimers();
+    const { worker, stop } = mockWorker(),
+      source = parts();
+    const complete = () =>
+      worker.onmessage!({
+        data: { part: source[0], geometry: snapshotGeometry(new BoxGeometry()), retain: true },
+      });
+    const first = mergeParts(source, 'union', 'First');
+    await vi.advanceTimersByTimeAsync(0);
+    complete();
+    (await first).geometry.dispose();
+    expect(stop).not.toHaveBeenCalled();
+    const second = mergeParts(source, 'union', 'Second');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(worker.postMessage).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(40_000);
+    expect(stop).not.toHaveBeenCalled();
+    complete();
+    (await second).geometry.dispose();
+    source[0].geometry.dispose();
+    expect(stop).toHaveBeenCalledOnce();
+  });
+
+  it('does not retain a source disposed during the merge', async () => {
+    const { worker, stop } = mockWorker(),
+      source = parts();
+    const pending = mergeParts(source, 'union', 'Test');
+    await vi.waitFor(() => expect(worker.postMessage).toHaveBeenCalledOnce());
+    source[0].geometry.dispose();
+    worker.onmessage!({
+      data: { part: source[0], geometry: snapshotGeometry(new BoxGeometry()), retain: true },
+    });
+    (await pending).geometry.dispose();
+    expect(stop).toHaveBeenCalledOnce();
+  });
   it('stays active beyond ninety seconds and reports stages before completing', async () => {
     vi.useFakeTimers();
     const { worker, stop } = mockWorker();
@@ -51,7 +88,7 @@ describe('Boolean background jobs', () => {
     const task = mergeParts(source, 'union', 'United');
     await vi.advanceTimersByTimeAsync(0);
     expect(worker.postMessage.mock.calls[0]).toHaveLength(1);
-    expect(worker.postMessage.mock.calls[0][0].meshes[0].positions).toBe(
+    expect(worker.postMessage.mock.calls[0][0].parts[0].geometry.attributes.position.array).toBe(
       source[0].geometry.attributes.position.array,
     );
     worker.onmessage!({
@@ -60,13 +97,16 @@ describe('Boolean background jobs', () => {
     await vi.advanceTimersByTimeAsync(100_000);
     expect(stop).not.toHaveBeenCalled();
     expect(useActivity.getState().tasks[0].status).toBe('running');
-    worker.onmessage!({ data: { type: 'validated' } });
+    worker.onmessage!({ data: { type: 'validated', indices: [0, 1] } });
     await vi.advanceTimersByTimeAsync(10);
-    const [request, transfer] = worker.postMessage.mock.calls[1];
-    expect(request.type).toBe('evaluate');
-    expect(transfer).not.toContain(source[0].geometry.attributes.position.array.buffer);
+    expect(worker.postMessage).toHaveBeenCalledOnce();
     expect(source[0].geometry.attributes.position.array.byteLength).toBeGreaterThan(0);
-    worker.onmessage!({ data: { result: binaryGeometry(new BoxGeometry()) } });
+    worker.onmessage!({
+      data: {
+        part: { ...source[0], name: 'United' },
+        geometry: snapshotGeometry(new BoxGeometry()),
+      },
+    });
     const result = await task;
     expect(useActivity.getState().tasks[0].status).toBe('completed');
     expect(stop).toHaveBeenCalledOnce();
@@ -95,7 +135,7 @@ describe('Boolean background jobs', () => {
       else if (method === 'activity') requestTaskCancellation(useActivity.getState().tasks[0].id);
       else worker.terminate();
       await rejection;
-      worker.onmessage!({ data: { result: binaryGeometry(new BoxGeometry()) } });
+      worker.onmessage!({ data: { geometry: snapshotGeometry(new BoxGeometry()) } });
       expect(stop).toHaveBeenCalledOnce();
       expect(useActivity.getState().tasks[0].status).toBe('cancelled');
       expect(useActivity.getState().notifications).toHaveLength(0);
