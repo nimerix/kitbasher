@@ -1,5 +1,8 @@
 # Mesh processing performance
 
+This records the first optimization pass in `62e7bc5`. See [mesh acceleration](acceleration-opportunities.md)
+for the implemented follow-up, current runtime backends, integrated measurements and setup.
+
 The browser merge pipeline now runs validation, transform/color baking, combination or Boolean evaluation, recentering, normals, and bounds in a worker. Returning a result attaches its buffers without recomputing the full mesh on the UI thread. Source buffers remain owned by the editor; cancellation terminates the active worker and stale scene results are rejected.
 
 Indexed geometry is preserved when it can reproduce the original triangle data. Inputs without normals or with unreferenced vertices retain the original expansion behavior so flat shading, bounds, and pivots remain unchanged. Numeric welding uses the existing 1e-5 quantization and first-use ordering; edge checks use sorted numeric keys. Successful validation is cached against geometry/attribute identity and version, including in MCP operations.
@@ -40,4 +43,7 @@ It writes `kitbasher-performance/mesh-local.json` in the system temporary direct
 
 Manifold 3.5.5 was benchmarked separately against the current Boolean engine on overlapping subdivided boxes and spheres. It was faster on the tested boxes and slower on the tested spheres when conversion and preparation were included. It also produced different triangulations and slightly different computed sphere volumes. The production dependency and Boolean engine remain unchanged; adopting it requires a separate dense-scan fidelity evaluation.
 
-WebGPU is not enabled by this change. The current WASM remesher has no WebGPU switch, and moving voxelization and surface extraction to GPU compute would require a separate implementation with its own geometry-equivalence checks. The measured preparation and threading improvements apply without a renderer migration. MCP Boolean evaluation itself still runs synchronously, though it benefits from faster validation, caching, and indexed preparation.
+The first pass did not enable WebGPU or move MCP Boolean evaluation off the server thread.
+The [follow-up](acceleration-opportunities.md) adds WebGPU proximity fields and Node compute
+workers. Solid remeshing still uses CPU kernels: moving voxelization and surface extraction to
+GPU compute requires a separate implementation with its own geometry-equivalence checks.

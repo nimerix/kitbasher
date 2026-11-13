@@ -1,5 +1,6 @@
 import { Box3, BufferAttribute, BufferGeometry, Matrix4, Triangle, Vector3 } from 'three';
-import { Brush, Evaluator, INTERSECTION } from 'three-bvh-csg';
+import { Evaluator, INTERSECTION } from 'three-bvh-csg';
+import { PreparedBrush as Brush } from './boolean-topology';
 import { ExtendedTriangle, MeshBVH } from 'three-mesh-bvh';
 import { assertClosed } from './merge';
 import type {

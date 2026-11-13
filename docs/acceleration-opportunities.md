@@ -1,109 +1,105 @@
-# Further mesh-processing acceleration
+# Mesh acceleration implementation
 
-Investigation of the working tree on `perf/mesh-processing-pipeline`, 2026-11-13. These are findings and isolated prototypes; this investigation does not enable a new runtime backend. The preceding worker/indexing optimizations remain in place.
+Implemented on `perf/mesh-processing-pipeline`, 2026-11-13. This replaces the earlier prototype-only investigation. Rendering continues to use WebGL; WebGPU compute is used independently for nearby-surface fields.
 
-## Recommended order
+## Runtime paths
 
-| Priority | Change                                                                       | Where it helps                                           | Evidence and limits                                                                                                                                                                       |
-| -------- | ---------------------------------------------------------------------------- | -------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 1        | Skip the remesher's separate output-counting pass                            | Every remesh                                             | Measured 30–38% lower WASM kernel time; exact output on four fixtures/settings. Requires a bounded output allocation and overflow handling.                                               |
-| 2        | Numeric/native edge-connectivity construction; cache prepared Boolean inputs | Union, subtraction, intersection                         | Edge connectivity accounts for roughly 47–64% of the measured Boolean time. Numeric JavaScript prototype improves cold operations; cached inputs improve repeat operations substantially. |
-| 3        | Parallel spatial-index construction and a memory-bounded job pool            | First selection, picking, fitting, independent mesh jobs | Installed library already provides `ParallelMeshBVHWorker`. Integration and browser measurements remain necessary.                                                                        |
-| 4        | WebGPU proximity and batched surface-distance queries                        | Nearby-surface isolation and inspection                  | Parallel GPU query code already exists in the installed BVH package. GPU performance has not been measured.                                                                               |
-| 5        | Native local helper and targeted WASM SIMD kernels                           | Large local jobs, reduction, remeshing, preparation      | Native ARM64 kernels were faster on this Mac. A helper adds packaging and IPC costs; SIMD needs a custom build and measurements.                                                          |
+| Work                                     | Implementation                                                                        | Activation and fallback                                                                                                            |
+| ---------------------------------------- | ------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
+| Remeshing                                | Vendored meshoptimizer binding skips the count-only voxelization pass                 | Default browser/server WASM path; one-million-triangle capacity, overflow rejected before reading output                           |
+| Boolean union, subtraction, intersection | Numeric vertex/edge connectivity with the original CSG quantization and pairing order | Default; unsupported half-edge settings use the upstream implementation                                                            |
+| Repeated Booleans                        | Prepared brushes cached by geometry revision, transform and tint                      | 96 MiB retained-data budget per processor; browser union and MCP Boolean workers expire after 30 idle seconds                      |
+| Picking indexes and display proxies      | Shared queue admits independent background jobs across CPU cores                      | At most two jobs on machines with at least four logical cores; one otherwise; 256 MiB estimated working budget                     |
+| Large picking indexes                    | Installed parallel BVH builder with indirect indexing                                 | At least 500,000 triangles, four logical cores and cross-origin isolation; normal worker fallback on failure                       |
+| MCP merge and interference inspection    | Bounded Node worker pool                                                              | At most two jobs, 512 MiB estimated working budget; cancellation terminates active computation; stale scene results are rejected   |
+| Nearby-surface isolation                 | Worker field construction; WebGPU nearest-triangle distance batches                   | Hardware adapters only, at least 32,768 grid nodes; CPU worker fallback for unsupported adapters, resource limits or device errors |
+| Local native reduction                   | Same meshoptimizer C++ source compiled for the host                                   | Optional build and explicit host opt-in; default policy uses it only for reductions of at least 50,000 triangles                   |
 
-## 1. Remesh once instead of counting and rebuilding
+Memory admission estimates include copies and scratch space; they are not hard process-memory limits. An oversized job runs alone. Very large completed jobs release their workers rather than retaining their heaps. Boolean cache eviction occurs after an operation, so active inputs remain valid throughout it.
 
-[Kitbasher's remesh call](/Users/michael/.t3/projects/kitbasher/src/core/mesh-processing.ts:107) reaches a [WASM wrapper](/Users/michael/.t3/projects/kitbasher/node_modules/meshoptimizer/meshopt_simplifier.js:317) that calls `meshopt_remesh` twice: first to count output triangles, then to emit them. The count-only path still constructs and fills a voxel grid. It skips vertex solving, so eliminating it does not halve all remeshing work.
+Source buffers remain owned by the scene. Worker transfers contain copied inputs or independently owned results. Native previews do not modify the shared scene; the normal review/apply/undo flow applies them.
 
-A scratch wrapper allocates space for Kitbasher's existing one-million-triangle output limit and calls the kernel once. Its output positions have identical SHA-256 hashes to the stock wrapper on both fixtures at resolutions 64 and 128.
+The GPU path affects the approximate nearby-surface display and its matching picking mask. It does not perform solid Booleans, reduction, remeshing, interference-volume decisions or print/export geometry changes. `surfaceDistances` also provides a reusable batched-query API with an exact-triangle CPU fallback. Inspection's adaptive surface-band algorithm still uses CPU queries.
 
-| Prepared input           | Resolution | Current WASM | Single-pass prototype |
-| ------------------------ | ---------: | -----------: | --------------------: |
-| Box, 580,800 triangles   |         64 |     27.16 ms |              18.93 ms |
-| Box, 580,800 triangles   |        128 |     41.49 ms |              26.72 ms |
-| Sphere, 97,792 triangles |         64 |      6.17 ms |               4.08 ms |
-| Sphere, 97,792 triangles |        128 |     26.90 ms |              16.70 ms |
+## Optional native helper
 
-This trades the preliminary count for a 36 MB output arena, even for small results. Production integration should preserve the current oversized-output error, verify that a truncated arena is never returned, and account for the WASM heap in the worker memory budget. A maintained binding or upstream change is preferable to modifying an installed npm file. The scratch prototype modified only a temporary copy.
+```sh
+npm run build:native
+KITBASHER_NATIVE_MESH=1 npm run headset
+```
 
-## 2. Boolean topology is a larger target than the triangle arithmetic
+The compiler is `c++` (`clang++` on Windows), or `$CXX`. The binary is written beside the server bundles in `dist-mcp/`. An MCP client can set the same environment variable when starting `kitbasher-mcp.js`. Build the application/server bundles with `npm run build` when installing or updating it.
 
-[evaluateBoolean](/Users/michael/.t3/projects/kitbasher/src/core/boolean.ts:20) creates fresh brushes for every call. [Brush preparation](/Users/michael/.t3/projects/kitbasher/node_modules/three-bvh-csg/src/core/Brush.js:47) builds a BVH and a half-edge map. [HalfEdgeMap](/Users/michael/.t3/projects/kitbasher/node_modules/three-bvh-csg/src/core/HalfEdgeMap.js:114) constructs position and directed-edge strings in a loop over every triangle.
+`KITBASHER_NATIVE_MESH=1` enables native reduction for sufficiently large inputs. Remeshing stays on single-pass WASM: the measured native kernel benefit was lost to process startup and transfers. `KITBASHER_NATIVE_MESH=all` enables both kernels, including small inputs, for testing or host-specific profiling. Native execution is disabled without explicit opt-in. A missing or failed helper falls back to WASM.
 
-On two meshes totaling approximately 392,000 triangles, half-edge construction alone took 262–282 ms per operation. The scratch numeric prototype interns quantized vertices and uses numeric directed-edge keys. It retains the installed library's 1e-6/int32 quantization and pairing order. Six adjacency comparisons and six union/subtraction/intersection comparisons matched exactly, including expanded positions, normals, and colors.
+Static deployments remain entirely browser-based. The authenticated local/shared host serves native previews only to its connected editor. No new remote service is involved.
 
-| Pair / operation   | Current fresh inputs | Numeric edge prototype | Reused prepared inputs, current engine |
-| ------------------ | -------------------: | ---------------------: | -------------------------------------: |
-| Boxes / union      |             438.9 ms |               291.4 ms |                                99.9 ms |
-| Boxes / subtract   |             408.0 ms |               262.5 ms |                                79.6 ms |
-| Spheres / union    |             599.9 ms |               540.0 ms |                               199.7 ms |
-| Spheres / subtract |             560.3 ms |               514.7 ms |                               170.9 ms |
+Native code is compiled with `-O3 -DNDEBUG -ffp-contract=off`, without fast-math. The source version and licenses are recorded in `native/README.md` and `src/vendor/meshoptimizer/README.md`. Native compilation and output equivalence were verified on this Mac's ARM64 CPU; Windows/x64/Linux builds need their own validation.
 
-The last column is a repeat-input best case, excluding the initial preparation. It is useful for retries, previews, undo/reapply, and reused cutters; a newly cut base still needs new topology. These alternatives are not additive speedups. Validation, transform/color baking, worker startup, and message transfers are outside these timings.
+## Optional parallel BVH construction
 
-A production implementation should cache by geometry revision and baked transform/color where applicable, evict by resident bytes, and retain cancellation. A native/WASM adjacency builder is a strong next target because it can avoid the remaining JavaScript maps and allocations. The numeric prototype currently falls back for attribute-sensitive and disjoint-edge modes; it is not a replacement for every library configuration. Kitbasher's separate closed-surface check uses a different tolerance, so its welded map cannot simply be substituted.
+For Vite development or the local/shared host:
 
-Additional low-risk candidates: use disjoint bounding boxes to bypass unnecessary solid operations, and avoid repeatedly validating/bounding already-trusted internal geometry. Group only provably disjoint unions; arbitrarily reordering intersecting unions can change triangulation and floating-point results.
+```sh
+KITBASHER_CROSS_ORIGIN_ISOLATED=1 npm run dev
+# or
+KITBASHER_CROSS_ORIGIN_ISOLATED=1 npm run headset
+```
 
-## 3. Use more CPU cores where jobs are independent
+This sends `Cross-Origin-Opener-Policy: same-origin` and `Cross-Origin-Embedder-Policy: require-corp`. Static hosts must configure equivalent headers themselves. These headers are opt-in because they change cross-window communication and cross-origin resource loading. Ordinary background-job parallelism and GPU compute do not require this opt-in.
 
-[Picking indexes](/Users/michael/.t3/projects/kitbasher/src/core/bvh.ts:76) and [display proxies](/Users/michael/.t3/projects/kitbasher/src/core/display-performance.ts:85) each use a serial queue. A 580,800-triangle BVH build took about 95 ms locally. The installed library's [parallel builder](https://gkjohnson.github.io/tools/docs/three-mesh-bvh/ParallelMeshBVHWorker/) distributes a large build across workers and provides a single-worker fallback.
+The adapter is pinned to `three-mesh-bvh` 0.9.18. It avoids that version's ignored rejecting `finally()` promise, owns worker cleanup, and abandons a stalled parallel builder after 30 seconds so the ordinary worker can proceed. Updating the dependency requires rerunning the parallel/cancellation tests. CSG is likewise pinned at 0.0.18 because the numeric adapter relies on its preparation contract.
 
-Start with a small, memory-bounded pool for independent jobs. A worker per core without memory accounting would multiply mesh copies and WASM heaps. Parallel BVH construction requires shared buffers and a cross-origin-isolated context. No COOP/COEP configuration was found in the repository's Vite/static/local-server paths; deployed headers were not checked. Browser shared-memory prerequisites are documented by [Emscripten](https://emscripten.org/docs/porting/pthreads.html).
+## Integrated measurements
 
-Preserve indirect indices and the original scene buffers. Inspection and CSG currently build their own indexes with different settings; sharing them requires a compatible cache, not blindly reusing whichever tree exists.
+Synthetic tests on this Mac (Apple M4 Max). Medians exclude one warmup. These are scoped measurements, not promises for arbitrary scans.
 
-[MCP Booleans](/Users/michael/.t3/projects/kitbasher/mcp/session.ts:782) and inspection still execute synchronously on the Node server thread. Moving them to `worker_threads` would keep the server responsive and permit bounded independent jobs. That improves responsiveness; it does not by itself shorten one Boolean calculation. Scene revision checks and atomic application of the result remain necessary.
+For a prepared 580,800-triangle box, five measured runs:
 
-## 4. Practical GPU entry points
+| Operation                | Path                                            |    Median |
+| ------------------------ | ----------------------------------------------- | --------: |
+| Remesh at resolution 128 | Stock two-pass binding, `MeshProcessor.process` |  34.22 ms |
+| Remesh at resolution 128 | Single-pass binding, same processing            |  23.00 ms |
+| Remesh at resolution 128 | Server worker, single-pass WASM                 |  37.23 ms |
+| Remesh at resolution 128 | Server worker, native helper                    |  40.13 ms |
+| Reduce to 25%            | Server worker, WASM                             | 119.12 ms |
+| Reduce to 25%            | Server worker, native helper                    | 108.68 ms |
 
-The strongest initial GPU target is [proximity-field construction](/Users/michael/.t3/projects/kitbasher/src/core/proximity.ts:51). It samples surfaces and sweeps the grid from eight directions. [Isolation](/Users/michael/.t3/projects/kitbasher/src/components/Isolation.tsx:120) currently performs this JavaScript work in UI-thread slices, then uploads the result as a WebGL 3D texture. A synthetic field of 1,331,000 nodes took a median 181 ms of CPU work; this is total work spread across yields, not a single 181 ms UI stall.
+The server timings include content hashing, worker messages, result normals/bounds, native process startup and IPC. They exclude browser HTTP transport. These results explain why native remeshing is not selected by the normal policy and why local native processing is opt-in.
 
-Move the existing algorithm to a worker first for responsiveness. For GPU acceleration, batch distance-to-surface queries or use a GPU distance-field algorithm. [BVHComputeData and WGSL queries](https://github.com/gkjohnson/three-mesh-bvh/blob/master/WEBGPU_API.md) are already available in the installed package, including closest-point and ray queries. The upstream API is marked unstable, so pin and isolate the adapter.
+Chrome's hardware Apple `metal-3` WebGPU adapter was used for these worker-field measurements, with three measured runs. They include worker startup, mesh copying, BVH preparation, GPU upload, compute, readback and byte encoding in the Vite development build:
 
-[Inspection surface bands](/Users/michael/.t3/projects/kitbasher/src/core/inspection.ts:90) are another batch-query candidate. Their adaptive clipping would need restructuring into batches before dispatching to GPU compute. Keep exact CPU checks for final geometric decisions until comparison tests establish suitable error bounds.
+| Proximity input              | CPU worker | WebGPU worker |
+| ---------------------------- | ---------: | ------------: |
+| Coarse box, 12 triangles     |   289.9 ms |      232.7 ms |
+| Dense box, 196,608 triangles |   314.7 ms |      311.5 ms |
 
-A compute backend can be introduced alongside the WebGL viewport. WebGPU results would need readback for the existing WebGL texture and CPU picking checks; that cost belongs in the benchmark. A renderer migration alone does not move these algorithms onto the GPU. [WebGPU compute](https://developer.chrome.com/docs/capabilities/web-apis/gpu-compute) supplies the execution mechanism, not a Boolean/remeshing implementation.
+The dense result is effectively even at this sample count. GPU compute is not assumed to improve every mesh. Physical-headset performance and other GPU/browser implementations have not been measured.
 
-GPU remeshing is a later project: voxelization, inside/outside classification, vertex solving, and surface extraction need an explicit implementation and topology validation. No GPU speedup is claimed by this investigation.
+Raw local diagnostics: `/tmp/kitbasher-integrated-acceleration.json` and `/tmp/kitbasher-gpu-acceleration.json`. Reproduce them with:
 
-## 5. Native and SIMD opportunities
+```sh
+KITBASHER_ACCELERATION_BENCH=1 npm test -- tests/unit/acceleration-benchmark.test.ts
+KITBASHER_ACCELERATION_BENCH=1 npm run test:e2e:acceleration -- --grep profiles
+```
 
-Reduction/remeshing already use C++ compiled to WASM. The exact installed 1.3.0 simplifier matches upstream tag `v1.3` byte-for-byte. Its [build configuration](https://github.com/zeux/meshoptimizer/blob/v1.3/Makefile) targets baseline WASM and disables auto-vectorization; the separately optimized SIMD decoder is not the simplifier.
+## Correctness and regression coverage
 
-A native ARM64 build of that source, compiled with `-O3 -DNDEBUG -ffp-contract=off`, gave these prepared-input kernel times:
+Completed locally: 875 unit tests, 20 targeted Chrome checks, TypeScript, production and
+native builds, formatting, and whitespace checks. Three unit timing diagnostics and one
+browser timing diagnostic are opt-in; their measured runs are described above.
 
-| Kernel                             | Stock WASM | Native C++ |
-| ---------------------------------- | ---------: | ---------: |
-| Box reduction, 580,800 triangles   |  110.69 ms |   84.89 ms |
-| Sphere reduction, 97,792 triangles |   12.28 ms |    9.54 ms |
-| Box remesh, resolution 128         |   41.49 ms |   25.82 ms |
-| Sphere remesh, resolution 128      |   26.90 ms |   16.63 ms |
+- Single-pass versus stock remeshing: exact output at resolutions 24, 64 and 128, plus overflow rejection and a subsequent successful run.
+- Numeric half-edge adjacency: stock equality for indexed/unindexed meshes, duplicate and degenerate edges, quantization boundaries and large coordinates.
+- Boolean union, subtraction and intersection: exact positions, indices, normals and colors against the stock evaluator on transformed/mirrored fixtures.
+- Native versus WASM: exact mesh buffers for plain/colored reductions and remeshing fixtures; invalid input, disabled backend and cancellation coverage.
+- WebGPU: 70,019 distance queries across multiple batches, transformed/mirrored meshes and a degenerate face. Maximum CPU/GPU difference on this hardware was approximately 0.0000015 mm. This does not establish bitwise equivalence for every GPU.
+- CPU field worker: exact equality with the existing field generator, source ownership and cancellation.
+- Parallel BVH: original position/index arrays unchanged, correct nearest-surface result; cancellation, rejection and stalled-worker fallback coverage.
+- MCP: background merge rejects concurrent scene changes; HTTP preview processing leaves the shared scene unchanged.
 
-All six native output buffers, including the two resolution-64 runs, matched the WASM output hashes. This establishes equivalence only for these fixtures. Native timings exclude process startup and IPC, and use the same two-call remesh procedure as the stock wrapper. Single-pass browser WASM already captures much of the measured native remesh advantage.
+Run `npm test`, `npm run build`, `npm run test:e2e:acceleration`, and the mesh-processing/isolation/MCP browser tests. The isolated-browser suite supplies the required response headers. Native tests skip when the optional helper is absent; build it first to include that coverage.
 
-An optional local helper could serve the existing Node/MCP/headset host, with a browser WASM fallback. Packaging, binary transfer, cancellation, and architecture-specific validation are real implementation costs. Native Manifold with TBB is another local-backend experiment; the [upstream README](https://github.com/elalish/manifold) distinguishes its native parallel backend from its serial WASM release and cautions against the threaded WASM build.
+## Further work
 
-For browser acceleration, prototype WASM SIMD on bulk preparation: transforms, normals, bounds, attribute packing, and numeric topology. [Emscripten supports SIMD](https://emscripten.org/docs/porting/simd.html), but merely adding the compiler flag does not guarantee a faster simplifier. Preserve floating-point semantics; there is no measured SIMD speedup yet. Keeping prepared inputs in a persistent WASM allocation could also avoid the wrappers copying them into the WASM heap on every attempt; the current worker cache retains JavaScript-side arrays.
-
-One additional hardware opportunity is [MCP image rendering](/Users/michael/.t3/projects/kitbasher/mcp/render.ts:9): it deliberately rasterizes triangles on the CPU. A GPU rendering backend could accelerate agent snapshots while retaining the CPU fallback. This affects snapshot generation, not the browser's already-accelerated viewport or mesh operations.
-
-## Engine replacement is not an automatic win
-
-The earlier Manifold experiment was mixed: it was faster for the tested boxes and slower for the tested spheres when conversion and preparation were included. It also changed triangulation and slightly changed sphere volumes. Keep it as a separately validated backend experiment rather than assuming any WASM engine will outperform the current JavaScript engine on every mesh.
-
-## Reproduction and limits
-
-Measured on this Mac's Apple M4 Max, 14 logical CPU cores, Node v25.2.0. Timing medians use five samples; kernel runs omit a warmup. No concurrent benchmark jobs were run. Inputs are synthetic boxes and spheres, not the user's dense scans. No browser, physical-headset, GPU, or multi-core speedup is established here.
-
-Scratch artifacts:
-
-- [Consolidated results](/tmp/kitbasher-acceleration-yBGCOm/results.json)
-- [WASM and single-pass benchmark](/tmp/kitbasher-acceleration-yBGCOm/kernels.mjs)
-- [Native benchmark](/tmp/kitbasher-acceleration-yBGCOm/native.cpp)
-- [Boolean preparation benchmark](/tmp/kitbasher-acceleration-yBGCOm/booleans.mjs)
-- [Numeric connectivity prototype](/tmp/kitbasher-acceleration-yBGCOm/numeric-halfedges.mjs)
-- [Numeric equivalence check](/tmp/kitbasher-acceleration-yBGCOm/verify-numeric.mjs)
-
-Full runtime tests were not rerun because this follow-up changes only investigation notes. Prototype correctness checks are scoped evidence, not approval to replace production algorithms without regression and real-scan validation.
+No SIMD speedup is claimed. The vendored simplifier's embedded WASM is unchanged; only its remesh binding is patched. A SIMD build needs separate profiling and equivalence checks. Native adjacency kernels, GPU solid operations, inspection surface-band batching and a GPU MCP snapshot renderer remain separate projects. The previous Manifold experiment changed triangulation and did not consistently beat the existing engine, so the Boolean engine is retained.

@@ -1,4 +1,5 @@
 import { execSync } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -6,6 +7,8 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { expect, test } from '@playwright/test';
 import type { Page } from '@playwright/test';
+import { BoxGeometry, Mesh } from 'three';
+import { STLExporter } from 'three/addons/exporters/STLExporter.js';
 
 // These drive the bundle a client would really start, over real stdio, with the real app.
 let folder: string;
@@ -41,15 +44,19 @@ const model = [
 ];
 
 test.beforeAll(() => {
-  execSync('npx vite build && npx vite build --config vite.mcp.config.ts', { stdio: 'pipe' });
+  execSync('npx vite build && npm run build:mcp', { stdio: 'pipe' });
 });
 
-test.beforeEach(async () => {
+test.beforeEach(async ({}, testInfo) => {
   folder = await mkdtemp(join(tmpdir(), 'kitbasher-e2e-mcp-'));
   transport = new StdioClientTransport({
     command: process.execPath,
     args: ['dist-mcp/kitbasher-mcp.js'],
     stderr: 'ignore',
+    ...(testInfo.title.startsWith('native mesh') ? { env: { KITBASHER_NATIVE_MESH: 'all' } } : {}),
+    ...(testInfo.title.startsWith('parallel indexes')
+      ? { env: { KITBASHER_CROSS_ORIGIN_ISOLATED: '1' } }
+      : {}),
   });
   client = new Client({ name: 'e2e', version: '1.0.0' });
   await client.connect(transport);
@@ -61,6 +68,71 @@ test.afterEach(async () => {
 });
 
 const part = (name: string) => `.part-select[title="${name}"]`;
+
+test('parallel indexes work in the built live host with unindexed scan data', async ({ page }) => {
+  const errors: string[] = [];
+  page.on('pageerror', (error) => errors.push(error.message));
+  const { url } = await call('open_live_view', { open_browser: false });
+  await page.goto(url);
+  await expect(page.locator('canvas')).toBeVisible();
+  expect(await page.evaluate(() => crossOriginIsolated)).toBe(true);
+  await page.evaluate(() => {
+    const NativeWorker = window.Worker;
+    (window as any).parallel = { started: 0, completed: 0 };
+    window.Worker = class extends NativeWorker {
+      constructor(url: string | URL, options?: WorkerOptions) {
+        super(url, options);
+        if (String(url).includes('parallelMeshBVH.worker')) {
+          (window as any).parallel.started++;
+          this.addEventListener('message', (event) => {
+            if (event.data.serialized) (window as any).parallel.completed++;
+          });
+        }
+      }
+    };
+  });
+  const geometry = new BoxGeometry(10, 8, 6, 210, 210, 210);
+  const data = new STLExporter().parse(new Mesh(geometry), { binary: true });
+  await page.getByRole('button', { name: 'Import parts', exact: true }).click();
+  await page.getByLabel('Choose model files').setInputFiles({
+    name: 'Dense box.stl',
+    mimeType: 'application/octet-stream',
+    buffer: Buffer.from(data.buffer),
+  });
+  await page.getByRole('dialog').getByRole('button', { name: 'Import parts', exact: true }).click();
+  await expect
+    .poll(() => page.evaluate(() => (window as any).parallel), { timeout: 20_000 })
+    .toEqual({ started: 1, completed: 1 });
+  expect(errors).toEqual([]);
+  geometry.dispose();
+});
+
+test('native mesh previews remain unapplied until confirmed in the live editor', async ({
+  page,
+}) => {
+  test.skip(
+    !existsSync(`dist-mcp/kitbasher-mesh-native${process.platform === 'win32' ? '.exe' : ''}`),
+    'Run build:native to test the optional helper.',
+  );
+  await call('add_parts', {
+    parts: [{ id: 'block', name: 'Native block', shapes: [{ type: 'box', size: [10, 8, 6] }] }],
+  });
+  const { url } = await call('open_live_view', { open_browser: false });
+  await page.goto(url);
+  await page.locator(part('Native block')).click();
+  await page.getByRole('button', { name: 'Decimate or remesh…' }).click();
+  await page.getByRole('radio', { name: 'Voxel remesh' }).click();
+  await page.getByLabel('Voxel resolution').fill('24');
+  const response = page.waitForResponse((response) => response.url().endsWith('/live/process'));
+  await page.getByRole('button', { name: 'Prepare mesh' }).click();
+  expect((await response).headers()['x-kitbasher-backend']).toBe('native');
+  await expect(page.getByRole('button', { name: 'Add processed copy' })).toBeEnabled();
+  expect((await call('get_scene')).parts).toHaveLength(1);
+  await page.getByRole('button', { name: 'Add processed copy' }).click();
+  await expect.poll(async () => (await call('get_scene')).parts.length).toBe(2);
+  await page.keyboard.press('ControlOrMeta+z');
+  await expect.poll(async () => (await call('get_scene')).parts.length).toBe(1);
+});
 
 test('free placement publishes only confirmed poses and yields to a shared scene update', async ({
   page,

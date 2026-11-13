@@ -174,15 +174,17 @@ export function createServer(session = new Session(), live = new LiveView()) {
     description: string,
     annotations: typeof readOnly,
     input: Shape,
-    run: (args: z.infer<z.ZodObject<Shape>>) => unknown | Promise<unknown>,
+    run: (args: z.infer<z.ZodObject<Shape>>, signal?: AbortSignal) => unknown | Promise<unknown>,
   ) =>
     server.registerTool(name, { description, annotations, inputSchema: z.strictObject(input) }, ((
       args: z.infer<z.ZodObject<Shape>>,
+      extra?: { signal?: AbortSignal },
     ) =>
       inOrder(async () => {
         let result: CallToolResult;
         try {
-          const value = await run(args);
+          if (extra?.signal?.aborted) throw new DOMException('Cancelled', 'AbortError');
+          const value = await run(args, extra?.signal);
           result = (value as CallToolResult)?.content ? (value as CallToolResult) : json(value);
         } catch (error) {
           result = {
@@ -353,8 +355,8 @@ export function createServer(session = new Session(), live = new LiveView()) {
         .optional()
         .describe('Add the result without removing the inputs.'),
     },
-    ({ ids: list, mode, name, keep_originals }) =>
-      session.mergeParts(list, mode, name, keep_originals),
+    ({ ids: list, mode, name, keep_originals }, signal) =>
+      session.mergePartsAsync(list, mode, name, keep_originals, signal),
   );
 
   tool(
@@ -533,7 +535,7 @@ export function createServer(session = new Session(), live = new LiveView()) {
         .optional()
         .describe('Report pairs within this gap. Default 0.5 mm.'),
     },
-    ({ ids: only, distance }) => session.inspect(only, distance ?? 0.5),
+    ({ ids: only, distance }, signal) => session.inspectAsync(only, distance ?? 0.5, signal),
   );
 
   tool(

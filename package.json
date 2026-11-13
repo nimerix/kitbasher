@@ -5,14 +5,18 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build && npm run build:mcp",
-    "build:mcp": "vite build --config vite.mcp.config.ts && vite build --config vite.mcp.config.ts --mode headset",
+    "build:mcp": "vite build --config vite.mcp.config.ts && vite build --config vite.mcp.config.ts --mode headset && vite build --config vite.mcp.config.ts --mode compute",
     "preview": "vite preview --host 0.0.0.0",
     "headset": "npm run build && node dist-mcp/kitbasher-headset.js",
     "test": "vitest run",
+    "pretest": "npm run build:compute",
+    "build:compute": "vite build --config vite.mcp.config.ts --mode compute",
     "test:e2e": "playwright test",
+    "test:e2e:acceleration": "playwright test --config tests/acceleration.config.ts",
     "test:e2e:drive": "playwright test --config tests/drive.config.ts",
     "format": "prettier --write src mcp tests *.ts *.json index.html docs/*.md README.md",
-    "format:check": "prettier --check src mcp tests *.ts *.json index.html docs/*.md README.md"
+    "format:check": "prettier --check src mcp tests *.ts *.json index.html docs/*.md README.md",
+    "build:native": "node scripts/build-native.mjs"
   },
   "repository": {
     "type": "git",
@@ -39,8 +43,8 @@
     "react": "^19.3.1",
     "react-dom": "^19.3.1",
     "three": "^0.187.0",
-    "three-bvh-csg": "^0.0.18",
-    "three-mesh-bvh": "^0.9.18",
+    "three-bvh-csg": "0.0.18",
+    "three-mesh-bvh": "0.9.18",
     "zod": "^4.6.7",
     "zustand": "^5.1.0"
   },
@@ -52,6 +56,7 @@
     "@types/three": "^0.187.0",
     "@vitejs/plugin-basic-ssl": "^2.3.0",
     "@vitejs/plugin-react": "^6.2.1",
+    "@webgpu/types": "^0.1.74",
     "iwer": "^2.8.0",
     "prettier": "^3.9.10",
     "typescript": "^7.0.2",

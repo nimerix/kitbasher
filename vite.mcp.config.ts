@@ -4,17 +4,22 @@ import { defineConfig } from 'vite';
 // any folder. The headset mode builds the program that shares a scene with a headset.
 export default defineConfig(({ mode }) => {
   const headset = mode === 'headset';
+  const compute = mode === 'compute';
   return {
     ssr: { noExternal: true },
     build: {
-      ssr: headset ? 'mcp/headset.ts' : 'mcp/server.ts',
+      ssr: compute ? 'mcp/compute.worker.ts' : headset ? 'mcp/headset.ts' : 'mcp/server.ts',
       outDir: 'dist-mcp',
-      emptyOutDir: !headset,
+      emptyOutDir: false,
       target: 'node22',
       minify: false,
       rollupOptions: {
         output: {
-          entryFileNames: headset ? 'kitbasher-headset.js' : 'kitbasher-mcp.js',
+          entryFileNames: compute
+            ? 'kitbasher-compute.js'
+            : headset
+              ? 'kitbasher-headset.js'
+              : 'kitbasher-mcp.js',
           format: 'es',
           inlineDynamicImports: true,
         },

@@ -44,15 +44,12 @@ const sweeps = [
   [-1, -1, -1],
 ] as const;
 
-/**
- * Measures how far each grid node around the meshes is from their surfaces, out to `reach` mm.
- * Yields often, so a caller can spread a dense mesh over several frames.
- */
-export function* bakeProximityField(
+/** Shared grid layout keeps CPU and GPU texture sampling in the same coordinate frame. */
+export function proximityGrid(
   sources: ProximitySource[],
   reach: number,
   limits = fieldLimits,
-): Generator<void, ProximityField | null> {
+): Omit<ProximityField, 'data'> | null {
   const bounds = new Box3(),
     box = new Box3();
   for (const { geometry, matrix } of sources) {
@@ -78,6 +75,26 @@ export function* bakeProximityField(
   const ox = bounds.min.x - reach - cell,
     oy = bounds.min.y - reach - cell,
     oz = bounds.min.z - reach - cell;
+
+  return { size: [nx, ny, nz], origin: [ox, oy, oz], cell, range: reach + 2 * cell };
+}
+
+/**
+ * Measures how far each grid node around the meshes is from their surfaces, out to `reach` mm.
+ * Yields often, so a caller can spread a dense mesh over several frames.
+ */
+export function* bakeProximityField(
+  sources: ProximitySource[],
+  reach: number,
+  limits = fieldLimits,
+): Generator<void, ProximityField | null> {
+  const grid = proximityGrid(sources, reach, limits);
+  if (!grid) return null;
+  const {
+    size: [nx, ny, nz],
+    origin: [ox, oy, oz],
+    cell,
+  } = grid;
   const count = nx * ny * nz;
   // The nearest surface sample found so far for each node, and its squared distance in cells.
   const seed = new Float32Array(count * 3);

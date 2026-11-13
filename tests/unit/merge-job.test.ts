@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { BoxGeometry } from 'three';
 import { snapshotGeometry } from '../../src/core/geometry-transfer';
-import { mergeParts } from '../../src/core/merge';
+import { mergeParts, releaseIdleMergeWorker } from '../../src/core/merge';
 import { requestTaskCancellation, useActivity } from '../../src/core/activity';
 import type { Part } from '../../src/core/types';
 
@@ -39,11 +39,48 @@ function mockWorker() {
 }
 beforeEach(() => useActivity.setState({ tasks: [], notifications: [] }));
 afterEach(() => {
+  releaseIdleMergeWorker();
   vi.unstubAllGlobals();
   vi.useRealTimers();
 });
 
 describe('Boolean background jobs', () => {
+  it('reuses a successful cached worker and releases it when its source is disposed', async () => {
+    vi.useFakeTimers();
+    const { worker, stop } = mockWorker(),
+      source = parts();
+    const complete = () =>
+      worker.onmessage!({
+        data: { part: source[0], geometry: snapshotGeometry(new BoxGeometry()), retain: true },
+      });
+    const first = mergeParts(source, 'union', 'First');
+    await vi.advanceTimersByTimeAsync(0);
+    complete();
+    (await first).geometry.dispose();
+    expect(stop).not.toHaveBeenCalled();
+    const second = mergeParts(source, 'union', 'Second');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(worker.postMessage).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(40_000);
+    expect(stop).not.toHaveBeenCalled();
+    complete();
+    (await second).geometry.dispose();
+    source[0].geometry.dispose();
+    expect(stop).toHaveBeenCalledOnce();
+  });
+
+  it('does not retain a source disposed during the merge', async () => {
+    const { worker, stop } = mockWorker(),
+      source = parts();
+    const pending = mergeParts(source, 'union', 'Test');
+    await vi.waitFor(() => expect(worker.postMessage).toHaveBeenCalledOnce());
+    source[0].geometry.dispose();
+    worker.onmessage!({
+      data: { part: source[0], geometry: snapshotGeometry(new BoxGeometry()), retain: true },
+    });
+    (await pending).geometry.dispose();
+    expect(stop).toHaveBeenCalledOnce();
+  });
   it('stays active beyond ninety seconds and reports stages before completing', async () => {
     vi.useFakeTimers();
     const { worker, stop } = mockWorker();

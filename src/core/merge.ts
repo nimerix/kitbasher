@@ -67,6 +67,32 @@ const validated = new WeakMap<BufferGeometry, string>();
 const yieldToUi = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
 const cancelled = () => new DOMException('Merge cancelled', 'AbortError');
 
+let idleMerge: { worker: Worker; claim: () => void; release: () => void } | undefined;
+export function releaseIdleMergeWorker() {
+  idleMerge?.release();
+}
+if (typeof window !== 'undefined') window.addEventListener('pagehide', releaseIdleMergeWorker);
+
+function keepMergeWorker(worker: Worker, parts: Part[]) {
+  idleMerge?.release();
+  const geometries = [...new Set(parts.map((part) => part.geometry))];
+  const entry = {
+    worker,
+    claim: () => {
+      clearTimeout(timer);
+      geometries.forEach((g) => g.removeEventListener('dispose', entry.release));
+      if (idleMerge === entry) idleMerge = undefined;
+    },
+    release: () => {
+      entry.claim();
+      worker.terminate();
+    },
+  };
+  const timer = setTimeout(entry.release, 30_000);
+  geometries.forEach((g) => g.addEventListener('dispose', entry.release));
+  idleMerge = entry;
+}
+
 function mergeInWorker(
   parts: Part[],
   mode: 'combine' | 'union',
@@ -80,11 +106,20 @@ function mergeInWorker(
     let worker: Worker | undefined;
     let terminate = () => {};
     let settled = false;
-    const finish = () => {
+    let disposed = false;
+    const geometries = [...new Set(parts.map((part) => part.geometry))];
+    const dispose = () => {
+      disposed = true;
+    };
+    geometries.forEach((geometry) => geometry.addEventListener('dispose', dispose));
+    const finish = (retain = false) => {
       if (settled) return false;
       settled = true;
       signal.removeEventListener('abort', cancel);
-      terminate();
+      geometries.forEach((geometry) => geometry.removeEventListener('dispose', dispose));
+      if (worker) worker.terminate = terminate;
+      if (retain && worker && !onWorker && !disposed) keepMergeWorker(worker, parts);
+      else terminate();
       return true;
     };
     const fail = (error: unknown) => {
@@ -94,7 +129,10 @@ function mergeInWorker(
     signal.addEventListener('abort', cancel, { once: true });
     const keys = parts.map((part) => geometryKey(part.geometry));
     try {
-      worker = new Worker(new URL('./merge.worker.ts', import.meta.url), { type: 'module' });
+      if (idleMerge) {
+        worker = idleMerge.worker;
+        idleMerge.claim();
+      } else worker = new Worker(new URL('./merge.worker.ts', import.meta.url), { type: 'module' });
       terminate = worker.terminate.bind(worker);
       // Preserve the old worker callback, including cancellation by calling terminate().
       worker.terminate = cancel;
@@ -113,7 +151,7 @@ function mergeInWorker(
         if (data.error) return fail(new Error(data.error));
         try {
           const geometry = restoreGeometry(data.geometry);
-          if (finish()) resolve({ ...data.part, geometry });
+          if (finish(data.retain === true)) resolve({ ...data.part, geometry });
           else geometry.dispose();
         } catch (error) {
           fail(error);

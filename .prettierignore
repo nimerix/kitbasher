@@ -1,0 +1,4 @@
+# Preserve upstream formatting in the vendored binding and license.
+src/vendor/meshoptimizer/simplifier.js
+src/vendor/meshoptimizer/simplifier.d.ts
+src/vendor/meshoptimizer/LICENSE.md

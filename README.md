@@ -789,6 +789,11 @@ Limits in a headset:
 
 ## Large files
 
+Mesh reduction/remeshing and merging run in cancellable workers. Remeshing skips a redundant
+voxelization pass, and repeated Booleans reuse prepared topology. Nearby-surface isolation can
+use WebGPU compute with a CPU-worker fallback. Optional native kernels and parallel BVH builds
+are described in [mesh acceleration](docs/acceleration-opportunities.md).
+
 Imports have no fixed size limit. STL and OBJ are read in pieces into typed arrays, so
 they are not bound by the browser's limits on strings or its JavaScript heap. An import
 shows its progress, and failing for lack of memory reports that instead of a damaged file.
@@ -816,9 +821,9 @@ Limits that remain, each reported with an explanation:
   exports have no such limit.
 - **3MF export:** about 2 million triangles of STL or OBJ, because the format is XML text.
 
-Interference inspection reports a partial analysis on very dense meshes, and Combine holds
-the interface for about 15 seconds at 48 million triangles. These limits were not measured in
-Firefox or Safari.
+Interference inspection reports a partial analysis on very dense meshes. The large-file numbers
+above predate the current background merge pipeline; maximum-size merges have not been
+remeasured. These limits were not measured in Firefox or Safari.
 
 ## Scope and limitations
 
@@ -829,7 +834,7 @@ Firefox or Safari.
   mesh stays in memory and on the GPU while open. See [large files](#large-files).
 - Boolean union expects repaired closed, consistently oriented inputs without
   self-intersections. It does not repair scans or guarantee print watertightness.
-  The original scene remains unchanged on failure; jobs time out after 90 seconds.
+  The original scene remains unchanged on failure; active jobs can be cancelled.
 - Joints use a parent/child constraint tree, not a physics solver. There are no
   closed-loop assemblies or joint angle limits. Turn Keep connected off to bypass
   a joint temporarily; alignment can also run with the joint active.

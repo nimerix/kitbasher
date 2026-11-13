@@ -14,7 +14,7 @@ export function snapshotGeometry(geometry: BufferGeometry): GeometrySnapshot {
   for (const name of ['position', 'normal', 'color']) {
     const attribute = geometry.getAttribute(name);
     if (!attribute) continue;
-    if (attribute instanceof BufferAttribute) {
+    if (!('data' in attribute)) {
       attributes[name] = {
         array: attribute.array,
         itemSize: attribute.itemSize,

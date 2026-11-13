@@ -1,4 +1,6 @@
 import type { BufferGeometry } from 'three';
+import { liveSession } from './store';
+import { processMeshLocally } from './local-mesh';
 import { binaryGeometry } from './geometry';
 import { geometryKey, restoreGeometry } from './geometry-transfer';
 import type { MeshProcessOptions } from './mesh-processing';
@@ -50,6 +52,7 @@ export function processMeshInWorker(
   return new Promise<{ geometry: BufferGeometry; error: number | null }>((resolve, reject) => {
     if (signal?.aborted) return reject(new DOMException('Cancelled', 'AbortError'));
     let worker: Worker | undefined;
+    const localController = new AbortController();
     let settled = false;
     let taskId: string;
     const key = geometryKey(geometry);
@@ -64,6 +67,7 @@ export function processMeshInWorker(
       if (settled) return false;
       settled = true;
       signal?.removeEventListener('abort', cancel);
+      localController.abort();
       geometry.removeEventListener('dispose', dispose);
       if (success && reusable && !disposed && worker) {
         keepWorker(worker, geometry, key);
@@ -95,40 +99,57 @@ export function processMeshInWorker(
     try {
       activity.onTask?.(taskId);
       if (settled) return;
-      const previous = idle;
-      const reuse = previous?.key === key;
-      if (previous) {
-        previous.claim();
-        worker = previous.worker;
-      } else
-        worker = new Worker(new URL('./mesh-processing.worker.ts', import.meta.url), {
-          type: 'module',
-        });
-      worker.onmessage = ({ data }) => {
+      const startWorker = () => {
         if (settled) return;
-        if (data.type === 'progress') {
-          updateTask(taskId, { detail: data.detail, progress: null });
-          return;
-        }
-        try {
-          if (data.errorMessage) throw new Error(data.errorMessage);
-          const result = { geometry: restoreGeometry(data.geometry), error: data.error };
-          finish(true);
-          if (owned) completeTask(taskId, 'Mesh ready to review and apply.');
-          resolve(result);
-        } catch (error) {
-          fail(error);
-        }
+        const previous = idle;
+        const reuse = previous?.key === key;
+        if (previous) {
+          previous.claim();
+          worker = previous.worker;
+        } else
+          worker = new Worker(new URL('./mesh-processing.worker.ts', import.meta.url), {
+            type: 'module',
+          });
+        worker.onmessage = ({ data }) => {
+          if (settled) return;
+          if (data.type === 'progress') {
+            updateTask(taskId, { detail: data.detail, progress: null });
+            return;
+          }
+          try {
+            if (data.errorMessage) throw new Error(data.errorMessage);
+            const result = { geometry: restoreGeometry(data.geometry), error: data.error };
+            finish(true);
+            if (owned) completeTask(taskId, 'Mesh ready to review and apply.');
+            resolve(result);
+          } catch (error) {
+            fail(error);
+          }
+        };
+        worker.onerror = (event) => fail(new Error(event.message || 'Mesh processing failed.'));
+        worker.onmessageerror = () =>
+          fail(new Error('The mesh worker returned an unreadable result.'));
+        const mesh = reuse ? undefined : binaryGeometry(geometry);
+        const size = mesh
+          ? Object.values(mesh).reduce((sum, array) => sum + (array?.byteLength ?? 0), 0)
+          : 0;
+        reusable = size <= 128 * 1024 * 1024;
+        worker.postMessage({ mesh, key, retain: reusable, options });
       };
-      worker.onerror = (event) => fail(new Error(event.message || 'Mesh processing failed.'));
-      worker.onmessageerror = () =>
-        fail(new Error('The mesh worker returned an unreadable result.'));
-      const mesh = reuse ? undefined : binaryGeometry(geometry);
-      const size = mesh
-        ? Object.values(mesh).reduce((sum, array) => sum + (array?.byteLength ?? 0), 0)
-        : 0;
-      reusable = size <= 128 * 1024 * 1024;
-      worker.postMessage({ mesh, key, retain: reusable, options });
+      if (liveSession) {
+        void processMeshLocally(geometry, options, localController.signal)
+          .then((result) => {
+            if (settled) {
+              result?.geometry.dispose();
+              return;
+            }
+            if (!result) return startWorker();
+            finish(true);
+            if (owned) completeTask(taskId, 'Mesh ready to review and apply.');
+            resolve(result);
+          })
+          .catch(fail);
+      } else startWorker();
     } catch (error) {
       fail(error);
     }

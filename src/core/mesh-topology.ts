@@ -2,7 +2,7 @@ import type { BufferGeometry } from 'three';
 
 /** Same 1e-5 quantization and first-use ordering as Three.js mergeVertices,
  * but only build the topology index, without strings or copied attributes. */
-export function weldedPositionIndex(geometry: BufferGeometry) {
+export function weldedPositionIndex(geometry: BufferGeometry, mode: 'closed' | 'csg' = 'closed') {
   const position = geometry.getAttribute('position'),
     source = geometry.index;
   const count = source?.count ?? position.count;
@@ -11,7 +11,11 @@ export function weldedPositionIndex(geometry: BufferGeometry) {
   const remap = new Int32Array(position.count).fill(-1);
   const indices = new Uint32Array(count);
   const mask = capacity - 1;
-  const quantize = (value: number) => Math.trunc(value * 100_000 + 0.5);
+  // CSG's half-edge map intentionally uses a different tolerance and int32 wrapping.
+  const quantize =
+    mode === 'csg'
+      ? (value: number) => (value * 1_000_000 + 0.5) | 0
+      : (value: number) => Math.trunc(value * 100_000 + 0.5);
   const hash = (value: number) =>
     Math.imul(value | 0, 0x45d9f3b) ^ (Math.floor(value / 4294967296) | 0);
   let vertices = 0;

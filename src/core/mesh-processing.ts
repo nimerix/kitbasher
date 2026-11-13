@@ -1,4 +1,4 @@
-import { MeshoptSimplifier } from 'meshoptimizer/simplifier';
+import { MeshoptSimplifier } from '../vendor/meshoptimizer/simplifier';
 import { deserializeGeometry } from './geometry';
 import type { BinaryGeometry } from './types';
 import { hasClosedEdges } from './mesh-topology';
@@ -6,6 +6,40 @@ import { hasClosedEdges } from './mesh-topology';
 export type MeshProcessOptions =
   | { mode: 'decimate'; ratio: number; error: number; lockBorder: boolean }
   | { mode: 'remesh'; resolution: number };
+
+export interface MeshKernelBackend {
+  reduce(
+    data: BinaryGeometry,
+    target: number,
+    error: number,
+    lockBorder: boolean,
+  ): Promise<[Uint32Array, number]> | [Uint32Array, number];
+  remesh(data: BinaryGeometry, resolution: number): Promise<Float32Array> | Float32Array;
+}
+
+export const wasmMeshKernels: MeshKernelBackend = {
+  reduce(data, target, error, lockBorder) {
+    const indices = data.indices as Uint32Array;
+    const flags = lockBorder ? ['LockBorder' as const] : [];
+    return data.colors
+      ? MeshoptSimplifier.simplifyWithAttributes(
+          indices,
+          data.positions,
+          3,
+          data.colors,
+          3,
+          [1, 1, 1],
+          null,
+          target,
+          error,
+          flags,
+        )
+      : MeshoptSimplifier.simplify(indices, data.positions, 3, target, error, flags);
+  },
+  remesh(data, resolution) {
+    return MeshoptSimplifier.remesh(data.indices as Uint32Array, data.positions, 3, resolution);
+  },
+};
 
 /** Exact position welding makes triangle-soup scans usable by the simplifier. */
 function weldedIndices(data: BinaryGeometry) {
@@ -43,9 +77,14 @@ function compact(data: BinaryGeometry, indices: Uint32Array): BinaryGeometry {
 export class MeshProcessor {
   private prepared?: BinaryGeometry;
   private closed?: boolean;
-  constructor(private data: BinaryGeometry | undefined) {}
+  constructor(
+    private data: BinaryGeometry | undefined,
+    private readonly kernels = wasmMeshKernels,
+  ) {}
 
   async process(options: MeshProcessOptions, onProgress?: (detail: string) => void) {
+    if (!options || !['decimate', 'remesh'].includes(options.mode))
+      throw new Error('Choose reduction or remeshing.');
     if (options.mode === 'decimate') {
       if (!(options.ratio > 0 && options.ratio <= 1) || !(options.error >= 0 && options.error <= 1))
         throw new Error(
@@ -72,22 +111,13 @@ export class MeshProcessor {
     const indices = data.indices as Uint32Array;
     if (options.mode === 'decimate') {
       const target = Math.max(3, Math.floor((indices.length / 3) * options.ratio) * 3);
-      const flags = options.lockBorder ? ['LockBorder' as const] : [];
       onProgress?.('Reducing triangles');
-      const [reduced, deviation] = data.colors
-        ? MeshoptSimplifier.simplifyWithAttributes(
-            indices,
-            data.positions,
-            3,
-            data.colors,
-            3,
-            [1, 1, 1],
-            null,
-            target,
-            options.error,
-            flags,
-          )
-        : MeshoptSimplifier.simplify(indices, data.positions, 3, target, options.error, flags);
+      const [reduced, deviation] = await this.kernels.reduce(
+        data,
+        target,
+        options.error,
+        options.lockBorder,
+      );
       if (!reduced.length)
         throw new Error(
           'The reduction would remove the entire mesh. Use a higher triangle target.',
@@ -104,7 +134,7 @@ export class MeshProcessor {
         'Voxel remeshing requires a closed, manifold mesh. Repair open edges first, or use Decimate.',
       );
     onProgress?.('Rebuilding surface on voxel grid');
-    const positions = MeshoptSimplifier.remesh(indices, data.positions, 3, options.resolution);
+    const positions = await this.kernels.remesh(data, options.resolution);
     if (!positions.length)
       throw new Error('No surface survived at this resolution. Increase voxel resolution.');
     if (positions.length / 9 > 1_000_000)

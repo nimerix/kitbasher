@@ -13,7 +13,8 @@ import {
   showsNearby,
 } from '../core/isolation';
 import type { NearbySpec } from '../core/isolation';
-import { bakeProximityField, fieldDistance, fieldLimits } from '../core/proximity';
+import { fieldDistance, fieldLimits } from '../core/proximity';
+import { bakeProximityInWorker } from '../core/proximity-job';
 import type { ProximityField } from '../core/proximity';
 import { useShortcut } from '../core/preferences';
 import { useEditor } from '../core/store';
@@ -31,30 +32,6 @@ interface Baked {
   spec: NearbySpec;
   field: ProximityField;
   texture: Data3DTexture;
-}
-
-// Long enough to make progress, short enough to keep the viewport moving.
-const sliceMs = 8;
-
-function runSliced<T>(task: Generator<void, T>, finish: (value: T) => void) {
-  // A message, unlike a timer, is delivered without a minimum delay.
-  const channel = new MessageChannel();
-  let cancelled = false;
-  const stop = () => {
-    cancelled = true;
-    channel.port1.close();
-  };
-  channel.port1.onmessage = () => {
-    if (cancelled) return;
-    const deadline = performance.now() + sliceMs;
-    let result = task.next();
-    while (!result.done && performance.now() < deadline) result = task.next();
-    if (!result.done) return channel.port2.postMessage(null);
-    stop();
-    finish(result.value);
-  };
-  channel.port2.postMessage(null);
-  return stop;
 }
 
 /**
@@ -124,9 +101,16 @@ export function useNearbySurfaces() {
     const start = () => {
       const context = gl.getContext() as WebGL2RenderingContext;
       const axis = Math.min(512, context.getParameter(context.MAX_3D_TEXTURE_SIZE) || 256);
-      const cancel = runSliced(
-        bakeProximityField(spec.sources, spec.reach, { ...fieldLimits, axis }),
-        (field) => {
+      const controller = new AbortController();
+      if (pending.current) pending.current.cancel = () => controller.abort();
+      void bakeProximityInWorker(
+        spec.sources,
+        spec.reach,
+        { ...fieldLimits, axis },
+        controller.signal,
+      )
+        .then(({ field }) => {
+          if (controller.signal.aborted) return;
           pending.current = null;
           if (!field) return;
           const texture = new Data3DTexture(field.data, ...field.size);
@@ -134,9 +118,17 @@ export function useNearbySurfaces() {
           texture.minFilter = texture.magFilter = LinearFilter;
           texture.needsUpdate = true;
           setBaked({ spec, field, texture });
-        },
-      );
-      if (pending.current) pending.current.cancel = cancel;
+        })
+        .catch((error) => {
+          if (controller.signal.aborted) return;
+          pending.current = null;
+          useEditor
+            .getState()
+            .notify(
+              error instanceof Error ? error.message : 'Nearby surfaces could not be prepared.',
+              'error',
+            );
+        });
     };
     if (usable) {
       // A drag that scales or separates the isolated parts changes the field every frame.
