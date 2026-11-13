@@ -102,6 +102,12 @@ export function editorCommands(context: CommandContext = {}) {
     move: command('Move', () => state.setTool('translate'), idle && editable, 'move'),
     rotate: command('Rotate', () => state.setTool('rotate'), idle && editable, 'rotate'),
     scale: command('Scale', () => state.setTool('scale'), idle && editable, 'scale'),
+    transform: command(
+      'Transform',
+      () => state.setTool('transform'),
+      idle && editable,
+      'transform',
+    ),
     focus: command(
       'Frame selection',
       () => state.focus(),

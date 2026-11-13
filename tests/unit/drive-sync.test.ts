@@ -4,6 +4,7 @@ import { DriveError } from '../../src/core/google-auth';
 import { useEditor } from '../../src/core/store';
 import type { DriveFile } from '../../src/core/google-drive';
 import { useActivity } from '../../src/core/activity';
+import { createSample } from '../../src/core/sample';
 
 const file = { id: 'cloud-1', name: 'Assembly.kitbash', version: '2' };
 const save = vi.fn();
@@ -44,6 +45,36 @@ afterEach(() => {
 });
 
 describe('Drive autosave coordination', () => {
+  it('saves committed poses during free placement and uploads the preview only after confirmation', async () => {
+    useEditor.getState().setScene(createSample());
+    useEditor.getState().select('torso');
+    useEditor.getState().setView({ clip: { enabled: false, overlap: 0.1 } });
+    bound();
+    const initialY = useEditor.getState().scene.parts.find((p) => p.id === 'torso')!.position[1];
+    useEditor.getState().beginFreeTransform('translate');
+    useEditor
+      .getState()
+      .previewFreeTransform([{ id: 'torso', patch: { position: [0, initialY + 10, 0] } }]);
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(save).toHaveBeenCalledTimes(1);
+    expect(
+      save.mock.calls[0][0].parts.find((p: { id: string }) => p.id === 'torso').position[1],
+    ).toBe(initialY);
+    useEditor.getState().finishFreeTransform(false);
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(save).toHaveBeenCalledTimes(1);
+    useEditor.getState().beginFreeTransform('translate');
+    useEditor
+      .getState()
+      .previewFreeTransform([{ id: 'torso', patch: { position: [0, initialY + 20, 0] } }]);
+    useEditor.getState().finishFreeTransform(true);
+    await vi.advanceTimersByTimeAsync(1500);
+    expect(save).toHaveBeenCalledTimes(2);
+    expect(
+      save.mock.calls[1][0].parts.find((p: { id: string }) => p.id === 'torso').position[1],
+    ).toBe(initialY + 20);
+  });
+
   it('coalesces rapid edits and saves only the newest revision', async () => {
     bound();
     edit('First');

@@ -40,6 +40,19 @@ top of the viewport, with Studio as the default. Smaller screens use collapsible
   Numeric rotation/scale and viewport tools use the same visible/anchor pivot.
 - Hold Shift for incremental one-tenth gizmo sensitivity, including mid-drag
   changes. End interrupted drags cleanly so camera navigation always resumes.
+- Offer a combined Transform tool (T) with simultaneous move arrows, plane
+  handles, rotation rings, and axis/uniform scale cubes. Remember an Enable
+  scaling preference in the browser; disabling it removes scale handles from
+  both rendering and picking, including during a drag. Keep rigid movement and
+  rotation independent of scale, and preserve pivots, joints, snapping, fine
+  adjustment, and one undo checkpoint per drag.
+- Offer configurable Shift + G / Shift + R pointer placement without dragging a
+  handle. Move in the view plane or rotate as a trackball, constrain X/Y/Z in the
+  handle frame, and confirm with Enter/left-click or cancel with Esc/right-click.
+  Preserve custom pivots, connected assemblies, clipping, and rigid geometry.
+  Cancel on focus loss or scene replacement. Keep previews outside document
+  history, recovery, Drive, and shared-session publishing until confirmation;
+  confirmation creates one undo step and cancellation preserves redo.
 - Paint only edge-connected mesh patches; optional fixed seed-plane angle and
   distance tolerances exclude adjacent bends and prevent plane drift across strokes.
 - Fit painted planes with area-weighted moments. Offer mate with signed offset,

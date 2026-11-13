@@ -28,6 +28,7 @@ import {
   Maximize,
   MousePointer2,
   Move3D,
+  Move,
   PanelLeftClose,
   PanelLeftOpen,
   PanelRightClose,
@@ -64,6 +65,7 @@ import { usePreferences, useShortcut, withShortcut } from './core/preferences';
 import { PreferencesPanel } from './components/PreferencesPanel';
 import { PartsPanel } from './components/PartsPanel';
 import { Inspector } from './components/Inspector';
+import { moveSteps, rotationSteps } from './components/TransformAdjustments';
 import { Dialogs } from './components/Dialogs';
 import { IconButton, Keyboard, Logo, Modal, NumericInput, useDismiss } from './components/ui';
 import { clipLimits } from './core/clipping';
@@ -346,6 +348,7 @@ function Toolbar({
     move: useShortcut('move'),
     rotate: useShortcut('rotate'),
     scale: useShortcut('scale'),
+    transform: useShortcut('transform'),
     undo: useShortcut('undo'),
     redo: useShortcut('redo'),
     pivot: useShortcut('pivot'),
@@ -360,6 +363,7 @@ function Toolbar({
     { id: 'translate', label: 'Move', shortcut: keys.move, icon: Move3D },
     { id: 'rotate', label: 'Rotate', shortcut: keys.rotate, icon: Rotate3D },
     { id: 'scale', label: 'Scale', shortcut: keys.scale, icon: Scaling },
+    { id: 'transform', label: 'Transform', shortcut: keys.transform, icon: Move },
   ];
   return (
     <div className="toolbar" role="toolbar" aria-label="Assembly tools">
@@ -394,6 +398,9 @@ function Toolbar({
               onClick={() => useEditor.getState().setTool(id)}
             >
               <Icon size={17} />
+              {id === 'translate' || id === 'rotate' || id === 'transform' ? (
+                <span className="transform-tool-name">{label}</span>
+              ) : null}
             </IconButton>
           ))}
           <IconButton
@@ -464,6 +471,7 @@ function Toolbar({
       <div className="toolbar-right">
         <button
           className={`snap-toggle ${view.snap ? 'active' : ''}`}
+          aria-label="Snap"
           title="Snap transforms to increments"
           aria-pressed={view.snap}
           onClick={() => useEditor.getState().setView({ snap: !view.snap })}
@@ -472,17 +480,36 @@ function Toolbar({
           <span>Snap</span>
           <span className={`mini-toggle ${view.snap ? 'on' : ''}`} />
         </button>
-        {view.snap ? (
+        {view.snap && tool === 'scale' ? (
+          <span className="scale-snap-step">10%</span>
+        ) : view.snap ? (
           <select
             className="snap-step"
-            aria-label="Snap distance"
-            value={view.snapStep}
-            onChange={(e) => useEditor.getState().setView({ snapStep: Number(e.target.value) })}
+            aria-label={tool === 'rotate' ? 'Snap angle' : 'Snap distance'}
+            value={tool === 'rotate' ? view.rotationSnapStep : view.snapStep}
+            onChange={(e) =>
+              useEditor
+                .getState()
+                .setView(
+                  tool === 'rotate'
+                    ? { rotationSnapStep: Number(e.target.value) }
+                    : { snapStep: Number(e.target.value) },
+                )
+            }
           >
-            <option value={0.1}>0.1 mm</option>
-            <option value={0.5}>0.5 mm</option>
-            <option value={1}>1 mm</option>
-            <option value={5}>5 mm</option>
+            {[
+              ...new Set([
+                ...(tool === 'rotate' ? rotationSteps : moveSteps),
+                tool === 'rotate' ? view.rotationSnapStep : view.snapStep,
+              ]),
+            ]
+              .sort((a, b) => a - b)
+              .map((step) => (
+                <option key={step} value={step}>
+                  {step}
+                  {tool === 'rotate' ? '°' : ' mm'}
+                </option>
+              ))}
           </select>
         ) : null}
         <span className="tool-divider" />
@@ -518,17 +545,18 @@ function Toolbar({
           </label>
         ) : null}
         <span className="tool-divider" />
-        <button
+        <select
           className="space-button"
-          title="Switch transform coordinate system"
-          onClick={() =>
-            useEditor.getState().setView({ space: view.space === 'world' ? 'local' : 'world' })
+          aria-label="Preferred transform axes"
+          title="Axes for handles and steps. Connected joints use joint axes; groups use world axes."
+          value={view.space}
+          onChange={(e) =>
+            useEditor.getState().setView({ space: e.target.value as 'world' | 'local' })
           }
         >
-          <span className="world-icon">⊕</span>
-          {view.space === 'world' ? 'World' : 'Local'}
-          <ChevronDown size={11} />
-        </button>
+          <option value="world">World</option>
+          <option value="local">Local</option>
+        </select>
         <span className="tool-divider" />
         <IconButton label={right ? 'Hide inspector' : 'Show inspector'} onClick={toggleRight}>
           {right ? <PanelRightClose size={16} /> : <PanelRightOpen size={16} />}
@@ -539,6 +567,7 @@ function Toolbar({
 }
 
 function StatusBar() {
+  const freeMode = useEditor((s) => s.freeTransform?.mode);
   const pivotPicking = useEditor((s) => s.pivotPicking),
     surfacePainting = useEditor((s) => s.tool === 'align' && s.operation.mode === 'surface');
   const recovery = useEditor((s) => s.recoveryStatus),
@@ -567,23 +596,25 @@ function StatusBar() {
           Zoom <kbd>Scroll</kbd>
         </span>
         <span className="status-context">
-          {indexing
-            ? 'Preparing a dense mesh · It can be clicked when this finishes'
-            : navigationMode
-              ? `${navigationMode === 'pan' ? 'Pan' : 'Orbit'} tool · Drag to navigate${cancel ? ` · ${cancel} to return` : ''}`
-              : pivotPicking
-                ? `Click a model surface to set its pivot${[pivot, cancel].some(Boolean) ? ` · ${[pivot, cancel].filter(Boolean).join(' or ')} to cancel` : ''}`
-                : surfacePainting
-                  ? `Drag to paint · Alt erases${smaller || larger ? ` · ${[smaller, larger].filter(Boolean).join(' / ')} brush size` : ''} · ${orbitHint} orbits`
-                  : tool === 'align'
-                    ? `Pick source → target · ${orbitHint} orbits`
-                    : tool === 'anchors'
-                      ? 'Add surface anchors · Drag a target to fit · Shift for fine adjustment'
-                      : tool === 'joint'
-                        ? 'Pick anchors to connect parts'
-                        : ['translate', 'rotate', 'scale'].includes(tool)
-                          ? 'Hold Shift while dragging for 10× finer adjustment'
-                          : 'Shift + click to select multiple'}
+          {freeMode
+            ? 'Move pointer · X / Y / Z: axis · Enter / click: confirm · Esc / right-click: cancel'
+            : indexing
+              ? 'Preparing a dense mesh · It can be clicked when this finishes'
+              : navigationMode
+                ? `${navigationMode === 'pan' ? 'Pan' : 'Orbit'} tool · Drag to navigate${cancel ? ` · ${cancel} to return` : ''}`
+                : pivotPicking
+                  ? `Click a model surface to set its pivot${[pivot, cancel].some(Boolean) ? ` · ${[pivot, cancel].filter(Boolean).join(' or ')} to cancel` : ''}`
+                  : surfacePainting
+                    ? `Drag to paint · Alt erases${smaller || larger ? ` · ${[smaller, larger].filter(Boolean).join(' / ')} brush size` : ''} · ${orbitHint} orbits`
+                    : tool === 'align'
+                      ? `Pick source → target · ${orbitHint} orbits`
+                      : tool === 'anchors'
+                        ? 'Add surface anchors · Drag a target to fit · Shift for fine adjustment'
+                        : tool === 'joint'
+                          ? 'Pick anchors to connect parts'
+                          : ['translate', 'rotate', 'scale', 'transform'].includes(tool)
+                            ? 'Hold Shift while dragging for 10× finer adjustment'
+                            : 'Shift + click to select multiple'}
         </span>
       </div>
       <div className="local-save-status">

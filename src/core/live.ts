@@ -1,7 +1,7 @@
 import type { BufferGeometry } from 'three';
 import { uid } from './geometry';
 import { appendGeometry, parseSceneDocument, readGeometry, validateLayout } from './scene-file';
-import { liveHost, useEditor, useSharedHistory } from './store';
+import { committedScene, liveHost, useEditor, useSharedHistory } from './store';
 import { useXR } from './xr-session';
 import { keepUnchanged, mergeScenes, sharedScene } from './sync';
 import type { GeometryLayout, SceneDocument } from './types';
@@ -87,7 +87,7 @@ export function joinLiveSession() {
   };
 
   const unsubscribe = useEditor.subscribe((state, previous) => {
-    if (applyingRemote || state.scene === previous.scene || !confirmed) return;
+    if (applyingRemote || committedScene(state) === committedScene(previous) || !confirmed) return;
     dirty = true;
     if (state.sceneEpoch !== previous.sceneEpoch) replace = true;
     // An action that adds an undo step here starts a new one on the server; a drag extends it.
@@ -118,7 +118,7 @@ export function joinLiveSession() {
       return geometry;
     });
     for (const key of Object.keys(message.geometries)) known.add(key);
-    const local = useEditor.getState().scene;
+    const local = committedScene(useEditor.getState());
     const first = !confirmed;
     let next = scene;
     // This tab is about to replace the scene, so it keeps its own.
@@ -192,7 +192,7 @@ export function joinLiveSession() {
   };
 
   const sendEdit = async () => {
-    const scene = useEditor.getState().scene;
+    const scene = committedScene(useEditor.getState());
     const base = confirmed!;
     const flags = { checkpoint, replace };
     dirty = checkpoint = replace = false;

@@ -48,6 +48,8 @@ import {
   saveDefaultLighting,
 } from './lighting';
 import { same } from './sync';
+import { transformSelection } from './transform-selection';
+import type { FreeTransformMode, TransformAxis, TransformPatch } from './free-transform';
 import type { NavigationMode } from './navigation';
 import { createSample } from './sample';
 import { captureComponents, instantiateComponents } from './clipboard';
@@ -117,6 +119,13 @@ const historyLimit = 40;
 // Leaves a dragged frame time to draw. The part catches up over the next frames.
 const gestureBudget = 12;
 
+interface FreeTransform {
+  mode: FreeTransformMode;
+  axis: TransformAxis;
+  baseline: SceneDocument;
+  patches: TransformPatch[];
+}
+
 interface EditorState {
   scene: SceneDocument;
   selected: string[];
@@ -132,6 +141,8 @@ interface EditorState {
   navigationMode: NavigationMode | null;
   temporaryOrbit: boolean;
   precision: boolean;
+  /** A reversible placement preview. Only confirmation changes history or persistence. */
+  freeTransform: FreeTransform | null;
   pivotRequest: number;
   pivotPicking: boolean;
   activeAnchor: string | null;
@@ -219,6 +230,9 @@ interface EditorState {
   updateConstraint: (id: string, patch: Partial<PlaneConstraint>) => void;
   removeConstraint: (id: string) => void;
   transform: (id: string, patch: Partial<Part>, checkpoint?: boolean) => void;
+  beginFreeTransform: (mode: FreeTransformMode) => boolean;
+  previewFreeTransform: (patches: TransformPatch[]) => void;
+  finishFreeTransform: (confirm: boolean) => void;
   transformMany: (
     patches: { id: string; patch: Partial<Part> }[],
     checkpoint?: boolean,
@@ -229,6 +243,8 @@ interface EditorState {
     budget?: number,
     /** Original poses of this gesture, used for the full-detail release check. */
     baseline?: Part[],
+    /** Update only the in-progress free-transform preview, without a document revision. */
+    preview?: boolean,
   ) => void;
   patchParts: (ids: string[], patch: Partial<Part>, checkpoint?: boolean) => void;
   /** Sets or, with null, clears the viewport-only color of these parts. */
@@ -272,8 +288,9 @@ interface EditorState {
 const changed = (state: EditorState, scene: SceneDocument, checkpoint = true) => ({
   scene,
   revision: state.revision + 1,
+  ...(state.freeTransform ? { freeTransform: null } : {}),
   ...(checkpoint
-    ? { past: [...state.past.slice(-(historyLimit - 1)), state.scene], future: [] }
+    ? { past: [...state.past.slice(-(historyLimit - 1)), committedScene(state)], future: [] }
     : {}),
 });
 
@@ -314,6 +331,7 @@ export const useEditor = create<EditorState>((set, get) => ({
   navigationMode: null,
   temporaryOrbit: false,
   precision: false,
+  freeTransform: null,
   pivotRequest: 0,
   pivotPicking: false,
   activeAnchor: null,
@@ -343,6 +361,7 @@ export const useEditor = create<EditorState>((set, get) => ({
     wireframe: false,
     snap: false,
     snapStep: 1,
+    rotationSnapStep: 15,
     projection: 'perspective',
     explode: 0,
     space: 'world',
@@ -1118,6 +1137,69 @@ export const useEditor = create<EditorState>((set, get) => ({
         constraints: state.scene.constraints?.filter((c) => c.id !== id),
       }),
     ),
+  beginFreeTransform: (mode) => {
+    const state = get();
+    if (state.busy || state.modal || state.freeTransform) return false;
+    const selection = transformSelection(
+      { ...state, navigationMode: null, temporaryOrbit: false, pivotPicking: false },
+      mode,
+    );
+    if (selection.blocked) {
+      state.notify(selection.blocked, 'info');
+      return false;
+    }
+    state.setTool(mode);
+    set({
+      freeTransform: { mode, axis: null, baseline: get().scene, patches: [] },
+      contextMenu: null,
+      temporaryOrbit: false,
+    });
+    return true;
+  },
+  previewFreeTransform: (patches) => {
+    const session = get().freeTransform;
+    if (!session) return;
+    set({ freeTransform: { ...session, patches } });
+    get().transformMany(
+      patches,
+      false,
+      session.mode === 'translate',
+      false,
+      gestureBudget,
+      undefined,
+      true,
+    );
+  },
+  finishFreeTransform: (confirm) => {
+    const session = get().freeTransform;
+    if (!session) return;
+    if (confirm && session.patches.length)
+      get().transformMany(
+        session.patches,
+        false,
+        session.mode === 'translate',
+        true,
+        undefined,
+        session.baseline.parts,
+        true,
+      );
+    set((state) => {
+      if (state.freeTransform?.baseline !== session.baseline) return {};
+      const differs = state.scene.parts.some((part, i) => {
+        const before = session.baseline.parts[i];
+        return (
+          !before ||
+          part.id !== before.id ||
+          (['position', 'quaternion', 'scale'] as const).some((key) =>
+            part[key].some((value, j) => Math.abs(value - before[key][j]) > 1e-9),
+          )
+        );
+      });
+      return confirm && differs
+        ? { ...changed(state, state.scene), freeTransform: null }
+        : { scene: session.baseline, freeTransform: null };
+    });
+  },
   transform: (id, patch, checkpoint = true) =>
     set((state) => {
       const part = state.scene.parts.find((p) => p.id === id);
@@ -1167,6 +1249,7 @@ export const useEditor = create<EditorState>((set, get) => ({
     settle = false,
     budget = gestureBudget,
     baseline,
+    preview = false,
   ) =>
     set((state) => {
       const ids = new Set(patches.map((p) => p.id));
@@ -1239,7 +1322,9 @@ export const useEditor = create<EditorState>((set, get) => ({
       }
       return parts === state.scene.parts
         ? {}
-        : changed(state, { ...state.scene, parts }, checkpoint);
+        : preview
+          ? { scene: { ...state.scene, parts } }
+          : changed(state, { ...state.scene, parts }, checkpoint);
     }),
   patchParts: (ids, patch, checkpoint = true) =>
     set((state) => {
@@ -1392,6 +1477,7 @@ export const useEditor = create<EditorState>((set, get) => ({
   setScene: (scene, recovered = false, driveFile = null) =>
     set((state) => ({
       scene,
+      freeTransform: null,
       driveFile,
       sceneEpoch: state.sceneEpoch + 1,
       selected: [],
@@ -1424,6 +1510,7 @@ export const useEditor = create<EditorState>((set, get) => ({
       const removed = state.scene.parts.map((part) => part.id).filter((id) => !ids.has(id));
       return {
         scene,
+        freeTransform: null,
         selected: state.selected.filter((id) => ids.has(id)),
         revision: state.revision + 1,
         ...(removed.length ? withoutRemovedParts(state, removed) : {}),
@@ -1449,7 +1536,10 @@ export const useEditor = create<EditorState>((set, get) => ({
                 ),
                 ...restoredIsolated(state, state.past.at(-1)!),
                 operation: blankOperation(),
-                tool: 'select',
+                // Keep placement tools ready for another adjustment after undo.
+                tool: ['translate', 'rotate', 'scale', 'transform'].includes(state.tool)
+                  ? state.tool
+                  : 'select',
                 navigationMode: null,
                 pivotPicking: false,
                 painting: false,
@@ -1473,7 +1563,9 @@ export const useEditor = create<EditorState>((set, get) => ({
                 ),
                 ...restoredIsolated(state, state.future[0]),
                 operation: blankOperation(),
-                tool: 'select',
+                tool: ['translate', 'rotate', 'scale', 'transform'].includes(state.tool)
+                  ? state.tool
+                  : 'select',
                 navigationMode: null,
                 pivotPicking: false,
                 painting: false,
@@ -1530,10 +1622,14 @@ export const canUndo = (state: EditorState) =>
 export const canRedo = (state: EditorState) =>
   state.sharedHistory ? state.sharedHistory.redo > 0 : state.future.length > 0;
 
+/** Preview poses never reach recovery, Drive, or other shared-session participants. */
+export const committedScene = (state: EditorState) => state.freeTransform?.baseline ?? state.scene;
+
 function reachableGeometries(state: EditorState) {
   const geometries = new Set<BufferGeometry>();
   for (const parts of [
     state.scene.parts,
+    state.freeTransform?.baseline.parts ?? [],
     ...state.past.map((scene) => scene.parts),
     ...state.future.map((scene) => scene.parts),
     state.clipboard?.parts ?? [],

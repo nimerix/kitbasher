@@ -30,6 +30,7 @@ const drawnSelection = (state: Editor) =>
 const initialOrbitTarget: [number, number, number] = [0, 54, 0];
 
 export function CameraRig() {
+  const freeTransform = useEditor((state) => !!state.freeTransform);
   const controls = useRef<OrbitControlsImpl>(null);
   const focusRequest = useEditor((state) => state.focusRequest);
   const pivotRequest = useEditor((state) => state.pivotRequest);
@@ -200,6 +201,12 @@ export function CameraRig() {
   }, [focusRequest, camera, invalidate, settle]);
 
   useEffect(() => settle(), [navigationMode, pivotPicking, surfacePainting, settle]);
+  useEffect(() => {
+    if (freeTransform) {
+      settle();
+      rotation.current = null;
+    }
+  }, [freeTransform, settle]);
 
   useEffect(() => {
     if (pivotRequest !== handledPivot.current) {
@@ -292,6 +299,7 @@ export function CameraRig() {
 
   return (
     <OrbitControls
+      enabled={!freeTransform}
       ref={controls}
       makeDefault
       onChange={() => {

@@ -1,4 +1,5 @@
 import { AnchorControls } from './AnchorControls';
+import { TransformAdjustments } from './TransformAdjustments';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Box,
@@ -151,7 +152,6 @@ function PartProperties({ part }: { part: Part }) {
     jointKey = useShortcut('joint');
   const joints = useEditor((s) => s.scene.joints),
     parts = useEditor((s) => s.scene.parts),
-    view = useEditor((s) => s.view),
     transform = useEditor((s) => s.transform),
     patchParts = useEditor((s) => s.patchParts);
   const joint = joints.find((j) => j.childId === part.id),
@@ -213,35 +213,18 @@ function PartProperties({ part }: { part: Part }) {
           </small>
         </div>
       </div>
-      <Section
-        title="Transform"
-        action={
-          <div className="coordinate-switch">
-            <button
-              className={view.space === 'world' ? 'active' : ''}
-              onClick={() => useEditor.getState().setView({ space: 'world' })}
-            >
-              World
-            </button>
-            <button
-              className={view.space === 'local' ? 'active' : ''}
-              onClick={() => useEditor.getState().setView({ space: 'local' })}
-            >
-              Local
-            </button>
-          </div>
-        }
-      >
+      <Section title="Transform">
+        <TransformAdjustments />
         <VectorFields
           label="Position"
-          unit="mm"
+          unit="mm · world"
           values={part.position}
           disabled={pinned}
           onCommit={(position) => transform(part.id, { position })}
         />
         <VectorFields
           label="Rotation"
-          unit={activeJoint ? '° · joint axes' : '°'}
+          unit={activeJoint ? '° · joint axes' : '° · world'}
           values={rotation}
           disabled={part.locked}
           locks={activeJoint?.rotationLocks}
@@ -962,6 +945,9 @@ export function Inspector({ onClose }: { onClose: () => void }) {
               <h2>{selected.length} parts selected</h2>
               <p>Transform them together, align them, or merge them into one mesh.</p>
             </div>
+            <Section title="Transform">
+              <TransformAdjustments />
+            </Section>
             <div className="multi-selection-actions">
               <button
                 className="button primary full-width"
@@ -1001,23 +987,30 @@ export function Inspector({ onClose }: { onClose: () => void }) {
         ) : part ? (
           <PartProperties part={part} />
         ) : (
-          <div className="inspector-empty">
-            <MousePointer2 size={30} strokeWidth={1} />
-            <h2>A place for every piece.</h2>
-            <p>Select a part to inspect its position, rotation, and connections.</p>
-            <div>
-              <span>Multiselect</span>
-              <kbd>Shift + click</kbd>
+          <>
+            {tool === 'translate' || tool === 'rotate' ? (
+              <Section title="Transform">
+                <TransformAdjustments />
+              </Section>
+            ) : null}
+            <div className="inspector-empty">
+              <MousePointer2 size={30} strokeWidth={1} />
+              <h2>A place for every piece.</h2>
+              <p>Select a part to inspect its position, rotation, and connections.</p>
+              <div>
+                <span>Multiselect</span>
+                <kbd>Shift + click</kbd>
+              </div>
+              <div>
+                <span>Focus selection</span>
+                <kbd>{focusKey || '—'}</kbd>
+              </div>
+              <div>
+                <span>Frame everything</span>
+                <kbd>{frameAllKey || '—'}</kbd>
+              </div>
             </div>
-            <div>
-              <span>Focus selection</span>
-              <kbd>{focusKey || '—'}</kbd>
-            </div>
-            <div>
-              <span>Frame everything</span>
-              <kbd>{frameAllKey || '—'}</kbd>
-            </div>
-          </div>
+          </>
         )}
       </div>
       <div className="inspector-footer">

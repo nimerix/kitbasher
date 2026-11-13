@@ -46,6 +46,8 @@ describe('key bindings', () => {
 
   it('matches the default single-key and modified shortcuts', () => {
     expect(matchKeyAction(press('g'), {})).toBe('move');
+    expect(matchKeyAction(press('G', { shiftKey: true }), {})).toBe('freeMove');
+    expect(matchKeyAction(press('R', { shiftKey: true }), {})).toBe('freeRotate');
     expect(matchKeyAction(press(' ', { code: 'Space' }), {})).toBe('holdOrbit');
     expect(matchKeyAction(press('.', { code: 'Period' }), {})).toBe('centerOrbit');
     expect(matchKeyAction(press('>', { code: 'Period', shiftKey: true }), {})).toBe(
@@ -63,7 +65,7 @@ describe('key bindings', () => {
   });
 
   it('keeps modifiers strict, so Shift and ⌘ variants never trigger plain tools', () => {
-    expect(matchKeyAction(press('G', { shiftKey: true }), {})).toBeNull();
+    expect(matchKeyAction(press('S', { shiftKey: true }), {})).toBeNull();
     expect(matchKeyAction(press('g', { metaKey: true }), {})).toBeNull();
     expect(matchKeyAction(press('g', { altKey: true }), {})).toBeNull();
   });

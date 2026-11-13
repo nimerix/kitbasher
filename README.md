@@ -52,11 +52,19 @@ for an empty workbench or to reload the sample.
    and up axis can be overridden. Automatic mode uses meters / Y up for glTF,
    millimeters / Z up for STL and OBJ, and declared 3MF units / Z up.
 2. Select parts in the viewport or the searchable part tree. Shift-click selects
-   several parts. Move, rotate, and scale using gizmos or numeric fields. Snapping
-   supports 0.1, 0.5, 1, and 5 mm translation increments and 15° rotation steps.
+   several parts. Move, rotate, and scale using gizmos or numeric fields. The
+   inspector’s **Move** and **Rotate** controls also offer X/Y/Z −/+ buttons for
+   precise adjustments, including whole selections. Enter a **Step** in millimeters
+   or degrees; **Snap dragging** uses that same increment for the handles. The
+   toolbar shows distance for Move, angle for Rotate, and 10% for Scale.
+   World/Local applies to handles and step buttons; absolute numeric fields show
+   their coordinate system separately. Connected joints use their joint axes,
+   and groups use world axes. Rotation shows the pivot in use, and unavailable
+   controls explain the selection, lock, or view restriction.
    Hold **Shift** during a gizmo drag for one-tenth movement, rotation, or scale
    sensitivity. Press or release it mid-drag without jumping; the whole drag is
-   one undo step.
+   one undo step. Each −/+ adjustment is also one undo step. Undo and redo keep
+   Move, Rotate, or Scale active so you can continue adjusting.
    Gizmos sit on the visible geometry, including scans with distant scanner
    origins. Press **P** (or **Pick surface pivot** in the Camera panel), then click a
    spot on a model to set its rotation, scale, and orbit pivot. A visible marker
@@ -513,6 +521,31 @@ overlapping geometry.
 
 ## Navigation and shortcuts
 
+Press **T** or select **Transform** for a combined gizmo: arrows move, squares move
+within a plane, rings rotate, and cubes scale. The white cube scales uniformly.
+In the inspector, uncheck **Enable scaling** to remove every scale handle while
+keeping movement and rotation available. This choice is saved in this browser
+and also appears in Preferences → Navigation → Transform tool. The separate
+Scale tool and numeric scale fields remain available for deliberate resizing.
+World/Local axes, custom pivots, joints, snapping, and Shift fine adjustment apply;
+each drag is one undo step. Move and Rotate preserve the exact scale values.
+
+Select a part, place the pointer over the viewport, and press **Shift + G** for free
+movement or **Shift + R** for free rotation. Release the shortcut keys, then move the
+pointer without holding a mouse button. Move follows the view plane; rotation behaves
+like a trackball around the selected pivot. **X**, **Y**, or **Z** constrains an axis;
+press the same axis again to return to free movement. The current World/Local or joint
+axes, snapping increments, joints, and Avoid clipping still apply. A group moves or
+rotates together.
+
+Press **Enter** or **left-click** to confirm one undo step. **Esc** or **right-click**
+restores the starting poses and keeps redo available. Clicking another interface control,
+changing window focus, resizing the viewport, or receiving a changed shared scene cancels
+the preview. After releasing the shortcut, hold **Shift** for 10× finer adjustment.
+The viewport prompt also provides Confirm and Cancel buttons. Previews stay local until
+confirmed; recovery, Drive, and shared sessions retain the committed poses. Rebind
+**Free move with pointer** and **Free rotate with pointer** in Preferences → Keyboard.
+
 Use `⌘` on macOS or `Ctrl` on Windows/Linux for the standard shortcuts below.
 Both modifiers are accepted in the workbench. These are the defaults; every key can
 be changed in [Preferences](#preferences), and menus, tooltips, and help follow. Text fields retain native selection,
@@ -532,6 +565,10 @@ During contact painting, undo removes the last brush stroke before scene changes
 | Isolate / with nearby surfaces        | `I` / `Shift + I`                                                                |
 | Center orbit / toggle orbit selection | `.` / `Shift + .`                                                                |
 | Select / move / rotate / scale        | `V` / `G` / `R` / `S`                                                            |
+| Combined Transform tool               | `T`                                                                              |
+| Free move / free rotate with pointer  | `Shift + G` / `Shift + R`                                                        |
+| Constrain free placement to an axis   | `X` / `Y` / `Z`; press again to release                                          |
+| Confirm / cancel free placement       | `Enter` or left-click / `Esc` or right-click                                     |
 | Align / joint / measure               | `A` / `J` / `D`                                                                  |
 | Paint contacts / pick pivot           | `B` / `P`                                                                        |
 | Front / right / top / projection      | `1` / `3` / `7` / `5`                                                            |
