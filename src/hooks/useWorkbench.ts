@@ -1,6 +1,6 @@
 import { useEffect, useRef } from 'react';
 import { joinLiveSession } from '../core/live';
-import { liveSession, useEditor } from '../core/store';
+import { committedScene, liveSession, useEditor } from '../core/store';
 import { readRecovery, saveRecovery } from '../core/recovery';
 import { executeEditorCommand, shortcutCommand } from '../core/commands';
 import { isEditableTarget, keyboardContextMenu } from '../core/context-menu';
@@ -12,7 +12,7 @@ export function useLiveSession() {
 }
 
 export function useRecovery() {
-  const scene = useEditor((s) => s.scene),
+  const scene = useEditor(committedScene),
     revision = useEditor((s) => s.revision),
     driveFile = useEditor((s) => s.driveFile);
   const ready = useRef(false);
@@ -85,6 +85,8 @@ export function useKeyboard(openScene: () => void, searchParts: () => void) {
       const target = event.target instanceof HTMLElement ? event.target : document.body;
       const state = useEditor.getState();
       if (state.modal || target.closest('[role=dialog]')) return;
+      // The viewport owns modal placement keys, including confirm/cancel and axis locks.
+      if (state.freeTransform) return;
       const command = shortcutCommand(event);
       const editable = isEditableTarget(target);
       if (command && (!editable || command === 'save' || command === 'open')) {
@@ -138,6 +140,11 @@ export function useKeyboard(openScene: () => void, searchParts: () => void) {
         return;
       }
       switch (action) {
+        case 'freeMove':
+        case 'freeRotate':
+          event.preventDefault();
+          state.beginFreeTransform(action === 'freeMove' ? 'translate' : 'rotate');
+          return;
         case 'pivot':
           event.preventDefault();
           state.setPivotPicking(!state.pivotPicking);

@@ -2,7 +2,7 @@ import { create } from 'zustand';
 import { cancelTask, completeTask, failTask, startTask, updateTask } from './activity';
 import { DriveError, forgetDriveToken } from './google-auth';
 import { googleDrive } from './google-drive';
-import { liveSession, useEditor } from './store';
+import { committedScene, liveSession, useEditor } from './store';
 import type { GoogleDriveClient } from './google-drive';
 
 type DriveStatus =
@@ -214,15 +214,20 @@ export class DriveAutosave {
     updateTask(taskId, { status: 'running', detail: 'Preparing scene for upload', progress: null });
     this.inFlight = (async () => {
       try {
-        const file = await this.client.save(state.scene, pending, controller.signal, (progress) => {
-          if (current()) {
-            useDrive.setState({ progress });
-            updateTask(taskId, {
-              detail: progress < 1 ? 'Uploading scene' : 'Confirming saved scene',
-              progress,
-            });
-          }
-        });
+        const file = await this.client.save(
+          committedScene(state),
+          pending,
+          controller.signal,
+          (progress) => {
+            if (current()) {
+              useDrive.setState({ progress });
+              updateTask(taskId, {
+                detail: progress < 1 ? 'Uploading scene' : 'Confirming saved scene',
+                progress,
+              });
+            }
+          },
+        );
         if (!current()) {
           cancelTask(taskId, 'Drive save stopped for this scene.');
           return;

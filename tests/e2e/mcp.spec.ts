@@ -62,6 +62,57 @@ test.afterEach(async () => {
 
 const part = (name: string) => `.part-select[title="${name}"]`;
 
+test('free placement publishes only confirmed poses and yields to a shared scene update', async ({
+  page,
+}) => {
+  await call('add_parts', { parts: model });
+  const { url } = await call('open_live_view', { open_browser: false });
+  await page.goto(url);
+  await page.locator(part('Agent column')).click();
+  const field = page.getByRole('spinbutton', { name: 'Position X', exact: true });
+  await expect(field).toHaveValue('0');
+  await page.keyboard.press('1');
+  await page.keyboard.press('Home');
+  const box = (await page.locator('canvas').boundingBox())!;
+  const start = { x: box.x + box.width / 2, y: box.y + box.height / 2 };
+  const position = async () =>
+    (await call('get_scene')).parts.find((p: { id: string }) => p.id === 'agent-column').position;
+  let edits = 0;
+  page.on('request', (request) => {
+    if (request.url().endsWith('/live/edit')) edits++;
+  });
+  await page.mouse.move(start.x, start.y);
+  await page.keyboard.press('Shift+g');
+  await page.mouse.move(start.x + 60, start.y, { steps: 8 });
+  await expect(field).not.toHaveValue('0');
+  expect(await position()).toEqual([0, 40, 0]);
+  expect(edits).toBe(0);
+  await page.mouse.click(start.x + 60, start.y, { button: 'right' });
+  await expect(field).toHaveValue('0');
+  expect(await position()).toEqual([0, 40, 0]);
+  expect(edits).toBe(0);
+
+  await page.mouse.move(start.x, start.y);
+  await page.keyboard.press('Shift+g');
+  await page.mouse.move(start.x + 60, start.y, { steps: 8 });
+  const wanted = Number(await field.inputValue());
+  await page.keyboard.press('Enter');
+  await expect.poll(async () => Math.abs((await position())[0] - wanted)).toBeLessThan(0.001);
+  expect(edits).toBe(1);
+  await expect(page.getByRole('button', { name: /^Undo \((⌘|Ctrl)\+Z\)$/ })).toBeEnabled();
+  await page.keyboard.press('Control+z');
+  await expect(field).toHaveValue('0');
+  expect(await position()).toEqual([0, 40, 0]);
+
+  await page.mouse.move(start.x, start.y);
+  await page.keyboard.press('Shift+g');
+  await page.mouse.move(start.x + 35, start.y, { steps: 6 });
+  await call('update_parts', { updates: [{ id: 'agent-base', translate: [0, 0, 30] }] });
+  await expect(page.locator('.free-transform-prompt')).toHaveCount(0);
+  await expect(field).toHaveValue('0');
+  expect(await position()).toEqual([0, 40, 0]);
+});
+
 test('a scene saved through MCP opens in the app', async ({ page }) => {
   const errors: string[] = [];
   page.on('pageerror', (error) => errors.push(error.message));

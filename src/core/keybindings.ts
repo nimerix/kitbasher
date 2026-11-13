@@ -16,6 +16,8 @@ export const keyActions = {
   select: { group: 'Tools', label: 'Select', keys: ['V'] },
   move: { group: 'Tools', label: 'Move', keys: ['G'] },
   rotate: { group: 'Tools', label: 'Rotate', keys: ['R'] },
+  freeMove: { group: 'Tools', label: 'Free move with pointer', keys: ['Shift+G'] },
+  freeRotate: { group: 'Tools', label: 'Free rotate with pointer', keys: ['Shift+R'] },
   scale: { group: 'Tools', label: 'Scale', keys: ['S'] },
   pivot: { group: 'Tools', label: 'Pick pivot on model', keys: ['P'] },
   align: { group: 'Tools', label: 'Align parts', keys: ['A'] },

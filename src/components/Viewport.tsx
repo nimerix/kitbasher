@@ -57,6 +57,7 @@ import {
 } from '../core/geometry';
 import { measureDistance, sceneLighting, useEditor } from '../core/store';
 import { PrecisionDrag } from '../core/precision';
+import { FreeTransformController, FreeTransformPrompt } from './FreeTransform';
 import { transformSelection } from '../core/transform-selection';
 import { referencePlanes, resolvePart } from '../core/references';
 import type { Part, SurfacePoint, FitAnchor, SceneDocument, SceneLight } from '../core/types';
@@ -345,6 +346,7 @@ function ManagedTransformControls({
 }
 
 function TransformGizmo() {
+  const freeTransform = useEditor((s) => !!s.freeTransform);
   const selected = useEditor((s) => s.selected),
     tool = useEditor((s) => s.tool),
     scene = useEditor((s) => s.scene),
@@ -418,7 +420,8 @@ function TransformGizmo() {
     proxy.updateMatrixWorld(true);
     invalidate();
   }, [selection, proxy, invalidate, movable.length, dragVersion]);
-  if (selection.blocked || !['translate', 'rotate', 'scale'].includes(tool)) return null;
+  if (freeTransform || selection.blocked || !['translate', 'rotate', 'scale'].includes(tool))
+    return null;
   const locks = selection.locks;
   return (
     <>
@@ -1041,6 +1044,7 @@ function Scene({
       {/* Handles and the view cube answer to the mouse, which a headset session does not have. */}
       {headset ? null : (
         <>
+          <FreeTransformController />
           <TransformGizmo />
           <AnchorOverlay />
           <LightHandles />
@@ -1063,6 +1067,7 @@ function Scene({
 }
 
 export function Viewport() {
+  const freeTransform = useEditor((s) => !!s.freeTransform);
   const inspection = useInspection();
   const view = useEditor((s) => s.view),
     tool = useEditor((s) => s.tool),
@@ -1093,7 +1098,7 @@ export function Viewport() {
   const distance = measurement.length === 2 ? measureDistance() : null;
   return (
     <main
-      className={`viewport ${navigationMode ? `is-camera-tool is-${navigationMode}` : pivotPicking || ['align', 'joint', 'measure'].includes(tool) ? 'is-picking' : ''}`}
+      className={`viewport ${freeTransform ? 'is-free-transform' : navigationMode ? `is-camera-tool is-${navigationMode}` : pivotPicking || ['align', 'joint', 'measure'].includes(tool) ? 'is-picking' : ''}`}
       aria-label="3D assembly viewport"
       tabIndex={0}
       onPointerDownCapture={() => {
@@ -1171,6 +1176,7 @@ export function Viewport() {
         </Suspense>
       </ViewportBoundary>
       <AnnotationLayer projection={projection} />
+      <FreeTransformPrompt />
       <InspectionControls inspection={inspection} />
       <div className="canvas-label" hidden={view.inspection.enabled}>
         <span className="canvas-label-line" />

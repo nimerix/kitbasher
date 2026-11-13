@@ -19,7 +19,9 @@ export function TransformAdjustments() {
     temporaryOrbit = useEditor((s) => s.temporaryOrbit),
     tool = useEditor((s) => s.tool);
   const moveKey = useShortcut('move'),
-    rotateKey = useShortcut('rotate');
+    rotateKey = useShortcut('rotate'),
+    freeMoveKey = useShortcut('freeMove'),
+    freeRotateKey = useShortcut('freeRotate');
   const selection = useMemo(
     () =>
       transformSelection(
@@ -83,6 +85,23 @@ export function TransformAdjustments() {
           </button>
         ))}
       </div>
+      {freeMoveKey || freeRotateKey ? (
+        <p className="transform-help free-transform-shortcuts">
+          Free with pointer:
+          {freeMoveKey ? (
+            <span>
+              {' '}
+              <kbd>{freeMoveKey}</kbd> move
+            </span>
+          ) : null}
+          {freeRotateKey ? (
+            <span>
+              {' '}
+              <kbd>{freeRotateKey}</kbd> rotate
+            </span>
+          ) : null}
+        </p>
+      ) : null}
       <div className="transform-setting-row">
         <span>Axes</span>
         {selection.axes === 'joint' ? (

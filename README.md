@@ -521,6 +521,22 @@ overlapping geometry.
 
 ## Navigation and shortcuts
 
+Select a part, place the pointer over the viewport, and press **Shift + G** for free
+movement or **Shift + R** for free rotation. Release the shortcut keys, then move the
+pointer without holding a mouse button. Move follows the view plane; rotation behaves
+like a trackball around the selected pivot. **X**, **Y**, or **Z** constrains an axis;
+press the same axis again to return to free movement. The current World/Local or joint
+axes, snapping increments, joints, and Avoid clipping still apply. A group moves or
+rotates together.
+
+Press **Enter** or **left-click** to confirm one undo step. **Esc** or **right-click**
+restores the starting poses and keeps redo available. Clicking another interface control,
+changing window focus, resizing the viewport, or receiving a changed shared scene cancels
+the preview. After releasing the shortcut, hold **Shift** for 10× finer adjustment.
+The viewport prompt also provides Confirm and Cancel buttons. Previews stay local until
+confirmed; recovery, Drive, and shared sessions retain the committed poses. Rebind
+**Free move with pointer** and **Free rotate with pointer** in Preferences → Keyboard.
+
 Use `⌘` on macOS or `Ctrl` on Windows/Linux for the standard shortcuts below.
 Both modifiers are accepted in the workbench. These are the defaults; every key can
 be changed in [Preferences](#preferences), and menus, tooltips, and help follow. Text fields retain native selection,
@@ -540,6 +556,9 @@ During contact painting, undo removes the last brush stroke before scene changes
 | Isolate / with nearby surfaces        | `I` / `Shift + I`                                                                |
 | Center orbit / toggle orbit selection | `.` / `Shift + .`                                                                |
 | Select / move / rotate / scale        | `V` / `G` / `R` / `S`                                                            |
+| Free move / free rotate with pointer  | `Shift + G` / `Shift + R`                                                        |
+| Constrain free placement to an axis   | `X` / `Y` / `Z`; press again to release                                          |
+| Confirm / cancel free placement       | `Enter` or left-click / `Esc` or right-click                                     |
 | Align / joint / measure               | `A` / `J` / `D`                                                                  |
 | Paint contacts / pick pivot           | `B` / `P`                                                                        |
 | Front / right / top / projection      | `1` / `3` / `7` / `5`                                                            |

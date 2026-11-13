@@ -564,6 +564,7 @@ function Toolbar({
 }
 
 function StatusBar() {
+  const freeMode = useEditor((s) => s.freeTransform?.mode);
   const pivotPicking = useEditor((s) => s.pivotPicking),
     surfacePainting = useEditor((s) => s.tool === 'align' && s.operation.mode === 'surface');
   const recovery = useEditor((s) => s.recoveryStatus),
@@ -592,23 +593,25 @@ function StatusBar() {
           Zoom <kbd>Scroll</kbd>
         </span>
         <span className="status-context">
-          {indexing
-            ? 'Preparing a dense mesh · It can be clicked when this finishes'
-            : navigationMode
-              ? `${navigationMode === 'pan' ? 'Pan' : 'Orbit'} tool · Drag to navigate${cancel ? ` · ${cancel} to return` : ''}`
-              : pivotPicking
-                ? `Click a model surface to set its pivot${[pivot, cancel].some(Boolean) ? ` · ${[pivot, cancel].filter(Boolean).join(' or ')} to cancel` : ''}`
-                : surfacePainting
-                  ? `Drag to paint · Alt erases${smaller || larger ? ` · ${[smaller, larger].filter(Boolean).join(' / ')} brush size` : ''} · ${orbitHint} orbits`
-                  : tool === 'align'
-                    ? `Pick source → target · ${orbitHint} orbits`
-                    : tool === 'anchors'
-                      ? 'Add surface anchors · Drag a target to fit · Shift for fine adjustment'
-                      : tool === 'joint'
-                        ? 'Pick anchors to connect parts'
-                        : ['translate', 'rotate', 'scale'].includes(tool)
-                          ? 'Hold Shift while dragging for 10× finer adjustment'
-                          : 'Shift + click to select multiple'}
+          {freeMode
+            ? 'Move pointer · X / Y / Z: axis · Enter / click: confirm · Esc / right-click: cancel'
+            : indexing
+              ? 'Preparing a dense mesh · It can be clicked when this finishes'
+              : navigationMode
+                ? `${navigationMode === 'pan' ? 'Pan' : 'Orbit'} tool · Drag to navigate${cancel ? ` · ${cancel} to return` : ''}`
+                : pivotPicking
+                  ? `Click a model surface to set its pivot${[pivot, cancel].some(Boolean) ? ` · ${[pivot, cancel].filter(Boolean).join(' or ')} to cancel` : ''}`
+                  : surfacePainting
+                    ? `Drag to paint · Alt erases${smaller || larger ? ` · ${[smaller, larger].filter(Boolean).join(' / ')} brush size` : ''} · ${orbitHint} orbits`
+                    : tool === 'align'
+                      ? `Pick source → target · ${orbitHint} orbits`
+                      : tool === 'anchors'
+                        ? 'Add surface anchors · Drag a target to fit · Shift for fine adjustment'
+                        : tool === 'joint'
+                          ? 'Pick anchors to connect parts'
+                          : ['translate', 'rotate', 'scale'].includes(tool)
+                            ? 'Hold Shift while dragging for 10× finer adjustment'
+                            : 'Shift + click to select multiple'}
         </span>
       </div>
       <div className="local-save-status">
