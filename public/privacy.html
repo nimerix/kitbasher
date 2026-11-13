@@ -58,7 +58,7 @@
     <header><a href="./">Kitbasher workbench</a></header>
     <main>
       <h1>Privacy Policy</h1>
-      <p>Last updated: <time datetime="2026-11-11">November 11, 2026</time></p>
+      <p>Last updated: <time datetime="2026-11-13">November 13, 2026</time></p>
       <p>
         Kitbasher is a local-first 3D assembly workbench maintained by Michael Pearce. We do not
         track your activity, run advertising, sell personal information, or use your models to train
@@ -110,8 +110,13 @@
         requests permission to access files you create with or open through the app, rather than
         unrestricted access to your Drive. Scene files and associated metadata are transferred
         directly between your browser and Google Drive for cloud saving and loading, not through a
-        Kitbasher backend. Access tokens are held in memory, not stored in browser storage or scene
-        files.
+        Kitbasher backend. On static installations, short-lived access tokens are kept in this tab's
+        session storage so reloading does not require signing in again. When hosted session renewal
+        is enabled, access tokens stay in memory and an encrypted, functional session cookie keeps
+        you connected for up to 30 days. This cookie is inaccessible to page scripts; the hosting
+        worker decrypts it to renew access with Google. OAuth codes and tokens pass through that
+        worker, but scene contents do not. Credentials are never included in scene files. Disconnect
+        clears the current browser's Drive session.
       </p>
       <p>
         Google's services are subject to the

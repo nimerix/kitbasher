@@ -1,9 +1,9 @@
 import { create } from 'zustand';
 import { cancelTask, completeTask, failTask, startTask, updateTask } from './activity';
-import { DriveError, forgetDriveToken } from './google-auth';
-import { googleDrive } from './google-drive';
+import { DriveError, endDriveSession, forgetDriveToken, restoreDriveSession } from './google-auth';
+import { DriveConflict, driveBinding, googleDrive } from './google-drive';
 import { committedScene, liveSession, useEditor } from './store';
-import type { GoogleDriveClient } from './google-drive';
+import type { DriveFile, GoogleDriveClient } from './google-drive';
 
 type DriveStatus =
   | 'disconnected'
@@ -23,6 +23,7 @@ export const useDrive = create<{
   progress: number;
   savedRevision: number;
   message: string | null;
+  conflict: DriveFile | null;
 }>(() => ({
   connected: false,
   dialogOpen: false,
@@ -30,6 +31,7 @@ export const useDrive = create<{
   progress: 0,
   savedRevision: -1,
   message: null,
+  conflict: null,
 }));
 
 export const driveStatusText = (status: DriveStatus) =>
@@ -55,6 +57,7 @@ export class DriveAutosave {
   private pendingSince = 0;
   private failures = 0;
   private stopped = true;
+  private paused = false;
   private activityId: string | undefined;
 
   constructor(private readonly client: Pick<GoogleDriveClient, 'save'> = googleDrive) {}
@@ -72,6 +75,7 @@ export class DriveAutosave {
         this.failures = 0;
         useDrive.setState({
           savedRevision: -1,
+          conflict: null,
           message: null,
           progress: 0,
           status: state.driveFile
@@ -89,6 +93,13 @@ export class DriveAutosave {
     window.addEventListener('offline', this.offline);
     window.addEventListener('beforeunload', this.beforeUnload);
     this.schedule();
+    void restoreDriveSession()
+      .then((connected) => {
+        if (!this.stopped && connected && !useDrive.getState().connected) this.connected();
+      })
+      .catch(() => {
+        /* A user can retry connecting in the Drive dialog. */
+      });
     return () => {
       this.stopped = true;
       this.cancel();
@@ -124,6 +135,12 @@ export class DriveAutosave {
     }
   };
   private online = () => {
+    if (!useDrive.getState().connected)
+      void restoreDriveSession()
+        .then((connected) => {
+          if (!this.stopped && connected) this.connected();
+        })
+        .catch(() => {});
     if (useDrive.getState().status === 'offline' || this.failures) this.retry();
   };
   private offline = () => {
@@ -135,7 +152,7 @@ export class DriveAutosave {
   };
 
   private schedule(delay?: number) {
-    if (this.stopped || !this.dirty()) return;
+    if (this.stopped || this.paused || !this.dirty()) return;
     const state = useDrive.getState();
     if (!state.connected) {
       if (this.activityId)
@@ -185,7 +202,7 @@ export class DriveAutosave {
     if (this.inFlight) return this.inFlight;
     const state = useEditor.getState(),
       binding = state.driveFile;
-    if (this.stopped || !binding || !this.dirty()) return Promise.resolve();
+    if (this.stopped || this.paused || !binding || !this.dirty()) return Promise.resolve();
     if (!useDrive.getState().connected || !navigator.onLine) {
       this.schedule();
       return Promise.resolve();
@@ -233,11 +250,12 @@ export class DriveAutosave {
           return;
         }
         // Acknowledgements only cover the captured revision, never edits made during upload.
-        useEditor.setState({ driveFile: { id: file.id, version: file.version } });
+        useEditor.setState({ driveFile: driveBinding(file) });
         this.failures = 0;
         useDrive.setState({
           savedRevision: state.revision,
           status: 'saved',
+          conflict: null,
           progress: 1,
           message: null,
         });
@@ -271,6 +289,7 @@ export class DriveAutosave {
         } else
           useDrive.setState({
             status: failure.kind === 'conflict' ? 'conflict' : 'error',
+            conflict: failure instanceof DriveConflict ? failure.file : null,
             message: failure.message,
           });
       } finally {
@@ -286,7 +305,13 @@ export class DriveAutosave {
   connected() {
     useDrive.setState({
       connected: true,
-      status: useEditor.getState().driveFile ? (this.dirty() ? 'pending' : 'saved') : 'idle',
+      status: useDrive.getState().conflict
+        ? 'conflict'
+        : useEditor.getState().driveFile
+          ? this.dirty()
+            ? 'pending'
+            : 'saved'
+          : 'idle',
       message: null,
     });
     this.schedule(0);
@@ -315,8 +340,23 @@ export class DriveAutosave {
     useDrive.setState({
       savedRevision: useEditor.getState().revision,
       status: 'saved',
+      conflict: null,
       message: null,
     });
+  }
+
+  /** Explicit conflict resolution must not race a queued or unfinished upload. */
+  async whilePaused<T>(action: () => Promise<T>): Promise<T> {
+    if (this.paused) throw new Error('A Drive action is already in progress.');
+    this.paused = true;
+    this.cancel();
+    try {
+      await this.inFlight;
+      return await action();
+    } finally {
+      this.paused = false;
+      this.schedule();
+    }
   }
 
   /** Used before replacing a scene. Failure leaves the current assembly intact. */
@@ -324,6 +364,7 @@ export class DriveAutosave {
     while (this.dirty()) {
       const state = useDrive.getState();
       if (
+        this.paused ||
         !state.connected ||
         !navigator.onLine ||
         ['conflict', 'error', 'reconnect'].includes(state.status)
@@ -354,10 +395,10 @@ export function stopDriveAutosave() {
   useEditor.setState({ driveFile: null });
 }
 
-export function disconnectDrive() {
+export async function disconnectDrive() {
   stopDriveAutosave();
-  forgetDriveToken();
-  useDrive.setState({ connected: false, status: 'disconnected', message: null });
+  useDrive.setState({ connected: false, status: 'disconnected', message: null, conflict: null });
+  await endDriveSession();
 }
 
 export async function saveNewDriveScene() {
@@ -368,23 +409,44 @@ export async function saveNewDriveScene() {
   driveAutosave.retry();
 }
 
-export async function openDriveScene(id: string) {
-  if (!(await flushDriveBeforeReplace())) return false;
+export async function openDriveScene(id: string, discardLocal = false) {
+  if (!discardLocal && !(await flushDriveBeforeReplace())) return false;
+  return driveAutosave.whilePaused(async () => {
+    const state = useEditor.getState();
+    state.setBusy('Opening scene from Google Drive…');
+    try {
+      const { scene, file } = await googleDrive.open(id);
+      if (
+        useEditor.getState().sceneEpoch !== state.sceneEpoch ||
+        useEditor.getState().revision !== state.revision
+      ) {
+        throw new Error(
+          'The workbench changed while this scene was opening. Please open it again.',
+        );
+      }
+      state.setScene(scene, false, driveBinding(file));
+      driveAutosave.acceptOpenedScene();
+      state.notify('Scene opened from Google Drive');
+      return true;
+    } finally {
+      state.setBusy(null);
+    }
+  });
+}
+
+/** The confirmation names the remote version being replaced, not an unchecked force write. */
+export async function overwriteDriveScene(file: DriveFile) {
   const state = useEditor.getState();
-  state.setBusy('Opening scene from Google Drive…');
-  try {
-    const { scene, file } = await googleDrive.open(id);
+  if (state.driveFile?.id !== file.id)
+    throw new Error('The current Drive scene changed. Check again.');
+  await driveAutosave.whilePaused(async () => {
     if (
       useEditor.getState().sceneEpoch !== state.sceneEpoch ||
-      useEditor.getState().revision !== state.revision
-    ) {
-      throw new Error('The workbench changed while this scene was opening. Please open it again.');
-    }
-    state.setScene(scene, false, { id: file.id, version: file.version });
-    driveAutosave.acceptOpenedScene();
-    state.notify('Scene opened from Google Drive');
-    return true;
-  } finally {
-    state.setBusy(null);
-  }
+      useEditor.getState().driveFile?.id !== file.id
+    )
+      throw new Error('The current Drive scene changed. Check again.');
+    useEditor.setState({ driveFile: driveBinding(file) });
+    useDrive.setState({ savedRevision: -1, status: 'pending', conflict: null, message: null });
+  });
+  return driveAutosave.flush();
 }

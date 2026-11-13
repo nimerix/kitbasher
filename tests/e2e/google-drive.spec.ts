@@ -1,22 +1,50 @@
 import { expect, test, type Page } from '@playwright/test';
 import { readSavedScene } from './saved-scene';
-import { readSceneFile } from '../../src/core/scene-file';
+import { readSceneFile, sceneFileBlob } from '../../src/core/scene-file';
+import { createHash } from 'node:crypto';
 
 interface CloudFile {
   id: string;
   name: string;
   version: string;
   modifiedTime: string;
+  md5Checksum: string;
   appProperties: Record<string, string>;
   bytes: Buffer;
 }
 
-async function mockGoogle(page: Page, denied = false) {
+async function mockGoogle(page: Page, denied = false, hosted = false) {
   const cloud = {
     files: new Map<string, CloudFile>(),
     uploads: [] as string[],
     expired: false,
+    renewals: 0,
+    authorizations: 0,
+    connected: false,
+    revoked: false,
   };
+  await page.route('**/api/drive/*', (route) => {
+    const action = new URL(route.request().url()).pathname.split('/').at(-1);
+    if (!hosted) return route.fulfill({ status: 404, body: '' });
+    if (action === 'connect') {
+      cloud.connected = true;
+      cloud.authorizations++;
+    }
+    if (action === 'disconnect') cloud.connected = false;
+    if (action === 'session' && cloud.revoked)
+      return route.fulfill({ status: 401, json: { error: 'Reconnect Google Drive' } });
+    if (action === 'session' && cloud.connected) cloud.renewals++;
+    return route.fulfill({
+      json: cloud.connected
+        ? {
+            enabled: true,
+            access_token: 'test-access-token',
+            expires_in: 3600,
+            scope: 'https://www.googleapis.com/auth/drive.file',
+          }
+        : { enabled: true },
+    });
+  });
   let allocated = 0;
   const sessions = new Map<
     string,
@@ -26,6 +54,7 @@ async function mockGoogle(page: Page, denied = false) {
     route.fulfill({
       contentType: 'text/javascript',
       body: `window.google = { accounts: { oauth2: {
+      initCodeClient: (config) => ({ requestCode: () => config.callback({ code: 'test-code' }) }),
       initTokenClient: (config) => ({ requestAccessToken: () => config.callback({
         access_token: 'test-access-token', expires_in: 3600,
         scope: ${JSON.stringify(denied ? '' : 'https://www.googleapis.com/auth/drive.file')}
@@ -67,6 +96,7 @@ async function mockGoogle(page: Page, denied = false) {
           modifiedTime: new Date().toISOString(),
           appProperties: session.metadata.appProperties!,
           bytes: Buffer.concat(session.chunks),
+          md5Checksum: createHash('md5').update(Buffer.concat(session.chunks)).digest('hex'),
         };
         cloud.files.set(file.id, file);
         cloud.uploads.push(file.id);
@@ -130,7 +160,7 @@ async function rename(page: Page, name: string) {
   await input.press('Enter');
 }
 
-test('saves edits to one portable Drive file and reconnects to it after local recovery', async ({
+test('saves edits to one portable Drive file and stays connected after local recovery', async ({
   page,
 }) => {
   const cloud = await mockGoogle(page);
@@ -157,10 +187,11 @@ test('saves edits to one portable Drive file and reconnects to it after local re
   await expect(page.getByText('Saved locally', { exact: true })).toBeVisible();
   await page.reload();
   await expect(page.getByText('Recovered your local assembly', { exact: true })).toBeVisible();
-  await expect(driveButton(page)).toHaveAccessibleName('Google Drive: Reconnect Drive');
+  await saved(page);
   await driveButton(page).click();
-  await page.getByRole('button', { name: 'Reconnect Google Drive', exact: true }).click();
-  await expect(page.getByRole('status').filter({ hasText: 'Saved to Drive' })).toBeVisible();
+  await expect(
+    page.getByRole('button', { name: 'Reconnect Google Drive', exact: true }),
+  ).toHaveCount(0);
   expect(cloud.files.size).toBe(1);
   const downloading = page.waitForEvent('download');
   await page.getByRole('button', { name: 'Download scene copy', exact: true }).click();
@@ -222,8 +253,7 @@ test('handles expired authorization and remote conflicts without creating duplic
   await page.getByRole('button', { name: 'Done', exact: true }).click();
   await saved(page);
   const remote = cloud.files.get('cloud-1')!;
-  remote.version = '50';
-  remote.appProperties = { kitbasher: 'scene', kitbasherWrite: 'another-editor' };
+  await changeRemote(remote, 'Cloud edits');
   await rename(page, 'Local conflicting edits');
   await expect(driveButton(page)).toHaveAccessibleName('Google Drive: Drive file changed');
   expect(cloud.uploads).toHaveLength(2);
@@ -232,7 +262,7 @@ test('handles expired authorization and remote conflicts without creating duplic
   await page.getByRole('button', { name: 'Done', exact: true }).click();
   await saved(page);
   expect(cloud.files.size).toBe(2);
-  expect(cloud.files.get('cloud-1')!.name).toBe('Needs reconnect.kitbash');
+  expect(cloud.files.get('cloud-1')!.name).toBe('Cloud edits.kitbash');
   expect(cloud.files.get('cloud-2')!.name).toBe('Local conflicting edits.kitbash');
 });
 
@@ -258,4 +288,131 @@ test('keeps Drive controls reachable on a phone-sized screen', async ({ page }) 
   await expect(
     page.getByRole('button', { name: 'Download scene copy', exact: true }),
   ).toBeInViewport();
+});
+
+async function changeRemote(file: CloudFile, name: string) {
+  const scene = await readSceneFile(new Blob([new Uint8Array(file.bytes)]));
+  scene.name = name;
+  file.bytes = Buffer.from(await (await sceneFileBlob(scene)).arrayBuffer());
+  file.md5Checksum = createHash('md5').update(file.bytes).digest('hex');
+  file.name = `${name}.kitbash`;
+  file.version = String(Number(file.version) + 10);
+  // Deliberately retain appProperties: updates outside Kitbasher can preserve them.
+}
+
+async function conflictingScene(page: Page) {
+  const cloud = await mockGoogle(page);
+  await connectAndSave(page);
+  await changeRemote(cloud.files.get('cloud-1')!, 'Cloud assembly');
+  await rename(page, 'Local assembly');
+  await expect(driveButton(page)).toHaveAccessibleName('Google Drive: Drive file changed');
+  await driveButton(page).click();
+  return cloud;
+}
+
+test('loads the cloud version directly from a conflict, with cancel leaving local edits intact', async ({
+  page,
+}) => {
+  const cloud = await conflictingScene(page);
+  await page.screenshot({
+    path: '/tmp/kitbasher-drive-conflict-desktop.png',
+    animations: 'disabled',
+  });
+  await page.getByRole('button', { name: 'Load Drive version', exact: true }).click();
+  await page.getByRole('button', { name: 'Cancel', exact: true }).click();
+  await expect(page.getByTitle('Rename assembly', { exact: true })).toContainText('Local assembly');
+  await page.getByRole('button', { name: 'Load Drive version', exact: true }).click();
+  await page.getByRole('button', { name: 'Discard local edits and load', exact: true }).click();
+  await saved(page);
+  await expect(page.getByTitle('Rename assembly', { exact: true })).toContainText('Cloud assembly');
+  expect(cloud.uploads).toEqual(['cloud-1']);
+});
+
+test('overwrites the reviewed Drive version only after explicit confirmation', async ({ page }) => {
+  const cloud = await conflictingScene(page);
+  await page.getByRole('button', { name: 'Overwrite Drive version', exact: true }).click();
+  expect(cloud.uploads).toHaveLength(1);
+  await page.getByRole('button', { name: 'Confirm overwrite', exact: true }).click();
+  await saved(page);
+  expect(cloud.files.get('cloud-1')!.name).toBe('Local assembly.kitbash');
+  expect(cloud.files.size).toBe(1);
+});
+
+test('checks again when the remote scene changes after the overwrite confirmation was shown', async ({
+  page,
+}) => {
+  const cloud = await conflictingScene(page);
+  await page.getByRole('button', { name: 'Overwrite Drive version', exact: true }).click();
+  await changeRemote(cloud.files.get('cloud-1')!, 'Newer cloud edits');
+  await page.getByRole('button', { name: 'Confirm overwrite', exact: true }).click();
+  await expect(driveButton(page)).toHaveAccessibleName('Google Drive: Drive file changed');
+  expect(cloud.uploads).toHaveLength(1);
+  expect(cloud.files.get('cloud-1')!.name).toBe('Newer cloud edits.kitbash');
+});
+
+test('keeps local edits and binding if loading the conflict version fails', async ({ page }) => {
+  await conflictingScene(page);
+  await page.route('**/drive/v3/files/cloud-1?alt=media', (route) =>
+    route.fulfill({ status: 503, json: {} }),
+  );
+  await page.getByRole('button', { name: 'Load Drive version', exact: true }).click();
+  await page.getByRole('button', { name: 'Discard local edits and load', exact: true }).click();
+  await expect(
+    page.getByRole('dialog', { name: 'Google Drive', exact: true }).getByRole('alert'),
+  ).toContainText('temporarily unavailable');
+  await expect(page.getByTitle('Rename assembly', { exact: true })).toContainText('Local assembly');
+  await page.getByRole('button', { name: 'Cancel', exact: true }).click();
+  await expect(
+    page.getByRole('button', { name: 'Overwrite Drive version', exact: true }),
+  ).toBeEnabled();
+});
+
+test('ignores metadata-only version changes and keeps saving to the same Drive file', async ({
+  page,
+}) => {
+  const cloud = await mockGoogle(page);
+  await connectAndSave(page);
+  cloud.files.get('cloud-1')!.version = '50';
+  await rename(page, 'No content conflict');
+  await saved(page);
+  expect(cloud.uploads).toEqual(['cloud-1', 'cloud-1']);
+});
+
+test('renews hosted authorization and restores after reload without reconnect, but respects disconnect', async ({
+  page,
+}) => {
+  const cloud = await mockGoogle(page, false, true);
+  await connectAndSave(page);
+  cloud.expired = true;
+  await rename(page, 'Renewed in background');
+  await saved(page);
+  expect(cloud.authorizations).toBe(1);
+  expect(cloud.renewals).toBe(1);
+  await expect(page.getByText('Saved locally', { exact: true })).toBeVisible();
+  await page.reload();
+  await saved(page);
+  expect(cloud.authorizations).toBe(1);
+  expect(cloud.renewals).toBe(2);
+  await driveButton(page).click();
+  await page.getByRole('button', { name: 'Disconnect', exact: true }).click();
+  await expect(
+    page.getByRole('button', { name: 'Connect Google Drive', exact: true }),
+  ).toBeEnabled();
+  expect(cloud.connected).toBe(false);
+});
+
+test('keeps conflict resolution usable on a phone', async ({ page }) => {
+  await conflictingScene(page);
+  await page.setViewportSize({ width: 390, height: 844 });
+  const load = page.getByRole('button', { name: 'Load Drive version', exact: true });
+  await load.scrollIntoViewIfNeeded();
+  await expect(load).toBeInViewport();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth)).toBe(false);
+  await page.screenshot({
+    path: '/tmp/kitbasher-drive-conflict-phone.png',
+    animations: 'disabled',
+  });
+  await load.click();
+  await page.getByRole('button', { name: 'Discard local edits and load', exact: true }).click();
+  await saved(page);
 });

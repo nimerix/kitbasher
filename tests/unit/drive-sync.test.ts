@@ -34,6 +34,7 @@ beforeEach(() => {
     savedRevision: -1,
     message: null,
     dialogOpen: false,
+    conflict: null,
   });
   sync = new DriveAutosave({ save });
   stop = sync.start();

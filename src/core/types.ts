@@ -128,6 +128,8 @@ export interface IsolationSettings {
 export interface DriveFileBinding {
   id: string;
   version: string | null;
+  /** Drive content checksum; metadata-only version changes are not conflicts. */
+  md5Checksum?: string;
   /** Identifies an upload whose response may have been lost. */
   pendingWriteId?: string;
 }

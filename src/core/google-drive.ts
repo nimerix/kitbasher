@@ -1,11 +1,11 @@
-import { DriveError, driveAccessToken } from './google-auth';
+import { DriveError, driveAccessToken, refreshDriveToken } from './google-auth';
 import { safeFilename } from './files';
 import { assertReadable, readSceneFile, sceneFileBlob } from './scene-file';
 import type { DriveFileBinding, SceneDocument } from './types';
 
 const api = 'https://www.googleapis.com/drive/v3/files';
 const uploadApi = 'https://www.googleapis.com/upload/drive/v3/files';
-const fields = 'id,name,version,modifiedTime,trashed,appProperties';
+const fields = 'id,name,version,modifiedTime,trashed,appProperties,md5Checksum';
 const chunkSize = 8 * 1024 * 1024;
 
 export interface DriveFile {
@@ -13,8 +13,46 @@ export interface DriveFile {
   name: string;
   version: string;
   modifiedTime?: string;
+  md5Checksum?: string;
   trashed?: boolean;
   appProperties?: Record<string, string>;
+}
+
+export class DriveConflict extends DriveError {
+  constructor(readonly file: DriveFile) {
+    super(
+      'The scene in Drive differs from your local copy. Choose which version to keep.',
+      'conflict',
+    );
+  }
+}
+
+export function driveBinding(file: DriveFile): DriveFileBinding {
+  return {
+    id: file.id,
+    version: file.version,
+    ...(file.md5Checksum ? { md5Checksum: file.md5Checksum } : {}),
+  };
+}
+
+function sameContent(a: { version: string | null; md5Checksum?: string }, b: DriveFile) {
+  return a.md5Checksum && b.md5Checksum ? a.md5Checksum === b.md5Checksum : a.version === b.version;
+}
+
+/** Compare in bounded chunks, even for scenes too large for one ArrayBuffer. */
+async function identicalBlobs(a: Blob, b: Blob, signal: AbortSignal) {
+  if (a.size !== b.size) return false;
+  for (let offset = 0; offset < a.size; offset += 1024 * 1024) {
+    signal.throwIfAborted();
+    const [left, right] = await Promise.all(
+      [a, b].map(
+        async (blob) =>
+          new Uint8Array(await blob.slice(offset, offset + 1024 * 1024).arrayBuffer()),
+      ),
+    );
+    if (!left.every((byte, index) => byte === right[index])) return false;
+  }
+  return true;
 }
 
 function fileRecord(value: unknown): DriveFile {
@@ -43,6 +81,9 @@ export function readDriveBinding(value: unknown): DriveFileBinding | null {
   return {
     id: binding.id,
     version: binding.version,
+    ...(typeof binding.md5Checksum === 'string' && /^[a-f0-9]{32}$/i.test(binding.md5Checksum)
+      ? { md5Checksum: binding.md5Checksum }
+      : {}),
     ...(typeof binding.pendingWriteId === 'string'
       ? { pendingWriteId: binding.pendingWriteId }
       : {}),
@@ -58,7 +99,7 @@ async function checkResponse(response: Response) {
     throw new DriveError('Reconnect to Google Drive to continue autosaving.', 'auth', status);
   if (status === 412)
     throw new DriveError(
-      'This Drive file changed elsewhere. Open the cloud version or save a new copy.',
+      'The Drive file changed during saving. Check again, then choose which version to keep.',
       'conflict',
       status,
     );
@@ -85,22 +126,32 @@ async function checkResponse(response: Response) {
 }
 
 export class GoogleDriveClient {
-  constructor(private readonly getToken = driveAccessToken) {}
+  constructor(
+    private readonly getToken: () => string | Promise<string> = driveAccessToken,
+    private readonly refreshToken: (rejected: string) => Promise<string> = refreshDriveToken,
+  ) {}
 
   private async request(url: string, init: RequestInit = {}, signal?: AbortSignal) {
     const headers = new Headers(init.headers);
-    headers.set('Authorization', `Bearer ${this.getToken()}`);
+    const accessToken = await this.getToken();
+    headers.set('Authorization', `Bearer ${accessToken}`);
     try {
-      return await checkResponse(
-        await fetch(url, {
+      const send = () =>
+        fetch(url, {
           ...init,
           headers,
           cache: 'no-store',
           signal: signal
             ? AbortSignal.any([signal, AbortSignal.timeout(120000)])
             : AbortSignal.timeout(120000),
-        }),
-      );
+        });
+      let response = await send();
+      if (response.status === 401) {
+        headers.set('Authorization', `Bearer ${await this.refreshToken(accessToken)}`);
+        signal?.throwIfAborted();
+        response = await send();
+      }
+      return await checkResponse(response);
     } catch (error) {
       if (signal?.aborted || error instanceof DriveError) throw error;
       throw new DriveError(
@@ -153,13 +204,14 @@ export class GoogleDriveClient {
       throw new DriveError('This scene is in Google Drive trash. Restore it first.');
     const response = await this.request(`${api}/${encodeURIComponent(id)}?alt=media`, {}, signal);
     const scene = await readSceneFile(await response.blob());
-    if ((await this.metadata(id, signal)).version !== file.version) {
+    const latest = await this.metadata(id, signal);
+    if (latest.trashed || !sameContent(file, latest)) {
       throw new DriveError(
         'This scene changed while it was opening. Please open it again.',
         'conflict',
       );
     }
-    return { scene, file };
+    return { scene, file: latest };
   }
 
   async save(
@@ -168,6 +220,9 @@ export class GoogleDriveClient {
     signal: AbortSignal,
     progress: (fraction: number) => void,
   ): Promise<DriveFile> {
+    const blob = await sceneFileBlob(scene);
+    await assertReadable(blob);
+    signal.throwIfAborted();
     let current: DriveFile | null = null;
     try {
       current = await this.metadata(binding.id, signal);
@@ -178,19 +233,20 @@ export class GoogleDriveClient {
     }
     if (current?.trashed)
       throw new DriveError('This scene is in Google Drive trash. Restore it or save a new copy.');
-    if (
-      current &&
-      current.version !== binding.version &&
-      (!binding.pendingWriteId || current.appProperties?.kitbasherWrite !== binding.pendingWriteId)
-    ) {
-      throw new DriveError(
-        'This Drive file changed elsewhere. Open the cloud version or save a new copy.',
-        'conflict',
+    if (current && !sameContent(binding, current)) {
+      // Old recovery records have no checksum. A lost upload response can also leave
+      // an old binding. Compare actual bytes before calling either case a conflict.
+      // An appProperties write id alone is unsafe: external editors may preserve it.
+      const response = await this.request(
+        `${api}/${encodeURIComponent(binding.id)}?alt=media`,
+        {},
+        signal,
       );
+      const identical = await identicalBlobs(blob, await response.blob(), signal);
+      const latest = await this.metadata(binding.id, signal);
+      if (identical && !latest.trashed && sameContent(current, latest)) return latest;
+      throw new DriveConflict(latest);
     }
-    const blob = await sceneFileBlob(scene);
-    await assertReadable(blob);
-    signal.throwIfAborted();
     const metadata = {
       ...(!current ? { id: binding.id } : {}),
       name: `${safeFilename(scene.name)}.kitbash`,
