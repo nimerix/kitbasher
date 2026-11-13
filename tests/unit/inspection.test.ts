@@ -167,7 +167,7 @@ describe('interference inspection', () => {
     const result = inspectMeshes({ meshes: [a, b], distance: 0.3 });
     expect(result.overlaps).toEqual([]);
     expect(result.solidPairs).toBe(0);
-    expect(result.warnings[0]).toContain('Open scan');
+    expect(result.warnings[0].message).toContain('Open scan');
     expect(result.pairs[0].volume).toBeNull();
     expect(result.pairs[0].distance).toBeCloseTo(0.2, 5);
     // The small contact patch is inside a coarse face: none of its original vertices is close.

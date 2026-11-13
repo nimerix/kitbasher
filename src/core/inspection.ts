@@ -215,6 +215,7 @@ export function inspectMeshes(
     overlaps: [],
     surfaces: [],
     pairs: [],
+    solidParts: [],
     checkedPairs: 0,
     solidPairs: 0,
     resolution: 0,
@@ -254,18 +255,19 @@ export function inspectMeshes(
       );
       try {
         assertClosed({ name: request.meshes[i].name, geometry } as Part);
+        result.solidParts.push(request.meshes[i].id);
         return true;
       } catch {
-        result.warnings.push(
-          `${request.meshes[i].name}: solid overlap unavailable for open or non-manifold geometry. Nearby surfaces are still checked.`,
-        );
+        result.warnings.push({
+          partIds: [request.meshes[i].id],
+          message: `${request.meshes[i].name}: solid overlap unavailable for open or non-manifold geometry. Nearby surfaces are still checked.`,
+        });
         return false;
       }
     });
     const evaluator = new Evaluator();
     evaluator.attributes = ['position', 'normal'];
     evaluator.useGroups = false;
-    const bands = geometries.map(() => [] as number[]);
     const budget: BandBudget = { queries: 0, triangles: 0, exhausted: false };
     const totalPairs = (geometries.length * (geometries.length - 1)) / 2;
     for (let a = 0; a < geometries.length; a++) {
@@ -314,9 +316,10 @@ export function inspectMeshes(
           } catch {
             volume = null;
             result.solidPairs--;
-            result.warnings.push(
-              `${meshA.name} / ${meshB.name}: solid intersection failed. Nearby surfaces are still checked.`,
-            );
+            result.warnings.push({
+              partIds: [meshA.id, meshB.id],
+              message: `${meshA.name} / ${meshB.name}: solid intersection failed. Nearby surfaces are still checked.`,
+            });
           } finally {
             intersection?.geometry.dispose();
           }
@@ -335,36 +338,45 @@ export function inspectMeshes(
         if (request.surfaces !== false && one.distance <= request.distance + 1e-7) {
           const detail = `Checking nearby surfaces for ${pairLabel}`;
           report('surfaces', detail, 0);
-          for (const value of surfaceBand(
+          const bandA = surfaceBand(
             geometryA,
             bvh[b],
             request.distance,
             result.resolution,
             budget,
             (fraction) => report('surfaces', detail, fraction / 2),
-          ))
-            bands[a].push(value);
-          for (const value of surfaceBand(
+          );
+          const bandB = surfaceBand(
             geometryB,
             bvh[a],
             request.distance,
             result.resolution,
             budget,
             (fraction) => report('surfaces', detail, 0.5 + fraction / 2),
-          ))
-            bands[b].push(value);
+          );
+          // Keep the contributing pair so a cached all-parts analysis can be scoped safely.
+          if (bandA.length)
+            result.surfaces.push({
+              id: meshA.id,
+              otherId: meshB.id,
+              positions: new Float32Array(bandA),
+            });
+          if (bandB.length)
+            result.surfaces.push({
+              id: meshB.id,
+              otherId: meshA.id,
+              positions: new Float32Array(bandB),
+            });
         }
       }
     }
     report('finishing', `Preparing results for ${result.checkedPairs} checked pairs`, null);
     if (budget.exhausted)
-      result.warnings.push(
-        'Surface band is incomplete: the scan exceeded the inspection detail budget. Inspect fewer selected parts or simplify the scan. Solid overlap results are separate.',
-      );
-    bands.forEach((positions, i) => {
-      if (positions.length)
-        result.surfaces.push({ id: request.meshes[i].id, positions: new Float32Array(positions) });
-    });
+      result.warnings.push({
+        partIds: [],
+        message:
+          'Surface band is incomplete: the scan exceeded the inspection detail budget. Solid overlap results are separate.',
+      });
     return result;
   } finally {
     brushes.forEach((brush) => brush?.disposeCacheData());

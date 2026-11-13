@@ -231,7 +231,7 @@ export function InspectionControls({ inspection }: { inspection: InspectionState
           {result.warnings.length ? (
             <div className="inspection-warnings" role="note">
               {result.warnings.map((warning) => (
-                <p key={warning}>{warning}</p>
+                <p key={warning.message}>{warning.message}</p>
               ))}
             </div>
           ) : null}
@@ -249,23 +249,35 @@ export function InspectionControls({ inspection }: { inspection: InspectionState
 export function InspectionOverlay({ inspection }: { inspection: InspectionState }) {
   const result = inspection.result;
   const geometry = useMemo(() => {
+    if (!result) return null;
     const make = (positions: Float32Array) => {
       const geometry = new BufferGeometry();
       geometry.setAttribute('position', new BufferAttribute(positions, 3));
       return geometry;
     };
-    return result
-      ? {
-          overlaps: result.overlaps.map((overlap) => ({
-            ...overlap,
-            geometry: make(overlap.positions),
-          })),
-          surfaces: result.surfaces.map((surface) => ({
-            ...surface,
-            geometry: make(surface.positions),
-          })),
+    // Cache bands by pair, but keep one proximity draw call per part as before.
+    const bands = new Map<string, Float32Array[]>();
+    for (const surface of result.surfaces) {
+      const group = bands.get(surface.id) ?? [];
+      group.push(surface.positions);
+      bands.set(surface.id, group);
+    }
+    return {
+      overlaps: result.overlaps.map((overlap) => ({
+        ...overlap,
+        geometry: make(overlap.positions),
+      })),
+      surfaces: [...bands].map(([id, fragments]) => {
+        if (fragments.length === 1) return { id, geometry: make(fragments[0]) };
+        const positions = new Float32Array(fragments.reduce((sum, part) => sum + part.length, 0));
+        let offset = 0;
+        for (const fragment of fragments) {
+          positions.set(fragment, offset);
+          offset += fragment.length;
         }
-      : null;
+        return { id, geometry: make(positions) };
+      }),
+    };
   }, [result]);
   useEffect(
     () => () => {
