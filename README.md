@@ -445,8 +445,12 @@ For a Drive scene, **Save** / **Cmd/Ctrl+S** flushes pending cloud edits and
 surface normals, vertex colors, part transforms, names, visibility, fixed locks,
 joints, editable plane constraints, and [editor colors and lighting](#part-colors-and-lighting).
 Files are binary, so scene size is limited by
-device memory rather than a file format limit; in testing, a 4 GiB scene saved and
-opened in about 5 seconds each. Pasted copies share one mesh, in memory and in the file. Private windows
+device memory rather than a file format limit. Meshes are packed: values that repeat are
+stored once, so an assembly of STL parts with 7.7 million triangles takes 55 MB where it took
+832 MB, and opens in half the time. Each mesh is packed the first time it is saved, and later
+saves and Drive autosaves reuse it. Positions, colors, and triangles reopen exactly, so STL and
+3MF exports are the same bytes after reopening. Normals that the triangles alone give are
+computed again rather than stored. Pasted copies share one mesh, in memory and in the file. Private windows
 cannot hold files above roughly 1.5 to 2 GiB and report an error; use a normal window for
 larger scenes. Scene files from earlier versions still open. See the
 [scene format](docs/scene-format.md).

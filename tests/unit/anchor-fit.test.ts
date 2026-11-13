@@ -188,7 +188,7 @@ describe('rigid anchor fitting', () => {
 
   it('persists targets and attachment points in both scene formats and validates them', async () => {
     const { scene } = fixture();
-    expect((await readSceneFile(sceneFileBlob(scene))).parts[0].anchors).toEqual(
+    expect((await readSceneFile(await sceneFileBlob(scene))).parts[0].anchors).toEqual(
       scene.parts[0].anchors,
     );
     const legacy = serializeScene(scene);

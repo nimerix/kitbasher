@@ -3,6 +3,7 @@ import { binaryGeometry, deserializeGeometry } from './geometry';
 import { validateJoint } from './constraints';
 import { hexColor } from './appearance';
 import { sanitizeLighting } from './lighting';
+import { meshCodecs, packedMesh, unpackMesh, validatePacked } from './mesh-pack';
 import { validatePlaneConstraints } from './plane-constraints';
 import type {
   BinaryGeometry,
@@ -10,14 +11,20 @@ import type {
   GeometryLayout,
   GeometrySection,
   Joint,
+  PackedLayout,
   Part,
   PlaneConstraint,
+  RawSceneHeader,
   SceneDocument,
   SceneFile,
 } from './types';
 
 // Layout and rationale: docs/scene-format.md
-const sceneVersion = 2;
+const fileVersion = 3;
+// Autosave and shared sessions pass meshes as version 2 sections, which take no time to encode.
+const sectionVersion = 2;
+// How long packing may hold the page before it gives way to drawing and input.
+const packingSliceMs = 50;
 const fileMagic = new Uint8Array([0x4b, 0x49, 0x54, 0x42, 0x41, 0x53, 0x48, 0x1a]);
 const prefixLength = 24;
 const sectionAlignment = 4;
@@ -30,7 +37,7 @@ const incomplete =
 export const sceneMetadata = (scene: SceneDocument) =>
   ({
     format: 'kitbasher',
-    version: sceneVersion,
+    version: sectionVersion,
     units: 'mm',
     name: scene.name,
     joints: scene.joints,
@@ -86,25 +93,40 @@ export function appendGeometry(geometry: BufferGeometry, body: BlobPart[], start
   return { layout, end };
 }
 
-export function sceneFileBlob(scene: SceneDocument): Blob {
+export async function sceneFileBlob(scene: SceneDocument): Promise<Blob> {
+  await meshCodecs();
+  let paused = performance.now();
+  const pause = async () => {
+    if (performance.now() - paused < packingSliceMs) return;
+    await new Promise((resolve) => setTimeout(resolve));
+    paused = performance.now();
+  };
   const body: BlobPart[] = [];
   const indexes = new Map<BufferGeometry, number>();
-  const geometries: GeometryLayout[] = [];
+  const geometries: PackedLayout[] = [];
+  const parts: BinarySceneHeader['parts'] = [];
   let bodyLength = 0;
-  const parts = scene.parts.map((part) => {
+  for (const part of scene.parts) {
     // Copies share one mesh in memory, and they stay shared in the file.
     let index = indexes.get(part.geometry);
     if (index === undefined) {
-      const { layout, end } = appendGeometry(part.geometry, body, bodyLength);
-      index = geometries.push(layout) - 1;
+      const mesh = await packedMesh(part.geometry, pause);
+      index = geometries.push({ offset: bodyLength, ...mesh.layout }) - 1;
       indexes.set(part.geometry, index);
-      bodyLength = end;
+      for (const block of mesh.data) body.push(...blobParts(block));
+      bodyLength += mesh.layout.length;
     }
-    return { ...part, geometry: index };
-  });
-  const header: BinarySceneHeader = { ...sceneMetadata(scene), parts, geometries, bodyLength };
+    parts.push({ ...part, geometry: index });
+  }
+  const header: BinarySceneHeader = {
+    ...sceneMetadata(scene),
+    version: fileVersion,
+    parts,
+    geometries,
+    bodyLength,
+  };
   const encoded = new TextEncoder().encode(JSON.stringify(header));
-  // JSON allows trailing spaces, which keep the body aligned.
+  // Padded to four bytes as in version 2, with spaces, which JSON allows after a value.
   const headerLength =
     prefixLength +
     encoded.length +
@@ -112,7 +134,7 @@ export function sceneFileBlob(scene: SceneDocument): Blob {
   const headerBytes = new Uint8Array(headerLength).fill(0x20);
   headerBytes.set(fileMagic);
   const prefix = new DataView(headerBytes.buffer);
-  prefix.setUint32(8, sceneVersion, true);
+  prefix.setUint32(8, fileVersion, true);
   prefix.setUint32(12, 0, true);
   prefix.setBigUint64(16, BigInt(headerLength - prefixLength), true);
   headerBytes.set(encoded, prefixLength);
@@ -192,7 +214,7 @@ export async function readGeometry(
   return deserializeGeometry(data);
 }
 
-/** Opens binary scenes and the JSON scene files saved by earlier versions. */
+/** Opens scene files of every version: packed, uncompressed sections, and JSON. */
 export async function readSceneFile(
   file: Blob,
   onProgress?: (fraction: number) => void,
@@ -211,12 +233,12 @@ export async function readSceneFile(
   if (file.size < prefixLength) throw new Error(incomplete);
   const view = new DataView(prefix);
   const version = view.getUint32(8, true);
-  if (version > sceneVersion)
+  if (version > fileVersion)
     throw new Error('This scene was saved by a newer version of Kitbasher.');
-  if (version !== sceneVersion) throw new Error(unreadable);
+  if (version !== fileVersion && version !== sectionVersion) throw new Error(unreadable);
   const bodyStart = prefixLength + Number(view.getBigUint64(16, true));
   if (bodyStart > file.size) throw new Error(incomplete);
-  let header: BinarySceneHeader;
+  let header: BinarySceneHeader | RawSceneHeader;
   try {
     header = JSON.parse(
       new TextDecoder().decode(await file.slice(prefixLength, bodyStart).arrayBuffer()),
@@ -227,19 +249,30 @@ export async function readSceneFile(
   if (!header || !Number.isSafeInteger(header.bodyLength) || !Array.isArray(header.geometries))
     throw new Error(unreadable);
   if (bodyStart + header.bodyLength !== file.size) throw new Error(incomplete);
+  // The version in the prefix decides how the meshes are read, whatever the header claims.
+  const packed = version === fileVersion;
+  // Every layout is checked before any mesh memory is read.
+  const validate = packed ? validatePacked : validateLayout;
   let cursor = 0;
-  for (const layout of header.geometries)
-    cursor = validateLayout(layout, cursor, header.bodyLength);
+  for (const layout of header.geometries) cursor = validate(layout, cursor, header.bodyLength);
   let read = 0;
+  const progress = (length: number) => {
+    read += length;
+    onProgress?.(header.bodyLength ? read / header.bodyLength : 1);
+  };
   const geometries: BufferGeometry[] = [];
-  for (const layout of header.geometries)
-    geometries.push(
-      await readGeometry(file, layout, bodyStart, (length) => {
-        read += length;
-        onProgress?.(header.bodyLength ? read / header.bodyLength : 1);
-      }),
-    );
-  return parseSceneDocument(header, sceneVersion, (reference) => {
+  if (packed) {
+    await meshCodecs();
+    for (const layout of header.geometries as PackedLayout[])
+      geometries.push(
+        await unpackMesh(layout, (start, length) =>
+          readBytes(file, bodyStart + layout.offset + start, length, progress),
+        ),
+      );
+  } else
+    for (const layout of header.geometries as GeometryLayout[])
+      geometries.push(await readGeometry(file, layout, bodyStart, progress));
+  return parseSceneDocument(header, version, (reference) => {
     const geometry = Number.isInteger(reference) ? geometries[reference as number] : undefined;
     if (!geometry) throw new Error('The scene contains invalid part data.');
     return geometry;

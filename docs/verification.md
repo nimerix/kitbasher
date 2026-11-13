@@ -52,7 +52,10 @@ Verified locally on November 11, 2026.
   that autosave writes each mesh once, survives failed writes, and upgrades old saves.
   `tests/unit/scene-format.test.ts` covers the binary layout and damaged or crafted files, and
   editor colors and lighting: exact round trips, saved selections, scenes from before them, and
-  partly invalid lighting that opens repaired.
+  partly invalid lighting that opens repaired. It also covers packing: positions, colors, and
+  indices that reopen bit for bit, normals that are stored or computed again, STL and 3MF exports
+  that are the same bytes after reopening, meshes packed once however many saves ask, and files
+  of both earlier versions.
   `tests/e2e/large-imports.spec.ts` imports an OBJ of the size that used to crash the tab and a
   text STL past the browser's string limit, and checks that a dense mesh stays usable while
   picking is prepared in a worker. `tests/unit/model-readers.test.ts` compares the streaming OBJ
@@ -222,7 +225,9 @@ Measured once in headless Chrome on an Apple M4 Max with 36 GB of memory, using 
 real profile that can page blobs to disk and the real GPU (`ANGLE Metal Renderer: Apple M4 Max`).
 Mesh contents were compared by checksum after each round trip and were identical. These sizes
 are too large for the regular test suite. Firefox and Safari were not tested. The parts in
-this first table were hidden, so it measures file handling alone.
+this first table were hidden, so it measures file handling alone. Its meshes share no values,
+so they are written as they are, and the first two rows were measured before scene files were
+packed.
 
 | Scene                   | Operation                 | Time  |
 | ----------------------- | ------------------------- | ----- |
@@ -237,6 +242,28 @@ The largest buffer in the first two rows was 2.01 GiB. Before the binary format,
 3-million-triangle scene could not be saved at all. With a 5-million-triangle scene, STL
 exported in 0.5 s and GLB in 1.1 s, while 3MF reported its text limit after 15 s.
 A private window reported a clear error for a 2.7 GiB scene.
+
+### Packed scene files
+
+Measured on the same machine in headless Chrome with the production build, three runs each,
+against the build before packing. The scene is an assembly of 13 STL parts with 7.7 million
+triangles and one color per part: 832 MB uncompressed, 54.7 MB packed. Opening is timed from
+choosing the file to the confirmation dialog, and saving until the download is on disk.
+
+| Operation                             | Uncompressed  | Packed                    |
+| ------------------------------------- | ------------- | ------------------------- |
+| Open                                  | 0.68 – 0.69 s | 0.36 – 0.43 s             |
+| First save, which packs every mesh    | 0.99 – 1.03 s | 1.29 – 1.34 s             |
+| Later saves                           | 1.1 – 2.3 s   | 0.10 – 0.11 s             |
+| Save after opening the packed file    |               | 0.09 – 0.16 s, no packing |
+| Longest main-thread stall, first save | 0.1 s         | 0.2 s                     |
+
+Positions, colors, and bounds reopened bit for bit. Normals were computed again for 12 of the
+13 meshes and moved by at most 0.024 degrees. The STL export of the whole scene, 385 MB, was
+the same bytes before saving and after reopening, as was the 3MF export of the three parts
+small enough for that format. A smooth 415 MB mesh with shared vertices has nothing to store
+once, so it is written as it is: it opened in 0.32 to 0.36 s against 0.32 to 0.33 s, and saved
+in 0.8 to 1.6 s against 0.7 to 1.5 s.
 
 ### Imports
 

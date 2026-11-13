@@ -67,8 +67,8 @@ export async function download(
   window.setTimeout(() => URL.revokeObjectURL(url), 60000);
 }
 
-export const downloadScene = (scene: SceneDocument, name = scene.name) =>
-  download(sceneFileBlob(scene), `${safeFilename(name)}.kitbash`);
+export const downloadScene = async (scene: SceneDocument, name = scene.name) =>
+  download(await sceneFileBlob(scene), `${safeFilename(name)}.kitbash`);
 
 export interface ImportOptions {
   units: 'auto' | 'mm' | 'cm' | 'm' | 'in';

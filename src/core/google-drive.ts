@@ -188,7 +188,7 @@ export class GoogleDriveClient {
         'conflict',
       );
     }
-    const blob = sceneFileBlob(scene);
+    const blob = await sceneFileBlob(scene);
     await assertReadable(blob);
     signal.throwIfAborted();
     const metadata = {
