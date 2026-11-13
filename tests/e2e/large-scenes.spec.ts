@@ -84,8 +84,8 @@ test('saves and reopens a scene far past the browser text limit', async ({ page 
   await (await saved).saveAs(path);
   await expect(page.locator('.toast-error')).toHaveCount(0);
   const { size } = await stat(path);
-  // 24 bytes per vertex, plus the sample scene and the header.
-  expect(size).toBeGreaterThan(triangles * 3 * 24);
+  // These values share nothing, so they pack to about their own size: 24 bytes per vertex.
+  expect(size).toBeGreaterThan(triangles * 3 * 24 * 0.95);
   expect(size).toBeLessThan(triangles * 3 * 24 * 1.05);
 
   await page.keyboard.press('ControlOrMeta+n');

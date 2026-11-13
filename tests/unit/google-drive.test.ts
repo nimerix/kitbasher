@@ -91,9 +91,15 @@ describe('Google Drive scene files', () => {
   });
 
   it('resumes at the server-acknowledged byte after an interrupted chunk', async () => {
+    // Positions with nothing in common, so the packed file still spans more than one chunk.
+    const positions = new Float32Array(1_200_000 * 3);
+    for (let i = 0, seed = 1; i < positions.length; i++) {
+      seed = (Math.imul(seed, 1664525) + 1013904223) | 0;
+      positions[i] = seed / 2 ** 20;
+    }
     const geometry = new BufferGeometry().setAttribute(
       'position',
-      new BufferAttribute(new Float32Array(750000 * 3), 3),
+      new BufferAttribute(positions, 3),
     );
     const fetcher = vi
       .fn()

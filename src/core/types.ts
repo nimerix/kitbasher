@@ -211,18 +211,45 @@ export interface GeometryLayout {
   indices?: GeometrySection & { type: 'u16' | 'u32' };
 }
 
-export interface BinarySceneHeader {
+/** One compressed run of values in a scene file: how many values, then how many bytes. */
+export type PackedBlock = [count: number, bytes: number];
+
+/** Values that repeat are stored once: for each vertex, each triangle, or the whole mesh. */
+export interface PackedAttribute {
+  per: 'vertex' | 'face' | 'mesh';
+  blocks: PackedBlock[];
+}
+
+/** A mesh in a scene file. Its blocks follow each other in the order of these fields. */
+export interface PackedLayout {
+  /** Bytes from the start of the body. */
+  offset: number;
+  length: number;
+  vertices: number;
+  /** The distinct positions. With `map`, each vertex names the one it uses. */
+  positions: { blocks: PackedBlock[]; map?: PackedBlock[] };
+  /** Absent when the triangles alone give the same normals. */
+  normals?: PackedAttribute;
+  colors?: PackedAttribute;
+  indices?: { type: 'u16' | 'u32'; blocks: PackedBlock[] };
+}
+
+interface SceneHeader<Version, Layout> {
   format: 'kitbasher';
-  version: 2;
+  version: Version;
   units: 'mm';
   name: string;
   parts: (Omit<Part, 'geometry'> & { geometry: number })[];
   joints: Joint[];
   constraints: PlaneConstraint[];
   lighting?: SceneLighting;
-  geometries: GeometryLayout[];
+  geometries: Layout[];
   bodyLength: number;
 }
+
+export type BinarySceneHeader = SceneHeader<3, PackedLayout>;
+/** Version 2 files hold every mesh value uncompressed. They still open. */
+export type RawSceneHeader = SceneHeader<2, GeometryLayout>;
 
 /** The JSON scene document written by earlier versions. */
 export interface SceneFile {

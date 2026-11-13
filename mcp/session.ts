@@ -433,7 +433,7 @@ export class Session {
     if (file !== this.path && existsSync(file) && !overwrite)
       throw new Error(`${file} already exists. Pass overwrite: true to replace it.`);
     const { scene, revision } = editor();
-    const bytes = await writeAtomically(file, sceneFileBlob(scene));
+    const bytes = await writeAtomically(file, await sceneFileBlob(scene));
     this.setPath(file);
     editor().markSaved(revision);
     return { path: file, bytes, parts: scene.parts.length };
