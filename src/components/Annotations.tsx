@@ -8,7 +8,7 @@ import { isJointConnected } from '../core/constraints';
 import { resolvePart } from '../core/references';
 import { contactColors, patchCenter } from '../core/surfaces';
 import { layoutCallouts } from '../core/callouts';
-import { hiddenByIsolation } from '../core/isolation';
+import { partDisplay } from '../core/alignment-visibility';
 import { usePreferences } from '../core/preferences';
 import { useEditor } from '../core/store';
 import type { Part, SurfacePatch } from '../core/types';
@@ -89,14 +89,11 @@ function useAnnotations(): Annotation[] {
     navigating = useEditor((s) => !!s.navigationMode || s.temporaryOrbit || s.pivotPicking);
   return useMemo(() => {
     if (explode) return [];
+    const display = { tool, operation: op, isolated, nearbyParts: nearby };
     const shown = (part?: Part): part is Part =>
-      !!part?.visible && !hiddenByIsolation(isolated, nearby, part.id);
+      !!part?.visible && partDisplay(display, part.id) !== 'hidden';
     // Callouts clear the whole visible model, not only the part their point is on.
-    const model = boxCorners(
-      sceneBounds(
-        isolated ? scene.parts.filter((part) => isolated.includes(part.id)) : scene.parts,
-      ),
-    );
+    const model = boxCorners(sceneBounds(scene.parts.filter(shown)));
     const list: Annotation[] = [];
     for (const part of scene.parts)
       if (shown(part) && part.pivot && selected.includes(part.id))
@@ -116,7 +113,7 @@ function useAnnotations(): Annotation[] {
       label?: string,
     ) => {
       const part = resolvePart(scene, point.partId);
-      if (part)
+      if (shown(part))
         list.push({
           id,
           kind: 'point',

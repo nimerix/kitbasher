@@ -5,6 +5,7 @@ import { contactColors, completedSurfacePairs } from '../core/surfaces';
 import { SurfaceBrushControls } from './SurfaceBrushControls';
 import { planeKindLabels } from '../core/plane-constraints';
 import type { SurfaceMethod } from '../core/types';
+import { alignmentPartIds } from '../core/alignment-visibility';
 
 export function SurfacePaintControls({
   rms,
@@ -23,6 +24,7 @@ export function SurfacePaintControls({
   const method = op.surfaceMethod ?? 'contact',
     required = method === 'contact' ? 3 : 1;
   const flush = method === 'flush';
+  const singleSide = (op.view === 'active' || op.view === 'ghost') && !!alignmentPartIds(op);
   const complete = completedSurfacePairs(op.surfacePairs).length;
   const active = op.surfacePairs.find((pair) => pair.id === op.activeSurface?.pairId);
   const side = op.activeSurface?.side;
@@ -50,7 +52,9 @@ export function SurfacePaintControls({
       </label>
       <p className="field-help">
         {flush
-          ? 'Choose the moving part, then drag across the seam onto its neighbor. Both sides are painted automatically, even across empty space. Add a seam for each connection to balance; each can use a different stationary neighbor.'
+          ? singleSide
+            ? 'Paint the moving patch, then choose Next: paint target to paint the matching side. Use Full scene to add seams with other neighbors.'
+            : 'Choose the moving part, then drag across the seam onto its neighbor. Both sides are painted automatically, even across empty space. Add a seam for each connection to balance; each can use a different stationary neighbor.'
           : method === 'contact'
             ? 'Paint matching contact areas on both parts. Use at least 3 pairs spread across the join.'
             : 'Paint one or more pairs of planar areas to orient the parts using fitted planes.'}{' '}
@@ -108,7 +112,7 @@ export function SurfacePaintControls({
           </div>
         ))}
       </div>
-      {active && side && !flush ? (
+      {active && side && (!flush || singleSide) ? (
         <div className="paint-next-step" role="status">
           <span>
             {erase ? 'Erase' : 'Paint'} the {side === 'source' ? 'moving' : 'target'} patch for pair{' '}

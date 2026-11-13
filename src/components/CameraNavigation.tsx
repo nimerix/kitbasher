@@ -5,7 +5,7 @@ import type { OrbitControls as OrbitControlsImpl } from 'three-stdlib';
 import { MOUSE, Quaternion, TOUCH, Vector3 } from 'three';
 import { ArrowDown, ArrowLeft, ArrowRight, ArrowUp, Crosshair, Hand, Orbit, X } from 'lucide-react';
 import { sceneBounds } from '../core/geometry';
-import { hiddenByIsolation } from '../core/isolation';
+import { hasAlignmentView, partDisplay } from '../core/alignment-visibility';
 import {
   rotateOrbitOffset,
   selectionOrbitCenter,
@@ -26,7 +26,7 @@ const cameraStepEvent = 'kitbasher:camera-step';
 type Editor = ReturnType<typeof useEditor.getState>;
 /** The selected parts an isolated view still draws, which is what the camera can aim at. */
 const drawnSelection = (state: Editor) =>
-  state.selected.filter((id) => !hiddenByIsolation(state.isolated, state.nearbyParts, id));
+  state.selected.filter((id) => partDisplay(state, id) !== 'hidden');
 const initialOrbitTarget: [number, number, number] = [0, 54, 0];
 
 export function CameraRig() {
@@ -174,9 +174,11 @@ export function CameraRig() {
     const aimed = drawnSelection(state);
     const selected = state.scene.parts.filter((part) => part.visible && aimed.includes(part.id));
     // Framing everything means everything drawn in full, which isolation narrows.
-    const drawn = state.isolated
-      ? state.scene.parts.filter((part) => state.isolated!.includes(part.id))
-      : state.scene.parts;
+    const drawn = hasAlignmentView(state.tool, state.operation)
+      ? state.scene.parts.filter((part) => partDisplay(state, part.id) !== 'hidden')
+      : state.isolated
+        ? state.scene.parts.filter((part) => state.isolated!.includes(part.id))
+        : state.scene.parts;
     const bounds = sceneBounds(focusRequest.all || !selected.length ? drawn : selected);
     const center = bounds.getCenter(new Vector3());
     const radius = Math.max(bounds.getSize(new Vector3()).length() / 2, 8);

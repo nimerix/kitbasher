@@ -75,6 +75,7 @@ import { useInspection } from '../hooks/useInspection';
 import type { InspectionState } from '../hooks/useInspection';
 import { InspectionToggle, InspectionControls, InspectionOverlay } from './InterferenceInspection';
 import { hiddenByIsolation, nextIsolation } from '../core/isolation';
+import { alignmentPartDisplay, hasAlignmentView, partDisplay } from '../core/alignment-visibility';
 import { IsolationNotice, nearbyRaycast, useNearbySurfaces } from './Isolation';
 import type { NearbySurfaces } from './Isolation';
 import { SceneLighting, overlayLayer, overlayLayers, useSceneFrame } from './SceneLighting';
@@ -115,6 +116,7 @@ const PartMesh = memo(function PartMesh({
   part,
   frame,
   hidden,
+  ghost,
   nearby,
   distinct,
   target,
@@ -123,6 +125,7 @@ const PartMesh = memo(function PartMesh({
   frame?: ExplodeFrame;
   /** Left out of an isolated view. */
   hidden: boolean;
+  ghost: boolean;
   /** Drawn only where it comes near the isolated parts. */
   nearby?: NearbySurfaces;
   /** Its automatic color when every part is shown in a different one. */
@@ -132,9 +135,11 @@ const PartMesh = memo(function PartMesh({
   const shown = part.visible && !hidden;
   const selected = useEditor((s) => s.selected.includes(part.id));
   const inspection = useEditor((s) => s.view.inspection);
+  const focused = useEditor((s) => hasAlignmentView(s.tool, s.operation));
+  const inspecting = inspection.enabled && !focused;
   const partColors = useEditor((s) => s.view.partColors);
   const paint = shownColor(part, partColors, distinct);
-  const vertexColors = !inspection.enabled && paint.vertexColors;
+  const vertexColors = !inspecting && !ghost && paint.vertexColors;
   const tool = useEditor((s) => s.tool),
     wireframe = useEditor((s) => s.view.wireframe),
     explode = useEditor((s) => s.view.explode),
@@ -159,7 +164,7 @@ const PartMesh = memo(function PartMesh({
   }, [part.geometry, shown, detail, target]);
   const precision =
     !!nearby ||
-    inspection.enabled ||
+    inspecting ||
     wireframe ||
     (!headset && (pivotPicking || ['align', 'joint', 'measure', 'anchors'].includes(tool)));
   const drawing =
@@ -229,11 +234,11 @@ const PartMesh = memo(function PartMesh({
           name={`part:${part.id}`}
           geometry={drawing}
           // Raycasting ignores Object3D.visible, so a hidden part would still catch clicks.
-          raycast={shown ? raycast : noRaycast}
+          raycast={shown && !ghost ? raycast : noRaycast}
           dispose={null}
           // The shadow pass would draw the whole part, including what is cut away.
-          castShadow={!nearby}
-          receiveShadow
+          castShadow={!nearby && !ghost}
+          receiveShadow={!ghost}
           onContextMenu={(event) => {
             event.nativeEvent.preventDefault();
             event.stopPropagation();
@@ -299,22 +304,23 @@ const PartMesh = memo(function PartMesh({
         >
           <meshStandardMaterial
             // Three compiles vertex colors into the shader, so toggling them needs a new material.
-            key={`${inspection.enabled ? 'inspection' : nearby ? 'nearby' : 'solid'}:${vertexColors}`}
+            key={`${inspecting ? 'inspection' : ghost ? 'ghost' : nearby ? 'nearby' : 'solid'}:${vertexColors}`}
             // Both sides, because the facing surfaces of a cut-away part are seen from behind.
             {...(nearby ? { onBeforeCompile: nearby.compile, side: DoubleSide } : {})}
-            color={inspection.enabled ? '#a4aab4' : paint.color}
-            transparent={inspection.enabled}
-            opacity={inspection.enabled ? (inspection.context ? 0.12 : 0) : 1}
-            depthWrite={!inspection.enabled}
+            color={inspecting || ghost ? '#a4aab4' : paint.color}
+            transparent={inspecting || ghost}
+            opacity={ghost ? 0.18 : inspecting ? (inspection.context ? 0.12 : 0) : 1}
+            depthWrite={!inspecting && !ghost}
             roughness={0.64}
             metalness={0.2}
             vertexColors={vertexColors}
-            wireframe={!inspection.enabled && wireframe}
-            emissive={selected && !inspection.enabled ? '#c77c39' : '#000000'}
-            emissiveIntensity={selected ? 0.12 : 0}
+            wireframe={!inspecting && !ghost && wireframe}
+            emissive={selected && !inspecting && !ghost ? '#c77c39' : '#000000'}
+            emissiveIntensity={selected && !ghost ? 0.12 : 0}
           />
           {selected &&
-          !inspection.enabled &&
+          !inspecting &&
+          !ghost &&
           !wireframe &&
           !nearby &&
           triangleCount(part.geometry) < proxyThreshold ? (
@@ -322,7 +328,7 @@ const PartMesh = memo(function PartMesh({
           ) : null}
         </mesh>
       </group>
-      <PaintCursor part={part} hit={brushHit} />
+      <PaintCursor part={part} hit={shown && !ghost ? brushHit : null} />
     </>
   );
 });
@@ -875,8 +881,12 @@ function LightHandleLayer() {
 function AssemblyAnnotations() {
   const scene = useEditor((s) => s.scene),
     op = useEditor((s) => s.operation),
+    tool = useEditor((s) => s.tool),
+    isolated = useEditor((s) => s.isolated),
+    nearbyParts = useEditor((s) => s.nearbyParts),
     explode = useEditor((s) => s.view.explode),
     measurement = useEditor((s) => s.measurement);
+  const display = { tool, operation: op, isolated, nearbyParts };
   if (explode) return null;
   const measured =
     measurement.length === 2
@@ -887,7 +897,10 @@ function AssemblyAnnotations() {
       {op.pairs.map((pair, i) => {
         const source = resolvePart(scene, pair.source.partId),
           target = resolvePart(scene, pair.target.partId);
-        return source && target ? (
+        return source &&
+          target &&
+          partDisplay(display, source.id) !== 'hidden' &&
+          partDisplay(display, target.id) !== 'hidden' ? (
           <Line
             key={i}
             points={[worldPoint(source, pair.source), worldPoint(target, pair.target)]}
@@ -938,16 +951,21 @@ function Scene({
     operation = useEditor((s) => s.operation),
     tool = useEditor((s) => s.tool);
   const isolated = useEditor((s) => s.isolated);
+  const focused = hasAlignmentView(tool, operation);
   const headset = useXR((s) => !!s.session),
     passthrough = useXR((s) => s.passthrough);
   const nearby = useNearbySurfaces();
   const target = useMemo(
     () =>
       displayTarget(
-        parts.filter((part) => !isolated || isolated.includes(part.id) || nearby?.ids.has(part.id)),
+        parts.filter((part) =>
+          focused
+            ? alignmentPartDisplay(tool, operation, part.id) !== 'hidden'
+            : !isolated || isolated.includes(part.id) || nearby?.ids.has(part.id),
+        ),
         headset,
       ),
-    [parts, isolated, nearby, headset],
+    [parts, isolated, nearby, headset, focused, tool, operation],
   );
   const exploding = view.explode > 0;
   const frame = useMemo(() => (exploding ? explodeFrame(parts) : undefined), [exploding, parts]);
@@ -991,14 +1009,17 @@ function Scene({
         />
       ) : null}
       {parts.map((part) => {
+        const alignmentDisplay = alignmentPartDisplay(tool, operation, part.id);
         const outside = !!isolated && !isolated.includes(part.id);
-        const surfaces = outside && nearby?.ids.has(part.id) ? nearby.surfaces : undefined;
+        const surfaces =
+          !focused && outside && nearby?.ids.has(part.id) ? nearby.surfaces : undefined;
         return (
           <PartMesh
             key={part.id}
             part={part}
             frame={frame}
-            hidden={outside && !surfaces}
+            hidden={alignmentDisplay ? alignmentDisplay === 'hidden' : outside && !surfaces}
+            ghost={alignmentDisplay === 'ghost'}
             nearby={surfaces}
             distinct={distinct?.get(part.id)}
             target={target}
@@ -1006,7 +1027,7 @@ function Scene({
         );
       })}
       {referencePlanes
-        .filter((p) => view.planes.includes(p.id) || operation.targetId === p.id)
+        .filter((p) => !focused && (view.planes.includes(p.id) || operation.targetId === p.id))
         .map((plane) => (
           <mesh
             key={plane.id}
@@ -1039,7 +1060,7 @@ function Scene({
             <Edges color={plane.color} transparent opacity={0.4} />
           </mesh>
         ))}
-      <InspectionOverlay inspection={inspection} />
+      {focused ? null : <InspectionOverlay inspection={inspection} />}
       <SurfacePaintOverlay />
       <HeadsetView />
       {/* Handles and the view cube answer to the mouse, which a headset session does not have. */}

@@ -124,6 +124,15 @@ for an empty workbench or to reload the sample.
      RMS error of the result. Every completed pair contributes to the fit; scale
      stays unchanged. Finish or clear a pending source before applying.
 
+   With two parts selected (or chosen as **Moving part** and **Target**), use
+   **Alignment view** to clear the workspace: **Isolate both parts** hides the
+   rest, **Active part only** shows the part for the next pick or painted patch,
+   and **Ghost other part** keeps the other part translucent and click-through.
+   Active views follow source/target steps automatically; when a single pair is
+   complete, both parts appear for review. **Full scene**, finishing, or canceling
+   returns to the previous scene view, including any existing isolation. These
+   views do not change saved visibility, exported parts, or undo history.
+
    **Contact paint (B)** also opens the surface-paint method directly. Select the
    moving part and target, paint a moving patch, choose **Next: paint target**, and
    paint the matching contact area. Finish the pair, add another, and repeat for

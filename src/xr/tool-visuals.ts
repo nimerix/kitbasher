@@ -11,7 +11,7 @@ import {
   Vector3,
 } from 'three';
 import { worldNormal, worldPoint } from '../core/geometry';
-import { hiddenByIsolation } from '../core/isolation';
+import { partDisplay } from '../core/alignment-visibility';
 import { useEditor } from '../core/store';
 import type { SurfacePoint } from '../core/types';
 
@@ -68,9 +68,7 @@ export class ToolVisuals {
   update(state: Editor, roomScale: number, hit?: SurfacePoint) {
     const shown = (id: string) => {
       const part = state.scene.parts.find((part) => part.id === id);
-      return part?.visible && !hiddenByIsolation(state.isolated, state.nearbyParts, id)
-        ? part
-        : null;
+      return part?.visible && partDisplay(state, id) !== 'hidden' ? part : null;
     };
     this.object.visible = !state.view.explode;
     if (

@@ -15,6 +15,7 @@ export type Tool =
   | 'measure'
   | 'anchors';
 export type AlignmentMode = 'point' | 'point-plane' | 'plane' | 'multi' | 'surface';
+export type AlignmentView = 'scene' | 'pair' | 'active' | 'ghost';
 
 export interface FitAnchor {
   id: string;
@@ -177,6 +178,8 @@ export interface SurfacePair {
 
 export interface AssemblyOperation {
   mode: AlignmentMode;
+  /** Temporary viewport presentation; never changes the scene's part visibility. */
+  view?: AlignmentView;
   sourceId: string | null;
   targetId: string | null;
   pairs: PickPair[];

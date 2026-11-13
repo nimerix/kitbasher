@@ -2,6 +2,7 @@ import { Quaternion, Vector3 } from 'three';
 import { isJointConnected } from '../core/constraints';
 import { poseAtPivot, quat, worldPoint } from '../core/geometry';
 import { hiddenByIsolation } from '../core/isolation';
+import { hasAlignmentView, partDisplay } from '../core/alignment-visibility';
 import { resolvePart } from '../core/references';
 import { useEditor } from '../core/store';
 import { completedSurfacePairs } from '../core/surfaces';
@@ -125,9 +126,14 @@ export function xrApply() {
 /** All points use the original mesh's local coordinates, just like desktop picks. */
 export function xrPick(point: SurfacePoint, _face: number | null = null) {
   const state = useEditor.getState();
-  if (state.busy || state.view.explode || state.view.inspection.enabled) return;
+  if (
+    state.busy ||
+    state.view.explode ||
+    (state.view.inspection.enabled && !hasAlignmentView(state.tool, state.operation))
+  )
+    return;
   const hit = resolvePart(state.scene, point.partId);
-  if (!hit?.visible || hiddenByIsolation(state.isolated, state.nearbyParts, hit.id)) return;
+  if (!hit?.visible || partDisplay(state, hit.id) !== 'solid') return;
   if (state.tool === 'anchors') {
     if (state.anchorPicking) state.addFitAnchor(point);
     else {
