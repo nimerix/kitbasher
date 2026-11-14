@@ -89,6 +89,7 @@ const order = [
   'contact-paint',
   'flush-fit',
   'anchors',
+  'pins',
   'joints',
   'planes',
   'no-clip',

@@ -91,7 +91,7 @@ export const assemblyGuides: DocArticle[] = [
         ],
       },
     ],
-    related: ['alignment', 'anchors', 'joints', 'no-clip'],
+    related: ['alignment', 'pins', 'anchors', 'joints', 'no-clip'],
   },
   {
     id: 'alignment',
@@ -383,9 +383,15 @@ export const assemblyGuides: DocArticle[] = [
     title: 'Pins and soft pins',
     description: 'Hold surface points in space or add elastic resistance with adjustable priority.',
     group: 'Build & assemble',
-    icon: 'crosshair',
+    icon: 'pin',
     intro:
       'Pins resist movement while you position a rigid part. Hard pins fix an exact point in world space; soft pins act like rubber bands of different strengths. The mesh keeps its shape.',
+    image: {
+      src: './images/pins.webp',
+      alt: 'Kitbasher Pin tool with an isolated torso rotated around the orange P1 hard pin and the fixed-point controls visible.',
+      caption:
+        'A hard pin holds P1 in world space while the torso rotates around it. The Pins panel shows the fixed point and controls to reset or remove it.',
+    },
     sections: [
       {
         id: 'place-pins',
@@ -408,6 +414,12 @@ export const assemblyGuides: DocArticle[] = [
           'Orange P markers show hard pins. Teal S markers show soft-pin resting points, with lines to their current surface attachments. The Pins panel reports the stretch in millimeters.',
           'The part stays where you release it. Resting points remain fixed, so later movements still feel their resistance. This is a positioning aid; it does not animate a spring returning to rest.',
         ],
+        image: {
+          src: './images/soft-pins.webp',
+          alt: 'Two soft pins on the rotated torso: priority 85 has 0.03 mm of stretch, priority 15 has 8.86 mm, with the priority slider, numeric field, and teal stretch line visible.',
+          caption:
+            'In this example, S1 at priority 85 stretches only 0.03 mm, while S2 at priority 15 gives 8.86 mm. Select a pin to change its priority with the slider or numeric field.',
+        },
       },
       {
         id: 'manage-pins',

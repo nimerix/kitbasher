@@ -23,6 +23,7 @@ import {
   Maximize2,
   Move3D,
   Paintbrush,
+  Pin,
   Ruler,
   ScanLine,
   Search,
@@ -61,6 +62,7 @@ const icons: Record<string, LucideIcon> = {
   align: Crosshair,
   paint: Paintbrush,
   anchors: Focus,
+  pin: Pin,
   joint: Link2,
   joints: Link2,
   ruler: Ruler,
@@ -406,23 +408,29 @@ function Home() {
           Start with a rough placement. Refine with the geometry you have.
         </p>
         <div className="tool-directory">
-          {['transforms', 'alignment', 'contact-paint', 'flush-fit', 'anchors', 'planes'].map(
-            (id) => {
-              const article = articleById.get(id);
-              return article ? (
-                <a key={id} href={guideHref(id)}>
-                  <span className="directory-icon">
-                    <ArticleIcon article={article} size={20} />
-                  </span>
-                  <div>
-                    <h3>{article.title}</h3>
-                    <p>{article.description}</p>
-                  </div>
-                  <ChevronRight size={15} />
-                </a>
-              ) : null;
-            },
-          )}
+          {[
+            'transforms',
+            'alignment',
+            'contact-paint',
+            'flush-fit',
+            'anchors',
+            'pins',
+            'planes',
+          ].map((id) => {
+            const article = articleById.get(id);
+            return article ? (
+              <a key={id} href={guideHref(id)}>
+                <span className="directory-icon">
+                  <ArticleIcon article={article} size={20} />
+                </span>
+                <div>
+                  <h3>{article.title}</h3>
+                  <p>{article.description}</p>
+                </div>
+                <ChevronRight size={15} />
+              </a>
+            ) : null;
+          })}
         </div>
       </section>
       <section className="home-bottom">
