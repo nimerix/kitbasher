@@ -5096,6 +5096,38 @@ optgroup {
   line-height: 1.6;
   margin: 10px 0;
 }
+
+.pin-actions {
+  display: flex;
+  gap: 6px;
+  margin: 10px 0;
+}
+.pin-actions > button {
+  flex: 1;
+}
+.pin-settings {
+  margin: 12px 0;
+}
+.pin-priority,
+.pin-range {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 8px 0;
+  font-size: 12px;
+}
+.pin-priority input {
+  width: 72px;
+}
+.pin-slider {
+  width: 100%;
+  accent-color: #7ce1d1;
+}
+.pin-range {
+  font-size: 10px;
+  color: var(--muted);
+}
 .anchor-part-label {
   display: grid;
   gap: 7px;

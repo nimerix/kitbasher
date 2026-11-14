@@ -62,6 +62,7 @@ import type {
   Joint,
   PlaneConstraint,
   Part,
+  Pin,
   SceneDocument,
   SceneLighting,
   SurfacePoint,
@@ -148,6 +149,8 @@ interface EditorState {
   pivotPicking: boolean;
   activeAnchor: string | null;
   anchorPicking: boolean;
+  activePin: string | null;
+  pinPicking: Pin['kind'] | null;
   painting: boolean;
   brushRadius: number;
   brushErase: boolean;
@@ -211,6 +214,15 @@ interface EditorState {
   ) => void;
   removeFitAnchor: (partId: string, anchorId: string) => void;
   rebaseFitAnchors: (partId: string) => void;
+  addPin: (point: SurfacePoint) => void;
+  updatePin: (
+    partId: string,
+    pinId: string,
+    patch: Partial<Pick<Pin, 'kind' | 'priority'>>,
+    checkpoint?: boolean,
+  ) => void;
+  removePin: (partId: string, pinId: string) => void;
+  rebasePins: (partId: string) => void;
   setBrush: (patch: {
     radius?: number;
     erase?: boolean;
@@ -337,6 +349,8 @@ export const useEditor = create<EditorState>((set, get) => ({
   pivotPicking: false,
   activeAnchor: null,
   anchorPicking: false,
+  activePin: null,
+  pinPicking: null,
   painting: false,
   brushRadius: 3,
   brushErase: false,
@@ -504,6 +518,11 @@ export const useEditor = create<EditorState>((set, get) => ({
       const pair = mode === 'surface' ? emptySurfacePair() : null;
       return {
         tool,
+        pinPicking:
+          tool === 'pins' &&
+          !state.scene.parts.find((p) => p.id === state.selected[0])?.pins?.length
+            ? 'hard'
+            : null,
         anchorPicking:
           tool === 'anchors' &&
           !state.scene.parts.find((p) => p.id === state.selected[0])?.anchors?.length,
@@ -613,6 +632,96 @@ export const useEditor = create<EditorState>((set, get) => ({
       anchors: part.anchors.map((a) => ({
         ...a,
         target: worldPoint(part, { partId, point: a.point, normal: [0, 1, 0] }).toArray(),
+      })),
+    });
+  },
+  addPin: (point) => {
+    const state = get();
+    const part = state.scene.parts.find((p) => p.id === point.partId);
+    if (
+      state.tool !== 'pins' ||
+      !state.pinPicking ||
+      state.view.explode ||
+      !part ||
+      part.locked ||
+      !part.visible ||
+      !point.point.every(Number.isFinite)
+    )
+      return;
+    if (state.selected.length && state.selected[0] !== part.id) {
+      state.notify('Select this part in the Pins panel before placing pins.', 'info');
+      return;
+    }
+    const pin: Pin = {
+      id: uid(),
+      point: [...point.point],
+      target: worldPoint(part, point).toArray(),
+      kind: state.pinPicking,
+      priority: 50,
+    };
+    set({
+      ...changed(state, {
+        ...state.scene,
+        parts: state.scene.parts.map((p) =>
+          p.id === part.id ? { ...p, pins: [...(p.pins ?? []), pin] } : p,
+        ),
+      }),
+      selected: [part.id],
+      activePin: pin.id,
+    });
+  },
+  updatePin: (partId, pinId, patch, checkpoint = true) => {
+    const state = get(),
+      part = state.scene.parts.find((p) => p.id === partId);
+    if (
+      !part ||
+      part.locked ||
+      !part.visible ||
+      state.view.explode ||
+      !part.pins?.some((pin) => pin.id === pinId) ||
+      (patch.kind !== undefined && patch.kind !== 'hard' && patch.kind !== 'soft') ||
+      (patch.priority !== undefined &&
+        (!Number.isFinite(patch.priority) || patch.priority < 0 || patch.priority > 100))
+    )
+      return;
+    let differs = false;
+    const pins = part.pins.map((pin) => {
+      if (
+        pin.id !== pinId ||
+        ((patch.kind === undefined || patch.kind === pin.kind) &&
+          (patch.priority === undefined || patch.priority === pin.priority))
+      )
+        return pin;
+      differs = true;
+      return {
+        ...pin,
+        ...patch,
+        // Promoting a stretched soft pin locks its current attachment without a jump.
+        ...(patch.kind === 'hard' && pin.kind !== 'hard'
+          ? {
+              target: worldPoint(part, { partId, point: pin.point, normal: [0, 1, 0] }).toArray(),
+            }
+          : {}),
+      };
+    });
+    if (differs) state.patchParts([partId], { pins }, checkpoint);
+  },
+  removePin: (partId, pinId) => {
+    const state = get(),
+      part = state.scene.parts.find((p) => p.id === partId);
+    if (!part || part.locked || !part.pins?.some((pin) => pin.id === pinId)) return;
+    const pins = part.pins.filter((pin) => pin.id !== pinId);
+    state.patchParts([partId], { pins });
+    if (state.activePin === pinId) set({ activePin: pins[0]?.id ?? null });
+  },
+  rebasePins: (partId) => {
+    const state = get(),
+      part = state.scene.parts.find((p) => p.id === partId);
+    if (!part || part.locked || !part.visible || state.view.explode || !part.pins?.length) return;
+    state.patchParts([partId], {
+      pins: part.pins.map((pin) => ({
+        ...pin,
+        target: worldPoint(part, { partId, point: pin.point, normal: [0, 1, 0] }).toArray(),
       })),
     });
   },
@@ -1090,8 +1199,9 @@ export const useEditor = create<EditorState>((set, get) => ({
       );
       const joint = joints.find((j) => j.id === id)!;
       const child = state.scene.parts.find((p) => p.id === joint.childId)!;
-      let parts = transformAssembly(state.scene.parts, joints, child.id, child);
+      let parts: Part[];
       try {
+        parts = transformAssembly(state.scene.parts, joints, child.id, child);
         parts = solvePlaneConstraints({ ...state.scene, joints }, parts);
       } catch (error) {
         get().notify((error as Error).message, 'error');
@@ -1435,6 +1545,7 @@ export const useEditor = create<EditorState>((set, get) => ({
     if (!part || part.locked || part.geometry !== source || state.sceneEpoch !== epoch)
       return false;
     const linked =
+      part.pins?.length ||
       part.anchors?.length ||
       state.scene.joints.some((j) => j.childId === id || j.parentId === id) ||
       state.scene.constraints?.some((c) => c.sourceId === id || c.targetId === id);
@@ -1446,6 +1557,7 @@ export const useEditor = create<EditorState>((set, get) => ({
       name: keepOriginal ? `${part.name} · ${label}` : part.name,
       source: `${label} · ${part.source}`,
       anchors: undefined,
+      pins: undefined,
       visible: keepOriginal ? true : part.visible,
     };
     set({
@@ -1496,6 +1608,8 @@ export const useEditor = create<EditorState>((set, get) => ({
       activeAnchor: null,
       activeLight: null,
       anchorPicking: false,
+      activePin: null,
+      pinPicking: null,
       navigationMode: null,
       temporaryOrbit: false,
       precision: false,

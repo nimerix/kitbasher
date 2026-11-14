@@ -178,6 +178,7 @@ export function solvePlaneConstraints(
       const requested = projectPlane(source, target, constraint);
       parts = transformAssembly(parts, scene.joints, source.id, requested, {
         stationaryIds: [...fixedIds, target.id],
+        softPins: false,
       });
     }
     const unsatisfied = constraints.find((c) => !planeConstraintResidual(parts, c).satisfied);
@@ -207,6 +208,6 @@ export function solvePlaneConstraints(
     failed = unsatisfied;
   }
   throw new Error(
-    `Cannot satisfy “${failed.name}” with the current locks, joints, or other plane constraints. Suppress a conflicting constraint or unlock the connected part.`,
+    `Cannot satisfy “${failed.name}” with the current locks, pins, joints, or other plane constraints. Release a pin, suppress a conflicting constraint, or unlock the connected part.`,
   );
 }

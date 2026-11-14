@@ -84,6 +84,7 @@ function useAnnotations(): Annotation[] {
     explode = useEditor((s) => s.view.explode),
     tool = useEditor((s) => s.tool),
     activeAnchor = useEditor((s) => s.activeAnchor),
+    activePin = useEditor((s) => s.activePin),
     isolated = useEditor((s) => s.isolated),
     nearby = useEditor((s) => s.nearbyParts),
     navigating = useEditor((s) => !!s.navigationMode || s.temporaryOrbit || s.pivotPicking);
@@ -140,6 +141,34 @@ function useAnnotations(): Annotation[] {
             color: '#9ac4bb',
           });
       }
+    for (const part of scene.parts.filter((p) => selected.includes(p.id) && shown(p))) {
+      for (const [index, pin] of (part.pins ?? []).entries()) {
+        const color = pin.kind === 'hard' ? '#ffbd7a' : '#7ce1d1';
+        list.push({
+          id: `pin:${part.id}:${pin.id}:actual`,
+          kind: 'anchor-actual',
+          position: vec(pin.point).applyMatrix4(partMatrix(part)),
+          color,
+        });
+        list.push({
+          id: `pin:${part.id}:${pin.id}`,
+          kind: 'anchor',
+          position: vec(pin.target),
+          color,
+          label: `${pin.kind === 'hard' ? 'P' : 'S'}${index + 1}`,
+          active: activePin === pin.id,
+          bounds: model,
+          select: {
+            label: `Select ${pin.kind} pin ${index + 1}`,
+            disabled: navigating,
+            run: () => {
+              useEditor.getState().select(part.id);
+              useEditor.setState({ activePin: pin.id, pinPicking: null });
+            },
+          },
+        });
+      }
+    }
     const anchorPart = scene.parts.find((p) => p.id === selected[0]);
     if (tool === 'anchors' && shown(anchorPart)) {
       const anchors = anchorPart.anchors ?? [];
@@ -197,6 +226,7 @@ function useAnnotations(): Annotation[] {
     explode,
     tool,
     activeAnchor,
+    activePin,
     navigating,
     isolated,
     nearby,

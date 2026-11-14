@@ -13,6 +13,7 @@ export type Tool =
   | 'align'
   | 'joint'
   | 'measure'
+  | 'pins'
   | 'anchors';
 export type AlignmentMode = 'point' | 'point-plane' | 'plane' | 'multi' | 'surface';
 export type AlignmentView = 'scene' | 'pair' | 'active' | 'ghost';
@@ -23,6 +24,17 @@ export interface FitAnchor {
   point: Vec3;
   /** Desired position in world millimeters. */
   target: Vec3;
+}
+
+export interface Pin {
+  id: string;
+  /** Fixed attachment in mesh-local coordinates. */
+  point: Vec3;
+  /** World-space resting position, in millimeters. Never follows a transform. */
+  target: Vec3;
+  kind: 'hard' | 'soft';
+  /** Soft resistance, 0 (off) to 100 (strongest). */
+  priority: number;
 }
 
 export interface Part {
@@ -39,6 +51,7 @@ export interface Part {
   /** User-picked pivot in mesh-local coordinates. */
   pivot?: Vec3;
   anchors?: FitAnchor[];
+  pins?: Pin[];
   /** Viewport-only color. Saved with the scene; exports and merges use `color`. */
   displayColor?: string;
 }

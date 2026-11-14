@@ -103,6 +103,26 @@ for an empty workbench or to reload the sample.
    snapping it back to the center. This also works with clicked custom pivots and
    the directional buttons; only explicit centering or framing recenters the view.
 
+   **Pin** holds points on a part in world space. Select a part, choose **Pin** in
+   the toolbar, then click its surface to add hard pins. One pin allows rotation
+   around that point; two distinct pins allow rotation around their shared axis;
+   three noncollinear pins hold the full pose. Choose **Soft pin** to add elastic
+   resistance instead. Each soft pin has a **Priority** slider and numeric value
+   from 0 (free) to 100 (strongest). Higher-priority pins stretch less while weaker
+   pins give way as you move or rotate. Pins never deform the mesh or change its
+   scale automatically. Orange P markers identify hard pins; teal S markers and
+   connecting lines show soft pins and their stretch.
+
+   Choose **Finish placing pins**, then use Move, Rotate, Transform, or numeric
+   adjustments. Pins remain active after leaving the Pin tool. The part stays at
+   the achieved pose when released; the resting points remain fixed. **Reset
+   resting points** rebases them onto the current placement. Switching a soft pin
+   to hard fixes its current surface point without a jump. Pins, priorities, and
+   resting points survive save/reopen, recovery, and shared sessions, and edits
+   support undo/redo. Copies receive their own pins at the copied position.
+   Joints, locked parts, and retained planes still apply; conflicting hard pins
+   block a placement rather than drifting. Remove a pin with its trash button.
+
    **Anchors (K)** provides fine rigid fitting for imperfect scanned interfaces.
    Select a moving part, click **Add anchors on surface**, and place three points
    around the interface. Click **Finish adding anchors**, select a numbered target,
@@ -292,7 +312,7 @@ to change geometry explicitly:
 
 **Prepare mesh** processes in a worker and reports the actual triangle count before applying.
 Cancel stops the worker. By default, applying creates an independent part in the same position
-and keeps the original hidden in the parts list. Parts with anchors, joints, or constraints
+and keeps the original hidden in the parts list. Parts with pins, anchors, joints, or constraints
 always use this copy workflow, retaining those links on the original. Undo restores the entire
 change in one step. Hidden originals remain in saved scenes and in exports scoped to all parts;
 choose visible or selected parts to export only the processed result.
@@ -492,7 +512,7 @@ autosave behavior](docs/google-drive.md).
 For a Drive scene, **Save** / **Cmd/Ctrl+S** flushes pending cloud edits and
 **File → Download scene copy** downloads a portable copy. Scene files include geometry,
 surface normals, vertex colors, part transforms, names, visibility, fixed locks,
-joints, editable plane constraints, and [editor colors and lighting](#part-colors-and-lighting).
+joints, pins, editable plane constraints, and [editor colors and lighting](#part-colors-and-lighting).
 Files are binary, so scene size is limited by
 device memory rather than a file format limit. Meshes are packed: values that repeat are
 stored once, so an assembly of STL parts with 7.7 million triangles takes 55 MB where it took

@@ -16,6 +16,7 @@ import {
   BoxSelect,
   Crosshair,
   Paintbrush,
+  Pin,
   FilePlus2,
   FolderOpen,
   GitMerge,
@@ -445,6 +446,14 @@ function Toolbar({
           {keys.paint ? <Keyboard>{keys.paint}</Keyboard> : null}
         </button>
         <button
+          className={`tool-button ${tool === 'pins' ? 'active' : ''}`}
+          title="Pin parts in space"
+          onClick={() => useEditor.getState().setTool('pins')}
+        >
+          <Pin size={16} />
+          <span>Pin</span>
+        </button>
+        <button
           className={`tool-button ${tool === 'anchors' ? 'active' : ''}`}
           title={withShortcut('Rigid anchor fit', keys.anchors)}
           onClick={() => useEditor.getState().setTool('anchors')}
@@ -619,13 +628,15 @@ function StatusBar() {
                     ? `Drag to paint · Alt erases${smaller || larger ? ` · ${[smaller, larger].filter(Boolean).join(' / ')} brush size` : ''} · ${orbitHint} orbits`
                     : tool === 'align'
                       ? `Pick source → target · ${orbitHint} orbits`
-                      : tool === 'anchors'
-                        ? 'Add surface anchors · Drag a target to fit · Shift for fine adjustment'
-                        : tool === 'joint'
-                          ? 'Pick anchors to connect parts'
-                          : ['translate', 'rotate', 'scale', 'transform'].includes(tool)
-                            ? 'Hold Shift while dragging for 10× finer adjustment'
-                            : 'Shift + click to select multiple'}
+                      : tool === 'pins'
+                        ? 'Place hard or soft pins on the surface · Move or rotate to adjust the part'
+                        : tool === 'anchors'
+                          ? 'Add surface anchors · Drag a target to fit · Shift for fine adjustment'
+                          : tool === 'joint'
+                            ? 'Pick anchors to connect parts'
+                            : ['translate', 'rotate', 'scale', 'transform'].includes(tool)
+                              ? 'Hold Shift while dragging for 10× finer adjustment'
+                              : 'Shift + click to select multiple'}
         </span>
       </div>
       <div className="local-save-status">
@@ -750,7 +761,8 @@ export default function App() {
     };
   }, []);
   useEffect(() => {
-    if (tool === 'align' || tool === 'joint' || tool === 'anchors') setRight(true);
+    if (tool === 'align' || tool === 'joint' || tool === 'anchors' || tool === 'pins')
+      setRight(true);
   }, [tool]);
   useEffect(() => {
     // Dropped files belong to one import dialog, not to the next one opened from a menu.

@@ -78,6 +78,14 @@ export function instantiateComponents(clipboard: ComponentClipboard, existing: P
       ...snapshotPart(part),
       id: ids.get(part.id)!,
       name,
+      pins: part.pins?.map((pin) => ({
+        ...pin,
+        id: uid(),
+        point: [...pin.point] as typeof pin.point,
+        target: vec(pin.target)
+          .add(new Vector3(12 * clipboard.nextOffset, 0, 0))
+          .toArray(),
+      })),
       anchors: part.anchors?.map((a) => ({
         id: uid(),
         point: [...a.point] as typeof a.point,

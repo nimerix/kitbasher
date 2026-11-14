@@ -379,6 +379,51 @@ export const assemblyGuides: DocArticle[] = [
     related: ['contact-paint', 'planes', 'joints', 'no-clip'],
   },
   {
+    id: 'pins',
+    title: 'Pins and soft pins',
+    description: 'Hold surface points in space or add elastic resistance with adjustable priority.',
+    group: 'Build & assemble',
+    icon: 'crosshair',
+    intro:
+      'Pins resist movement while you position a rigid part. Hard pins fix an exact point in world space; soft pins act like rubber bands of different strengths. The mesh keeps its shape.',
+    sections: [
+      {
+        id: 'place-pins',
+        title: 'Place pins on a part',
+        steps: [
+          'Select a visible, unlocked part and choose Pin in the toolbar.',
+          'Choose Pin for a hard pin or Soft pin for elastic resistance.',
+          'Click the selected part’s surface to place one or more pins, then choose Finish placing pins.',
+          'Use Move, Rotate, Transform, or numeric adjustments. Pins stay active after leaving the Pin tool.',
+        ],
+        paragraphs: [
+          'One hard pin allows rotation around its point. Two distinct hard pins leave rotation around their shared axis. Three noncollinear hard pins hold the complete pose. Existing joints, locks, and plane constraints still apply; conflicting hard pins block a placement.',
+        ],
+      },
+      {
+        id: 'soft-priority',
+        title: 'Adjust soft-pin priority',
+        paragraphs: [
+          'Select a soft pin in the viewport or Pins list. Set Priority using the slider or numeric field, from 0 (free) to 100 (strongest). Resistance rises exponentially across this range, so stronger pins give less while weaker pins stretch farther.',
+          'Orange P markers show hard pins. Teal S markers show soft-pin resting points, with lines to their current surface attachments. The Pins panel reports the stretch in millimeters.',
+          'The part stays where you release it. Resting points remain fixed, so later movements still feel their resistance. This is a positioning aid; it does not animate a spring returning to rest.',
+        ],
+      },
+      {
+        id: 'manage-pins',
+        title: 'Reset, remove, and save',
+        bullets: [
+          'Reset resting points places all the selected part’s targets at their current attachments.',
+          'Switching a stretched soft pin to hard locks its current attachment without moving the part.',
+          'Remove an individual pin with its trash button. A soft pin at priority 0 exerts no resistance.',
+          'Pin edits and movement support undo/redo. Pins survive scene save, recovery, reopen, and shared editing. Copies receive independent pins at the copied position.',
+          'Reset Explode to zero and choose a visible, unlocked part before editing pins.',
+        ],
+      },
+    ],
+    related: ['transforms', 'anchors', 'joints', 'planes'],
+  },
+  {
     id: 'anchors',
     title: 'Rigid anchor fitting',
     description:
