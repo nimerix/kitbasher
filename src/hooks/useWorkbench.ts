@@ -2,6 +2,7 @@ import { useEffect, useRef } from 'react';
 import { joinLiveSession } from '../core/live';
 import { committedScene, liveSession, useEditor } from '../core/store';
 import { readRecovery, saveRecovery } from '../core/recovery';
+import { driveAutosave, useDrive } from '../core/drive-sync';
 import { executeEditorCommand, shortcutCommand } from '../core/commands';
 import { isEditableTarget, keyboardContextMenu } from '../core/context-menu';
 import { actionRepeats, keyName, matchKeyAction } from '../core/keybindings';
@@ -15,6 +16,8 @@ export function useRecovery() {
   const scene = useEditor(committedScene),
     revision = useEditor((s) => s.revision),
     driveFile = useEditor((s) => s.driveFile);
+  const driveSavedRevision = useDrive((s) => s.savedRevision);
+  const driveSaved = !!driveFile && revision === driveSavedRevision;
   const ready = useRef(false);
   useEffect(() => {
     // The agent's server holds a shared scene. Leaving ready unset also stops autosaving it.
@@ -26,12 +29,17 @@ export function useRecovery() {
         if (!active) return;
         if (saved && useEditor.getState().revision === 0) {
           useEditor.getState().setScene(saved.scene, true, saved.driveFile);
+          if (saved.driveSaved) driveAutosave.acceptOpenedScene();
           useEditor.getState().notify('Recovered your local assembly', 'info');
         }
         useEditor.getState().setBusy(null);
         ready.current = true;
         const state = useEditor.getState();
-        return saveRecovery(state.scene, state.driveFile);
+        return saveRecovery(
+          committedScene(state),
+          state.driveFile,
+          !!state.driveFile && state.revision === useDrive.getState().savedRevision,
+        );
       })
       .catch(() => {
         if (active) useEditor.getState().setBusy(null);
@@ -46,18 +54,19 @@ export function useRecovery() {
     if (!ready.current) return;
     useEditor.setState({ recoveryStatus: 'saving' });
     const timeout = window.setTimeout(() => {
-      saveRecovery(scene, driveFile)
+      saveRecovery(scene, driveFile, driveSaved)
         .then(() => {
           if (
             useEditor.getState().revision === revision &&
-            useEditor.getState().driveFile === driveFile
+            useEditor.getState().driveFile === driveFile &&
+            useDrive.getState().savedRevision === driveSavedRevision
           )
             useEditor.setState({ recoveryStatus: 'saved' });
         })
         .catch(() => useEditor.setState({ recoveryStatus: 'error' }));
     }, 850);
     return () => clearTimeout(timeout);
-  }, [scene, revision, driveFile]);
+  }, [scene, revision, driveFile, driveSaved, driveSavedRevision]);
   useEffect(() => {
     const beforeUnload = (e: BeforeUnloadEvent) => {
       if (useEditor.getState().recoveryStatus !== 'saved') {

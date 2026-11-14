@@ -14,6 +14,7 @@ import type { DriveFileBinding, GeometryLayout, Part, SceneDocument } from './ty
 interface RecoverySnapshot {
   scene: SceneDocument;
   driveFile: DriveFileBinding | null;
+  driveSaved: boolean;
 }
 
 const databaseName = 'kitbasher-workbench';
@@ -101,11 +102,12 @@ async function removeOrphanMeshes(db: IDBDatabase) {
 
 // Meshes never change once they are in a scene, so each is written once. After that, an
 // edit only rewrites the scene's metadata, however large the scene is.
-async function writeRecovery({ scene, driveFile }: RecoverySnapshot) {
+async function writeRecovery({ scene, driveFile, driveSaved }: RecoverySnapshot) {
   const geometries = new Map(scene.parts.map((part) => [part.geometry.uuid, part.geometry]));
   const file = {
     ...sceneMetadata(scene),
     driveFile,
+    driveSaved,
     parts: scene.parts.map((part) => ({ ...part, geometry: part.geometry.uuid })),
   };
   const keys = new Set(geometries.keys());
@@ -136,8 +138,9 @@ let writing: Promise<void> | null = null;
 export function saveRecovery(
   scene: SceneDocument,
   driveFile: DriveFileBinding | null = null,
+  driveSaved = false,
 ): Promise<void> {
-  queued = { scene, driveFile };
+  queued = { scene, driveFile, driveSaved };
   writing ??= (async () => {
     try {
       while (queued) {
@@ -159,7 +162,7 @@ export async function readRecovery(): Promise<RecoverySnapshot | null> {
     const data = await requested(transaction.objectStore(scenes).get(currentScene));
     if (!data) return null;
     // Autosaves from earlier versions hold their meshes inside the scene record.
-    if (data.version !== 2) return { scene: parseScene(data), driveFile: null };
+    if (data.version !== 2) return { scene: parseScene(data), driveFile: null, driveSaved: false };
     const keys: string[] = [
       ...new Set<string>(data.parts.map((part: StoredPart) => part.geometry)),
     ];
@@ -182,7 +185,17 @@ export async function readRecovery(): Promise<RecoverySnapshot | null> {
       if (!geometry) throw new Error('The local save is missing a mesh.');
       return geometry;
     });
-    return { scene, driveFile: readDriveBinding(data.driveFile) };
+    const driveFile = readDriveBinding(data.driveFile);
+    return {
+      scene,
+      driveFile,
+      // Older caches cannot prove that their local edits reached Drive.
+      driveSaved:
+        data.driveSaved === true &&
+        !!driveFile &&
+        driveFile.version !== null &&
+        !driveFile.pendingWriteId,
+    };
   } finally {
     db.close();
   }
