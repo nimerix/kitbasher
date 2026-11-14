@@ -217,7 +217,7 @@ test('headset bindings can be changed, restored after reload, and reset from pre
   );
 });
 
-test('markers keep a fixed screen size and callouts stay vertically aligned above the model', async ({
+test('markers keep a fixed screen size and callouts keep an angled arm with a horizontal landing', async ({
   page,
 }) => {
   await page.locator('.part-select[title="Pivot piece"]').click();
@@ -239,15 +239,28 @@ test('markers keep a fixed screen size and callouts stay vertically aligned abov
   const leader = page.locator('.annotation-leader');
   await expect(leader).toBeVisible();
   await frames(page, 2);
-  const [d, l, line] = await Promise.all([dot, label, leader].map((n) => n.boundingBox()));
-  const center = (b: typeof d) => b!.x + b!.width / 2;
-  expect(Math.abs(center(l) - center(d))).toBeLessThan(1.5);
-  expect(Math.abs(center(line) - center(d))).toBeLessThan(1.5);
-  // Label, then leader, then point, from top to bottom.
-  expect(l!.y + l!.height).toBeLessThanOrEqual(line!.y + 1);
-  expect(line!.y + line!.height).toBeLessThanOrEqual(d!.y + d!.height / 2);
+  const checkLeader = async () => {
+    const [d, l] = await Promise.all([dot, label].map((n) => n.boundingBox()));
+    const [start, elbow, end] = await leader.evaluate((element: SVGPolylineElement) =>
+      Array.from(element.points, (point) => {
+        const screen = point.matrixTransform(element.getScreenCTM()!);
+        return { x: screen.x, y: screen.y };
+      }),
+    );
+    const center = { x: d!.x + d!.width / 2, y: d!.y + d!.height / 2 };
+    // The arm starts at the pivot ring and ends with a horizontal landing at label mid-height.
+    expect(Math.hypot(start.x - center.x, start.y - center.y)).toBeCloseTo(16 * 0.9, 0);
+    expect(Math.abs(elbow.x - start.x)).toBeGreaterThan(8);
+    expect(Math.abs(elbow.y - start.y)).toBeGreaterThan(8);
+    expect(end.y).toBeCloseTo(elbow.y, 3);
+    expect(end.y).toBeCloseTo(l!.y + l!.height / 2, 0);
+    expect(Math.abs(end.x - elbow.x)).toBeGreaterThan(8);
+    const edge = end.x > elbow.x ? l!.x : l!.x + l!.width;
+    expect(Math.abs(edge - end.x)).toBeCloseTo(3, 0);
+  };
+  await checkLeader();
 
-  // Orbiting keeps the callout straight above the point.
+  // The same geometry follows the projected point while orbiting.
   const canvas = (await page.locator('canvas').first().boundingBox())!;
   await page.mouse.move(canvas.x + canvas.width / 2, canvas.y + canvas.height / 2);
   await page.mouse.down({ button: 'middle' });
@@ -256,7 +269,18 @@ test('markers keep a fixed screen size and callouts stay vertically aligned abov
   });
   await page.mouse.up({ button: 'middle' });
   await page.waitForTimeout(500);
-  const [d2, l2] = await Promise.all([dot, label].map((n) => n.boundingBox()));
-  expect(Math.abs(center(l2) - center(d2))).toBeLessThan(1.5);
-  expect(l2!.y).toBeLessThan(d2!.y);
+  await checkLeader();
+
+  await page.getByRole('button', { name: /^Preferences \(/ }).click();
+  await page.getByRole('tab', { name: 'Markers' }).click();
+  const preview = page.getByRole('img', { name: 'Marker preview' });
+  await expect(preview.locator('polyline')).toHaveCount(3);
+  for (const line of await preview.locator('polyline').all()) {
+    const [start, elbow, end] = await line.evaluate((element: SVGPolylineElement) =>
+      Array.from(element.points, ({ x, y }) => ({ x, y })),
+    );
+    expect(Math.abs(elbow.x - start.x)).toBeGreaterThan(1);
+    expect(Math.abs(elbow.y - start.y)).toBeGreaterThan(1);
+    expect(end.y).toBe(elbow.y);
+  }
 });

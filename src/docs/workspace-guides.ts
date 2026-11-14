@@ -462,7 +462,7 @@ export const workspaceGuides: DocArticle[] = [
         title: 'Make points and labels readable',
         paragraphs: [
           'Markers shares one screen-pixel size across anchors, custom pivots, picked points, measurements, joints, and painted patches. The marker stays the same visible size while you zoom the model.',
-          'Labels can sit beside their point or use CAD-style callouts with leader lines. Callouts stay above the point on screen and can use a clearance from the model outline or a fixed leader length. Overlapping labels stack outward. Increase these settings for dense joins or smaller screens, then check that labels do not hide the surface you need to pick.',
+          'Labels can sit beside their point or use CAD-style callouts with an angled leader and a horizontal end beside the label. Each callout finds its own position around the model. Both arms adjust to avoid the model, other labels, and other leaders, using your model clearance or preferred leader length. When the model fills the viewport, callouts use the available space near their points. Increase these settings for dense joins or smaller screens, then check that labels do not hide the surface you need to pick.',
         ],
       },
       {

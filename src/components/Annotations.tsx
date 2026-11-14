@@ -7,7 +7,7 @@ import { partMatrix, partPivot, sceneBounds, vec, worldPoint } from '../core/geo
 import { isJointConnected } from '../core/constraints';
 import { resolvePart } from '../core/references';
 import { contactColors, patchCenter } from '../core/surfaces';
-import { layoutCallouts } from '../core/callouts';
+import { layoutCallouts, type CalloutBounds } from '../core/callouts';
 import { partDisplay } from '../core/alignment-visibility';
 import { usePreferences } from '../core/preferences';
 import { useEditor } from '../core/store';
@@ -248,7 +248,7 @@ const hasDot = (kind: AnnotationKind, callout: boolean) =>
 interface Nodes {
   dot?: HTMLElement | null;
   label?: HTMLElement | null;
-  leader?: HTMLElement | null;
+  leader?: SVGPolylineElement | null;
 }
 
 const projected = new Vector3();
@@ -257,11 +257,22 @@ export function AnnotationLayer({ projection }: { projection: ViewProjection }) 
   const annotations = useAnnotations();
   const markers = usePreferences((s) => s.markers);
   const nodes = useRef(new Map<string, Nodes>());
-  const node = (id: string, slot: keyof Nodes) => (element: HTMLElement | null) => {
-    const entry = nodes.current.get(id) ?? {};
-    entry[slot] = element;
-    nodes.current.set(id, entry);
-  };
+  const previousLayout = useRef<{
+    annotations: Annotation[];
+    markers: typeof markers;
+    width: number;
+    height: number;
+    world: number[];
+    projection: number[];
+    sizes: { width: number; height: number }[];
+  } | null>(null);
+  const node =
+    <K extends keyof Nodes>(id: string, slot: K) =>
+    (element: Nodes[K]) => {
+      const entry = nodes.current.get(id) ?? {};
+      entry[slot] = element;
+      nodes.current.set(id, entry);
+    };
   const callout = markers.style === 'callout';
 
   const layout = useCallback(() => {
@@ -287,6 +298,30 @@ export function AnnotationLayer({ projection }: { projection: ViewProjection }) 
       width: nodes.label?.offsetWidth ?? 0,
       height: nodes.label?.offsetHeight ?? 0,
     }));
+    // Routing is only needed when the projection, annotations, or measured labels change.
+    const previous = previousLayout.current;
+    if (
+      previous?.annotations === annotations &&
+      previous.markers === markers &&
+      previous.width === width &&
+      previous.height === height &&
+      previous.world.every((value, i) => value === camera.matrixWorld.elements[i]) &&
+      previous.projection.every((value, i) => value === camera.projectionMatrix.elements[i]) &&
+      sizes.every(
+        (size, i) =>
+          size.width === previous.sizes[i].width && size.height === previous.sizes[i].height,
+      )
+    )
+      return;
+    previousLayout.current = {
+      annotations,
+      markers,
+      width,
+      height,
+      world: camera.matrixWorld.toArray(),
+      projection: camera.projectionMatrix.toArray(),
+      sizes,
+    };
     const place = (element: HTMLElement | null | undefined, x: number, y: number, show = true) => {
       if (!element) return;
       element.style.transform = `translate3d(${x}px, ${y}px, 0)`;
@@ -306,13 +341,23 @@ export function AnnotationLayer({ projection }: { projection: ViewProjection }) 
       }
       return;
     }
-    const visible = labelled.filter((item) => item.visible);
+    const onScreen = (item: (typeof labelled)[number]) =>
+      item.visible && item.x >= 0 && item.x <= width && item.y >= 0 && item.y <= height;
+    const visible = labelled.filter(onScreen);
     const placed = layoutCallouts(
       visible.map((item) => {
-        let modelTop: number | null = null;
+        let modelBounds: CalloutBounds | null = null;
         for (const corner of item.annotation.bounds ?? []) {
           const screen = toScreen(corner);
-          if (screen.visible) modelTop = Math.min(modelTop ?? Infinity, screen.y);
+          if (!screen.visible) continue;
+          if (!modelBounds) {
+            modelBounds = { left: screen.x, right: screen.x, top: screen.y, bottom: screen.y };
+          } else {
+            modelBounds.left = Math.min(modelBounds.left, screen.x);
+            modelBounds.right = Math.max(modelBounds.right, screen.x);
+            modelBounds.top = Math.min(modelBounds.top, screen.y);
+            modelBounds.bottom = Math.max(modelBounds.bottom, screen.y);
+          }
         }
         return {
           x: item.x,
@@ -320,24 +365,27 @@ export function AnnotationLayer({ projection }: { projection: ViewProjection }) 
           width: item.width,
           height: item.height,
           radius: markerRadius(item.annotation.kind, markers.size),
-          modelTop,
+          modelBounds,
         };
       }),
       markers,
       { width, height },
     );
     labelled.forEach((item) => {
-      if (!item.visible) {
+      if (!onScreen(item)) {
         place(item.nodes.label, 0, 0, false);
-        place(item.nodes.leader, 0, 0, false);
+        if (item.nodes.leader) item.nodes.leader.style.visibility = 'hidden';
       }
     });
     visible.forEach((item, index) => {
       const { x, y, leader } = placed[index];
       place(item.nodes.label, x, y);
       if (item.nodes.leader) {
-        item.nodes.leader.style.height = leader ? `${leader[1] - leader[0]}px` : '0px';
-        place(item.nodes.leader, x, leader ? leader[0] : y, !!leader);
+        item.nodes.leader.setAttribute(
+          'points',
+          leader ? leader.map((point) => `${point.x},${point.y}`).join(' ') : '',
+        );
+        item.nodes.leader.style.visibility = leader ? 'visible' : 'hidden';
       }
     });
   }, [annotations, callout, markers, projection]);
@@ -374,18 +422,20 @@ export function AnnotationLayer({ projection }: { projection: ViewProjection }) 
         } as CSSProperties
       }
     >
-      {callout
-        ? annotations
+      {callout ? (
+        <svg className="annotation-leaders" aria-hidden="true">
+          {annotations
             .filter((a) => a.label)
             .map((a) => (
-              <span
+              <polyline
                 key={`${a.id}:leader`}
                 ref={node(a.id, 'leader')}
                 className="annotation-leader"
                 style={{ '--marker-color': a.color } as CSSProperties}
               />
-            ))
-        : null}
+            ))}
+        </svg>
+      ) : null}
       {annotations
         .filter((a) => hasDot(a.kind, callout))
         .map((a) => (

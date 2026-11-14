@@ -5255,10 +5255,17 @@ optgroup {
   width: calc(var(--marker-size) * 2.2);
   height: calc(var(--marker-size) * 2.2);
 }
+.annotation-layer > .annotation-leaders {
+  width: 100%;
+  height: 100%;
+  visibility: visible;
+  will-change: auto;
+}
 .annotation-leader {
-  width: 1px;
-  translate: -0.5px 0;
-  background: var(--marker-color);
+  fill: none;
+  stroke: var(--marker-color);
+  stroke-width: 1px;
+  visibility: hidden;
   opacity: 0.85;
 }
 .annotation-label {
@@ -5268,9 +5275,14 @@ optgroup {
   font-size: var(--marker-label-size);
   line-height: 1.25;
 }
-.annotation-layer.is-callout .surface-pick-label {
-  border: 1px solid color-mix(in srgb, var(--marker-color) 55%, transparent);
-  box-shadow: 0 1px 6px #0008;
+.annotation-layer.is-callout .annotation-label {
+  width: auto;
+  height: auto;
+  padding: 2px 4px;
+  border: 0;
+  border-radius: 0;
+  background: none;
+  box-shadow: none;
 }
 .annotation-layer .anchor-marker {
   width: calc(var(--marker-size) + 16px);

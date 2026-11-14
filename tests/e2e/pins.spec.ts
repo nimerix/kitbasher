@@ -144,6 +144,50 @@ test('places mixed pins, edits priority by number and slider, and saves/reopens 
   expect((await state(page)).pins).toHaveLength(1);
 });
 
+test('pin callouts use elbow leaders and their displaced labels still select the pin', async ({
+  page,
+}) => {
+  await open(page);
+  await place(page, [-10, -10, 1]);
+  await page.getByRole('button', { name: 'Soft pin', exact: true }).click();
+  await place(page, [10, 10, 1]);
+  await place(page, [-1, 1, 1]);
+  await page.getByRole('button', { name: 'Finish placing pins', exact: true }).click();
+  await page.getByRole('button', { name: /^Preferences \(/ }).click();
+  await page.getByRole('tab', { name: 'Markers' }).click();
+  await page.getByRole('radio', { name: 'Callout', exact: true }).click();
+  await page.keyboard.press('Escape');
+  const labels = page.locator('.annotation-label.anchor-marker');
+  const leaders = page.locator('.annotation-leader');
+  await expect(leaders).toHaveCount(3);
+  const rows: number[] = [];
+  for (let index = 0; index < 3; index++) {
+    const label = (await labels.nth(index).boundingBox())!;
+    await expect(leaders.nth(index)).toBeVisible();
+    const [start, elbow, end] = await leaders.nth(index).evaluate((element: SVGPolylineElement) =>
+      Array.from(element.points, (point) => {
+        const screen = point.matrixTransform(element.getScreenCTM()!);
+        return { x: screen.x, y: screen.y };
+      }),
+    );
+    expect(Math.abs(elbow.x - start.x)).toBeGreaterThan(8);
+    expect(Math.abs(elbow.y - start.y)).toBeGreaterThan(8);
+    expect(end.y).toBeCloseTo(label.y + label.height / 2, 0);
+    expect(end.y).toBe(elbow.y);
+    expect(Math.abs(end.x - elbow.x)).toBeGreaterThan(8);
+    rows.push(Math.round(end.y));
+  }
+  expect(new Set(rows).size).toBeGreaterThan(1);
+  const hard = page.getByRole('button', { name: 'Select hard pin 1', exact: true });
+  const soft = page.getByRole('button', { name: 'Select soft pin 2', exact: true });
+  await hard.click();
+  await expect(hard).toHaveClass(/active/);
+  await expect(soft).not.toHaveClass(/active/);
+  await soft.click();
+  await expect(soft).toHaveClass(/active/);
+  await expect(hard).not.toHaveClass(/active/);
+});
+
 test('rotates around a hard surface pin using the actual gizmo, as one undo step', async ({
   page,
 }) => {
