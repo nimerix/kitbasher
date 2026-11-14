@@ -187,7 +187,10 @@ test('saves edits to one portable Drive file and stays connected after local rec
   await expect(page.getByText('Saved locally', { exact: true })).toBeVisible();
   await page.reload();
   await expect(page.getByText('Recovered your local assembly', { exact: true })).toBeVisible();
+  // Leave enough time for a mistakenly queued autosave to run.
+  await page.waitForTimeout(2000);
   await saved(page);
+  expect(cloud.uploads).toHaveLength(3);
   await driveButton(page).click();
   await expect(
     page.getByRole('button', { name: 'Reconnect Google Drive', exact: true }),
@@ -203,6 +206,7 @@ test('saves edits to one portable Drive file and stays connected after local rec
   await page.getByRole('button', { name: 'Done', exact: true }).click();
   await rename(page, 'After recovery');
   await saved(page);
+  expect(cloud.uploads).toHaveLength(4);
   expect(cloud.uploads.every((id) => id === 'cloud-1')).toBe(true);
 });
 
@@ -220,8 +224,70 @@ test('opens a Drive scene after creating a new scene without uploading the repla
   await page.getByRole('button', { name: 'Open scene', exact: true }).click();
   await saved(page);
   await expect(page.locator('.part-row')).toHaveCount(15);
+  await expect(page.getByText('Saved locally', { exact: true })).toBeVisible();
+  await page.reload();
+  await expect(page.getByText('Recovered your local assembly', { exact: true })).toBeVisible();
+  await page.waitForTimeout(2000);
+  await saved(page);
   expect(cloud.uploads).toEqual(['cloud-1']);
 });
+
+for (const legacy of [false, true]) {
+  test(`recovers pending offline edits${legacy ? ' from an older cache' : ''} and saves them to the same Drive file`, async ({
+    page,
+    context,
+  }) => {
+    const cloud = await mockGoogle(page);
+    await connectAndSave(page);
+    await context.setOffline(true);
+    await rename(page, 'Pending across reload');
+    await expect(driveButton(page)).toHaveAccessibleName('Google Drive: Drive offline');
+    await expect(page.getByText('Saved locally', { exact: true })).toBeVisible();
+    expect(cloud.uploads).toHaveLength(1);
+    if (legacy) {
+      await page.evaluate(
+        () =>
+          new Promise<void>((resolve, reject) => {
+            const open = indexedDB.open('kitbasher-workbench', 2);
+            open.onerror = () => reject(open.error);
+            open.onsuccess = () => {
+              const db = open.result;
+              const transaction = db.transaction('scenes', 'readwrite');
+              const store = transaction.objectStore('scenes');
+              const read = store.get('current');
+              read.onsuccess = () => {
+                delete read.result.driveSaved;
+                store.put(read.result, 'current');
+              };
+              transaction.oncomplete = () => {
+                db.close();
+                resolve();
+              };
+              transaction.onabort = () => {
+                db.close();
+                reject(transaction.error);
+              };
+            };
+          }),
+      );
+    }
+    // Close while still offline so the old page cannot upload before recovery.
+    page.once('dialog', (dialog) => dialog.accept());
+    await page.goto('about:blank');
+    await context.setOffline(false);
+    await page.goto('/');
+    await expect(page.getByText('Recovered your local assembly', { exact: true })).toBeVisible();
+    await saved(page);
+    expect(cloud.uploads).toEqual(['cloud-1', 'cloud-1']);
+    expect(cloud.files.get('cloud-1')!.name).toBe('Pending across reload.kitbash');
+    await expect(page.getByText('Saved locally', { exact: true })).toBeVisible();
+    await page.reload();
+    await expect(page.getByText('Recovered your local assembly', { exact: true })).toBeVisible();
+    await page.waitForTimeout(2000);
+    await saved(page);
+    expect(cloud.uploads).toHaveLength(2);
+  });
+}
 
 test('retains offline edits and automatically uploads them on reconnect', async ({
   page,
@@ -390,7 +456,10 @@ test('renews hosted authorization and restores after reload without reconnect, b
   expect(cloud.renewals).toBe(1);
   await expect(page.getByText('Saved locally', { exact: true })).toBeVisible();
   await page.reload();
+  await expect(page.getByText('Recovered your local assembly', { exact: true })).toBeVisible();
+  await page.waitForTimeout(2000);
   await saved(page);
+  expect(cloud.uploads).toHaveLength(2);
   expect(cloud.authorizations).toBe(1);
   expect(cloud.renewals).toBe(2);
   await driveButton(page).click();

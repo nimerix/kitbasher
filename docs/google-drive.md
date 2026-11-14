@@ -57,7 +57,10 @@ Google documents `same-origin-allow-popups` for this integration when necessary.
   Wait for **Saved to Drive** before closing the tab. Pending Drive edits trigger
   the browser's leave-page warning even if local recovery has finished.
 - IndexedDB recovery continues independently. It stores the Drive file binding
-  alongside the local scene, so reconnecting after a reload updates the same file.
+  and whether that snapshot is already saved to Drive alongside the local scene.
+  Reloading a saved scene does not upload it again; pending edits still save to
+  the same file after reconnecting. Older caches without this saved-state marker
+  are treated as pending so unsaved edits are not lost.
   Downloaded `.kitbash` files contain neither Drive bindings nor credentials.
   Opening a local file or starting a new scene clears the previous cloud binding.
 - On static hosts, short-lived access tokens are kept in this tab's session storage,
