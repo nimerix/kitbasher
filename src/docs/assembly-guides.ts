@@ -829,12 +829,12 @@ export const assemblyGuides: DocArticle[] = [
         title: 'Move labels clear of the model',
         steps: [
           'In Point markers, change Labels from Beside point to Callout.',
-          'Choose Clear of model to position labels above the model’s outline, or Fixed leader for a chosen line length.',
-          'Adjust Clearance above model or Leader length in pixels.',
+          'Choose Clear of model to leave a gap around the model’s outline, or Preferred length to favor a chosen angled arm length.',
+          'Adjust Clearance from model or Preferred leader length in pixels. Both arms can adapt to avoid overlaps.',
           'Review the preference panel’s marker preview, then inspect the actual interface at your working zoom.',
         ],
         paragraphs: [
-          'Callout leaders run straight above their points on screen. Labels that would overlap stack outward, helping keep several source/target or anchor labels readable. These are marker-display preferences; they do not create additional constraints or change the measured geometry.',
+          'Callout leaders angle away from their points, then run horizontally to the side of each label. Each callout adjusts its position and both arm lengths independently to clear the model, other labels, and other lines. These are marker-display preferences; they do not create additional constraints or change the measured geometry.',
         ],
       },
       {

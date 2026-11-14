@@ -11,7 +11,7 @@ import type { KeyActionId, KeyBindingOverrides } from './keybindings';
 import type { ZoomSettings } from './zoom';
 
 export type LabelStyle = 'inline' | 'callout';
-/** `model` keeps callout labels clear of their part; `offset` uses a fixed leader length. */
+/** `model` applies model clearance; `offset` favors a preferred angled leader length. */
 export type CalloutPlacement = 'model' | 'offset';
 
 export interface MarkerSettings {
@@ -20,9 +20,9 @@ export interface MarkerSettings {
   labelSize: number;
   style: LabelStyle;
   placement: CalloutPlacement;
-  /** Gap between a part's on-screen outline and its callout labels, in pixels. */
+  /** Gap between the model's on-screen outline and its callout labels, in pixels. */
   clearance: number;
-  /** Leader length for fixed-offset callouts, in pixels. */
+  /** Preferred angled leader length, in pixels; routing can adjust both arms. */
   leader: number;
 }
 

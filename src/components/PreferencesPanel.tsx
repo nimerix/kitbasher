@@ -566,28 +566,28 @@ function MarkerPreferences() {
               value={markers.placement}
               options={[
                 { id: 'model', label: 'Clear of model' },
-                { id: 'offset', label: 'Fixed leader' },
+                { id: 'offset', label: 'Preferred length' },
               ]}
               onChange={(placement) => set({ placement })}
             />
             {markers.placement === 'model' ? (
               <RangeField
                 key="clearance"
-                label="Clearance above model"
+                label="Clearance from model"
                 value={markers.clearance}
                 limit={preferenceLimits.clearance}
                 unit="px"
-                help="Labels sit this far above the model's outline on screen, straight above each point."
+                help="Labels and horizontal arms clear the model by this gap. Each callout adjusts independently to avoid other labels and lines."
                 onChange={(clearance) => set({ clearance })}
               />
             ) : (
               <RangeField
                 key="leader"
-                label="Leader length"
+                label="Preferred leader length"
                 value={markers.leader}
                 limit={preferenceLimits.leader}
                 unit="px"
-                help="Labels sit this far straight above each point."
+                help="Preferred length of the angled arm. Both arms adjust when needed to clear the model, other labels, and lines."
                 onChange={(leader) => set({ leader })}
               />
             )}
@@ -621,7 +621,7 @@ function MarkerPreview({ markers }: { markers: MarkerSettings }) {
             width: widthOf(p.label),
             height: labelHeight,
             radius: r,
-            modelTop: model.top,
+            modelBounds: model,
           })),
           markers,
           { width, height },
@@ -641,12 +641,10 @@ function MarkerPreview({ markers }: { markers: MarkerSettings }) {
         />
         {placed.map((label, i) =>
           label.leader ? (
-            <line
+            <polyline
               key={`leader-${i}`}
-              x1={label.x}
-              x2={label.x}
-              y1={label.leader[0]}
-              y2={label.leader[1]}
+              points={label.leader.map((point) => `${point.x},${point.y}`).join(' ')}
+              fill="none"
               stroke={points[i].color}
             />
           ) : null,
@@ -656,14 +654,16 @@ function MarkerPreview({ markers }: { markers: MarkerSettings }) {
         ))}
         {placed.map((label, i) => (
           <g key={`label-${i}`} transform={`translate(${label.x} ${label.y})`}>
-            <rect
-              className="preview-label"
-              x={-widthOf(points[i].label) / 2}
-              y={-labelHeight / 2}
-              width={widthOf(points[i].label)}
-              height={labelHeight}
-              rx={3}
-            />
+            {markers.style === 'inline' ? (
+              <rect
+                className="preview-label"
+                x={-widthOf(points[i].label) / 2}
+                y={-labelHeight / 2}
+                width={widthOf(points[i].label)}
+                height={labelHeight}
+                rx={3}
+              />
+            ) : null}
             <text fill={points[i].color} fontSize={markers.labelSize} dy="0.35em">
               {points[i].label}
             </text>
