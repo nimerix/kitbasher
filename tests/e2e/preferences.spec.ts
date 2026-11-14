@@ -217,7 +217,69 @@ test('headset bindings can be changed, restored after reload, and reset from pre
   );
 });
 
-test('markers keep a fixed screen size and callouts keep an angled arm with a horizontal landing', async ({
+test('callouts recover after an edge pan and stop updating once the camera rests', async ({
+  page,
+}) => {
+  await page.locator('.part-select[title="Pivot piece"]').click();
+  await setPreferences(page, { markers: { style: 'callout', leader: 24 } });
+  await expect(page.locator('.pivot-label')).toBeVisible();
+  const result = await page.evaluate(async () => {
+    const url = performance
+      .getEntriesByType('resource')
+      .map((entry) => entry.name)
+      .find((name) => name.includes('/@react-three_fiber.js'))!;
+    const root = (await import(url))._roots.get(document.querySelector('canvas')).store.getState();
+    const canvas = document.querySelector('canvas')!.getBoundingClientRect();
+    const label = document.querySelector('.pivot-label')!;
+    const marker = document.querySelector('.annotation-dot.is-pivot')!;
+    const frame = () =>
+      new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    const read = () => {
+      const l = label.getBoundingClientRect(),
+        d = marker.getBoundingClientRect();
+      return {
+        x: l.x + l.width / 2 - d.x - d.width / 2,
+        y: l.y + l.height / 2 - d.y - d.height / 2,
+      };
+    };
+    const pivot = root.camera.position.clone().set(0, 30, 8);
+    const panTo = async (x: number) => {
+      const target = pivot.clone().project(root.camera);
+      target.x = (2 * x) / canvas.width - 1;
+      const delta = pivot.clone().sub(target.unproject(root.camera));
+      root.camera.position.add(delta);
+      root.controls.target.add(delta);
+      root.controls.update();
+      root.invalidate();
+      await frame();
+    };
+    await frame();
+    const originX =
+      marker.getBoundingClientRect().x + marker.getBoundingClientRect().width / 2 - canvas.x;
+    const before = read();
+    for (let x = originX; x < canvas.width - 10; x += 6) await panTo(x);
+    await panTo(canvas.width - 10);
+    const edge = read();
+    // There must be no endless animation trying to ease past the viewport clamp.
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    let changes = 0;
+    const observer = new MutationObserver((records) => {
+      changes += records.length;
+    });
+    observer.observe(label, { attributes: true, attributeFilter: ['style'] });
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    observer.disconnect();
+    for (let x = canvas.width - 10; x > originX; x -= 6) await panTo(x);
+    await panTo(originX);
+    return { before, edge, after: read(), changes };
+  });
+  expect(result.edge.x).toBeLessThan(result.before.x - 10);
+  expect(result.after.x).toBeCloseTo(result.before.x, 1);
+  expect(result.after.y).toBeCloseTo(result.before.y, 1);
+  expect(result.changes).toBe(0);
+});
+
+test('callouts keep a fixed screen size, short connectors, and stable offsets while orbiting', async ({
   page,
 }) => {
   await page.locator('.part-select[title="Pivot piece"]').click();
@@ -235,30 +297,71 @@ test('markers keep a fixed screen size and callouts keep an angled arm with a ho
   await frames(page, 2);
   expect(Math.round(await width())).toBe(Math.round(16 * 0.65));
 
-  await setPreferences(page, { markers: { style: 'callout', placement: 'model', clearance: 30 } });
+  await setPreferences(page, { markers: { style: 'callout', leader: 24 } });
   const leader = page.locator('.annotation-leader');
   await expect(leader).toBeVisible();
   await frames(page, 2);
   const checkLeader = async () => {
     const [d, l] = await Promise.all([dot, label].map((n) => n.boundingBox()));
-    const [start, elbow, end] = await leader.evaluate((element: SVGPolylineElement) =>
+    const [start, end] = await leader.evaluate((element: SVGPolylineElement) =>
       Array.from(element.points, (point) => {
         const screen = point.matrixTransform(element.getScreenCTM()!);
         return { x: screen.x, y: screen.y };
       }),
     );
     const center = { x: d!.x + d!.width / 2, y: d!.y + d!.height / 2 };
-    // The arm starts at the pivot ring and ends with a horizontal landing at label mid-height.
-    expect(Math.hypot(start.x - center.x, start.y - center.y)).toBeCloseTo(16 * 0.9, 0);
-    expect(Math.abs(elbow.x - start.x)).toBeGreaterThan(8);
-    expect(Math.abs(elbow.y - start.y)).toBeGreaterThan(8);
-    expect(end.y).toBeCloseTo(elbow.y, 3);
-    expect(end.y).toBeCloseTo(l!.y + l!.height / 2, 0);
-    expect(Math.abs(end.x - elbow.x)).toBeGreaterThan(8);
-    const edge = end.x > elbow.x ? l!.x : l!.x + l!.width;
-    expect(Math.abs(edge - end.x)).toBeCloseTo(3, 0);
+    // Direct connector from the pivot ring to the nearest badge edge.
+    expect(Math.hypot(start.x - center.x, start.y - center.y)).toBeCloseTo(16 * 0.9 + 1, 0);
+    expect(Math.hypot(end.x - start.x, end.y - start.y)).toBeLessThanOrEqual(80);
+    expect(
+      Math.min(
+        Math.abs(end.x - l!.x),
+        Math.abs(end.x - l!.x - l!.width),
+        Math.abs(end.y - l!.y),
+        Math.abs(end.y - l!.y - l!.height),
+      ),
+    ).toBeLessThan(1);
   };
   await checkLeader();
+
+  const leaderLength = () =>
+    leader.evaluate((el: SVGPolylineElement) => {
+      const [a, b] = Array.from(el.points);
+      return Math.hypot(a.x - b.x, a.y - b.y);
+    });
+  const compactLength = await leaderLength();
+  await setPreferences(page, { markers: { leader: 48 } });
+  await expect.poll(leaderLength).toBeGreaterThan(compactLength + 10);
+  await setPreferences(page, { markers: { leader: 24 } });
+  await expect.poll(leaderLength).toBeLessThan(compactLength + 0.3);
+
+  // Tiny camera pans must translate the label with its point, with no rerouting jitter.
+  const offsets = await page.evaluate(async () => {
+    const url = performance
+      .getEntriesByType('resource')
+      .map((entry) => entry.name)
+      .find((name) => name.includes('/@react-three_fiber.js'))!;
+    const root = (await import(url))._roots.get(document.querySelector('canvas')).store.getState();
+    const result: { x: number; y: number }[] = [];
+    for (let i = 0; i < 30; i++) {
+      root.camera.position.x += 0.025;
+      root.controls.target.x += 0.025;
+      root.controls.update();
+      root.invalidate();
+      await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+      const d = document.querySelector('.annotation-dot.is-pivot')!.getBoundingClientRect();
+      const l = document.querySelector('.pivot-label')!.getBoundingClientRect();
+      result.push({
+        x: l.x + l.width / 2 - d.x - d.width / 2,
+        y: l.y + l.height / 2 - d.y - d.height / 2,
+      });
+    }
+    return result;
+  });
+  for (const offset of offsets) {
+    expect(Math.abs(offset.x - offsets[0].x)).toBeLessThan(0.25);
+    expect(Math.abs(offset.y - offsets[0].y)).toBeLessThan(0.25);
+  }
 
   // The same geometry follows the projected point while orbiting.
   const canvas = (await page.locator('canvas').first().boundingBox())!;
@@ -271,16 +374,42 @@ test('markers keep a fixed screen size and callouts keep an angled arm with a ho
   await page.waitForTimeout(500);
   await checkLeader();
 
-  await page.getByRole('button', { name: /^Preferences \(/ }).click();
+  // Offscreen points must not leave a label stranded at the viewport edge.
+  const pan = (amount: number) =>
+    page.evaluate(async (amount) => {
+      const url = performance
+        .getEntriesByType('resource')
+        .map((entry) => entry.name)
+        .find((name) => name.includes('/@react-three_fiber.js'))!;
+      const root = (await import(url))._roots
+        .get(document.querySelector('canvas'))
+        .store.getState();
+      root.camera.position.x += amount;
+      root.controls.target.x += amount;
+      root.controls.update();
+      root.invalidate();
+    }, amount);
+  await pan(1000);
+  await expect(label).toBeHidden();
+  await expect(leader).toBeHidden();
+  await pan(-1000);
+  await expect(label).toBeVisible();
+  await checkLeader();
+
+  await page.emulateMedia({ reducedMotion: 'reduce' });
+  await page.setViewportSize({ width: 1000, height: 800 });
+  await expect(label).toBeVisible();
+  await checkLeader();
+
+  await page.keyboard.press('ControlOrMeta+,');
   await page.getByRole('tab', { name: 'Markers' }).click();
   const preview = page.getByRole('img', { name: 'Marker preview' });
   await expect(preview.locator('polyline')).toHaveCount(3);
   for (const line of await preview.locator('polyline').all()) {
-    const [start, elbow, end] = await line.evaluate((element: SVGPolylineElement) =>
+    const [start, end] = await line.evaluate((element: SVGPolylineElement) =>
       Array.from(element.points, ({ x, y }) => ({ x, y })),
     );
-    expect(Math.abs(elbow.x - start.x)).toBeGreaterThan(1);
-    expect(Math.abs(elbow.y - start.y)).toBeGreaterThan(1);
-    expect(end.y).toBe(elbow.y);
+    expect(Math.hypot(end.x - start.x, end.y - start.y)).toBeGreaterThan(1);
+    expect(Math.hypot(end.x - start.x, end.y - start.y)).toBeLessThanOrEqual(80);
   }
 });

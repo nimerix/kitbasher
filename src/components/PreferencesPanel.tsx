@@ -560,38 +560,14 @@ function MarkerPreferences() {
           onChange={(style) => set({ style })}
         />
         {markers.style === 'callout' ? (
-          <>
-            <SegmentedField
-              label="Callout placement"
-              value={markers.placement}
-              options={[
-                { id: 'model', label: 'Clear of model' },
-                { id: 'offset', label: 'Preferred length' },
-              ]}
-              onChange={(placement) => set({ placement })}
-            />
-            {markers.placement === 'model' ? (
-              <RangeField
-                key="clearance"
-                label="Clearance from model"
-                value={markers.clearance}
-                limit={preferenceLimits.clearance}
-                unit="px"
-                help="Labels and horizontal arms clear the model by this gap. Each callout adjusts independently to avoid other labels and lines."
-                onChange={(clearance) => set({ clearance })}
-              />
-            ) : (
-              <RangeField
-                key="leader"
-                label="Preferred leader length"
-                value={markers.leader}
-                limit={preferenceLimits.leader}
-                unit="px"
-                help="Preferred length of the angled arm. Both arms adjust when needed to clear the model, other labels, and lines."
-                onChange={(leader) => set({ leader })}
-              />
-            )}
-          </>
+          <RangeField
+            label="Label spacing"
+            value={markers.leader}
+            limit={preferenceLimits.leader}
+            unit="px"
+            help="Short leaders keep labels near their points. Crowded labels adjust locally and keep their position as you orbit."
+            onChange={(leader) => set({ leader })}
+          />
         ) : null}
         <MarkerPreview markers={markers} />
       </section>
@@ -609,23 +585,24 @@ function MarkerPreview({ markers }: { markers: MarkerSettings }) {
     { x: 118, y: 124, label: 'T1', color: '#9ccec6' },
     { x: 186, y: 112, label: 'Pivot', color: '#c9dcf8' },
   ];
+  const callout = markers.style === 'callout';
   const r = markers.size / 2;
-  const labelHeight = markers.labelSize + 6;
-  const widthOf = (label: string) => label.length * markers.labelSize * 0.62 + 9;
+  const labelHeight = markers.labelSize * 1.25 + (callout ? 10 : 4);
+  const widthOf = (label: string) =>
+    Math.max(callout ? 30 : 0, label.length * markers.labelSize * 0.62 + (callout ? 16 : 8));
   const placed =
     markers.style === 'callout'
       ? layoutCallouts(
           points.map((p) => ({
+            id: p.label,
             x: p.x,
             y: p.y,
             width: widthOf(p.label),
             height: labelHeight,
             radius: r,
-            modelBounds: model,
           })),
           markers,
           { width, height },
-          4,
         )
       : points.map((p) => ({ x: p.x, y: p.y - r - 3 - labelHeight / 2, leader: null }));
   return (
@@ -646,6 +623,8 @@ function MarkerPreview({ markers }: { markers: MarkerSettings }) {
               points={label.leader.map((point) => `${point.x},${point.y}`).join(' ')}
               fill="none"
               stroke={points[i].color}
+              strokeWidth={1}
+              style={{ filter: 'drop-shadow(0 1px 1px #000)' }}
             />
           ) : null,
         )}
@@ -654,17 +633,20 @@ function MarkerPreview({ markers }: { markers: MarkerSettings }) {
         ))}
         {placed.map((label, i) => (
           <g key={`label-${i}`} transform={`translate(${label.x} ${label.y})`}>
-            {markers.style === 'inline' ? (
-              <rect
-                className="preview-label"
-                x={-widthOf(points[i].label) / 2}
-                y={-labelHeight / 2}
-                width={widthOf(points[i].label)}
-                height={labelHeight}
-                rx={3}
-              />
-            ) : null}
-            <text fill={points[i].color} fontSize={markers.labelSize} dy="0.35em">
+            <rect
+              className="preview-label"
+              x={-widthOf(points[i].label) / 2}
+              y={-labelHeight / 2}
+              width={widthOf(points[i].label)}
+              height={labelHeight}
+              rx={callout ? 4 : 3}
+              stroke={callout ? '#59616c' : 'none'}
+            />
+            <text
+              fill={callout ? '#f8fafc' : points[i].color}
+              fontSize={markers.labelSize}
+              dy="0.35em"
+            >
               {points[i].label}
             </text>
           </g>

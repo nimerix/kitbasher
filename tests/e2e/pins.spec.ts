@@ -1,4 +1,5 @@
 import { expect, test, type Page } from '@playwright/test';
+import { writeFile } from 'node:fs/promises';
 import { BoxGeometry } from 'three';
 import { serializeGeometry } from '../../src/core/geometry';
 import { readSavedScene } from './saved-scene';
@@ -144,7 +145,7 @@ test('places mixed pins, edits priority by number and slider, and saves/reopens 
   expect((await state(page)).pins).toHaveLength(1);
 });
 
-test('pin callouts use elbow leaders and their displaced labels still select the pin', async ({
+test('compact pin callouts stay readable and stable while selecting and navigating', async ({
   page,
 }) => {
   await open(page);
@@ -160,24 +161,43 @@ test('pin callouts use elbow leaders and their displaced labels still select the
   const labels = page.locator('.annotation-label.anchor-marker');
   const leaders = page.locator('.annotation-leader');
   await expect(leaders).toHaveCount(3);
-  const rows: number[] = [];
   for (let index = 0; index < 3; index++) {
     const label = (await labels.nth(index).boundingBox())!;
     await expect(leaders.nth(index)).toBeVisible();
-    const [start, elbow, end] = await leaders.nth(index).evaluate((element: SVGPolylineElement) =>
+    const [start, end] = await leaders.nth(index).evaluate((element: SVGPolylineElement) =>
       Array.from(element.points, (point) => {
         const screen = point.matrixTransform(element.getScreenCTM()!);
         return { x: screen.x, y: screen.y };
       }),
     );
-    expect(Math.abs(elbow.x - start.x)).toBeGreaterThan(8);
-    expect(Math.abs(elbow.y - start.y)).toBeGreaterThan(8);
-    expect(end.y).toBeCloseTo(label.y + label.height / 2, 0);
-    expect(end.y).toBe(elbow.y);
-    expect(Math.abs(end.x - elbow.x)).toBeGreaterThan(8);
-    rows.push(Math.round(end.y));
+    expect(Math.hypot(end.x - start.x, end.y - start.y)).toBeLessThanOrEqual(80);
+    expect(
+      Math.min(
+        Math.abs(end.x - label.x),
+        Math.abs(end.x - label.x - label.width),
+        Math.abs(end.y - label.y),
+        Math.abs(end.y - label.y - label.height),
+      ),
+    ).toBeLessThan(1);
+    const style = await labels.nth(index).evaluate((el) => {
+      const s = getComputedStyle(el);
+      return {
+        color: s.color,
+        background: s.backgroundColor,
+        opacity: s.opacity,
+        font: parseFloat(s.fontSize),
+        border: s.borderColor,
+      };
+    });
+    expect(style.color).toBe('rgb(248, 250, 252)');
+    expect(style.background).not.toBe('rgba(0, 0, 0, 0)');
+    expect(style.font).toBeGreaterThanOrEqual(12);
+    expect(style.opacity).toBe('1');
+    expect(style.border).toBe(index === 2 ? 'rgb(124, 225, 209)' : 'rgb(89, 97, 108)');
   }
-  expect(new Set(rows).size).toBeGreaterThan(1);
+  const beforeSelection = await labels.evaluateAll((els) =>
+    els.map((el) => el.getBoundingClientRect().toJSON()),
+  );
   const hard = page.getByRole('button', { name: 'Select hard pin 1', exact: true });
   const soft = page.getByRole('button', { name: 'Select soft pin 2', exact: true });
   await hard.click();
@@ -186,6 +206,75 @@ test('pin callouts use elbow leaders and their displaced labels still select the
   await soft.click();
   await expect(soft).toHaveClass(/active/);
   await expect(hard).not.toHaveClass(/active/);
+  expect(
+    await labels.evaluateAll((els) => els.map((el) => el.getBoundingClientRect().toJSON())),
+  ).toEqual(beforeSelection);
+  await hard.focus();
+  await page.keyboard.press('Tab');
+  await expect(soft).toBeFocused();
+  await page.keyboard.press('Shift+Tab');
+  await expect(hard).toBeFocused();
+  await page.keyboard.press('Enter');
+  await expect(hard).toHaveAttribute('aria-pressed', 'true');
+  expect(await hard.evaluate((el) => getComputedStyle(el).outlineStyle)).not.toBe('none');
+  // Focus stays on the dark label rather than losing contrast on a light model.
+  expect(await hard.evaluate((el) => parseFloat(getComputedStyle(el).outlineOffset))).toBeLessThan(
+    0,
+  );
+
+  // Pin selection is unavailable while orbiting, but the labels remain fully readable.
+  await page.locator('canvas').focus();
+  await page.keyboard.press('o');
+  await expect(hard).toBeDisabled();
+  expect(await hard.evaluate((el) => getComputedStyle(el).opacity)).toBe('1');
+  await page.keyboard.press('Escape');
+  await expect(hard).toBeEnabled();
+  // Capture the ordinary pointer-selected state after exercising keyboard focus above.
+  await hard.click();
+  await page.screenshot({ path: 'test-results/compact-callouts.png' });
+  const snapshot = await labels.evaluateAll((elements) => ({
+    tool: 'callout-render-check',
+    version: 1,
+    url: location.href,
+    viewport: { width: innerWidth, height: innerHeight },
+    page: {
+      scrollWidth: document.documentElement.scrollWidth,
+      clientWidth: document.documentElement.clientWidth,
+    },
+    elements: elements.map((el) => {
+      const rect = el.getBoundingClientRect(),
+        style = getComputedStyle(el);
+      return {
+        id: el.getAttribute('aria-label'),
+        tag: 'button',
+        interactive: true,
+        name: el.getAttribute('aria-label'),
+        text: el.textContent,
+        rect: { x: rect.x, y: rect.y, w: rect.width, h: rect.height },
+        color: style.color,
+        bg: style.backgroundColor,
+        opacity: Number(style.opacity),
+        fontSize: parseFloat(style.fontSize),
+        fontWeight: Number(style.fontWeight),
+      };
+    }),
+  }));
+  await writeFile('test-results/callout-qa.json', JSON.stringify(snapshot));
+  const distance = () =>
+    page.evaluate(async () => {
+      const url = performance
+        .getEntriesByType('resource')
+        .map((entry) => entry.name)
+        .find((name) => name.includes('/@react-three_fiber.js'))!;
+      const root = (await import(url))._roots
+        .get(document.querySelector('canvas'))
+        .store.getState();
+      return root.camera.position.distanceTo(root.controls.target) as number;
+    });
+  const beforeZoom = await distance();
+  await hard.hover();
+  await page.mouse.wheel(0, -100);
+  await expect.poll(distance).toBeLessThan(beforeZoom - 0.1);
 });
 
 test('rotates around a hard surface pin using the actual gizmo, as one undo step', async ({

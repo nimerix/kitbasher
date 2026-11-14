@@ -1,13 +1,19 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef } from 'react';
 import type { CSSProperties } from 'react';
 import { useFrame } from '@react-three/fiber';
-import { Box3, Vector3 } from 'three';
+import { Vector3 } from 'three';
 import type { Camera } from 'three';
-import { partMatrix, partPivot, sceneBounds, vec, worldPoint } from '../core/geometry';
+import { partMatrix, partPivot, vec, worldPoint } from '../core/geometry';
 import { isJointConnected } from '../core/constraints';
 import { resolvePart } from '../core/references';
 import { contactColors, patchCenter } from '../core/surfaces';
-import { layoutCallouts, type CalloutBounds } from '../core/callouts';
+import {
+  calloutLeader,
+  clampCallout,
+  layoutCallouts,
+  type CalloutBounds,
+  type CalloutOffset,
+} from '../core/callouts';
 import { partDisplay } from '../core/alignment-visibility';
 import { usePreferences } from '../core/preferences';
 import { useEditor } from '../core/store';
@@ -48,21 +54,9 @@ interface Annotation {
   color: string;
   label?: string;
   labelClass?: string;
-  /** Corners of the visible model's box in world space, so callouts can clear its outline. */
-  bounds?: Vector3[];
   active?: boolean;
   select?: { label: string; disabled: boolean; run: () => void };
 }
-
-const boxCorners = (box: Box3) =>
-  [0, 1, 2, 3, 4, 5, 6, 7].map(
-    (i) =>
-      new Vector3(
-        i & 1 ? box.max.x : box.min.x,
-        i & 2 ? box.max.y : box.min.y,
-        i & 4 ? box.max.z : box.min.z,
-      ),
-  );
 
 // A patch center walks every painted face, so reuse it until the patch or mesh changes.
 const patchCenters = new WeakMap<SurfacePatch, { part: Part; center: Vector3 | null }>();
@@ -93,8 +87,6 @@ function useAnnotations(): Annotation[] {
     const display = { tool, operation: op, isolated, nearbyParts: nearby };
     const shown = (part?: Part): part is Part =>
       !!part?.visible && partDisplay(display, part.id) !== 'hidden';
-    // Callouts clear the whole visible model, not only the part their point is on.
-    const model = boxCorners(sceneBounds(scene.parts.filter(shown)));
     const list: Annotation[] = [];
     for (const part of scene.parts)
       if (shown(part) && part.pivot && selected.includes(part.id))
@@ -105,7 +97,6 @@ function useAnnotations(): Annotation[] {
           color: '#c9dcf8',
           label: 'Pivot',
           labelClass: 'pivot-label',
-          bounds: model,
         });
     const pick = (
       id: string,
@@ -121,7 +112,6 @@ function useAnnotations(): Annotation[] {
           position: worldPoint(part, point),
           color,
           label,
-          bounds: model,
         });
     };
     op.pairs.forEach((pair, i) => {
@@ -157,7 +147,7 @@ function useAnnotations(): Annotation[] {
           color,
           label: `${pin.kind === 'hard' ? 'P' : 'S'}${index + 1}`,
           active: activePin === pin.id,
-          bounds: model,
+
           select: {
             label: `Select ${pin.kind} pin ${index + 1}`,
             disabled: navigating,
@@ -189,7 +179,7 @@ function useAnnotations(): Annotation[] {
           color,
           label: String(index + 1),
           active,
-          bounds: model,
+
           select: {
             label: `Select anchor ${index + 1} target`,
             disabled: navigating,
@@ -212,7 +202,6 @@ function useAnnotations(): Annotation[] {
               position: center.clone().applyMatrix4(partMatrix(part)),
               color: contactColors[index % contactColors.length],
               label: `${side === 'source' ? 'S' : 'T'}${index + 1}`,
-              bounds: model,
             });
         }),
       );
@@ -249,6 +238,7 @@ interface Nodes {
   dot?: HTMLElement | null;
   label?: HTMLElement | null;
   leader?: SVGPolylineElement | null;
+  halo?: SVGPolylineElement | null;
 }
 
 const projected = new Vector3();
@@ -257,6 +247,11 @@ export function AnnotationLayer({ projection }: { projection: ViewProjection }) 
   const annotations = useAnnotations();
   const markers = usePreferences((s) => s.markers);
   const nodes = useRef(new Map<string, Nodes>());
+  const root = useRef<HTMLDivElement>(null);
+  const offsets = useRef(new Map<string, CalloutOffset>());
+  const displayed = useRef(new Map<string, CalloutOffset>());
+  const animation = useRef(0);
+  const lastDraw = useRef(0);
   const previousLayout = useRef<{
     annotations: Annotation[];
     markers: typeof markers;
@@ -265,6 +260,7 @@ export function AnnotationLayer({ projection }: { projection: ViewProjection }) 
     world: number[];
     projection: number[];
     sizes: { width: number; height: number }[];
+    obstacles: string;
   } | null>(null);
   const node =
     <K extends keyof Nodes>(id: string, slot: K) =>
@@ -298,6 +294,26 @@ export function AnnotationLayer({ projection }: { projection: ViewProjection }) 
       width: nodes.label?.offsetWidth ?? 0,
       height: nodes.label?.offsetHeight ?? 0,
     }));
+    // Keep short callouts out of the viewport's controls when local space allows it.
+    const obstacles: CalloutBounds[] = [{ left: width - 120, right: width, top: 0, bottom: 126 }];
+    const layerRect = root.current?.getBoundingClientRect();
+    if (layerRect) {
+      root.current?.parentElement
+        ?.querySelectorAll<HTMLElement>(
+          '.viewport-top, .canvas-label, .viewport-controls, .camera-navigation, .explode-control, .pick-prompt',
+        )
+        .forEach((element) => {
+          const rect = element.getBoundingClientRect();
+          if (rect.width && rect.height)
+            obstacles.push({
+              left: rect.left - layerRect.left,
+              right: rect.right - layerRect.left,
+              top: rect.top - layerRect.top,
+              bottom: rect.bottom - layerRect.top,
+            });
+        });
+    }
+    const obstacleKey = JSON.stringify(obstacles);
     // Routing is only needed when the projection, annotations, or measured labels change.
     const previous = previousLayout.current;
     if (
@@ -305,6 +321,7 @@ export function AnnotationLayer({ projection }: { projection: ViewProjection }) 
       previous.markers === markers &&
       previous.width === width &&
       previous.height === height &&
+      previous.obstacles === obstacleKey &&
       previous.world.every((value, i) => value === camera.matrixWorld.elements[i]) &&
       previous.projection.every((value, i) => value === camera.projectionMatrix.elements[i]) &&
       sizes.every(
@@ -321,7 +338,13 @@ export function AnnotationLayer({ projection }: { projection: ViewProjection }) 
       world: camera.matrixWorld.toArray(),
       projection: camera.projectionMatrix.toArray(),
       sizes,
+      obstacles: obstacleKey,
     };
+    cancelAnimationFrame(animation.current);
+    if (previous && previous.markers.leader !== markers.leader) offsets.current.clear();
+    const ids = new Set(annotations.map((a) => a.id));
+    for (const map of [nodes.current, offsets.current, displayed.current])
+      for (const id of map.keys()) if (!ids.has(id)) map.delete(id);
     const place = (element: HTMLElement | null | undefined, x: number, y: number, show = true) => {
       if (!element) return;
       element.style.transform = `translate3d(${x}px, ${y}px, 0)`;
@@ -332,6 +355,8 @@ export function AnnotationLayer({ projection }: { projection: ViewProjection }) 
       .map((item, index) => ({ ...item, ...sizes[index] }))
       .filter((item) => item.nodes.label);
     if (!callout) {
+      offsets.current.clear();
+      displayed.current.clear();
       for (const item of labelled) {
         const centered = !hasDot(item.annotation.kind, false);
         const offset = centered
@@ -344,59 +369,84 @@ export function AnnotationLayer({ projection }: { projection: ViewProjection }) 
     const onScreen = (item: (typeof labelled)[number]) =>
       item.visible && item.x >= 0 && item.x <= width && item.y >= 0 && item.y <= height;
     const visible = labelled.filter(onScreen);
+    const calloutItems = visible.map((item) => ({
+      id: item.annotation.id,
+      x: item.x,
+      y: item.y,
+      width: item.width,
+      height: item.height,
+      radius: markerRadius(item.annotation.kind, markers.size),
+    }));
     const placed = layoutCallouts(
-      visible.map((item) => {
-        let modelBounds: CalloutBounds | null = null;
-        for (const corner of item.annotation.bounds ?? []) {
-          const screen = toScreen(corner);
-          if (!screen.visible) continue;
-          if (!modelBounds) {
-            modelBounds = { left: screen.x, right: screen.x, top: screen.y, bottom: screen.y };
-          } else {
-            modelBounds.left = Math.min(modelBounds.left, screen.x);
-            modelBounds.right = Math.max(modelBounds.right, screen.x);
-            modelBounds.top = Math.min(modelBounds.top, screen.y);
-            modelBounds.bottom = Math.max(modelBounds.bottom, screen.y);
-          }
-        }
-        return {
-          x: item.x,
-          y: item.y,
-          width: item.width,
-          height: item.height,
-          radius: markerRadius(item.annotation.kind, markers.size),
-          modelBounds,
-        };
-      }),
+      calloutItems,
       markers,
       { width, height },
+      offsets.current,
+      obstacles,
     );
+    visible.forEach((item, i) => offsets.current.set(item.annotation.id, placed[i].offset));
     labelled.forEach((item) => {
       if (!onScreen(item)) {
         place(item.nodes.label, 0, 0, false);
-        if (item.nodes.leader) item.nodes.leader.style.visibility = 'hidden';
+        for (const line of [item.nodes.leader, item.nodes.halo])
+          if (line) line.style.visibility = 'hidden';
       }
     });
-    visible.forEach((item, index) => {
-      const { x, y, leader } = placed[index];
-      place(item.nodes.label, x, y);
-      if (item.nodes.leader) {
-        item.nodes.leader.setAttribute(
-          'points',
-          leader ? leader.map((point) => `${point.x},${point.y}`).join(' ') : '',
+    // Only local collision adjustments ease. Projected points follow the camera exactly,
+    // so orbiting never drags a label behind its point. This also settles on demand canvases.
+    const draw = (time: number) => {
+      const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+      const amount = reducedMotion ? 1 : 1 - Math.exp(-Math.min(32, time - lastDraw.current) / 55);
+      lastDraw.current = time;
+      let moving = false;
+      visible.forEach((item, index) => {
+        const target = placed[index].offset;
+        const current = displayed.current.get(item.annotation.id) ?? target;
+        const distance = Math.hypot(target.x - current.x, target.y - current.y);
+        const offset =
+          distance < 0.25
+            ? target
+            : {
+                x: current.x + (target.x - current.x) * amount,
+                y: current.y + (target.y - current.y) * amount,
+              };
+        moving ||= !reducedMotion && distance >= 0.25;
+        const center = clampCallout(
+          calloutItems[index],
+          { x: item.x + offset.x, y: item.y + offset.y },
+          { width, height },
         );
-        item.nodes.leader.style.visibility = leader ? 'visible' : 'hidden';
-      }
-    });
+        // Clamp only the drawing. Remembering the clamped position would make the
+        // offset drift and keep easing forever against an immovable viewport edge.
+        displayed.current.set(item.annotation.id, offset);
+        place(item.nodes.label, center.x, center.y);
+        const leader = calloutLeader(calloutItems[index], center);
+        for (const line of [item.nodes.leader, item.nodes.halo]) {
+          if (!line) continue;
+          line.setAttribute('points', leader ? leader.map((p) => `${p.x},${p.y}`).join(' ') : '');
+          line.style.visibility = leader ? 'visible' : 'hidden';
+        }
+      });
+      if (moving) animation.current = requestAnimationFrame(draw);
+    };
+    draw(performance.now());
   }, [annotations, callout, markers, projection]);
 
   useLayoutEffect(() => {
     layout();
-    return projection.subscribe(layout);
+    const unsubscribe = projection.subscribe(layout);
+    // Fonts and viewport resizes can change label geometry without a camera frame.
+    const resize = new ResizeObserver(() => layout());
+    if (root.current) resize.observe(root.current);
+    for (const entry of nodes.current.values()) if (entry.label) resize.observe(entry.label);
+    return () => {
+      unsubscribe();
+      resize.disconnect();
+      cancelAnimationFrame(animation.current);
+    };
   }, [layout, projection]);
 
   // Clickable anchor labels sit outside the canvas, so pass the wheel on to keep zooming.
-  const root = useRef<HTMLDivElement>(null);
   useEffect(() => {
     const layer = root.current;
     if (!layer) return;
@@ -427,12 +477,10 @@ export function AnnotationLayer({ projection }: { projection: ViewProjection }) 
           {annotations
             .filter((a) => a.label)
             .map((a) => (
-              <polyline
-                key={`${a.id}:leader`}
-                ref={node(a.id, 'leader')}
-                className="annotation-leader"
-                style={{ '--marker-color': a.color } as CSSProperties}
-              />
+              <g key={`${a.id}:leader`} style={{ '--marker-color': a.color } as CSSProperties}>
+                <polyline ref={node(a.id, 'halo')} className="annotation-leader-halo" />
+                <polyline ref={node(a.id, 'leader')} className="annotation-leader" />
+              </g>
             ))}
         </svg>
       ) : null}
@@ -454,7 +502,9 @@ export function AnnotationLayer({ projection }: { projection: ViewProjection }) 
               key={`${a.id}:label`}
               ref={node(a.id, 'label')}
               className={`annotation-label anchor-marker ${a.active ? 'active' : ''}`}
+              style={{ '--marker-color': a.color } as CSSProperties}
               aria-label={a.select.label}
+              aria-pressed={!!a.active}
               disabled={a.select.disabled}
               onPointerDown={(e) => e.stopPropagation()}
               onClick={(e) => {
@@ -469,7 +519,7 @@ export function AnnotationLayer({ projection }: { projection: ViewProjection }) 
               key={`${a.id}:label`}
               ref={node(a.id, 'label')}
               className={`annotation-label surface-pick-label ${a.labelClass ?? ''}`}
-              style={{ color: a.color, '--marker-color': a.color } as CSSProperties}
+              style={{ '--marker-color': a.color } as CSSProperties}
             >
               {a.label}
             </span>
