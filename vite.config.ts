@@ -15,5 +15,9 @@ export default defineConfig({
           }
         : undefined,
   },
-  build: { target: 'es2022', chunkSizeWarningLimit: 1500 },
+  build: {
+    target: 'es2022',
+    chunkSizeWarningLimit: 1500,
+    rolldownOptions: { input: { app: 'index.html', docs: 'docs/index.html' } },
+  },
 });

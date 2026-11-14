@@ -7,6 +7,7 @@
     "build": "tsc --noEmit && vite build && npm run build:mcp",
     "build:mcp": "vite build --config vite.mcp.config.ts && vite build --config vite.mcp.config.ts --mode headset && vite build --config vite.mcp.config.ts --mode compute",
     "preview": "vite preview --host 0.0.0.0",
+    "docs:capture": "node scripts/capture-docs.mjs",
     "headset": "npm run build && node dist-mcp/kitbasher-headset.js",
     "test": "vitest run",
     "pretest": "npm run build:compute",

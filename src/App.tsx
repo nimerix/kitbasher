@@ -3,6 +3,7 @@ import {
   ArrowDownToLine,
   ArrowRight,
   Box,
+  BookOpen,
   Check,
   CheckCircle2,
   ChevronDown,
@@ -293,6 +294,16 @@ function Header({ openScene }: { openScene: () => void }) {
       </div>
       <div className="header-actions">
         <ActivityCenter />
+        <a
+          className="icon-button"
+          href="./docs/"
+          target="_blank"
+          rel="noopener noreferrer"
+          aria-label="Documentation"
+          title="Documentation"
+        >
+          <BookOpen size={17} />
+        </a>
         <IconButton
           label="Help and keyboard shortcuts"
           onClick={() => useEditor.getState().setModal('help')}
@@ -942,6 +953,9 @@ export default function App() {
       <footer className="site-footer">
         <span>© 2026 Michael Pearce</span>
         <nav aria-label="Project links">
+          <a href="./docs/" target="_blank" rel="noopener noreferrer">
+            Documentation
+          </a>
           <a href="./privacy.html" target="_blank" rel="noopener noreferrer">
             Privacy Policy
           </a>

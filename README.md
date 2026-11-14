@@ -34,6 +34,20 @@ network, for example when testing on a tablet. Fonts and application assets are
 bundled locally. This is a browser application; native desktop installers are not
 included.
 
+## Documentation
+
+Open **Documentation** in the workbench header or help dialog for the illustrated
+user manual. During development it lives at `http://localhost:5173/docs/`; the
+production build includes the same `/docs/` entry alongside the editor.
+
+The manual covers first assemblies, every assembly tool, inspection, imports and
+exports, saves and Drive recovery, display settings, shortcuts, headset sessions,
+and MCP automation. It includes full-text search, direct links to individual guides
+and sections, and a mobile layout.
+
+See [maintaining the documentation](docs/documentation.md) to update articles and
+recapture images of the app.
+
 ## Privacy
 
 The website's [Privacy Policy](public/privacy.html) explains local processing,
