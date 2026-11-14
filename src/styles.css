@@ -141,6 +141,10 @@ optgroup {
   white-space: nowrap;
   border: 0;
 }
+.help-docs-link {
+  display: inline-flex;
+  margin-bottom: 22px;
+}
 .workbench {
   height: 100dvh;
   min-height: 420px;

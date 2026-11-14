@@ -667,6 +667,14 @@ function HelpDialog() {
       onClose={() => useEditor.getState().setModal(null)}
       wide
     >
+      <a
+        className="button secondary help-docs-link"
+        href="./docs/"
+        target="_blank"
+        rel="noopener noreferrer"
+      >
+        Open the illustrated documentation <ArrowRight size={14} />
+      </a>
       <div className="help-layout">
         <div>
           <h3>
