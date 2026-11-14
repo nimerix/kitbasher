@@ -5261,34 +5261,70 @@ optgroup {
   visibility: visible;
   will-change: auto;
 }
-.annotation-leader {
+.annotation-leader,
+.annotation-leader-halo {
   fill: none;
   stroke: var(--marker-color);
   stroke-width: 1px;
+  stroke-linecap: round;
   visibility: hidden;
-  opacity: 0.85;
+}
+.annotation-leader-halo {
+  stroke: #11151b;
+  stroke-width: 2.5px;
 }
 .annotation-label {
+  transition: none;
   translate: -50% -50%;
+  color: var(--marker-color);
 }
 .annotation-layer .surface-pick-label {
   font-size: var(--marker-label-size);
   line-height: 1.25;
-}
-.annotation-layer.is-callout .annotation-label {
-  width: auto;
-  height: auto;
-  padding: 2px 4px;
-  border: 0;
-  border-radius: 0;
-  background: none;
-  box-shadow: none;
 }
 .annotation-layer .anchor-marker {
   width: calc(var(--marker-size) + 16px);
   height: calc(var(--marker-size) + 16px);
   font-size: calc(var(--marker-label-size) + 1px);
   pointer-events: auto;
+}
+.annotation-layer.is-callout .annotation-label {
+  display: grid;
+  place-items: center;
+  width: auto;
+  min-width: 30px;
+  height: auto;
+  min-height: 26px;
+  padding: 4px 7px;
+  border: 1px solid #59616c;
+  border-radius: 4px;
+  background: #171c24;
+  color: #f8fafc;
+  font-size: var(--marker-label-size);
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.25;
+  white-space: nowrap;
+  box-shadow: 0 1px 2px #0006;
+}
+.annotation-layer.is-callout .annotation-label.active {
+  border-color: var(--marker-color);
+  background: #253040;
+}
+/* Navigation disables picking, not the information printed on the viewport. */
+.annotation-layer .anchor-marker:disabled {
+  opacity: 1;
+  pointer-events: none;
+}
+.annotation-layer.is-callout .anchor-marker:focus-visible {
+  outline: 2px solid #ffffff;
+  /* Keep focus contrast on the dark badge, without an outer ring over the model. */
+  outline-offset: -3px;
+}
+@media (hover: hover) {
+  .annotation-layer.is-callout .anchor-marker:enabled:hover {
+    background: #253040;
+  }
 }
 
 /* Preferences: a side panel that leaves the viewport usable, so changes can be tried live. */
@@ -5555,7 +5591,7 @@ optgroup {
   stroke: #555c66;
 }
 .marker-preview .preview-label {
-  fill: #202226e6;
+  fill: #171c24;
 }
 .marker-preview text {
   font-weight: 600;

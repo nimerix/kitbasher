@@ -11,18 +11,13 @@ import type { KeyActionId, KeyBindingOverrides } from './keybindings';
 import type { ZoomSettings } from './zoom';
 
 export type LabelStyle = 'inline' | 'callout';
-/** `model` applies model clearance; `offset` favors a preferred angled leader length. */
-export type CalloutPlacement = 'model' | 'offset';
 
 export interface MarkerSettings {
   /** Point diameter in screen pixels. */
   size: number;
   labelSize: number;
   style: LabelStyle;
-  placement: CalloutPlacement;
-  /** Gap between the model's on-screen outline and its callout labels, in pixels. */
-  clearance: number;
-  /** Preferred angled leader length, in pixels; routing can adjust both arms. */
+  /** Local label spacing in pixels; crowded labels can move a little farther. */
   leader: number;
 }
 
@@ -40,11 +35,9 @@ export const defaultPreferences: Preferences = {
   zoom: { sensitivity: 1, curve: 0.5, smoothing: 40, invert: false },
   markers: {
     size: 8,
-    labelSize: 10,
+    labelSize: 12,
     style: 'inline',
-    placement: 'model',
-    clearance: 28,
-    leader: 56,
+    leader: 24,
   },
   keybindings: {},
 };
@@ -54,9 +47,8 @@ export const preferenceLimits = {
   curve: { min: 0.2, max: 2, step: 0.05 },
   smoothing: { min: 0, max: 100, step: 1 },
   size: { min: 4, max: 24, step: 1 },
-  labelSize: { min: 8, max: 16, step: 1 },
-  clearance: { min: 8, max: 160, step: 1 },
-  leader: { min: 16, max: 240, step: 1 },
+  labelSize: { min: 12, max: 18, step: 1 },
+  leader: { min: 16, max: 48, step: 1 },
 } as const;
 
 const storageKey = 'kitbasher.preferences';
@@ -90,9 +82,12 @@ export function sanitizePreferences(value: unknown): Preferences {
       size: number(markers.size, preferenceLimits.size, m.size),
       labelSize: number(markers.labelSize, preferenceLimits.labelSize, m.labelSize),
       style: pick(markers.style, ['inline', 'callout'], m.style),
-      placement: pick(markers.placement, ['model', 'offset'], m.placement),
-      clearance: number(markers.clearance, preferenceLimits.clearance, m.clearance),
-      leader: number(markers.leader, preferenceLimits.leader, m.leader),
+      // Old model-clearance preferences caused screen-spanning routes. Start their
+      // replacement at compact spacing; explicit old fixed lengths are safely clamped.
+      leader:
+        markers.placement === 'model'
+          ? m.leader
+          : number(markers.leader, preferenceLimits.leader, m.leader),
     },
     keybindings: sanitizeOverrides(source.keybindings),
   };

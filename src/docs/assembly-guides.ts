@@ -826,15 +826,15 @@ export const assemblyGuides: DocArticle[] = [
       },
       {
         id: 'callouts',
-        title: 'Move labels clear of the model',
+        title: 'Use compact callouts',
         steps: [
           'In Point markers, change Labels from Beside point to Callout.',
-          'Choose Clear of model to leave a gap around the model’s outline, or Preferred length to favor a chosen angled arm length.',
-          'Adjust Clearance from model or Preferred leader length in pixels. Both arms can adapt to avoid overlaps.',
+          'Use Label spacing to set a short gap between each point and its label.',
+          'Orbit and zoom: labels follow their points, keeping their local position unless a nearby label or viewport edge needs room.',
           'Review the preference panel’s marker preview, then inspect the actual interface at your working zoom.',
         ],
         paragraphs: [
-          'Callout leaders angle away from their points, then run horizontally to the side of each label. Each callout adjusts its position and both arm lengths independently to clear the model, other labels, and other lines. These are marker-display preferences; they do not create additional constraints or change the measured geometry.',
+          'Callouts use compact dark badges with light text, a subtle edge, and a short thin connector to the point. Crowded labels adjust locally rather than moving to the edge of the model. Selected pins and anchors have a subtle colored edge, and labels stay readable while navigating. These display preferences do not create additional constraints or change the measured geometry.',
         ],
       },
       {
