@@ -30,6 +30,13 @@ whose two versions differ is refused.
 
 ### Header
 
+Parts may include `pins`, an array of `{ id, point, target, kind, priority }`.
+`point` is a finite mesh-local XYZ attachment; `target` is its finite world-space
+resting position in millimeters. `kind` is `hard` or `soft`, and `priority` is a
+finite number from 0 to 100. IDs are unique within each part. Hard targets remain
+fixed during movement; soft targets provide weighted resistance. Pins are optional
+editor metadata, independent of mesh buffers, supported by all three scene readers.
+
 ```jsonc
 {
   "format": "kitbasher",

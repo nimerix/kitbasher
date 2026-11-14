@@ -1,6 +1,7 @@
 import { Euler, Matrix4, Quaternion, Vector3 } from 'three';
 import { partMatrix, quat, transformFromMatrix, vec } from './geometry';
 import type { Joint, Part } from './types';
+import { applyPinCorrection, hardPinsSatisfied, pinCorrection } from './pins';
 
 export function validateJoint(joints: Joint[], parentId: string, childId: string) {
   if (parentId === childId) throw new Error('Choose two different parts.');
@@ -79,7 +80,7 @@ export function transformAssembly(
   joints: Joint[],
   id: string,
   requested: Part,
-  options: { moveConnected?: boolean; stationaryIds?: string[] } = {},
+  options: { moveConnected?: boolean; stationaryIds?: string[]; softPins?: boolean } = {},
 ): Part[] {
   const original = parts.find((p) => p.id === id);
   if (!original || original.locked) return parts;
@@ -128,6 +129,65 @@ export function transformAssembly(
       const moved = transformFromMatrix(child, delta.clone().multiply(partMatrix(child)));
       results.set(child.id, constrainPart(moved, newParent, joint));
       queue.push(child.id);
+    }
+  }
+  if (
+    parts.some((p) =>
+      p.pins?.some(
+        (pin) => pin.kind === 'hard' || (options.softPins !== false && pin.priority > 0),
+      ),
+    )
+  ) {
+    const affected = new Set(
+      parts
+        .filter((p) => visited.has(p.id) || !sameTransform(p, results.get(p.id)!))
+        .map((p) => p.id),
+    );
+    const moving = [...affected].map((key) => results.get(key)!);
+    if (
+      moving.some((p) =>
+        p.pins?.some(
+          (pin) => pin.kind === 'hard' || (options.softPins !== false && pin.priority > 0),
+        ),
+      )
+    ) {
+      // A joint to a stationary parent is another exact point constraint. Move the
+      // affected assembly with one rigid correction so its internal joints stay seated.
+      const boundaries = active
+        .filter((j) => affected.has(j.childId) && !affected.has(j.parentId))
+        .flatMap((j) => {
+          const parent = results.get(j.parentId)!;
+          const source = vec(j.childAnchor).applyMatrix4(partMatrix(results.get(j.childId)!));
+          const target = vec(j.parentAnchor).applyMatrix4(partMatrix(parent));
+          const pairs = [{ source, target }];
+          const locks = j.rotationLocks.filter(Boolean).length;
+          // A hinge permits twist about its one free axis. Two extra directions
+          // make a fully locked joint's orientation exact as well as its position.
+          const axes = locks === 3 ? [0, 1] : locks === 2 ? [j.rotationLocks.indexOf(false)] : [];
+          const frame = quat(parent.quaternion).multiply(quat(j.restRotation));
+          for (const axis of axes) {
+            const direction = new Vector3().setComponent(axis, 1).applyQuaternion(frame);
+            pairs.push({
+              source: source.clone().add(direction),
+              target: target.clone().add(direction),
+            });
+          }
+          return pairs;
+        });
+      const delta = pinCorrection(results.get(id)!, moving, boundaries, options.softPins !== false);
+      for (const p of moving) results.set(p.id, applyPinCorrection(p, delta));
+      if (moving.some((p) => !hardPinsSatisfied(results.get(p.id)!)))
+        throw new Error(
+          'A hard pin prevents this movement. Release the pin to move its attachment.',
+        );
+      if (
+        active.some((joint) => {
+          const child = results.get(joint.childId)!,
+            parent = results.get(joint.parentId)!;
+          return !sameTransform(child, constrainPart(child, parent, joint));
+        })
+      )
+        return parts;
     }
   }
   // A fixed object or an alignment target must never be dragged by another part.

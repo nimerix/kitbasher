@@ -353,6 +353,26 @@ export function parseSceneDocument(
         anchorIds.add(anchor.id);
       }
     }
+    if (p.pins !== undefined) {
+      const pinIds = new Set<string>();
+      if (!Array.isArray(p.pins)) throw new Error('The scene contains invalid pins.');
+      for (const pin of p.pins) {
+        if (
+          !pin ||
+          typeof pin.id !== 'string' ||
+          !pin.id ||
+          pinIds.has(pin.id) ||
+          !finiteTuple(pin.point, 3) ||
+          !finiteTuple(pin.target, 3) ||
+          (pin.kind !== 'hard' && pin.kind !== 'soft') ||
+          !Number.isFinite(pin.priority) ||
+          pin.priority < 0 ||
+          pin.priority > 100
+        )
+          throw new Error('The scene contains invalid pins.');
+        pinIds.add(pin.id);
+      }
+    }
     ids.add(p.id);
     const { displayColor, ...rest } = p;
     return {

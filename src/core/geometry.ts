@@ -217,20 +217,35 @@ export function deserializeGeometry(
 }
 
 /** Least-squares rigid registration (Kabsch); reflects neither shape nor scale. */
-export function rigidAlignment(source: Vector3[], target: Vector3[], stabilize = false) {
+export function rigidAlignment(
+  source: Vector3[],
+  target: Vector3[],
+  stabilize = false,
+  options: { weights?: number[]; centers?: [Vector3, Vector3] } = {},
+) {
   if (source.length !== target.length || source.length < (stabilize ? 1 : 3))
     throw new Error('Pick at least three matching point pairs.');
+  const weights = options.weights ?? source.map(() => 1);
+  const total = weights.reduce((sum, weight) => sum + weight, 0);
+  if (
+    weights.length !== source.length ||
+    !weights.every((w) => Number.isFinite(w) && w >= 0) ||
+    !(total > 0)
+  )
+    throw new Error('Alignment weights must be finite, nonnegative, and have a positive sum.');
   const centroid = (points: Vector3[]) =>
-    points.reduce((sum, p) => sum.add(p), new Vector3()).multiplyScalar(1 / points.length);
-  const aCenter = centroid(source),
-    bCenter = centroid(target);
+    points
+      .reduce((sum, p, i) => sum.addScaledVector(p, weights[i]), new Vector3())
+      .multiplyScalar(1 / total);
+  const aCenter = options.centers?.[0] ?? centroid(source),
+    bCenter = options.centers?.[1] ?? centroid(target);
   const a = source.map((p) => p.clone().sub(aCenter)),
     b = target.map((p) => p.clone().sub(bCenter));
   const h = new Matrix(3, 3);
   for (let i = 0; i < a.length; i++)
     for (let r = 0; r < 3; r++)
       for (let c = 0; c < 3; c++) {
-        h.set(r, c, h.get(r, c) + a[i].getComponent(r) * b[i].getComponent(c));
+        h.set(r, c, h.get(r, c) + weights[i] * a[i].getComponent(r) * b[i].getComponent(c));
       }
   // A tiny preference for the current orientation resolves free twist for one,
   // two, or collinear anchors without introducing arbitrary SVD rotations.
@@ -271,9 +286,9 @@ export function rigidAlignment(source: Vector3[], target: Vector3[], stabilize =
   matrix.setPosition(bCenter.clone().sub(aCenter.clone().applyMatrix4(matrix)));
   const rms = Math.sqrt(
     source.reduce(
-      (sum, p, i) => sum + p.clone().applyMatrix4(matrix).distanceToSquared(target[i]),
+      (sum, p, i) => sum + weights[i] * p.clone().applyMatrix4(matrix).distanceToSquared(target[i]),
       0,
-    ) / source.length,
+    ) / total,
   );
   return { matrix, rms };
 }

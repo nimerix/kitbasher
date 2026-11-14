@@ -7,6 +7,7 @@ import { pipeline } from 'node:stream/promises';
 import type { ReadableStream as NodeReadableStream } from 'node:stream/web';
 import { DoubleSide, Euler, Matrix3, Matrix4, Quaternion, Ray, Vector3 } from 'three';
 import { fitAnchors, anchorGaps } from '../src/core/anchor-fit';
+import { pinGaps } from '../src/core/pins';
 import { solveAlignment } from '../src/core/alignment';
 import { evaluateBoolean } from '../src/core/boolean';
 import type { ClipReport } from '../src/core/clipping';
@@ -215,6 +216,12 @@ export function describePart(part: Part) {
     ...(part.pivot ? { pivot: rounded(part.pivot) } : {}),
     ...(part.anchors?.length
       ? { anchors: part.anchors.length, anchor_gaps: rounded(anchorGaps(part)) }
+      : {}),
+    ...(part.pins?.length
+      ? {
+          pins: part.pins.map(({ id, kind, priority }) => ({ id, kind, priority })),
+          pin_gaps: rounded(pinGaps(part)),
+        }
       : {}),
   };
 }
@@ -732,6 +739,10 @@ export class Session {
             anchors: part.anchors?.map((anchor) => ({
               ...anchor,
               target: vec(anchor.target).applyMatrix4(transform).toArray(),
+            })),
+            pins: part.pins?.map((pin) => ({
+              ...pin,
+              target: vec(pin.target).applyMatrix4(transform).toArray(),
             })),
           };
         });

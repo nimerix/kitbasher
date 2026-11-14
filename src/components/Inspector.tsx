@@ -1,4 +1,5 @@
 import { AnchorControls } from './AnchorControls';
+import { PinControls } from './PinControls';
 import { TransformAdjustments } from './TransformAdjustments';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
@@ -944,13 +945,15 @@ export function Inspector({ onClose }: { onClose: () => void }) {
       <div className="inspector-title">
         <span>
           <SlidersHorizontal size={14} />
-          {tool === 'anchors'
-            ? 'Anchors'
-            : tool === 'align'
-              ? 'Alignment'
-              : tool === 'joint'
-                ? 'Joint builder'
-                : 'Inspector'}
+          {tool === 'pins'
+            ? 'Pins'
+            : tool === 'anchors'
+              ? 'Anchors'
+              : tool === 'align'
+                ? 'Alignment'
+                : tool === 'joint'
+                  ? 'Joint builder'
+                  : 'Inspector'}
         </span>
         <div>
           <IconButton label="Workbench help" onClick={() => useEditor.getState().setModal('help')}>
@@ -968,7 +971,9 @@ export function Inspector({ onClose }: { onClose: () => void }) {
       <div
         className={`inspector-scroll ${tool === 'align' || tool === 'joint' ? 'assembly-scroll' : ''}`}
       >
-        {tool === 'anchors' ? (
+        {tool === 'pins' ? (
+          <PinControls />
+        ) : tool === 'anchors' ? (
           <AnchorControls />
         ) : tool === 'align' || tool === 'joint' ? (
           <AssemblyInspector />
@@ -1021,7 +1026,10 @@ export function Inspector({ onClose }: { onClose: () => void }) {
             </div>
           </>
         ) : part ? (
-          <PartProperties part={part} />
+          <>
+            <PartProperties part={part} />
+            <PinControls />
+          </>
         ) : (
           <>
             {tool === 'translate' || tool === 'rotate' ? (

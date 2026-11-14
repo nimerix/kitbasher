@@ -2,6 +2,7 @@ import { constrainPart, isJointConnected, validateJoint } from './constraints';
 import { partMatrix } from './geometry';
 import { solvePlaneConstraints, validatePlaneConstraints } from './plane-constraints';
 import { sceneMetadata } from './scene-file';
+import { hardPinsSatisfied } from './pins';
 import type { Joint, Part, PlaneConstraint, SceneDocument, SceneLighting } from './types';
 
 // Rules for one scene edited from several places at once: an agent's MCP server and the browser
@@ -32,6 +33,7 @@ const fieldGroups: Record<Kind, string[][]> = {
     ['visible'],
     ['locked'],
     ['geometry', 'source'],
+    ['pins'],
   ],
   joints: [
     ['parentId', 'childId', 'parentAnchor', 'childAnchor'],
@@ -325,7 +327,12 @@ export function reconcile(scene: SceneDocument): SceneDocument {
     if (!sameTransform(child, seated)) parts.set(child.id, seated);
   }
   const placed = scene.parts.map((part) => parts.get(part.id)!);
-  return { ...scene, parts: solvePlaneConstraints({ ...scene, parts: placed }, placed) };
+  const solved = solvePlaneConstraints({ ...scene, parts: placed }, placed);
+  if (!solved.every(hardPinsSatisfied))
+    throw new Error(
+      'A shared edit conflicts with a hard pin. Release the pin before moving its attachment.',
+    );
+  return { ...scene, parts: solved };
 }
 
 /** Reuses objects that did not change, so a view only redraws what did. */

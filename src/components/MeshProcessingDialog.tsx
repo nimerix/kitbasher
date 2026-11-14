@@ -41,6 +41,7 @@ export function MeshProcessingDialog() {
   const linked =
     part &&
     (!!part.anchors?.length ||
+      !!part.pins?.length ||
       scene.joints.some((j) => j.parentId === part.id || j.childId === part.id) ||
       scene.constraints?.some((c) => c.sourceId === part.id || c.targetId === part.id));
   const close = () => useEditor.getState().setModal(null);
@@ -217,7 +218,7 @@ export function MeshProcessingDialog() {
         </p>
         {linked ? (
           <p className="export-note">
-            Parts with anchors, joints or constraints are processed as independent copies.
+            Parts with pins, anchors, joints or constraints are processed as independent copies.
           </p>
         ) : null}
       </fieldset>

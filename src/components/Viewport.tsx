@@ -166,7 +166,7 @@ const PartMesh = memo(function PartMesh({
     !!nearby ||
     inspecting ||
     wireframe ||
-    (!headset && (pivotPicking || ['align', 'joint', 'measure', 'anchors'].includes(tool)));
+    (!headset && (pivotPicking || ['align', 'joint', 'measure', 'anchors', 'pins'].includes(tool)));
   const drawing =
     proxy?.source === part.geometry && shouldDrawProxy(detail, moving, headset, precision)
       ? proxy.geometry
@@ -201,6 +201,11 @@ const PartMesh = memo(function PartMesh({
     if (state.navigationMode || state.temporaryOrbit) return;
     if (state.pivotPicking) {
       state.setPartPivot(toSurface(event));
+      return;
+    }
+    if (state.tool === 'pins') {
+      if (state.pinPicking) state.addPin(toSurface(event));
+      else state.select(part.id);
       return;
     }
     if (state.tool === 'anchors') {
@@ -293,7 +298,7 @@ const PartMesh = memo(function PartMesh({
             document.body.style.cursor = navigationMode
               ? 'grab'
               : useEditor.getState().pivotPicking ||
-                  ['align', 'joint', 'measure', 'anchors'].includes(tool)
+                  ['align', 'joint', 'measure', 'anchors', 'pins'].includes(tool)
                 ? 'crosshair'
                 : 'pointer';
           }}
@@ -573,6 +578,39 @@ function AnchorHandle({ part, anchor }: { part: Part; anchor: FitAnchor }) {
           drag.settle = state.view.clip.enabled ? () => apply('settle') : undefined;
         }}
       />
+    </>
+  );
+}
+
+function PinOverlay() {
+  const scene = useEditor((s) => s.scene),
+    selected = useEditor((s) => s.selected);
+  const isolated = useEditor((s) => s.isolated),
+    nearby = useEditor((s) => s.nearbyParts);
+  const exploded = useEditor((s) => s.view.explode > 0);
+  if (exploded) return null;
+  return (
+    <>
+      {scene.parts
+        .filter(
+          (p) => selected.includes(p.id) && p.visible && !hiddenByIsolation(isolated, nearby, p.id),
+        )
+        .flatMap((part) =>
+          (part.pins ?? []).map((pin) => {
+            const actual = vec(pin.point).applyMatrix4(partMatrix(part)),
+              target = vec(pin.target);
+            return actual.distanceToSquared(target) > 1e-12 ? (
+              <Line
+                key={`${part.id}:${pin.id}`}
+                points={[actual, target]}
+                color={pin.kind === 'hard' ? '#ffbd7a' : '#7ce1d1'}
+                lineWidth={1.5 + pin.priority / 50}
+                depthTest={false}
+                raycast={noRaycast}
+              />
+            ) : null;
+          }),
+        )}
     </>
   );
 }
@@ -1076,6 +1114,7 @@ function Scene({
             />
           ) : null}
           <AnchorOverlay />
+          <PinOverlay />
           <LightHandles />
           <AssemblyAnnotations />
           <ProjectionTracker projection={projection} />
