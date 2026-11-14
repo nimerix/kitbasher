@@ -4,6 +4,7 @@
 import { chromium } from '@playwright/test';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
+import { preparePinCapture } from './docs-pins.mjs';
 
 const baseURL = process.env.DOCS_CAPTURE_URL ?? 'http://127.0.0.1:5173';
 const output = fileURLToPath(new URL('../public/docs/images/', import.meta.url));
@@ -129,6 +130,11 @@ try {
   await page.mouse.click(642, 420);
   await page.mouse.click(737, 420);
   await capture('measurement');
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  for (const kind of ['hard', 'soft']) {
+    await page.evaluate(preparePinCapture, kind);
+    await capture(kind === 'hard' ? 'pins' : 'soft-pins');
+  }
 } finally {
   await browser.close();
 }

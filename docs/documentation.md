@@ -11,7 +11,7 @@ The typed content lives in `src/docs/`:
 
 - `start-guides.ts`: first assembly, interface, imports, navigation, parts,
   workflows, and inspection.
-- `assembly-guides.ts`: transforms, alignment, contact paint, flush seams, anchors,
+- `assembly-guides.ts`: transforms, alignment, contact paint, flush seams, anchors, pins,
   joints, planes, No clip, and measurement.
 - `workspace-guides.ts`: saving, Drive, exports, appearance, preferences,
   performance, headset sessions, automation, and troubleshooting.
@@ -53,6 +53,12 @@ It does not read or change an existing user's tab or assembly. It uses source-mo
 imports and therefore requires the development server, not the production preview.
 The Drive screenshot deliberately shows the unconfigured local installation;
 do not substitute a staged authenticated screenshot for a real account outcome.
+
+The pin examples use `scripts/docs-pins.mjs` to isolate the sample torso and apply
+real pin constraints. `pins.webp` shows rotation around a hard pin; `soft-pins.webp`
+shows priority 85 and 15 pins resisting the same rotation, with the weaker pin’s
+stretch, slider, and numeric field visible. Use a 1440 × 1000 viewport for both
+captures. Keep the captions consistent with the displayed priorities and gaps.
 
 The SVGs illustrate point and plane alignment, rigid residuals, multi-seam flush
 fitting, and the scene workflow. They are explanatory diagrams, not screenshots.
