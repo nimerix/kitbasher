@@ -1,6 +1,7 @@
 export type DocGroup =
   | 'Start here'
   | 'Build & assemble'
+  | 'Alignment tutorials'
   | 'Inspect & finish'
   | 'Workspace & files'
   | 'Beyond the desktop';
@@ -9,6 +10,13 @@ export interface DocImage {
   src: string;
   alt: string;
   caption: string;
+}
+
+export interface DocAnimation {
+  src: string;
+  poster: string;
+  captions: string;
+  title: string;
 }
 
 export interface DocSection {
@@ -30,6 +38,8 @@ export interface DocArticle {
   group: DocGroup;
   icon: string;
   intro: string;
+  practiceScene?: string;
+  animation?: DocAnimation;
   image?: DocImage;
   sections: DocSection[];
   related: string[];

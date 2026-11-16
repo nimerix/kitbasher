@@ -75,3 +75,85 @@ keyboard dismissal, history, section links, mobile navigation/reflow, and missin
 guide recovery. After changing a tool, check its instructions against the current
 UI and update both text and images. Screenshot or emulator evidence does not
 establish physical headset performance or successful live Google authorization.
+
+## Alignment tutorials
+
+`src/docs/alignment-tutorials.ts` contains the method chooser and 15 separate
+walkthroughs. Each numbered step is a section with its own screenshot, descriptive
+alt text, caption, actions, expected result, and relevant recovery advice. The
+`Alignment tutorials` sidebar group and links from the existing reference guides
+make them discoverable. The directory is also linked from the documentation home.
+
+The optional article `practiceScene` field renders a download link. Original,
+subdivided block fixtures live in `public/docs/examples/`; these are valid legacy
+JSON `.kitbash` scenes accepted by the normal importer. They contain the starting
+geometry and transforms, not browser preferences or an in-progress tool operation.
+All image assets are local, lazy-loaded, and use the existing image overlay.
+
+To regenerate the fixtures and their 79 screenshots:
+
+```sh
+# With a development server running:
+npm run docs:capture:alignment
+# Capture one tutorial on another port:
+DOCS_CAPTURE_URL=http://127.0.0.1:5188 npm run docs:capture:alignment -- --only=mate
+```
+
+The capture script imports each downloadable file through the workbench file
+picker in a fresh headless Chrome context. UI controls choose methods and settings;
+deterministic picks and brush hits call the same editor actions as pointer input.
+The actual alignment, painting, pin, joint, and constraint solvers generate the
+shown placements and residuals. It checks that operations apply successfully and
+fails on page errors. No user tab, live MCP scene, or existing assembly is modified.
+Screenshots are full-resolution WebP; no generated or mocked UI is used.
+
+Keep screenshot numbers synchronized with tutorial steps. Re-run the documentation
+browser suite to check every image and deep link, then inspect representative
+screenshots and the rendered articles on desktop and at 320 pixels. Verify downloads
+through the normal file importer as well as their HTTP responses. Do not treat a
+reproducible screenshot as evidence of every physical miniature's fit quality.
+
+## Animated tutorial walkthroughs
+
+All 15 tutorials also have an opt-in MP4 walkthrough above the written steps. The
+`animation` article field supplies its source, poster, WebVTT captions, and title.
+`TutorialAnimation.tsx` uses native video decoding and controls, plus keyboard
+accessible Play/Pause, Replay, and speed controls. There is no autoplay or looping;
+`preload="none"` avoids downloading the movie until requested. Playback pauses when
+scrolled out of view, the browser tab is hidden, or reduced motion is enabled.
+Reduced-motion users can explicitly choose Play. Printed documentation retains the
+illustrated steps and omits the video player.
+
+Regenerate the animations with a development server, Chrome, and FFmpeg installed:
+
+```sh
+npm run docs:animate:alignment
+DOCS_CAPTURE_URL=http://127.0.0.1:5188 npm run docs:animate:alignment -- --only=anchors
+```
+
+This runs the same actual editor actions as screenshot capture. Animation mode
+leaves the existing images and practice downloads unchanged. The encoder in
+`scripts/docs-animation.mjs` holds each numbered step, then inserts a two-second
+motion replay between actual before/after poses. These replay frames are teaching
+illustrations, not intermediate solver steps or a promise that a fitted movement
+path is collision-free. Quaternion interpolation preserves the rigid shape; hard
+pin and already connected joint rotations retain a stationary pivot along the
+whole path. Anchor targets interpolate with their fitted part. The real achieved
+scene is restored afterward. The user-facing caption explains the slowed replay.
+
+MP4s use H.264/yuv420p at 1440 × 1000 and 24 fps with fast-start metadata. A strong
+cubic-bezier(0.77, 0, 0.175, 1) ease-in-out makes pose changes legible. Local WebVTT
+tracks name each step and motion replay; the full written walkthrough supplies the
+more detailed description. Videos are silent and need no audio to follow. All
+assets live in `public/docs/animations/`, and no animation library is required.
+
+```sh
+npx playwright test tests/e2e/documentation.spec.ts tests/e2e/documentation-animations.spec.ts
+npm run build
+```
+
+The animation tests decode every movie, check timed captions, exercise playback,
+pause, speed, replay and seeking, verify keyboard and reduced-motion behavior at
+320 pixels, check that scrolling away pauses playback, and retain written
+instructions/download access when a media request fails. Inspect a moving frame
+and the final pose as well as the poster when reviewing a newly recorded clip.

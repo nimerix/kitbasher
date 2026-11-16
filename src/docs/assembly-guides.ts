@@ -91,7 +91,7 @@ export const assemblyGuides: DocArticle[] = [
         ],
       },
     ],
-    related: ['alignment', 'pins', 'anchors', 'joints', 'no-clip'],
+    related: ['tutorial-precision', 'alignment', 'pins', 'anchors', 'joints', 'no-clip'],
   },
   {
     id: 'alignment',
@@ -203,7 +203,17 @@ export const assemblyGuides: DocArticle[] = [
         ],
       },
     ],
-    related: ['contact-paint', 'planes', 'anchors', 'no-clip'],
+    related: [
+      'alignment-tutorials',
+      'tutorial-point-to-point',
+      'tutorial-point-to-plane',
+      'tutorial-plane-to-plane',
+      'tutorial-multi-point',
+      'contact-paint',
+      'planes',
+      'anchors',
+      'no-clip',
+    ],
   },
   {
     id: 'contact-paint',
@@ -295,7 +305,7 @@ export const assemblyGuides: DocArticle[] = [
         ],
       },
     ],
-    related: ['alignment', 'flush-fit', 'planes', 'no-clip'],
+    related: ['tutorial-contact', 'alignment', 'flush-fit', 'planes', 'no-clip'],
   },
   {
     id: 'flush-fit',
@@ -333,7 +343,7 @@ export const assemblyGuides: DocArticle[] = [
           'Choose Apply flush fit to commit one undoable edit.',
         ],
         paragraphs: [
-          'Unlike contact painting, this workflow does not require a separate Next: paint target stage. One complete seam is sufficient; add more seams when several connections should remain aligned together.',
+          'In Full scene or Isolate both parts, a stroke can paint both sides without a separate target stage. In Active part only or Ghost other part, paint the moving side, choose Next: paint target, paint the target, then Finish pair. One complete seam is sufficient; add more seams when several connections should remain aligned together.',
         ],
       },
       {
@@ -376,7 +386,7 @@ export const assemblyGuides: DocArticle[] = [
         ],
       },
     ],
-    related: ['contact-paint', 'planes', 'joints', 'no-clip'],
+    related: ['tutorial-flush', 'contact-paint', 'planes', 'joints', 'no-clip'],
   },
   {
     id: 'pins',
@@ -433,7 +443,14 @@ export const assemblyGuides: DocArticle[] = [
         ],
       },
     ],
-    related: ['transforms', 'anchors', 'joints', 'planes'],
+    related: [
+      'tutorial-hard-pins',
+      'tutorial-soft-pins',
+      'transforms',
+      'anchors',
+      'joints',
+      'planes',
+    ],
   },
   {
     id: 'anchors',
@@ -515,7 +532,7 @@ export const assemblyGuides: DocArticle[] = [
         ],
       },
     ],
-    related: ['transforms', 'alignment', 'planes', 'no-clip'],
+    related: ['tutorial-anchors', 'transforms', 'alignment', 'planes', 'no-clip'],
   },
   {
     id: 'joints',
@@ -608,7 +625,7 @@ export const assemblyGuides: DocArticle[] = [
         },
       },
     ],
-    related: ['transforms', 'alignment', 'planes', 'no-clip'],
+    related: ['tutorial-joints', 'transforms', 'alignment', 'planes', 'no-clip'],
   },
   {
     id: 'planes',
@@ -694,7 +711,16 @@ export const assemblyGuides: DocArticle[] = [
         ],
       },
     ],
-    related: ['alignment', 'contact-paint', 'flush-fit', 'joints'],
+    related: [
+      'tutorial-mate',
+      'tutorial-parallel',
+      'tutorial-perpendicular',
+      'tutorial-angle',
+      'alignment',
+      'contact-paint',
+      'flush-fit',
+      'joints',
+    ],
   },
   {
     id: 'no-clip',
