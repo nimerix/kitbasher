@@ -145,6 +145,9 @@ kbd {
   color: var(--accent);
 }
 .docs-label {
+  display: flex;
+  align-items: center;
+  min-height: 28px;
   font-size: 13px;
   padding-left: 24px;
   border-left: 1px solid #41444b;
@@ -1159,6 +1162,8 @@ body:has(dialog[open]) {
     font-size: 12px;
   }
   .mobile-toc summary {
+    min-height: 28px;
+    line-height: 28px;
     cursor: pointer;
     color: #c4c8d1;
   }
@@ -1654,5 +1659,74 @@ body:has(dialog[open]) {
   .code-block pre {
     white-space: pre-wrap;
     color: #111;
+  }
+}
+
+.tutorial-animation {
+  margin: 28px 0 36px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: #202226;
+}
+.tutorial-animation-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 14px;
+  font-size: 12px;
+}
+.tutorial-animation-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+.tutorial-animation-actions button,
+.tutorial-animation-actions select {
+  min-height: 36px;
+  border: 1px solid #50545e;
+  border-radius: 4px;
+  background: #292c32;
+  color: var(--text);
+  padding: 6px 9px;
+  font: inherit;
+}
+.tutorial-animation-actions button,
+.tutorial-animation-actions label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.tutorial-animation-actions button:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+.tutorial-animation video {
+  display: block;
+  width: 100%;
+  height: auto;
+  aspect-ratio: 36 / 25;
+  background: #191b1e;
+}
+.tutorial-animation figcaption {
+  padding: 12px 14px 14px;
+  font-size: 12px;
+  line-height: 1.7;
+  color: #bec3cd;
+}
+.tutorial-animation figcaption p {
+  margin: 0 0 8px;
+}
+.tutorial-animation figcaption a {
+  color: var(--accent);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+@media print {
+  .tutorial-animation {
+    display: none;
   }
 }

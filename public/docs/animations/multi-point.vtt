@@ -1,0 +1,19 @@
+WEBVTT
+
+00:00:00.000 --> 00:00:03.000
+1. Choose the fit and plan three landmarks
+
+00:00:03.000 --> 00:00:06.000
+2. Pick the first source point
+
+00:00:06.000 --> 00:00:09.000
+3. Complete the first correspondence
+
+00:00:09.000 --> 00:00:12.000
+4. Spread the pairs and inspect RMS
+
+00:00:12.000 --> 00:00:14.042
+Motion replay: the moving block reaches its fitted pose.
+
+00:00:14.042 --> 00:00:17.042
+5. Apply the rigid fit and check the seam

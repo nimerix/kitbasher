@@ -1,0 +1,19 @@
+WEBVTT
+
+00:00:00.000 --> 00:00:03.000
+1. Select a part and choose Pin
+
+00:00:03.000 --> 00:00:06.000
+2. Place a fixed point
+
+00:00:06.000 --> 00:00:09.000
+3. Switch to rotation
+
+00:00:09.000 --> 00:00:11.042
+Motion replay: rotate while the hard pin stays fixed in world space.
+
+00:00:11.042 --> 00:00:14.042
+4. Check the pin after posing
+
+00:00:14.042 --> 00:00:17.042
+5. Manage the fixed point and save

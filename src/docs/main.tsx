@@ -35,6 +35,7 @@ import {
 import type { LucideIcon } from 'lucide-react';
 import { articleById, articles, groups, searchDocs } from './content';
 import type { DocArticle, DocImage, DocSection } from './types';
+import { TutorialAnimation } from './TutorialAnimation';
 import './styles.css';
 
 const icons: Record<string, LucideIcon> = {
@@ -409,6 +410,7 @@ function Home() {
         </p>
         <div className="tool-directory">
           {[
+            'alignment-tutorials',
             'transforms',
             'alignment',
             'contact-paint',
@@ -470,6 +472,16 @@ function Article({ article }: { article: DocArticle }) {
         <h1 tabIndex={-1}>{article.title}</h1>
         <p className="article-description">{article.description}</p>
         <p className="article-intro">{article.intro}</p>
+        {article.practiceScene && (
+          <p>
+            <a href={article.practiceScene} download>
+              Download practice scene (.kitbash)
+            </a>
+          </p>
+        )}
+        {article.animation && (
+          <TutorialAnimation key={article.animation.src} animation={article.animation} />
+        )}
         {article.image && <Figure figure={article.image} priority />}
         <details className="mobile-toc">
           <summary>On this page</summary>

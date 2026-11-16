@@ -1,5 +1,6 @@
 import { keyActions, keyGroups } from '../core/keybindings';
 import { assemblyGuides } from './assembly-guides';
+import { alignmentTutorialDirectory, alignmentTutorials } from './alignment-tutorials';
 import { startGuides } from './start-guides';
 import { workspaceGuides } from './workspace-guides';
 import type { DocArticle, DocGroup } from './types';
@@ -7,6 +8,7 @@ import type { DocArticle, DocGroup } from './types';
 export const groups: DocGroup[] = [
   'Start here',
   'Build & assemble',
+  'Alignment tutorials',
   'Inspect & finish',
   'Workspace & files',
   'Beyond the desktop',
@@ -86,6 +88,7 @@ const order = [
   'parts',
   'transforms',
   'alignment',
+  'alignment-tutorials',
   'contact-paint',
   'flush-fit',
   'anchors',
@@ -93,6 +96,7 @@ const order = [
   'joints',
   'planes',
   'no-clip',
+  ...alignmentTutorials.map((article) => article.id),
   'measurement',
   'inspection',
   'performance',
@@ -108,6 +112,8 @@ const order = [
 export const articles: DocArticle[] = [
   ...startGuides,
   ...assemblyGuides,
+  alignmentTutorialDirectory,
+  ...alignmentTutorials,
   ...workspaceGuides,
   shortcuts,
 ].sort((a, b) => order.indexOf(a.id) - order.indexOf(b.id));
