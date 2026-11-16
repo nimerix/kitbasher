@@ -63,6 +63,45 @@ captures. Keep the captions consistent with the displayed priorities and gaps.
 The SVGs illustrate point and plane alignment, rigid residuals, multi-seam flush
 fitting, and the scene workflow. They are explanatory diagrams, not screenshots.
 
+## References beside the instructions
+
+`src/docs/reference-images.ts` describes focused screenshots used inside guide
+sections. The matching files are in `public/docs/images/reference/`. Supply the
+actual `width` and `height` for each crop so lazy loading reserves the right space.
+These figures use the same enlargement overlay as the existing article images.
+
+| Where readers need a visual                    | Reference added                                                       |
+| ---------------------------------------------- | --------------------------------------------------------------------- |
+| First assembly, workbench menus, saving        | Open File menu and its scene commands                                 |
+| Workbench layout and small windows             | Header/tool row, Parts panel, and narrow-screen panel toggles         |
+| Navigation and isolation                       | View selector, expanded Camera panel, and Nearby surfaces controls    |
+| Part visibility and context actions            | Selected row with eye/lock buttons, hidden part, and right-click menu |
+| Exact placement and collision tolerance        | Move steps and axes, plus No clip and its millimeter field            |
+| Contact painting                               | Right-click brush settings                                            |
+| Reference planes and retained constraints      | Ground target selector and the existing Mate planes tutorial result   |
+| Display, preferences, and measurement callouts | Exploded view, Navigation settings, and Markers with Callout selected |
+| Background work and notifications              | Completed interference job and an actual local-download notification  |
+
+Regenerate these references independently of the article heroes and tutorials:
+
+```sh
+npm run docs:capture:reference
+DOCS_CAPTURE_URL=http://127.0.0.1:5188 npm run docs:capture:reference -- --only=brush-settings
+```
+
+Each capture uses a fresh browser context and the original Scout scene. Menus and
+controls are operated in the real editor; the activity example runs a real
+interference check, and the notification example downloads a real scene. There is
+no authenticated Drive session or staged provider success. Inspect the generated
+crop and keep its alt text and caption consistent with the visible state.
+
+Sections can also declare `tutorials: ['tutorial-precision']` to render a labeled
+“Watch” link beside the relevant instructions. Every destination must be an
+existing article with an `animation`; the link opens its `#walkthrough` player.
+This reuses all 15 captioned walkthroughs without duplicating or preloading movies
+in the reference guides. Readers still choose when to play, and the destination
+retains its written steps and practice download.
+
 ## Validation
 
 ```sh

@@ -10,6 +10,8 @@ export interface DocImage {
   src: string;
   alt: string;
   caption: string;
+  width?: number;
+  height?: number;
 }
 
 export interface DocAnimation {
@@ -29,6 +31,7 @@ export interface DocSection {
   code?: { language: string; value: string };
   note?: { title: string; text: string; tone?: 'tip' | 'warning' };
   image?: DocImage;
+  tutorials?: string[];
 }
 
 export interface DocArticle {

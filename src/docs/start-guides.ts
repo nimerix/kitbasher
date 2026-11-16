@@ -1,4 +1,5 @@
 import type { DocArticle } from './types';
+import { referenceImages } from './reference-images';
 
 export const startGuides: DocArticle[] = [
   {
@@ -93,6 +94,7 @@ export const startGuides: DocArticle[] = [
       {
         id: 'open-the-sample',
         title: '1. Open the sample',
+        image: referenceImages.fileMenu,
         steps: [
           'Open Kitbasher. A fresh workbench starts with Scout · MK.04.',
           'If another scene is already open, save it first. Choose File → New assembly, then Scout · MK.04 to reload the sample.',
@@ -132,6 +134,7 @@ export const startGuides: DocArticle[] = [
       {
         id: 'try-fitting',
         title: '4. Choose a fitting method for your next model',
+        tutorials: ['tutorial-point-to-point', 'tutorial-contact'],
         paragraphs: [
           'For your own parts, make a coarse placement with Move and Rotate, then press A for Align. Point to point translates one picked location to another; Plane to plane also orients their normals. A 3+ point fit uses at least three matching pairs spread around an interface.',
           'Use Contact paint when matching patches describe the interface better than individual points. Anchors offer a different route: place attachment points on the moving part and adjust their world targets while the part remains rigid. The detailed tool guides explain the required picks and the residual errors.',
@@ -172,6 +175,7 @@ export const startGuides: DocArticle[] = [
       {
         id: 'header-and-menus',
         title: 'Header and application menus',
+        image: referenceImages.fileMenu,
         paragraphs: [
           'The header holds the assembly name, File, Edit, and View menus, save and export actions, optional cloud controls, background activity, and notifications. Rename the assembly here to make scene files easier to identify later.',
         ],
@@ -196,6 +200,7 @@ export const startGuides: DocArticle[] = [
       {
         id: 'tool-row',
         title: 'Choose the operation in the toolbar',
+        image: referenceImages.toolbar,
         paragraphs: [
           'Select, Move, Rotate, Scale, Transform, Align, Contact paint, Anchors, Joint, and Measure change what a click or drag does in the viewport. The active tool determines the controls shown in the inspector.',
           'The toolbar also exposes snapping, preferred World or Local axes, and No clip. The snap amount follows the active transform: a distance for Move, an angle for Rotate, and the scale increment for Scale. A highlighted tool does not mean that an operation has already been applied; alignment and joint creation still need their picks and confirmation.',
@@ -204,6 +209,7 @@ export const startGuides: DocArticle[] = [
       {
         id: 'left-panel',
         title: 'Parts, Joints, and Constraints',
+        image: referenceImages.partsControls,
         paragraphs: [
           'The left panel’s Parts tab lists individual mesh objects under the assembly name. Search by name, select from the list, and use the eye and lock controls to manage each object. Triangle and part totals help explain the scene’s complexity.',
           'Joints lists parent-to-child connections and lets you select their child or remove the relationship. Constraints lists saved plane relationships with their editing and suppression controls. The search field follows the active tab.',
@@ -220,6 +226,7 @@ export const startGuides: DocArticle[] = [
       {
         id: 'feedback',
         title: 'Status, background work, and notifications',
+        image: referenceImages.mobilePanels,
         paragraphs: [
           'The bottom status bar provides navigation hints, the next step for the active tool, and browser recovery or shared-session status. A dense mesh may need preparation before it can be picked; the status message explains when that is happening.',
           'Background activity keeps running jobs visible, with elapsed time, the current stage, and cancellation where supported. A percentage belongs to that stage, rather than promising an overall completion time. The Notifications bell retains completion and error messages after their banners close.',
@@ -339,6 +346,7 @@ export const startGuides: DocArticle[] = [
       {
         id: 'framing-and-projection',
         title: 'Frame the part and compare views',
+        image: referenceImages.viewMenu,
         paragraphs: [
           'Press F to frame the selection and Home to frame all currently relevant parts. With isolation active, Frame all frames the isolated view. Double-clicking a part in the Parts panel also requests a focus.',
           'Press 1 for Front, 3 for Right, and 7 for Top. Press 5 to switch between perspective and orthographic projection. Orthographic views are useful for checking apparent offsets without perspective foreshortening; orbit afterward to confirm depth and clearance.',
@@ -348,6 +356,7 @@ export const startGuides: DocArticle[] = [
       {
         id: 'orbit-centers',
         title: 'Choose a useful orbit center',
+        image: referenceImages.cameraControls,
         paragraphs: [
           'Orbit selection is enabled initially and uses a selected part’s custom pivot, or the visible center of the selected parts. Shift + . toggles the preference. Press . to center the orbit on the selection once while keeping the current zoom and direction.',
           'Press P, then click a model surface to create a custom pivot. The marker follows its part and also becomes the pivot for rotation and scale, except where an active joint supplies its own anchor. Reset custom pivot returns to the mesh center.',
@@ -370,6 +379,7 @@ export const startGuides: DocArticle[] = [
       {
         id: 'nearby-surfaces',
         title: 'Keep just the surrounding interface',
+        image: referenceImages.isolation,
         paragraphs: [
           'Press Shift + I to isolate with Nearby surfaces. The surrounding objects are cut away except where their surfaces are near the isolated part. The default distance is 2 mm, adjustable up to 200 mm in the viewport isolation bar.',
           'Visible nearby surfaces remain available for selection, alignment picks, joints, measurement, and painting. Cut-away surfaces cannot be picked. The cut follows the isolated parts as they move, but its distance field has finite resolution; use measurement and Interference for final gap evaluation.',
@@ -415,6 +425,7 @@ export const startGuides: DocArticle[] = [
       {
         id: 'visibility-and-locks',
         title: 'Visibility and locks have different jobs',
+        image: referenceImages.partsControls,
         paragraphs: [
           'Use the eye control beside a part to hide or show it. Visibility belongs to the scene and matters when exporting visible parts. Use the lock control to protect a stationary reference or a component whose placement is already established.',
           'A hidden component still exists in the scene. A locked component can still be selected for inspection and unlocking. Temporary isolation is useful when you only want a cleaner view; it leaves the saved visibility unchanged.',
@@ -445,6 +456,7 @@ export const startGuides: DocArticle[] = [
       {
         id: 'context-and-merge',
         title: 'Context actions and permanent combinations',
+        image: referenceImages.contextActions,
         paragraphs: [
           'Right-click a component in the viewport or Parts panel for transform, clipboard, rename, delete, alignment, painting, joints, merge, inspection, isolation, visibility, and lock actions. Right-clicking a selected part preserves the whole selection. Shift + F10 or the Menu key also opens the context menu.',
           'Merge selected replaces selected parts and their joints with one mesh object. Combine meshes preserves the original triangles; Boolean union attempts to fuse overlapping solid volumes. Save a scene copy before merging if you want the separate assembly available later. Undo reverses the merge while that history remains available.',
@@ -491,6 +503,7 @@ export const startGuides: DocArticle[] = [
       {
         id: 'scanned-parts',
         title: 'Fit imperfect scanned interfaces',
+        tutorials: ['tutorial-multi-point', 'tutorial-flush'],
         paragraphs: [
           'Begin with the original scan and a small number of well-separated matching regions. A 3+ point fit gives a useful coarse registration; painted contact fitting compares the actual painted surfaces. Spread pairs around the interface so a symmetric patch does not leave an ambiguous orientation.',
           'For final adjustments, use rigid anchors to expose target gaps or Paint flush across seams to balance outer-surface continuity against several neighbors. Read the residuals. Incompatible interfaces leave an error because the tools preserve the rigid part rather than stretching it.',

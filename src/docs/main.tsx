@@ -24,6 +24,7 @@ import {
   Move3D,
   Paintbrush,
   Pin,
+  Play,
   Ruler,
   ScanLine,
   Search,
@@ -124,8 +125,8 @@ function Figure({ figure, priority = false }: { figure: DocImage; priority?: boo
         <img
           src={figure.src}
           alt={figure.alt}
-          width={1440}
-          height={960}
+          width={figure.width ?? 1440}
+          height={figure.height ?? 960}
           loading={priority ? 'eager' : 'lazy'}
         />
         <span className="figure-expand">
@@ -235,6 +236,20 @@ function Section({ section }: { section: DocSection }) {
         </aside>
       )}
       {section.image && <Figure figure={section.image} />}
+      {section.tutorials && (
+        <div className="section-tutorials">
+          {section.tutorials.map((id) => {
+            const tutorial = articleById.get(id);
+            return tutorial?.animation ? (
+              <a key={id} href={`${guideHref(id)}#walkthrough`}>
+                <Play size={15} aria-hidden="true" />
+                <span>Watch: {tutorial.title}</span>
+                <ArrowRight size={14} aria-hidden="true" />
+              </a>
+            ) : null;
+          })}
+        </div>
+      )}
     </section>
   );
 }

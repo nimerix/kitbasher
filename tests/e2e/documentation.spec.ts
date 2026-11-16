@@ -91,6 +91,17 @@ test('renders every guide deep link with working illustrations and related-guide
           true,
         );
       }
+      for (const section of article.sections) {
+        const walkthroughs = page.locator(`#${section.id} .section-tutorials a`);
+        await expect(walkthroughs).toHaveCount(section.tutorials?.length ?? 0);
+        for (const [index, id] of (section.tutorials ?? []).entries()) {
+          expect(
+            articleById.get(id)?.animation,
+            `${article.id}/${section.id}: ${id} needs a video`,
+          ).toBeDefined();
+          await expect(walkthroughs.nth(index)).toHaveAttribute('href', `?guide=${id}#walkthrough`);
+        }
+      }
     });
   }
 
