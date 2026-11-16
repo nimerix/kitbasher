@@ -1,4 +1,5 @@
 import type { DocArticle } from './types';
+import { referenceImages } from './reference-images';
 
 export const workspaceGuides: DocArticle[] = [
   {
@@ -20,6 +21,7 @@ export const workspaceGuides: DocArticle[] = [
       {
         id: 'save-a-scene',
         title: 'Create a portable checkpoint',
+        image: referenceImages.fileMenu,
         steps: [
           'Give the assembly a recognizable name in the top bar.',
           'Choose Save scene, File → Save, or Ctrl/⌘ + S. Without Drive attached, your browser downloads a self-contained .kitbash file.',
@@ -392,6 +394,7 @@ export const workspaceGuides: DocArticle[] = [
       {
         id: 'exploded-and-wireframe',
         title: 'Expose hidden structure',
+        image: referenceImages.explodedView,
         paragraphs: [
           'Use the Exploded view slider to visually separate an assembly and understand which part belongs where. Reset the slider before reviewing actual contact or making assembly edits. Exploded positions are a viewing aid rather than new fitted placements.',
           'Wireframe reveals triangle structure. Grid and joint visibility can be toggled from View, while isolation and alignment visibility reduce surrounding clutter. Interference inspection uses its own neutral display to make contacts and overlaps readable.',
@@ -439,6 +442,7 @@ export const workspaceGuides: DocArticle[] = [
       {
         id: 'scroll-zoom',
         title: 'Make wheel and trackpad zoom comfortable',
+        image: referenceImages.navigationPreferences,
         bullets: [
           'Sensitivity changes the amount of zoom for each scroll step.',
           'Response curve below 1 makes small and large wheel steps more even; 1 follows scroll distance directly; above 1 accelerates fast scrolling.',
@@ -460,6 +464,7 @@ export const workspaceGuides: DocArticle[] = [
       {
         id: 'markers',
         title: 'Make points and labels readable',
+        image: referenceImages.markerPreferences,
         paragraphs: [
           'Markers shares one screen-pixel size across anchors, custom pivots, picked points, measurements, joints, and painted patches. The marker stays the same visible size while you zoom the model.',
           'Labels can sit beside their point or use compact callouts: readable dark badges with short, outlined leaders. Callouts stay near their points and keep their local position as you orbit or zoom. Crowded labels adjust within a small area, and labels for offscreen points are hidden. Label spacing controls the preferred gap in pixels; it never sends a label across the assembly. The thin connector matches the point color; a subtle colored edge marks the selected pin or anchor. Labels stay readable during camera navigation.',
@@ -544,6 +549,7 @@ export const workspaceGuides: DocArticle[] = [
       {
         id: 'cancel-and-progress',
         title: 'Follow and cancel background jobs',
+        image: referenceImages.backgroundActivity,
         paragraphs: [
           'Background activity in the header lists queued and running work, including surface indexing, viewport optimization, mesh processing, interference inspection, merges, and Drive uploads. Each job names its stage and shows elapsed time; measured percentages describe that stage. An indeterminate bar means that stage has no meaningful percentage.',
           'Use Cancel for jobs that offer it. Mesh processing also has Cancel processing in its dialog. Cancellation stops pending work rather than applying a half-finished result. Keep the panel open for long jobs or return to it while working elsewhere.',
@@ -552,6 +558,7 @@ export const workspaceGuides: DocArticle[] = [
       {
         id: 'notification-history',
         title: 'Revisit completion messages and errors',
+        image: referenceImages.notifications,
         paragraphs: [
           'The Notifications bell keeps messages after their banners close. Errors stay visible until dismissed. You can mark messages read, remove individual messages, or clear history.',
           'Routine mesh preparation and successful Drive autosaves finish quietly; failures still alert you. History is kept for this tab’s current session, with the latest 50 finished jobs and 100 notifications. Download scene checkpoints separately when you need a durable record of the work itself.',

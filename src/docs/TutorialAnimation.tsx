@@ -50,7 +50,7 @@ export function TutorialAnimation({ animation }: { animation: DocAnimation }) {
   };
 
   return (
-    <figure className="tutorial-animation" aria-label={animation.title}>
+    <figure id="walkthrough" className="tutorial-animation" aria-label={animation.title}>
       <div className="tutorial-animation-toolbar">
         <strong>Watch the walkthrough</strong>
         <div className="tutorial-animation-actions">

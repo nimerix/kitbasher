@@ -803,6 +803,31 @@ tr:last-child td {
   line-height: 1.9;
   color: #d5c2a9;
 }
+.section-tutorials {
+  display: grid;
+  gap: 10px;
+  margin: 20px 0;
+}
+.section-tutorials a {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 13px;
+  line-height: 1.6;
+}
+.section-tutorials a span {
+  flex: 1;
+  min-width: 0;
+}
+.section-tutorials svg {
+  flex-shrink: 0;
+}
+#walkthrough {
+  scroll-margin-top: 90px;
+}
 .related-guides {
   margin-top: 45px;
   border-top: 1px solid var(--border);

@@ -14,6 +14,34 @@ async function play(page: Page) {
     .toBe(true);
 }
 
+test('opens a contextual video reference at its player and returns to the guide on desktop and mobile', async ({
+  page,
+}) => {
+  for (const width of [1440, 320]) {
+    await page.setViewportSize({ width, height: 1000 });
+    await page.goto('/docs/?guide=transforms#precise-steps');
+    const reference = page.locator('#precise-steps .section-tutorials a');
+    await reference.focus();
+    await reference.press('Enter');
+    await expect(page).toHaveURL(/guide=tutorial-precision#walkthrough$/);
+    await expect(player(page)).toBeInViewport();
+    await expect(
+      player(page).getByRole('button', { name: 'Play animation', exact: true }),
+    ).toBeInViewport();
+    expect(
+      await player(page)
+        .locator('video')
+        .evaluate((video: HTMLVideoElement) => video.paused),
+    ).toBe(true);
+    await expect
+      .poll(() => page.evaluate(() => document.documentElement.scrollWidth <= innerWidth))
+      .toBe(true);
+    await page.goBack();
+    await expect(page).toHaveURL(/guide=transforms#precise-steps$/);
+    await expect(reference).toBeVisible();
+  }
+});
+
 test('every alignment tutorial has a decodable local animation with timed step captions', async ({
   page,
 }) => {

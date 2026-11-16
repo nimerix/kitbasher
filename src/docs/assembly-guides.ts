@@ -1,4 +1,5 @@
 import type { DocArticle } from './types';
+import { referenceImages } from './reference-images';
 
 export const assemblyGuides: DocArticle[] = [
   {
@@ -41,6 +42,8 @@ export const assemblyGuides: DocArticle[] = [
       {
         id: 'precise-steps',
         title: 'Use exact values and repeatable steps',
+        image: referenceImages.precisionControls,
+        tutorials: ['tutorial-precision'],
         steps: [
           'Choose Move or Rotate and set Step in the inspector, in millimeters or degrees.',
           'Click the X, Y, or Z −/+ buttons to adjust the whole selection by that amount.',
@@ -150,6 +153,11 @@ export const assemblyGuides: DocArticle[] = [
       {
         id: 'first-alignment',
         title: 'Apply a point or plane alignment',
+        tutorials: [
+          'tutorial-point-to-point',
+          'tutorial-point-to-plane',
+          'tutorial-plane-to-plane',
+        ],
         steps: [
           'Select the moving part, choose Align in the toolbar, or press A.',
           'Choose an Alignment method. Check Moving part and Target part or plane in the inspector. A world reference plane can be the target for point and plane methods.',
@@ -164,6 +172,7 @@ export const assemblyGuides: DocArticle[] = [
       {
         id: 'multi-point',
         title: 'Build a stable 3+ point fit',
+        tutorials: ['tutorial-multi-point'],
         paragraphs: [
           'Choose 3+ point fit, then alternate source and target clicks for at least three matching pairs. Keep adding fourth, fifth, or later pairs when they provide meaningful information; there is no three-pair cap. Spread landmarks across the interface and avoid points on one line.',
           'The inspector numbers every pair, shows an unfinished source pick, and lets you remove individual pairs. Finish or clear a pending source before applying. All completed pairs contribute to the rigid best fit; adding poor correspondences can make the result worse.',
@@ -233,6 +242,7 @@ export const assemblyGuides: DocArticle[] = [
       {
         id: 'paint-first-pair',
         title: 'Paint your first matching pair',
+        tutorials: ['tutorial-contact'],
         steps: [
           'Select the moving part and press B, or choose Contact paint in the toolbar.',
           'Choose the Moving part and Target part. Keep the contact-fitting surface relationship selected.',
@@ -248,6 +258,7 @@ export const assemblyGuides: DocArticle[] = [
       {
         id: 'brush',
         title: 'Control and revise the brush',
+        image: referenceImages.brushSettings,
         table: {
           headers: ['Control', 'Action'],
           rows: [
@@ -334,6 +345,7 @@ export const assemblyGuides: DocArticle[] = [
       {
         id: 'paint-seam',
         title: 'Paint and apply a seam',
+        tutorials: ['tutorial-flush'],
         steps: [
           'Select the moving part and press B to open Contact paint.',
           'Under Surface relationship, choose Paint flush · across seams.',
@@ -406,6 +418,7 @@ export const assemblyGuides: DocArticle[] = [
       {
         id: 'place-pins',
         title: 'Place pins on a part',
+        tutorials: ['tutorial-hard-pins'],
         steps: [
           'Select a visible, unlocked part and choose Pin in the toolbar.',
           'Choose Pin for a hard pin or Soft pin for elastic resistance.',
@@ -419,6 +432,7 @@ export const assemblyGuides: DocArticle[] = [
       {
         id: 'soft-priority',
         title: 'Adjust soft-pin priority',
+        tutorials: ['tutorial-soft-pins'],
         paragraphs: [
           'Select a soft pin in the viewport or Pins list. Set Priority using the slider or numeric field, from 0 (free) to 100 (strongest). Resistance rises exponentially across this range, so stronger pins give less while weaker pins stretch farther.',
           'Orange P markers show hard pins. Teal S markers show soft-pin resting points, with lines to their current surface attachments. The Pins panel reports the stretch in millimeters.',
@@ -485,6 +499,7 @@ export const assemblyGuides: DocArticle[] = [
       {
         id: 'move-target',
         title: 'Adjust a target with handles or coordinates',
+        tutorials: ['tutorial-anchors'],
         paragraphs: [
           'Drag the selected target’s XYZ handle, or edit Anchor target X, Y, and Z in the inspector. Target numeric coordinates are always world millimeters, with 0.01 mm input steps. Handle axes follow the available World/Local setting, and snapping applies when enabled.',
           'Hold Shift while dragging for ten times finer movement. Moving one target keeps the other targets fixed; Kitbasher then recomputes the part’s rigid translation and rotation to minimize their combined gaps. Each drag is one undo step.',
@@ -567,6 +582,7 @@ export const assemblyGuides: DocArticle[] = [
       {
         id: 'rotation-freedom',
         title: 'Make a hinge or fixed attachment',
+        tutorials: ['tutorial-joints'],
         paragraphs: [
           'Leave one rotation axis free for a hinge-like connection. Lock all three axes for a fixed joint. Locking a previously free axis captures the current pose, so position the part at the desired angle before locking it.',
           'Connected parts use joint axes for rotation controls, including numeric rotation. Rotation and scaling pivot around the joint anchor. A surface pivot can be useful for ordinary parts, but an active joint retains its connection anchor as the rotation pivot.',
@@ -646,6 +662,7 @@ export const assemblyGuides: DocArticle[] = [
       {
         id: 'reference-plane',
         title: 'Use a world reference plane',
+        image: referenceImages.referencePlane,
         paragraphs: [
           'Choose Align and a point or plane method. In Target part or plane, select a reference plane instead of another mesh. This provides a stable scene-level target when placing a base or organizing parts against a common orientation.',
           'The built-in planes are Ground · XZ, Front · XY, and Side · YZ. Their rows under Reference planes in the Parts panel let you toggle their visibility. They provide named world targets without adding an exported mesh.',
@@ -655,6 +672,12 @@ export const assemblyGuides: DocArticle[] = [
       {
         id: 'plane-methods',
         title: 'Choose a painted plane relationship',
+        tutorials: [
+          'tutorial-mate',
+          'tutorial-parallel',
+          'tutorial-perpendicular',
+          'tutorial-angle',
+        ],
         table: {
           headers: ['Relationship', 'What remains controlled'],
           rows: [
@@ -689,6 +712,14 @@ export const assemblyGuides: DocArticle[] = [
       {
         id: 'edit-constraint',
         title: 'Manage relationships in the Constraints tab',
+        image: {
+          src: './images/tutorials/mate-5.webp',
+          width: 1440,
+          height: 1000,
+          alt: 'Constraints tab with an active Mate planes relationship between Moving block and Target block, showing offset, face direction, and residual.',
+          caption:
+            'The Mate planes practice scene after creation: edit the relationship in the Constraints tab on the left and read its achieved residual.',
+        },
         paragraphs: [
           'The Constraints tab lists the moving and target parts and provides a name, relationship selector, Active switch, and residual readout. Rename a relationship to describe its purpose, change its type, or adjust the offset or angle directly.',
           'Mate and Parallel relationships expose Face direction for same or opposing normals. Suppress a constraint to place its moving part freely, then enable it again when the relationship should apply. Removing a constraint deletes that relationship; suppressing keeps its definition.',
@@ -741,6 +772,7 @@ export const assemblyGuides: DocArticle[] = [
       {
         id: 'enable-and-tolerance',
         title: 'Set a useful contact tolerance',
+        image: referenceImages.placementSettings,
         steps: [
           'Keep No clip enabled in the toolbar while assembling against neighboring surfaces.',
           'Set Allowed overlap beside the toggle in millimeters.',
@@ -853,6 +885,7 @@ export const assemblyGuides: DocArticle[] = [
       {
         id: 'callouts',
         title: 'Use compact callouts',
+        image: referenceImages.markerPreferences,
         steps: [
           'In Point markers, change Labels from Beside point to Callout.',
           'Use Label spacing to set a short gap between each point and its label.',
