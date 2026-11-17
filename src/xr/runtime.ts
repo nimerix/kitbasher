@@ -227,6 +227,13 @@ export class XRRuntime {
     private readonly scene: Scene,
     private readonly session: XRSession,
   ) {
+    // Warp is desktop only.
+    const editor = useEditor.getState();
+    if (editor.tool === 'warp') {
+      editor.cancelWarp();
+      editor.setTool('select');
+      this.tool = 'select';
+    }
     this.raycaster.firstHitOnly = true;
     this.rig = frameRig(this.head, this.navigationBounds());
     this.applyRig();

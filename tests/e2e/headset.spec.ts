@@ -306,6 +306,26 @@ test('sets the model within reach and returns the desktop view on leaving', asyn
   expect(errors).toEqual([]);
 });
 
+test('cancels a warp and leaves the Warp tool when a session starts', async ({ page }) => {
+  await setup(page);
+  const warping = () =>
+    page.evaluate(async () => {
+      const urls = performance.getEntriesByType('resource').map((entry) => entry.name);
+      const { useEditor } = await import(urls.find((url) => /\/src\/core\/store\.ts/.test(url))!);
+      const { tool, warp } = useEditor.getState();
+      return { tool: tool as string, session: !!warp };
+    });
+  await page.evaluate(async () => {
+    const urls = performance.getEntriesByType('resource').map((entry) => entry.name);
+    const { useEditor } = await import(urls.find((url) => /\/src\/core\/store\.ts/.test(url))!);
+    useEditor.setState({ selected: ['block'] });
+    useEditor.getState().setTool('warp');
+  });
+  expect(await warping()).toEqual({ tool: 'warp', session: true });
+  await enter(page);
+  expect(await warping()).toEqual({ tool: 'select', session: false });
+});
+
 test('holds a part in the hand, and stops it at another part', async ({ page }) => {
   await setup(page);
   await enter(page);

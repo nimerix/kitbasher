@@ -181,6 +181,7 @@ export function joinLiveSession() {
     notify(
       `Your last change was undone because it could not be combined with ${other}'s.${reason ? ` ${reason}` : ''}`,
     );
+    useEditor.getState().settleWarp(false);
   };
 
   const lost = () => {
@@ -212,8 +213,13 @@ export function joinLiveSession() {
         ...flags,
         scene: sharedScene(scene),
       });
-      if (response.ok) awaited = ((await response.json()) as { version: number }).version;
-      else refused(await errorOf(response));
+      if (response.ok) {
+        awaited = ((await response.json()) as { version: number }).version;
+        // Only the edit that carries an applied warp settles it, not one sent before it.
+        const { warpPending, settleWarp } = useEditor.getState();
+        if (warpPending && scene.parts.some((part) => part.geometry === warpPending.applied))
+          settleWarp(true);
+      } else refused(await errorOf(response));
     } catch (error) {
       if (error instanceof Refusal) refused(error.message);
       else {
