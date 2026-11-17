@@ -159,7 +159,14 @@ function buildSystem(grid: WarpGrid, key: number[]): WarpSystem {
   };
 }
 
-function writeRotation(out: Float64Array, o: number, x: number, y: number, z: number, w: number) {
+export function writeRotation(
+  out: Float64Array,
+  o: number,
+  x: number,
+  y: number,
+  z: number,
+  w: number,
+) {
   out[o] = 1 - 2 * (y * y + z * z);
   out[o + 1] = 2 * (x * y - z * w);
   out[o + 2] = 2 * (x * z + y * w);
