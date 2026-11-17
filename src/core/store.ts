@@ -65,7 +65,11 @@ import {
   saveDefaultLighting,
 } from './lighting';
 import { same } from './sync';
-import { transformSelection } from './transform-selection';
+import {
+  transformSelection,
+  warpMovesFromPatches,
+  type WarpTransformSelection,
+} from './transform-selection';
 import type { FreeTransformMode, TransformAxis, TransformPatch } from './free-transform';
 import type { NavigationMode } from './navigation';
 import { createSample } from './sample';
@@ -168,6 +172,8 @@ interface FreeTransform {
   axis: TransformAxis;
   baseline: SceneDocument;
   patches: TransformPatch[];
+  /** A free move of warp control points, and the points to restore if it is cancelled. */
+  warp?: { model: WarpModel; points: WarpPoint[]; selection: WarpTransformSelection };
 }
 
 export type WarpGizmo = 'translate' | 'rotate' | 'scale' | 'transform';
@@ -1460,6 +1466,7 @@ export const useEditor = create<EditorState>((set, get) => ({
     const { warp } = get();
     if (!warp) return;
     abortWarpBuild();
+    warpDrag = null;
     disposeWarpPreview(warp.preview);
     set({ warp: null, painting: false, paintHistory: [] });
     if (notice) get().notify(notice, 'info');
@@ -1538,10 +1545,9 @@ export const useEditor = create<EditorState>((set, get) => ({
       model = warp?.model;
     if (!warp || !model || warp.stage !== 'warp') return;
     const targets = new Map(
-      (warp.snap ? snapWarpTargets(state.scene, warp, moves) : moves).map((move) => [
-        move.id,
-        move.target,
-      ]),
+      (warp.snap && moves.length ? snapWarpTargets(state.scene, warp, moves) : moves).map(
+        (move) => [move.id, move.target],
+      ),
     );
     const points = warp.points.map((point) => {
       const target = targets.get(point.id);
@@ -1996,9 +2002,14 @@ export const useEditor = create<EditorState>((set, get) => ({
       state.notify(selection.blocked, 'info');
       return false;
     }
-    state.setTool(mode);
+    // Control points move inside the warp session, which leaving the tool would end.
+    const warp =
+      selection.kind === 'warp'
+        ? { model: state.warp!.model!, points: state.warp!.points, selection }
+        : undefined;
+    if (!warp) state.setTool(mode);
     set({
-      freeTransform: { mode, axis: null, baseline: get().scene, patches: [] },
+      freeTransform: { mode, axis: null, baseline: get().scene, patches: [], warp },
       contextMenu: null,
       temporaryOrbit: false,
     });
@@ -2008,6 +2019,11 @@ export const useEditor = create<EditorState>((set, get) => ({
     const session = get().freeTransform;
     if (!session) return;
     set({ freeTransform: { ...session, patches } });
+    if (session.warp) {
+      const moves = warpMovesFromPatches(session.warp.selection, patches);
+      if (moves.length) get().moveWarpPoints(moves, 'drag');
+      return;
+    }
     get().transformMany(
       patches,
       false,
@@ -2021,6 +2037,19 @@ export const useEditor = create<EditorState>((set, get) => ({
   finishFreeTransform: (confirm) => {
     const session = get().freeTransform;
     if (!session) return;
+    if (session.warp) {
+      const { selection } = session.warp;
+      const moves = confirm ? warpMovesFromPatches(selection, session.patches) : [];
+      const moved = moves.some(({ id, target }) => {
+        const start = selection.parts.find((point) => point.id === id)!.position;
+        return target.some((value, a) => Math.abs(value - start[a]) > 1e-9);
+      });
+      // Ending the drag in the session records it as one undo step and settles the surface.
+      if (moved) get().moveWarpPoints(moves, 'end');
+      else restoreWarpPoints(session.warp);
+      set({ freeTransform: null });
+      return;
+    }
     if (confirm && session.patches.length)
       get().transformMany(
         session.patches,
@@ -2533,6 +2562,24 @@ useEditor.subscribe((state, previous) => {
   const isolated = state.isolated.filter((id) => state.scene.parts.some((part) => part.id === id));
   if (isolated.length !== state.isolated.length)
     useEditor.setState({ isolated: isolated.length ? isolated : null });
+});
+
+/** Ends a free move of control points by putting them back and settling the surface again. */
+function restoreWarpPoints({ model, points }: NonNullable<FreeTransform['warp']>) {
+  if (warpDrag?.model !== model) return;
+  const { warp, moveWarpPoints } = useEditor.getState();
+  if (warp?.model !== model) {
+    warpDrag = null;
+    return;
+  }
+  useEditor.setState({ warp: { ...warp, points } });
+  moveWarpPoints([], 'end');
+}
+
+// Another edit can end a free move of control points before it is confirmed. It is cancelled.
+useEditor.subscribe((state, previous) => {
+  const moving = previous.freeTransform?.warp;
+  if (moving && !state.freeTransform) restoreWarpPoints(moving);
 });
 
 /** Lets go of a warp kept for the live server's answer. */

@@ -48,12 +48,13 @@ import {
   Undo2,
   X,
 } from 'lucide-react';
-import { canRedo, canUndo, liveHost, liveSession, useEditor } from './core/store';
+import { canRedo, liveHost, liveSession, useEditor } from './core/store';
 import {
   downloadCurrentScene,
   editorCommands,
   executeEditorCommand,
   saveCurrentScene,
+  undoAvailable,
 } from './core/commands';
 import { driveAutosave, flushDriveBeforeReplace, useDrive } from './core/drive-sync';
 import { DriveButton, GoogleDriveDialog } from './components/GoogleDrive';
@@ -350,7 +351,7 @@ function Toolbar({
 }) {
   const tool = useEditor((s) => s.tool),
     view = useEditor((s) => s.view),
-    undoable = useEditor((s) => canUndo(s) || s.paintHistory.length > 0),
+    undoable = useEditor(undoAvailable),
     redoable = useEditor(canRedo),
     selected = useEditor((s) => s.selected);
   const pivotPicking = useEditor((s) => s.pivotPicking);

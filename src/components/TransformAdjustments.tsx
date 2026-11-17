@@ -1,8 +1,14 @@
 import { useMemo } from 'react';
 import { Crosshair, Info, Magnet, Minus, Move3D, Move, Plus, Rotate3D } from 'lucide-react';
+import { chooseTransformTool } from '../core/commands';
 import { useEditor } from '../core/store';
 import { usePreferences, useShortcut, withShortcut } from '../core/preferences';
-import { stepTransform, transformSelection } from '../core/transform-selection';
+import {
+  activeTransformTool,
+  stepTransform,
+  transformSelection,
+  warpMovesFromPatches,
+} from '../core/transform-selection';
 import { NumericInput } from './ui';
 
 export const moveSteps = [0.01, 0.1, 0.5, 1, 5, 10];
@@ -18,7 +24,9 @@ export function TransformAdjustments() {
     pivotPicking = useEditor((s) => s.pivotPicking),
     navigationMode = useEditor((s) => s.navigationMode),
     temporaryOrbit = useEditor((s) => s.temporaryOrbit),
-    tool = useEditor((s) => s.tool);
+    editorTool = useEditor((s) => s.tool),
+    warp = useEditor((s) => s.warp),
+    tool = useEditor(activeTransformTool);
   const moveKey = useShortcut('move'),
     rotateKey = useShortcut('rotate'),
     freeMoveKey = useShortcut('freeMove'),
@@ -36,6 +44,8 @@ export function TransformAdjustments() {
           pivotPicking,
           navigationMode,
           temporaryOrbit,
+          tool: editorTool,
+          warp,
         },
         tool,
       ),
@@ -48,6 +58,8 @@ export function TransformAdjustments() {
       pivotPicking,
       navigationMode,
       temporaryOrbit,
+      editorTool,
+      warp,
       tool,
     ],
   );
@@ -57,16 +69,16 @@ export function TransformAdjustments() {
   const step = rotating ? view.rotationSnapStep : view.snapStep;
   const adjust = (axis: 0 | 1 | 2, direction: number) => {
     // Read fresh state so rapid repeated clicks always start from the last accepted pose.
-    const state = useEditor.getState();
-    if (state.tool !== 'translate' && state.tool !== 'rotate') return;
-    const amount = state.tool === 'rotate' ? state.view.rotationSnapStep : state.view.snapStep;
-    const patches = stepTransform(
-      transformSelection(state, state.tool),
-      state.tool,
-      axis,
-      direction * amount,
-    );
-    if (patches.length) state.transformMany(patches, true, state.tool === 'translate', true);
+    const state = useEditor.getState(),
+      mode = activeTransformTool(state);
+    if (mode !== 'translate' && mode !== 'rotate') return;
+    const amount = mode === 'rotate' ? state.view.rotationSnapStep : state.view.snapStep;
+    const selection = transformSelection(state, mode);
+    const patches = stepTransform(selection, mode, axis, direction * amount);
+    if (selection.kind === 'warp') {
+      const moves = warpMovesFromPatches(selection, patches);
+      if (moves.length) state.moveWarpPoints(moves, 'end');
+    } else if (patches.length) state.transformMany(patches, true, mode === 'translate', true);
   };
   return (
     <div className="transform-adjustments">
@@ -83,7 +95,7 @@ export function TransformAdjustments() {
             data-combined={mode === 'transform' ? true : undefined}
             aria-pressed={tool === mode}
             title={withShortcut(label, key)}
-            onClick={() => useEditor.getState().setTool(mode)}
+            onClick={() => chooseTransformTool(mode)}
           >
             <Icon size={15} aria-hidden="true" /> {label} {key ? <kbd>{key}</kbd> : null}
           </button>
@@ -168,7 +180,9 @@ export function TransformAdjustments() {
               <button
                 key={space}
                 aria-pressed={selection.axes === space}
-                disabled={space === 'local' && selection.parts.length > 1}
+                disabled={
+                  space === 'local' && (selection.parts.length > 1 || selection.kind === 'warp')
+                }
                 onClick={() => useEditor.getState().setView({ space })}
               >
                 {space === 'world' ? 'World' : 'Local'}

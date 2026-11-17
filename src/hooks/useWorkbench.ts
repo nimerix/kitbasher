@@ -3,10 +3,11 @@ import { joinLiveSession } from '../core/live';
 import { committedScene, liveSession, useEditor } from '../core/store';
 import { readRecovery, saveRecovery } from '../core/recovery';
 import { driveAutosave, useDrive } from '../core/drive-sync';
-import { executeEditorCommand, shortcutCommand } from '../core/commands';
+import { chooseTransformTool, executeEditorCommand, shortcutCommand } from '../core/commands';
 import { isEditableTarget, keyboardContextMenu } from '../core/context-menu';
 import { actionRepeats, keyName, matchKeyAction } from '../core/keybindings';
 import { usePreferences } from '../core/preferences';
+import { warpingPoints } from '../core/transform-selection';
 
 export function useLiveSession() {
   useEffect(() => (liveSession ? joinLiveSession() : undefined), []);
@@ -133,17 +134,25 @@ export function useKeyboard(openScene: () => void, searchParts: () => void) {
       // Auto-repeat would flicker toggles such as P, O, H, and 5. Only brush sizing repeats.
       if (event.repeat && !actionRepeats(action)) return;
       const paintingSurface = state.tool === 'align' && state.operation.mode === 'surface';
-      const tools = {
-        select: 'select',
+      const transformTools = {
         move: 'translate',
         rotate: 'rotate',
         scale: 'scale',
         transform: 'transform',
+      } as const;
+      const tools = {
+        select: 'select',
         align: 'align',
         joint: 'joint',
         anchors: 'anchors',
+        warp: 'warp',
         measure: 'measure',
       } as const;
+      if (action in transformTools) {
+        event.preventDefault();
+        chooseTransformTool(transformTools[action as keyof typeof transformTools]);
+        return;
+      }
       if (action in tools) {
         event.preventDefault();
         state.setTool(tools[action as keyof typeof tools]);
@@ -222,7 +231,8 @@ export function useKeyboard(openScene: () => void, searchParts: () => void) {
         }
         case 'delete':
           event.preventDefault();
-          executeEditorCommand('delete');
+          if (warpingPoints(state) && state.warp!.selectedPoints.length) state.removeWarpPoints();
+          else executeEditorCommand('delete');
           return;
         case 'apply':
           if (nativeActivation || !['align', 'joint'].includes(state.tool)) return;

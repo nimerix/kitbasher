@@ -3,7 +3,7 @@ import type { Camera } from 'three';
 import { partMatrix, quat, radians, transformFromMatrix, vec } from './geometry';
 import { FreeTransformMotion } from './free-transform';
 import type { TransformPatch } from './free-transform';
-import type { Part } from './types';
+import type { TransformTarget } from './transform-selection';
 
 export interface TransformHandle {
   mode: 'translate' | 'rotate' | 'scale';
@@ -25,7 +25,7 @@ export class CombinedTransformDrag {
   private worldAxis: Vector3 | null;
 
   constructor(
-    private parts: Part[],
+    private parts: TransformTarget[],
     private pivot: Vector3,
     private orientation: Quaternion,
     readonly handle: TransformHandle,

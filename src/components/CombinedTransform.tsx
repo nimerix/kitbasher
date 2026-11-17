@@ -14,7 +14,7 @@ import { CombinedTransformDrag } from '../core/combined-transform';
 import type { TransformHandle } from '../core/combined-transform';
 import type { TransformPatch } from '../core/free-transform';
 import { translationIsPinned } from '../core/constraints';
-import { transformSelection } from '../core/transform-selection';
+import { transformSelection, warpMovesFromPatches } from '../core/transform-selection';
 import { useEditor } from '../core/store';
 import { usePreferences } from '../core/preferences';
 
@@ -68,6 +68,8 @@ export function CombinedTransform({ onPress }: { onPress: () => void }) {
     navigationMode = useEditor((s) => s.navigationMode),
     temporaryOrbit = useEditor((s) => s.temporaryOrbit),
     pivotPicking = useEditor((s) => s.pivotPicking),
+    tool = useEditor((s) => s.tool),
+    warp = useEditor((s) => s.warp),
     free = useEditor((s) => !!s.freeTransform);
   const scaling = usePreferences((s) => s.transform.scaling);
   const selection = useMemo(
@@ -82,13 +84,28 @@ export function CombinedTransform({ onPress }: { onPress: () => void }) {
           navigationMode,
           temporaryOrbit,
           pivotPicking,
+          tool,
+          warp,
         },
         'transform',
       ),
-    [scene, selected, view, isolated, nearbyParts, navigationMode, temporaryOrbit, pivotPicking],
+    [
+      scene,
+      selected,
+      view,
+      isolated,
+      nearbyParts,
+      navigationMode,
+      temporaryOrbit,
+      pivotPicking,
+      tool,
+      warp,
+    ],
   );
   const pinned = useMemo(
-    () => selection.parts.some((part) => translationIsPinned(scene.parts, scene.joints, part.id)),
+    () =>
+      selection.kind === 'parts' &&
+      selection.parts.some((part) => translationIsPinned(scene.parts, scene.joints, part.id)),
     [selection, scene],
   );
   const root = useRef<Group>(null),
@@ -97,6 +114,7 @@ export function CombinedTransform({ onPress }: { onPress: () => void }) {
   const [hover, setHover] = useState('');
   const [version, setVersion] = useState(0);
   const drag = useRef<{
+    selection: typeof selection;
     motion: CombinedTransformDrag;
     mode: TransformHandle['mode'];
     checkpointed: boolean;
@@ -113,6 +131,13 @@ export function CombinedTransform({ onPress }: { onPress: () => void }) {
       const current = drag.current;
       if (!current) return;
       const state = useEditor.getState();
+      if (current.selection.kind === 'warp') {
+        const moves = warpMovesFromPatches(current.selection, patches);
+        // The end always reaches the session, which records the drag as one undo step.
+        if (moves.length || settle) state.moveWarpPoints(moves, settle ? 'end' : 'drag');
+        invalidate();
+        return;
+      }
       state.transformMany(
         patches,
         !current.checkpointed,
@@ -129,7 +154,10 @@ export function CombinedTransform({ onPress }: { onPress: () => void }) {
   const finish = useCallback(() => {
     const current = drag.current;
     if (!current) return;
-    if (current.patches.length && useEditor.getState().view.clip.enabled)
+    if (
+      current.patches.length &&
+      (current.selection.kind === 'warp' || useEditor.getState().view.clip.enabled)
+    )
       apply(current.patches, true);
     drag.current = null;
     try {
@@ -250,6 +278,7 @@ export function CombinedTransform({ onPress }: { onPress: () => void }) {
         return;
       const capture = event.target as unknown as Capture;
       drag.current = {
+        selection,
         motion: new CombinedTransformDrag(
           selection.parts,
           selection.pivot,

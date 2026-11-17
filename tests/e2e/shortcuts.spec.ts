@@ -368,3 +368,97 @@ test('supports find/save/import/export shortcuts and fits the context menu in a 
   await page.screenshot({ path: '/tmp/kitbasher-context-menu-mobile.png' });
   expect(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth)).toBe(false);
 });
+
+async function warpState(page: Page) {
+  return page.evaluate(async () => {
+    const urls = performance.getEntriesByType('resource').map((entry) => entry.name);
+    const { useEditor } = await import(
+      urls.find((url) => /\/src\/core\/store\.ts(?:\?.*)?$/.test(url))!
+    );
+    const state = useEditor.getState();
+    return {
+      tool: state.tool as string,
+      stage: state.warp?.stage as string | undefined,
+      gizmo: state.warp?.gizmo as string | undefined,
+      targets: state.warp?.points.map((point: any) => point.target) as unknown[] | undefined,
+      selectedPoints: state.warp?.selectedPoints.length as number | undefined,
+      undo: state.warp?.undo.length as number | undefined,
+      free: !!state.freeTransform,
+      past: state.past.length as number,
+      parts: state.scene.parts.length as number,
+    };
+  });
+}
+
+test('routes transform keys, Delete and Undo to warp control points while warping', async ({
+  page,
+}) => {
+  await page.keyboard.press('w');
+  expect(await warpState(page)).toMatchObject({ tool: 'warp', stage: 'region' });
+  // The warp panel arrives with its own task, so the grid and the point come from the store.
+  await page.evaluate(async () => {
+    const urls = performance.getEntriesByType('resource').map((entry) => entry.name);
+    const { useEditor } = await import(
+      urls.find((url) => /\/src\/core\/store\.ts(?:\?.*)?$/.test(url))!
+    );
+    useEditor.getState().setWarpRegion('whole');
+    await useEditor.getState().layWarpGrid();
+    const part = useEditor.getState().scene.parts.find((p: any) => p.id === 'a');
+    const position = part.geometry.getAttribute('position'),
+      index = part.geometry.index;
+    const centre = [0, 0, 0];
+    for (let c = 0; c < 3; c++) {
+      const vertex = index ? index.getX(c) : c;
+      centre[0] += position.getX(vertex) / 3;
+      centre[1] += position.getY(vertex) / 3;
+      centre[2] += position.getZ(vertex) / 3;
+    }
+    useEditor.getState().addWarpPoint({ partId: 'a', point: centre, normal: [1, 0, 0] }, 0);
+  });
+  expect(await warpState(page)).toMatchObject({
+    stage: 'warp',
+    gizmo: 'translate',
+    targets: [null],
+    selectedPoints: 1,
+    undo: 1,
+  });
+
+  for (const [key, gizmo] of [
+    ['r', 'rotate'],
+    ['s', 'scale'],
+    ['t', 'transform'],
+    ['g', 'translate'],
+  ]) {
+    await page.keyboard.press(key);
+    expect(await warpState(page)).toMatchObject({ tool: 'warp', gizmo });
+  }
+
+  // Free move works on the point inside the session: Escape puts it back, Enter keeps it.
+  const box = (await page.locator('canvas').boundingBox())!;
+  const pointer = { x: box.x + box.width / 2, y: box.y + box.height / 2 };
+  for (const finish of ['Escape', 'Enter']) {
+    await page.mouse.move(pointer.x, pointer.y);
+    await page.keyboard.press('Shift+g');
+    await page.mouse.move(pointer.x + 40, pointer.y - 20, { steps: 6 });
+    const moving = await warpState(page);
+    expect(moving).toMatchObject({ tool: 'warp', free: true, undo: 1 });
+    expect(moving.targets![0]).not.toBeNull();
+    await page.keyboard.press(finish);
+    expect(await warpState(page)).toMatchObject({
+      tool: 'warp',
+      free: false,
+      undo: finish === 'Escape' ? 1 : 2,
+    });
+  }
+  expect((await warpState(page)).targets![0]).not.toBeNull();
+
+  // Undo steps back through the session without touching the scene or leaving the tool.
+  await page.keyboard.press('Control+z');
+  expect(await warpState(page)).toMatchObject({ tool: 'warp', targets: [null], undo: 1, past: 0 });
+
+  // Delete removes the selected point, never the part.
+  await page.keyboard.press('Delete');
+  expect(await warpState(page)).toMatchObject({ tool: 'warp', targets: [], undo: 2, parts: 3 });
+  await page.keyboard.press('Meta+z');
+  expect(await warpState(page)).toMatchObject({ tool: 'warp', targets: [null], undo: 1 });
+});
