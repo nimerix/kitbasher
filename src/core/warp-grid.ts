@@ -1,4 +1,3 @@
-import { MeshoptSimplifier } from '../vendor/meshoptimizer/simplifier';
 import { WarpRole, type WarpRegion } from './warp-region';
 
 export const warpDensityNodes = [60, 120, 250, 500, 1000, 2000, 4000] as const;
@@ -19,6 +18,8 @@ export interface WarpGrid {
 }
 
 export async function buildWarpGrid(region: WarpRegion, density: number): Promise<WarpGrid> {
+  // Loaded on first use, which keeps the WASM simplifier out of the app's startup bundle.
+  const { MeshoptSimplifier } = await import('../vendor/meshoptimizer/simplifier');
   await MeshoptSimplifier.ready;
   const level = Math.min(warpDensityNodes.length - 1, Math.max(0, Math.round(density)));
   const target = warpDensityNodes[level];
