@@ -58,7 +58,8 @@ function closestHit(point: Vector3, neighbours: WarpNeighbour[]): Hit | null {
   const nearest = new Vector3();
   for (const n of neighbours) {
     local.copy(point).applyMatrix4(n.inverse);
-    const hit = n.tree.closestPointToPoint(local);
+    const reach = best / Math.min(...n.part.scale.map(Math.abs));
+    const hit = n.tree.closestPointToPoint(local, undefined, 0, reach);
     if (!hit) continue;
     const world = hit.point.applyMatrix4(n.matrix);
     const distance = world.distanceTo(point);
@@ -112,11 +113,18 @@ function restNormalsOf(model: WarpModel) {
       sums[o + 2] += nz;
     }
   }
+  const m = model.matrix;
+  const det =
+    m[0] * (m[5] * m[10] - m[9] * m[6]) -
+    m[4] * (m[1] * m[10] - m[9] * m[2]) +
+    m[8] * (m[1] * m[6] - m[5] * m[2]);
+  // A mirrored part has reversed world winding, which flips the cross products.
+  const sign = det < 0 ? -1 : 1;
   normals = new Float64Array(grid.nodes.length * 3);
   for (let n = 0; n < grid.nodes.length; n++) {
     const o = grid.nodes[n] * 3;
     const length = Math.hypot(sums[o], sums[o + 1], sums[o + 2]) || 1;
-    for (let a = 0; a < 3; a++) normals[n * 3 + a] = sums[o + a] / length;
+    for (let a = 0; a < 3; a++) normals[n * 3 + a] = (sign * sums[o + a]) / length;
   }
   restNormals.set(model, normals);
   return normals;

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { Box3, BoxGeometry, BufferGeometry, Matrix4, Vector3 } from 'three';
+import { Box3, Quaternion, BoxGeometry, BufferGeometry, Matrix4, Vector3 } from 'three';
 import { workerIndexTriangles } from '../../src/core/spatial-index';
 import { buildWarpModel } from '../../src/core/warp-model';
 import { createWarpOutput, evaluateWarp } from '../../src/core/warp-evaluate';
@@ -18,7 +18,7 @@ import {
 } from '../../src/core/warp-solve';
 import { partMatrix } from '../../src/core/geometry';
 import { treeOf } from '../../src/core/clipping';
-import type { Part, SceneDocument } from '../../src/core/types';
+import type { Part, Quat, SceneDocument } from '../../src/core/types';
 
 const overlap = 0.1;
 
@@ -69,6 +69,21 @@ async function seam(gap: number) {
   return { model, warped, wall, neighbours: [neighbourOf(wall)] };
 }
 
+const turn = (axis: Vector3, degrees: number) =>
+  new Quaternion().setFromAxisAngle(axis, (degrees * Math.PI) / 180).toArray() as Quat;
+
+/** Cubes with the warped one mirrored and rotated, and a rotated plate neighbour. */
+async function transformedSeam() {
+  const box = new BoxGeometry(20, 20, 20, 12, 12, 12);
+  const warped = partOf('warped', box, [0, 0, 0]);
+  warped.scale = [1, 1, -1];
+  warped.quaternion = turn(new Vector3(0, 1, 0), 90);
+  const wall = partOf('wall', new BoxGeometry(20, 40, 10), [31, 0, 0]);
+  wall.quaternion = turn(new Vector3(0, 0, 1), 90);
+  const model = await modelOf(box, partMatrix(warped));
+  return { model, neighbours: [neighbourOf(wall)] };
+}
+
 describe('warp neighbours', () => {
   afterEach(() => vi.unstubAllGlobals());
 
@@ -89,6 +104,23 @@ describe('warp neighbours', () => {
     const state = createWarpState(model.restNodes);
     const targets = closeGapTargets(model, state, neighbours, overlap);
     for (const { node } of targets) expect(state.positions[node * 3]).toBeGreaterThan(9);
+  });
+
+  it('skips a back-facing node that is in range and not past the surface', async () => {
+    const { model } = await seam(1);
+    const plate = partOf('plate', new BoxGeometry(0.2, 20, 20), [9.5, 0, 0]);
+    const state = createWarpState(model.restNodes);
+    expect(closeGapTargets(model, state, [neighbourOf(plate)], overlap)).toEqual([]);
+  });
+
+  it('targets the facing side of a mirrored, rotated part and a rotated neighbour', async () => {
+    const { model, neighbours } = await transformedSeam();
+    const state = createWarpState(model.restNodes);
+    const targets = closeGapTargets(model, state, neighbours, overlap);
+    expect(targets.length).toBeGreaterThan(0);
+    for (const { target } of targets) expect(target[0]).toBeCloseTo(11.1, 5);
+    const report = measureSeam(model, createWarpOutput(model), neighbours)!;
+    expect(report.gaps.some((gap) => Math.abs(gap - 1) < 1e-5)).toBe(true);
   });
 
   it('returns null seam when nothing is within range', async () => {
