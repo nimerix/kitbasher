@@ -1,6 +1,6 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { BufferAttribute, BufferGeometry, PlaneGeometry, Triangle, Vector3 } from 'three';
-import { useActivity } from '../../src/core/activity';
+import { requestTaskCancellation, useActivity } from '../../src/core/activity';
 import { triangleCount } from '../../src/core/geometry';
 import { useEditor, type WarpPoint } from '../../src/core/store';
 import { readFace } from '../../src/core/surfaces';
@@ -8,6 +8,16 @@ import { bindPoint } from '../../src/core/warp-bind';
 import { defaultWarpDensity } from '../../src/core/warp-grid';
 import type { WarpModel } from '../../src/core/warp-model';
 import type { Part, SceneDocument, SurfacePoint, Vec3 } from '../../src/core/types';
+
+const job = vi.hoisted(() => ({ failure: null as Error | null }));
+vi.mock('../../src/core/warp-job', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../src/core/warp-job')>();
+  return {
+    ...actual,
+    buildWarpModelJob: (...args: Parameters<typeof actual.buildWarpModelJob>) =>
+      job.failure ? Promise.reject(job.failure) : actual.buildWarpModelJob(...args),
+  };
+});
 
 function plate(id: string, x = 0): Part {
   const geometry = new PlaneGeometry(40, 40, 16, 16);
@@ -70,9 +80,17 @@ const editor = () => useEditor.getState();
 const session = () => useEditor.getState().warp!;
 const toast = () => useEditor.getState().toast?.message;
 const warpTasks = () => useActivity.getState().tasks.filter((t) => t.title === 'Preparing warp');
+const runningTask = () => warpTasks().find((t) => t.status === 'running')!;
+const failures = () => warpTasks().filter((t) => t.status === 'failed');
+const errors = () =>
+  useActivity
+    .getState()
+    .notifications.filter((n) => n.kind === 'error')
+    .map((n) => n.message);
 
 const initial = useEditor.getState();
 afterEach(() => {
+  job.failure = null;
   editor().cancelWarp();
   useEditor.setState(initial);
   useActivity.setState({ tasks: [], notifications: [] });
@@ -374,6 +392,61 @@ describe('warp session', () => {
         .map((task) => task.status)
         .sort(),
     ).toEqual(['cancelled', 'completed', 'completed', 'completed', 'completed']);
+  });
+
+  it('restores the stage, density and stroke undo when a build is cancelled', async () => {
+    const a = plate('a');
+    setup([a], ['a']);
+    editor().setTool('warp');
+    editor().paintWarpRegion(hit('a', 0, 0), faceAt(a.geometry, 0, 0), false, true);
+    editor().endPaintStroke();
+    const painted = session().faces;
+
+    const first = editor().layWarpGrid();
+    requestTaskCancellation(runningTask().id);
+    await first;
+    expect(session()).toMatchObject({ stage: 'region', density: defaultWarpDensity, model: null });
+    expect(session().faces).toEqual(painted);
+    expect(editor().paintHistory).toHaveLength(1);
+    editor().undoPaintStroke();
+    expect(session().faces).toEqual([]);
+
+    await editor().layWarpGrid();
+    const model = session().model!;
+    const rebuild = editor().setWarpDensity(1);
+    expect(session()).toMatchObject({ stage: 'building', density: 1 });
+    requestTaskCancellation(runningTask().id);
+    await rebuild;
+    expect(session()).toMatchObject({ stage: 'warp', density: defaultWarpDensity });
+    expect(session().model).toBe(model);
+    expect(failures()).toEqual([]);
+    expect(errors()).toEqual([]);
+
+    await editor().setWarpDensity(1);
+    expect(session()).toMatchObject({ stage: 'warp', density: 1 });
+    expect(session().model).not.toBe(model);
+    expect(session().model!.grid.nodes.length).toBeLessThan(model.grid.nodes.length);
+    expect(failures()).toEqual([]);
+  });
+
+  it('restores the stage and density and reports the error when a rebuild fails', async () => {
+    setup([plate('a')], ['a']);
+    editor().setTool('warp');
+    await editor().layWarpGrid();
+    const model = session().model!;
+
+    job.failure = new Error('The warp worker stopped.');
+    await editor().setWarpDensity(1);
+    expect(session()).toMatchObject({ stage: 'warp', density: defaultWarpDensity });
+    expect(session().model).toBe(model);
+    expect(failures().map((task) => task.detail)).toEqual(['The warp worker stopped.']);
+    expect(errors()).toEqual(['Preparing warp: The warp worker stopped.']);
+
+    job.failure = null;
+    await editor().setWarpDensity(1);
+    expect(session()).toMatchObject({ stage: 'warp', density: 1 });
+    expect(session().model).not.toBe(model);
+    expect(failures()).toHaveLength(1);
   });
 
   it('never writes to the source geometry arrays', async () => {
