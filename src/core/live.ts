@@ -194,6 +194,8 @@ export function joinLiveSession() {
 
   const sendEdit = async () => {
     const scene = committedScene(useEditor.getState());
+    // A warp applied before this edit was captured is settled by its answer.
+    const pending = useEditor.getState().warpPending;
     const base = confirmed!;
     const flags = { checkpoint, replace };
     dirty = checkpoint = replace = false;
@@ -215,10 +217,8 @@ export function joinLiveSession() {
       });
       if (response.ok) {
         awaited = ((await response.json()) as { version: number }).version;
-        // Only the edit that carries an applied warp settles it, not one sent before it.
-        const { warpPending, settleWarp } = useEditor.getState();
-        if (warpPending && scene.parts.some((part) => part.geometry === warpPending.applied))
-          settleWarp(true);
+        if (pending && pending === useEditor.getState().warpPending)
+          useEditor.getState().settleWarp(true);
       } else refused(await errorOf(response));
     } catch (error) {
       if (error instanceof Refusal) refused(error.message);
@@ -312,6 +312,7 @@ export function joinLiveSession() {
     source.close();
     unsubscribe();
     useSharedHistory(null);
+    useEditor.setState({ liveStatus: null });
     window.removeEventListener('pointerdown', markViewMoved, { capture: true });
     window.removeEventListener('wheel', markViewMoved, { capture: true });
   };
