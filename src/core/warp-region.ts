@@ -129,3 +129,16 @@ export function buildWarpRegion(
     interiorCount,
   };
 }
+
+/** Position of a geometry face among the region's triangles, or -1 when it is not in the region. */
+export function regionTriangleOf(region: WarpRegion, face: number) {
+  const { faces } = region;
+  let lo = 0,
+    hi = faces.length - 1;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (faces[mid] < face) lo = mid + 1;
+    else hi = mid;
+  }
+  return faces.length && faces[lo] === face ? lo : -1;
+}

@@ -1,6 +1,6 @@
 import type { Vec3 } from './types';
 import type { WarpGrid } from './warp-grid';
-import { WarpRole, type WarpRegion } from './warp-region';
+import { WarpRole, regionTriangleOf, type WarpRegion } from './warp-region';
 
 export const warpBindingNodes = 4;
 
@@ -127,19 +127,21 @@ export function bindPoint(
   face: number,
   barycentric: Vec3,
 ): { node: number[]; weight: number[] } {
-  const { faces, triangles } = region;
-  let lo = 0,
-    hi = faces.length - 1;
-  while (lo < hi) {
-    const mid = (lo + hi) >> 1;
-    if (faces[mid] < face) lo = mid + 1;
-    else hi = mid;
-  }
-  if (!faces.length || faces[lo] !== face) throw new Error('Face is not in the warp region.');
+  const triangle = regionTriangleOf(region, face);
+  if (triangle < 0) throw new Error('Face is not in the warp region.');
+  return bindTrianglePoint(region, binding, triangle, barycentric);
+}
 
+/** `bindPoint` for a region triangle already found with `regionTriangleOf`. */
+export function bindTrianglePoint(
+  region: WarpRegion,
+  binding: WarpBinding,
+  triangle: number,
+  barycentric: Vec3,
+): { node: number[]; weight: number[] } {
   const merged = new Map<number, number>();
   for (let c = 0; c < 3; c++) {
-    const v = triangles[lo * 3 + c];
+    const v = region.triangles[triangle * 3 + c];
     for (let j = 0; j < K; j++) {
       const n = binding.node[v * K + j];
       if (n === none) continue;

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { BoxGeometry, BufferAttribute, BufferGeometry, PlaneGeometry, SphereGeometry } from 'three';
 import { triangleCount } from '../../src/core/geometry';
-import { buildWarpRegion, WarpRole } from '../../src/core/warp-region';
+import { buildWarpRegion, regionTriangleOf, WarpRole } from '../../src/core/warp-region';
 
 describe('buildWarpRegion', () => {
   it('treats a whole closed mesh as interior with no border', () => {
@@ -87,5 +87,15 @@ describe('buildWarpRegion outputs', () => {
     const r = buildWarpRegion(g, null);
     expect(r.weldOf[3]).toBe(0xffffffff);
     expect(r.weldedCount).toBe(3);
+  });
+});
+
+describe('regionTriangleOf', () => {
+  it('finds each region face and returns -1 for faces outside the region', () => {
+    const painted = [10, 11, 12, 13, 18, 19, 20, 21];
+    const r = buildWarpRegion(new PlaneGeometry(10, 10, 4, 4), painted);
+    painted.forEach((face, i) => expect(regionTriangleOf(r, face)).toBe(i));
+    for (const face of [0, 9, 14, 17, 22, 31, -1]) expect(regionTriangleOf(r, face)).toBe(-1);
+    expect(regionTriangleOf(buildWarpRegion(new PlaneGeometry(10, 10, 4, 4), []), 0)).toBe(-1);
   });
 });

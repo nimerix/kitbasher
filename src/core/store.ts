@@ -63,13 +63,13 @@ import { trimHistory } from './history-budget';
 import { captureComponents, instantiateComponents } from './clipboard';
 import type { ComponentClipboard } from './clipboard';
 import { referencePlanes, resolvePart } from './references';
-import { bindPoint } from './warp-bind';
+import { bindTrianglePoint } from './warp-bind';
 import { createWarpOutput, type WarpOutput } from './warp-evaluate';
 import { defaultWarpDensity, warpDensityNodes } from './warp-grid';
 import { buildWarpModelJob } from './warp-job';
 import type { WarpModel, WarpModelInput } from './warp-model';
 import type { SeamReport } from './warp-neighbour';
-import type { WarpRegion } from './warp-region';
+import { regionTriangleOf } from './warp-region';
 import { createWarpState, type WarpState } from './warp-solve';
 import type {
   AssemblyOperation,
@@ -418,8 +418,15 @@ const newWarpSession = (part: Part, epoch: number): WarpSession => ({
   undo: [],
 });
 
-// The grid build in flight, and the stage to return to if it is cancelled or fails.
-let warpBuild: { controller: AbortController; from: 'region' | 'warp' } | null = null;
+type WarpSettled = { stage: 'region' | 'warp'; density: number };
+// The grid build in flight, and the stage and density to return to if it is cancelled or fails.
+let warpBuild: { controller: AbortController; from: WarpSettled } | null = null;
+
+/** The session before this build, or before the build in flight that it replaces. */
+const settledWarp = (warp: WarpSession): WarpSettled =>
+  warp.stage === 'building'
+    ? (warpBuild?.from ?? { stage: 'region', density: warp.density })
+    : { stage: warp.stage, density: warp.density };
 
 function abortWarpBuild() {
   const build = warpBuild;
@@ -458,22 +465,9 @@ function warpModelInput(part: Part, faces: number[] | null, density: number): Wa
   };
 }
 
-/** The face's position among the region triangles, or -1 when it is outside the region. */
-function regionTriangle(region: WarpRegion, face: number) {
-  const { faces } = region;
-  let lo = 0,
-    hi = faces.length - 1;
-  while (lo < hi) {
-    const mid = (lo + hi) >> 1;
-    if (faces[mid] < face) lo = mid + 1;
-    else hi = mid;
-  }
-  return faces.length && faces[lo] === face ? lo : -1;
-}
-
 /** Binds a point to a model, or returns null when its face is outside the model's region. */
 function bindWarpPoint(model: WarpModel, point: WarpPoint): WarpPoint | null {
-  const triangle = regionTriangle(model.region, point.face);
+  const triangle = regionTriangleOf(model.region, point.face);
   if (triangle < 0) return null;
   const restWorld: Vec3 = [0, 0, 0];
   for (let c = 0; c < 3; c++) {
@@ -482,7 +476,7 @@ function bindWarpPoint(model: WarpModel, point: WarpPoint): WarpPoint | null {
   }
   return {
     ...point,
-    binding: bindPoint(model.region, model.grid, model.binding, point.face, point.barycentric),
+    binding: bindTrianglePoint(model.region, model.binding, triangle, point.barycentric),
     restWorld,
   };
 }
@@ -1252,83 +1246,17 @@ export const useEditor = create<EditorState>((set, get) => ({
     return true;
   },
   layWarpGrid: async () => {
-    const state = get(),
-      warp = state.warp;
-    const part = warp && state.scene.parts.find((p) => p.id === warp.partId);
-    if (!warp || part?.geometry !== warp.source) return;
-    const from = warp.stage === 'building' ? (warpBuild?.from ?? 'region') : warp.stage;
-    abortWarpBuild();
-    const controller = new AbortController();
-    const build = (warpBuild = { controller, from });
-    // An empty painted region would leave the grid nothing to simplify, so it means the whole part.
-    const faces = warp.region === 'painted' && warp.faces.length ? warp.faces : null;
-    const taskId = startTask({
-      title: 'Preparing warp',
-      detail: `${(faces?.length ?? triangleCount(part.geometry)).toLocaleString()} triangles`,
-      progress: null,
-      notify: false,
-      cancel: () => controller.abort(),
-    });
-    controller.signal.addEventListener(
-      'abort',
-      () => cancelTask(taskId, 'Warp preparation cancelled.'),
-      { once: true },
-    );
-    set({ painting: false, paintHistory: [], warp: { ...warp, stage: 'building' } });
-    let model: WarpModel;
-    try {
-      model = await buildWarpModelJob(warpModelInput(part, faces, warp.density), controller.signal);
-    } catch (error) {
-      // A newer build or a cancelled session has already taken over.
-      if (warpBuild !== build) return;
-      warpBuild = null;
-      if (!controller.signal.aborted)
-        failTask(taskId, error instanceof Error ? error.message : String(error));
-      const current = get().warp;
-      if (current) set({ warp: { ...current, stage: from } });
-      return;
-    }
-    const current = get().warp;
-    if (warpBuild !== build || !current) return;
-    warpBuild = null;
-    const rebound = new Map<WarpPoint, WarpPoint | null>();
-    const rebind = (points: WarpPoint[]) =>
-      points.flatMap((point) => {
-        if (!rebound.has(point)) rebound.set(point, bindWarpPoint(model, point));
-        return rebound.get(point) ?? [];
-      });
-    const points = rebind(current.points);
-    const kept = new Set(points.map((point) => point.id));
-    const output = createWarpOutput(model);
-    disposeWarpPreview(current.preview);
-    set({
-      warp: {
-        ...current,
-        stage: 'warp',
-        model,
-        state: createWarpState(model.restNodes),
-        output,
-        preview: warpPreview(current.source, output),
-        points,
-        selectedPoints: current.selectedPoints.filter((id) => kept.has(id)),
-        gapTargets: [],
-        folds: new Uint32Array(0),
-        seam: null,
-        // Snapshots must bind to the same grid as the session; gap targets name old nodes.
-        undo: current.undo.map((step) => ({ points: rebind(step.points), gapTargets: [] })),
-      },
-    });
-    completeTask(taskId, `${model.grid.nodes.length.toLocaleString()} grid nodes`);
-    if (points.length < current.points.length)
-      get().notify('Some control points were outside the new region and were removed.', 'info');
+    const { warp } = get();
+    if (warp) await layWarp(settledWarp(warp));
   },
   setWarpDensity: async (density) => {
     const { warp } = get();
     if (!warp || !Number.isFinite(density)) return;
     const level = Math.min(warpDensityNodes.length - 1, Math.max(0, Math.round(density)));
     if (level === warp.density) return;
+    const from = settledWarp(warp);
     set({ warp: { ...warp, density: level } });
-    if (warp.stage !== 'region') await get().layWarpGrid();
+    if (warp.stage !== 'region') await layWarp(from);
   },
   cancelWarp: (notice) => {
     const { warp } = get();
@@ -2183,6 +2111,81 @@ useEditor.subscribe((state, previous) => {
   if (isolated.length !== state.isolated.length)
     useEditor.setState({ isolated: isolated.length ? isolated : null });
 });
+
+/** Lays the session's grid. A build that stops returns the session to `from`. */
+async function layWarp(from: WarpSettled) {
+  const state = useEditor.getState(),
+    warp = state.warp;
+  const part = warp && state.scene.parts.find((p) => p.id === warp.partId);
+  if (!warp || part?.geometry !== warp.source) return;
+  abortWarpBuild();
+  const controller = new AbortController();
+  const build = (warpBuild = { controller, from });
+  // An empty painted region would leave the grid nothing to simplify, so it means the whole part.
+  const faces = warp.region === 'painted' && warp.faces.length ? warp.faces : null;
+  const taskId = startTask({
+    title: 'Preparing warp',
+    detail: `${(faces?.length ?? triangleCount(part.geometry)).toLocaleString()} triangles`,
+    progress: null,
+    notify: false,
+    cancel: () => controller.abort(),
+  });
+  controller.signal.addEventListener(
+    'abort',
+    () => cancelTask(taskId, 'Warp preparation cancelled.'),
+    { once: true },
+  );
+  useEditor.setState({ painting: false, warp: { ...warp, stage: 'building' } });
+  let model: WarpModel;
+  try {
+    model = await buildWarpModelJob(warpModelInput(part, faces, warp.density), controller.signal);
+  } catch (error) {
+    // A newer build or a cancelled session has already taken over.
+    if (warpBuild !== build) return;
+    warpBuild = null;
+    if (!controller.signal.aborted)
+      failTask(taskId, error instanceof Error ? error.message : String(error));
+    const current = useEditor.getState().warp;
+    if (current) useEditor.setState({ warp: { ...current, ...from } });
+    return;
+  }
+  const current = useEditor.getState().warp;
+  if (warpBuild !== build || !current) return;
+  warpBuild = null;
+  const rebound = new Map<WarpPoint, WarpPoint | null>();
+  const rebind = (points: WarpPoint[]) =>
+    points.flatMap((point) => {
+      if (!rebound.has(point)) rebound.set(point, bindWarpPoint(model, point));
+      return rebound.get(point) ?? [];
+    });
+  const points = rebind(current.points);
+  const kept = new Set(points.map((point) => point.id));
+  const output = createWarpOutput(model);
+  disposeWarpPreview(current.preview);
+  useEditor.setState({
+    // Stroke undo stays available until a grid replaces the region it painted.
+    paintHistory: [],
+    warp: {
+      ...current,
+      stage: 'warp',
+      model,
+      state: createWarpState(model.restNodes),
+      output,
+      preview: warpPreview(current.source, output),
+      points,
+      selectedPoints: current.selectedPoints.filter((id) => kept.has(id)),
+      gapTargets: [],
+      folds: new Uint32Array(0),
+      seam: null,
+      // Snapshots must bind to the same grid as the session; gap targets name old nodes.
+      undo: current.undo.map((step) => ({ points: rebind(step.points), gapTargets: [] })),
+    },
+  });
+  completeTask(taskId, `${model.grid.nodes.length.toLocaleString()} grid nodes`);
+  const { notify } = useEditor.getState();
+  if (points.length < current.points.length)
+    notify('Some control points were outside the new region and were removed.', 'info');
+}
 
 // A warp is built from one geometry of one scene. Undo, another editor, opening a file
 // or leaving the tool by any route ends the session.
