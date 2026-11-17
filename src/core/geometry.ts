@@ -31,10 +31,13 @@ export const radians = (value: number) => (value * Math.PI) / 180;
 export const degrees = (value: number) => (value * 180) / Math.PI;
 export const vec = (value: Vec3) => new Vector3(...value);
 export const quat = (value: Quat) => new Quaternion(...value);
-export const partMatrix = (part: Part) =>
+export const partMatrix = (part: Pick<Part, 'position' | 'quaternion' | 'scale'>) =>
   new Matrix4().compose(vec(part.position), quat(part.quaternion), vec(part.scale));
 
-export function transformFromMatrix(part: Part, matrix: Matrix4): Part {
+export function transformFromMatrix<T extends Pick<Part, 'position' | 'quaternion' | 'scale'>>(
+  part: T,
+  matrix: Matrix4,
+): T {
   const position = new Vector3(),
     quaternion = new Quaternion(),
     scale = new Vector3();

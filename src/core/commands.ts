@@ -4,7 +4,8 @@ import { nextIsolation } from './isolation';
 import { matchKeyAction } from './keybindings';
 import type { KeyActionId, KeyInput } from './keybindings';
 import { primaryShortcutText, usePreferences } from './preferences';
-import { canRedo, canUndo, useEditor } from './store';
+import { canRedo, canUndo, useEditor, type WarpGizmo } from './store';
+import { warpingPoints } from './transform-selection';
 import type { SurfacePoint } from './types';
 
 export async function saveCurrentScene() {
@@ -29,6 +30,31 @@ export async function downloadCurrentScene() {
   } finally {
     state.setBusy(null);
   }
+}
+
+type EditorState = ReturnType<typeof useEditor.getState>;
+
+/**
+ * What Undo steps back first: a paint stroke, a control-point edit in a warp session, or the
+ * scene. Scene undo while warping would leave the tool and discard the session.
+ */
+function undoTarget(state: EditorState) {
+  const painting =
+    (state.tool === 'align' && state.operation.mode === 'surface') ||
+    (state.tool === 'warp' && state.warp?.stage === 'region');
+  if (painting && state.paintHistory.length) return 'stroke';
+  if (warpingPoints(state) && state.warp!.undo.length) return 'warp';
+  return 'scene';
+}
+
+export const undoAvailable = (state: EditorState) =>
+  canUndo(state) || state.paintHistory.length > 0 || undoTarget(state) === 'warp';
+
+/** Chooses a transform tool, or while warping, the gizmo that moves control points. */
+export function chooseTransformTool(tool: WarpGizmo) {
+  const state = useEditor.getState();
+  if (warpingPoints(state)) state.setWarpOptions({ gizmo: tool });
+  else state.setTool(tool);
 }
 
 export interface CommandContext {
@@ -59,15 +85,12 @@ export function editorCommands(context: CommandContext = {}) {
     undo: command(
       'Undo',
       () => {
-        if (
-          state.tool === 'align' &&
-          state.operation.mode === 'surface' &&
-          state.paintHistory.length
-        )
-          state.undoPaintStroke();
+        const target = undoTarget(state);
+        if (target === 'stroke') state.undoPaintStroke();
+        else if (target === 'warp') state.undoWarpEdit();
         else state.undo();
       },
-      idle && (canUndo(state) || state.paintHistory.length > 0),
+      idle && undoAvailable(state),
       'undo',
     ),
     redo: command('Redo', state.redo, idle && canRedo(state), 'redo'),
@@ -99,12 +122,12 @@ export function editorCommands(context: CommandContext = {}) {
       'rename',
     ),
     delete: command('Delete unlocked parts', state.deleteSelected, idle && editable, 'delete'),
-    move: command('Move', () => state.setTool('translate'), idle && editable, 'move'),
-    rotate: command('Rotate', () => state.setTool('rotate'), idle && editable, 'rotate'),
-    scale: command('Scale', () => state.setTool('scale'), idle && editable, 'scale'),
+    move: command('Move', () => chooseTransformTool('translate'), idle && editable, 'move'),
+    rotate: command('Rotate', () => chooseTransformTool('rotate'), idle && editable, 'rotate'),
+    scale: command('Scale', () => chooseTransformTool('scale'), idle && editable, 'scale'),
     transform: command(
       'Transform',
-      () => state.setTool('transform'),
+      () => chooseTransformTool('transform'),
       idle && editable,
       'transform',
     ),

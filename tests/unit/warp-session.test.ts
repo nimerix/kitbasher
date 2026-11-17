@@ -12,11 +12,13 @@ import {
 } from 'three';
 import { MeshBVH } from 'three-mesh-bvh';
 import { requestTaskCancellation, useActivity } from '../../src/core/activity';
+import { chooseTransformTool, editorCommands, executeEditorCommand } from '../../src/core/commands';
 import { triangleCount } from '../../src/core/geometry';
 import { spatialIndexOptions, workerIndexTriangles } from '../../src/core/spatial-index';
 import { useEditor, type WarpPoint } from '../../src/core/store';
 import { useXR } from '../../src/core/xr-session';
 import { readFace } from '../../src/core/surfaces';
+import { activeTransformTool } from '../../src/core/transform-selection';
 import { bindPoint } from '../../src/core/warp-bind';
 import { deformPoint } from '../../src/core/warp-evaluate';
 import { defaultWarpDensity } from '../../src/core/warp-grid';
@@ -1238,5 +1240,85 @@ describe('warp points, close gap and apply', () => {
     editor().setScene({ ...editor().scene });
     expect(editor().warpPending).toBeNull();
     expect(kept.released()).toBe(true);
+  });
+});
+
+describe('warp commands', () => {
+  it('Mod+Z undoes warp strokes and point edits before the scene', async () => {
+    const a = plate('a');
+    setup([a], ['a']);
+    editor().patchParts(['a'], { color: '#112233' });
+    expect(editor().past).toHaveLength(1);
+    editor().setTool('warp');
+    editor().setBrush({ radius: 3, erase: false });
+    editor().paintWarpRegion(hit('a', 0, 0), faceAt(a.geometry, 0, 0), false, true);
+    editor().endPaintStroke();
+    const first = session().faces;
+    editor().paintWarpRegion(hit('a', 8, 0), faceAt(a.geometry, 8, 0), false, true);
+    editor().endPaintStroke();
+    expect(session().faces.length).toBeGreaterThan(first.length);
+
+    executeEditorCommand('undo');
+    expect(session().faces).toEqual(first);
+    expect(editor().paintHistory).toHaveLength(1);
+    expect(editor().tool).toBe('warp');
+    expect(editor().past).toHaveLength(1);
+
+    await editor().layWarpGrid();
+    const p = addAt(a, 0, 0);
+    move(p.id, [0, 0, 2]);
+    expect(session().undo).toHaveLength(2);
+    executeEditorCommand('undo');
+    expect(session().points[0].target).toBeNull();
+    executeEditorCommand('undo');
+    expect(session().points).toEqual([]);
+    expect(editor().tool).toBe('warp');
+    expect(editor().past).toHaveLength(1);
+    expect(editor().scene.parts[0].color).toBe('#112233');
+
+    // With nothing left in the session, Undo steps back through the scene, which ends it.
+    executeEditorCommand('undo');
+    expect(editor().past).toHaveLength(0);
+    expect(editor().scene.parts[0].color).toBe('#aabbcc');
+    expect(editor().warp).toBeNull();
+  });
+
+  it('enables Undo for session edits without scene history', async () => {
+    const a = plate('a');
+    setup([a], ['a']);
+    editor().setTool('warp');
+    expect(editorCommands().undo.enabled).toBe(false);
+    editor().setBrush({ radius: 3, erase: false });
+    editor().paintWarpRegion(hit('a', 0, 0), faceAt(a.geometry, 0, 0), false, true);
+    editor().endPaintStroke();
+    expect(editorCommands().undo.enabled).toBe(true);
+    await editor().layWarpGrid();
+    expect(editorCommands().undo.enabled).toBe(false);
+    addAt(a, 0, 0);
+    expect(editorCommands().undo.enabled).toBe(true);
+    // A session left in the region stage keeps its steps for the next grid, not for Undo.
+    editor().setWarpRegion('painted');
+    expect(editorCommands().undo.enabled).toBe(false);
+  });
+
+  it('transform tool choices set the warp gizmo only while warping', async () => {
+    const a = plate('a');
+    setup([a], ['a']);
+    editor().setTool('warp');
+    await editor().layWarpGrid();
+    chooseTransformTool('rotate');
+    expect(editor().tool).toBe('warp');
+    expect(session().gizmo).toBe('rotate');
+    executeEditorCommand('scale');
+    expect(session().gizmo).toBe('scale');
+    expect(activeTransformTool(editor())).toBe('scale');
+    executeEditorCommand('transform');
+    expect(activeTransformTool(editor())).toBe('transform');
+
+    editor().cancelWarp();
+    editor().setTool('select');
+    chooseTransformTool('rotate');
+    expect(editor().tool).toBe('rotate');
+    expect(activeTransformTool(editor())).toBe('rotate');
   });
 });

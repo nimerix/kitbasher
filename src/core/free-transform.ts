@@ -1,6 +1,7 @@
 import { Quaternion, Vector2, Vector3 } from 'three';
 import type { Camera } from 'three';
 import { quat, radians, vec } from './geometry';
+import type { TransformTarget } from './transform-selection';
 import type { Part } from './types';
 
 export type TransformAxis = 0 | 1 | 2 | null;
@@ -37,7 +38,7 @@ export class FreeTransformMotion {
   }
 
   patches(
-    parts: Part[],
+    parts: TransformTarget[],
     pivot: Vector3,
     orientation: Quaternion,
     mode: FreeTransformMode,

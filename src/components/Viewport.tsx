@@ -416,12 +416,15 @@ function TransformGizmo() {
           navigationMode,
           pivotPicking,
           temporaryOrbit: false,
+          tool,
+          // These handles move parts only, never warp control points.
+          warp: null,
         },
         tool,
       ),
     [scene, selected, view, isolated, nearbyParts, navigationMode, pivotPicking, tool],
   );
-  const movable = selection.parts;
+  const movable = selection.kind === 'parts' ? selection.parts : [];
   useLayoutEffect(() => {
     if (dragging.current || !movable.length) return;
     // Use visible geometry, never a scanner's possibly distant object origin.

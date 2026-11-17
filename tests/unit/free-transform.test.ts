@@ -1,15 +1,21 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   BoxGeometry,
+  BufferGeometry,
   Euler,
   OrthographicCamera,
   PerspectiveCamera,
+  PlaneGeometry,
   Quaternion,
+  Triangle,
   Vector3,
 } from 'three';
 import { FreeTransformMotion } from '../../src/core/free-transform';
-import { partPivot, quat, vec } from '../../src/core/geometry';
-import { committedScene, useEditor } from '../../src/core/store';
+import { partPivot, quat, triangleCount, vec } from '../../src/core/geometry';
+import { committedScene, useEditor, type WarpPoint } from '../../src/core/store';
+import { readFace } from '../../src/core/surfaces';
+import { transformSelection } from '../../src/core/transform-selection';
+import { deformPoint } from '../../src/core/warp-evaluate';
 import type { Part } from '../../src/core/types';
 
 const original = useEditor.getState();
@@ -217,5 +223,166 @@ describe('free transform transactions', () => {
     state().finishFreeTransform(true);
     expect(state().scene.parts[0].position[0]).toBeGreaterThan(0);
     expect(state().scene.parts[0].position[0]).toBeLessThanOrEqual(6.11);
+  });
+});
+
+/** The face containing a mesh-local point on the z = 0 plate. */
+function faceAt(geometry: BufferGeometry, x: number, y: number) {
+  const triangle = new Triangle(),
+    point = new Vector3(x, y, 0),
+    closest = new Vector3();
+  for (let face = 0; face < triangleCount(geometry); face++) {
+    readFace(geometry, face, triangle);
+    if (triangle.closestPointToPoint(point, closest).distanceTo(point) < 1e-6) return face;
+  }
+  throw new Error('No face under the point.');
+}
+
+describe('free transform on warp control points', () => {
+  const warp = () => state().warp!;
+  const distance = (a: ArrayLike<number>, b: ArrayLike<number>) =>
+    Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]);
+  const deformed = (point: WarpPoint) =>
+    deformPoint(warp().model!, warp().state!, point.binding, point.restWorld);
+  const targets = () => warp().points.map((point) => point.target);
+
+  const add = (x: number, y: number) => {
+    const plate = state().scene.parts[0];
+    state().addWarpPoint(
+      { partId: plate.id, point: [x, y, 0], normal: [0, 0, 1] },
+      faceAt(plate.geometry, x, y),
+    );
+    return warp().points.at(-1)!.id;
+  };
+
+  /** Lays a grid over a whole plate and adds two selected points on it. */
+  async function warpPlate() {
+    const plate = part('plate', { geometry: new PlaneGeometry(40, 40, 16, 16) });
+    state().setScene({ name: 'Warp', parts: [plate], joints: [] });
+    state().select('plate');
+    state().setTool('warp');
+    await state().layWarpGrid();
+    const ids = [add(-4, 0), add(4, 0)];
+    state().selectWarpPoints(ids);
+    return ids;
+  }
+
+  /** Starts a free move and returns a function that lifts the points along Z by pixels. */
+  function freeLift() {
+    expect(state().beginFreeTransform('translate')).toBe(true);
+    const selection = transformSelection(state(), 'translate');
+    const motion = new FreeTransformMotion(camera(), selection.pivot, 1000, 1000);
+    // The camera looks down Z, where 10 pixels of vertical motion reach 1 mm.
+    return (pixels: number) => {
+      motion.move(0, -pixels, false);
+      state().previewFreeTransform(
+        motion.patches(
+          selection.parts,
+          selection.pivot,
+          selection.orientation,
+          'translate',
+          2,
+          null,
+        ),
+      );
+    };
+  }
+
+  afterEach(() => state().cancelWarp());
+
+  it('free move on points confirms one session undo step and cancel restores', async () => {
+    const [a, b] = await warpPlate();
+    const { scene, past, revision } = state();
+    expect(warp().undo).toHaveLength(2);
+
+    const lift = freeLift();
+    expect(state().tool).toBe('warp');
+    lift(10);
+    lift(10);
+    expect(distance(targets()[0]!, [-4, 0, 2])).toBeLessThan(1e-6);
+    expect(distance(targets()[1]!, [4, 0, 2])).toBeLessThan(1e-6);
+    expect(warp().undo).toHaveLength(2);
+    state().finishFreeTransform(true);
+    expect(state().freeTransform).toBeNull();
+    expect(state().tool).toBe('warp');
+    // The whole gesture is one session step, holding the points from before it.
+    expect(warp().undo).toHaveLength(3);
+    expect(
+      warp()
+        .undo.at(-1)!
+        .points.map((point) => point.target),
+    ).toEqual([null, null]);
+    for (const point of warp().points)
+      expect(distance(deformed(point), point.target!)).toBeLessThan(0.01);
+    // Scene history is untouched.
+    expect(state().scene).toBe(scene);
+    expect(state().past).toBe(past);
+    expect(state().revision).toBe(revision);
+
+    const settled = warp().points,
+      surface = Array.from(warp().output!.positions);
+    const again = freeLift();
+    again(30);
+    expect(targets()[0]![2]).toBeCloseTo(5, 6);
+    state().finishFreeTransform(false);
+    expect(state().freeTransform).toBeNull();
+    expect(warp().points).toEqual(settled);
+    expect(warp().undo).toHaveLength(3);
+    const output = warp().output!.positions;
+    expect(Math.max(...surface.map((value, i) => Math.abs(value - output[i])))).toBeLessThan(0.01);
+    expect(state().scene).toBe(scene);
+    expect(state().past).toBe(past);
+
+    // The next gesture records the points from before it, not from the cancelled move.
+    const c = add(0, 6);
+    const added = warp().points;
+    state().moveWarpPoints([{ id: a, target: [-4, 0, 1] }], 'end');
+    expect(warp().undo).toHaveLength(5);
+    expect(warp().undo.at(-1)!.points).toEqual(added);
+    state().undoWarpEdit();
+    expect(targets()).toEqual(added.map((point) => point.target));
+    expect(warp().points.map((point) => point.id)).toEqual([a, b, c]);
+  });
+
+  it('adds no step for a free move of points that returns to where it began', async () => {
+    await warpPlate();
+    const before = warp().points;
+    const lift = freeLift();
+    lift(20);
+    lift(-20);
+    state().finishFreeTransform(true);
+    expect(warp().points).toEqual(before);
+    expect(warp().undo).toHaveLength(2);
+    // Confirming without any movement adds none either.
+    freeLift();
+    state().finishFreeTransform(true);
+    expect(warp().points).toEqual(before);
+    expect(warp().undo).toHaveLength(2);
+  });
+
+  it('refuses a free move with no point selected and keeps the session', async () => {
+    await warpPlate();
+    state().selectWarpPoints([]);
+    expect(state().beginFreeTransform('translate')).toBe(false);
+    expect(state().toast?.message).toBe('Select a control point to move it.');
+    expect(state().tool).toBe('warp');
+    expect(state().warp).not.toBeNull();
+  });
+
+  it('cancels a free move of points that a received scene ends', async () => {
+    const [a] = await warpPlate();
+    const before = warp().points;
+    const lift = freeLift();
+    lift(20);
+    expect(targets()[0]).not.toBeNull();
+    state().receiveScene({ ...state().scene, name: 'From another editor' });
+    expect(state().freeTransform).toBeNull();
+    expect(state().warp).not.toBeNull();
+    expect(warp().points).toEqual(before);
+    expect(warp().undo).toHaveLength(2);
+    add(0, 6);
+    const added = warp().points;
+    state().moveWarpPoints([{ id: a, target: [-4, 0, 1] }], 'end');
+    expect(warp().undo.at(-1)!.points).toEqual(added);
   });
 });
