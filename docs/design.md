@@ -53,6 +53,12 @@ top of the viewport, with Studio as the default. Smaller screens use collapsible
   Cancel on focus loss or scene replacement. Keep previews outside document
   history, recovery, Drive, and shared-session publishing until confirmation;
   confirmation creates one undo step and cancellation preserves redo.
+- Offer a Warp tool (W) that bends a scanned part's surface to close gaps to a
+  neighbour: an optional painted region with a fixed border, a coarse grid with
+  adjustable density, control points moved with the normal transform tools,
+  optional snap to neighbour, Close gap at an overlap depth, and a gap readout.
+  Apply bakes the warp as one undo step without modifying pins, anchors, joints,
+  or any other part. Cancel discards it.
 - Paint only edge-connected mesh patches; optional fixed seed-plane angle and
   distance tolerances exclude adjacent bends and prevent plane drift across strokes.
 - Fit painted planes with area-weighted moments. Offer mate with signed offset,
