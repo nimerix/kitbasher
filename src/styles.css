@@ -6497,3 +6497,112 @@ optgroup {
   height: 16px;
   margin: 0;
 }
+
+/* Warp: region, grid, control points and the seam. */
+.warp-controls .inspector-section strong {
+  font-weight: 560;
+  color: var(--text);
+}
+.display-segmented.warp-region {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  margin: 12px 0 4px;
+}
+.warp-density {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 12px;
+  font-size: 11px;
+  color: var(--muted);
+}
+.warp-density input {
+  width: 100%;
+  accent-color: var(--accent);
+}
+.warp-density-scale {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 2px;
+  padding-left: 58px;
+  font-size: 10px;
+  color: var(--muted);
+}
+.warp-building {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin: 10px 0;
+  font-size: 11px;
+  color: var(--muted);
+}
+.warp-gap-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 12px;
+}
+.warp-gap-row > .button {
+  flex: 1;
+}
+.warp-gap-row > label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--muted);
+}
+.warp-gap-row input {
+  width: 64px;
+  padding: 6px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: #22262b;
+  color: var(--text);
+}
+.warp-readout {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  margin-top: 12px;
+  padding: 9px 10px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: #1c1e22;
+  font-size: 11px;
+  color: var(--muted);
+}
+.warp-readout > strong {
+  color: #f0a29b;
+  font-variant-numeric: tabular-nums;
+}
+.warp-readout > strong.closed {
+  color: #9bd3a3;
+}
+.warp-warning {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  margin: 12px 16px 0;
+  font-size: 11px;
+  line-height: 1.5;
+  color: #f0b4a0;
+}
+.warp-warning > svg {
+  flex: none;
+  margin-top: 2px;
+}
+.warp-actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  padding: 14px 16px 18px;
+}
+.transform-mode-buttons.with-scale {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+/* Narrower toolbars keep the Warp icon and its tooltip, so the strip still fits on one row. */
+@media (max-width: 1500px) {
+  .warp-tool > span {
+    display: none;
+  }
+}

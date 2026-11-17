@@ -1,11 +1,13 @@
 import { useEffect, useMemo } from 'react';
 import { DoubleSide, MeshBasicMaterial, Quaternion, Vector3 } from 'three';
-import { useEditor } from '../core/store';
+import { paintingWarpRegion, useEditor } from '../core/store';
 import { contactColors, patchGeometry } from '../core/surfaces';
 import { worldNormal, worldPoint } from '../core/geometry';
 import { solveAlignment } from '../core/alignment';
 import { partDisplay } from '../core/alignment-visibility';
 import type { Part, SurfacePatch, SurfacePoint } from '../core/types';
+
+export const warpRegionColor = '#80cbc4';
 
 /** The patch's S/T label is drawn by the annotation layer. */
 function PaintedPatch({ part, patch, color }: { part: Part; patch: SurfacePatch; color: string }) {
@@ -127,15 +129,9 @@ export function PaintCursor({ part, hit }: { part: Part; hit: SurfacePoint | nul
     tool = useEditor((s) => s.tool),
     navigationMode = useEditor((s) => (s.temporaryOrbit ? 'orbit' : s.navigationMode)),
     pivotPicking = useEditor((s) => s.pivotPicking);
-  if (
-    !hit ||
-    tool !== 'align' ||
-    op.mode !== 'surface' ||
-    navigationMode ||
-    pivotPicking ||
-    !op.activeSurface
-  )
-    return null;
+  const warpRegion = useEditor((s) => paintingWarpRegion(s) && s.warp!.partId === part.id);
+  const contact = tool === 'align' && op.mode === 'surface' && !!op.activeSurface;
+  if (!hit || (!contact && !warpRegion) || navigationMode || pivotPicking) return null;
   const index = op.surfacePairs.findIndex((pair) => pair.id === op.activeSurface?.pairId);
   const normal = worldNormal(part, hit),
     position = worldPoint(part, hit).addScaledVector(normal, 0.03);
@@ -145,7 +141,13 @@ export function PaintCursor({ part, hit }: { part: Part; hit: SurfacePoint | nul
       <mesh raycast={() => {}} renderOrder={20}>
         <ringGeometry args={[radius, radius + Math.max(radius * 0.025, 0.035), 64]} />
         <meshBasicMaterial
-          color={erase ? '#f18c8c' : contactColors[index % contactColors.length]}
+          color={
+            erase
+              ? '#f18c8c'
+              : warpRegion
+                ? warpRegionColor
+                : contactColors[index % contactColors.length]
+          }
           side={DoubleSide}
           depthTest={false}
           transparent

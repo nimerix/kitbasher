@@ -15,7 +15,7 @@ import type { TransformHandle } from '../core/combined-transform';
 import type { TransformPatch } from '../core/free-transform';
 import { translationIsPinned } from '../core/constraints';
 import { transformSelection, warpMovesFromPatches } from '../core/transform-selection';
-import { useEditor } from '../core/store';
+import { finishWarpDrag, useEditor, type WarpBaseline } from '../core/store';
 import { usePreferences } from '../core/preferences';
 
 const colors = ['#ed8883', '#9bc78b', '#88b4ef'];
@@ -115,6 +115,8 @@ export function CombinedTransform({ onPress }: { onPress: () => void }) {
   const [version, setVersion] = useState(0);
   const drag = useRef<{
     selection: typeof selection;
+    /** The control points this drag moves, to put back if it ends where it began. */
+    warp?: WarpBaseline;
     motion: CombinedTransformDrag;
     mode: TransformHandle['mode'];
     checkpointed: boolean;
@@ -131,10 +133,9 @@ export function CombinedTransform({ onPress }: { onPress: () => void }) {
       const current = drag.current;
       if (!current) return;
       const state = useEditor.getState();
-      if (current.selection.kind === 'warp') {
-        const moves = warpMovesFromPatches(current.selection, patches);
-        // The end always reaches the session, which records the drag as one undo step.
-        if (moves.length || settle) state.moveWarpPoints(moves, settle ? 'end' : 'drag');
+      if (current.warp) {
+        const moves = warpMovesFromPatches(current.warp.selection, patches);
+        if (moves.length) state.moveWarpPoints(moves, 'drag');
         invalidate();
         return;
       }
@@ -154,10 +155,10 @@ export function CombinedTransform({ onPress }: { onPress: () => void }) {
   const finish = useCallback(() => {
     const current = drag.current;
     if (!current) return;
-    if (
-      current.patches.length &&
-      (current.selection.kind === 'warp' || useEditor.getState().view.clip.enabled)
-    )
+    // Every drag of control points ends in the session, which records it as one undo step.
+    if (current.warp)
+      finishWarpDrag(current.warp, warpMovesFromPatches(current.warp.selection, current.patches));
+    else if (current.patches.length && useEditor.getState().view.clip.enabled)
       apply(current.patches, true);
     drag.current = null;
     try {
@@ -279,6 +280,10 @@ export function CombinedTransform({ onPress }: { onPress: () => void }) {
       const capture = event.target as unknown as Capture;
       drag.current = {
         selection,
+        warp:
+          selection.kind === 'warp'
+            ? { model: state.warp!.model!, points: state.warp!.points, selection }
+            : undefined,
         motion: new CombinedTransformDrag(
           selection.parts,
           selection.pivot,

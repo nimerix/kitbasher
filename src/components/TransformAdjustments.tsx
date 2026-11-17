@@ -1,14 +1,19 @@
 import { useMemo } from 'react';
-import { Crosshair, Info, Magnet, Minus, Move3D, Move, Plus, Rotate3D } from 'lucide-react';
-import { chooseTransformTool } from '../core/commands';
+import {
+  Crosshair,
+  Info,
+  Magnet,
+  Minus,
+  Move3D,
+  Move,
+  Plus,
+  Rotate3D,
+  Scaling,
+} from 'lucide-react';
+import { chooseTransformTool, stepSelection } from '../core/commands';
 import { useEditor } from '../core/store';
 import { usePreferences, useShortcut, withShortcut } from '../core/preferences';
-import {
-  activeTransformTool,
-  stepTransform,
-  transformSelection,
-  warpMovesFromPatches,
-} from '../core/transform-selection';
+import { activeTransformTool, transformSelection } from '../core/transform-selection';
 import { NumericInput } from './ui';
 
 export const moveSteps = [0.01, 0.1, 0.5, 1, 5, 10];
@@ -29,6 +34,7 @@ export function TransformAdjustments() {
     tool = useEditor(activeTransformTool);
   const moveKey = useShortcut('move'),
     rotateKey = useShortcut('rotate'),
+    scaleKey = useShortcut('scale'),
     freeMoveKey = useShortcut('freeMove'),
     freeRotateKey = useShortcut('freeRotate');
   const transformKey = useShortcut('transform');
@@ -66,28 +72,25 @@ export function TransformAdjustments() {
   const active = tool === 'translate' || tool === 'rotate';
   const rotating = tool === 'rotate',
     unit = rotating ? '°' : 'mm';
+  const points = selection.kind === 'warp';
+  // A control point has no orientation or size of its own.
+  const single = points && selection.parts.length === 1;
+  const needsTwo = 'Rotate and scale need two or more control points.';
   const step = rotating ? view.rotationSnapStep : view.snapStep;
-  const adjust = (axis: 0 | 1 | 2, direction: number) => {
-    // Read fresh state so rapid repeated clicks always start from the last accepted pose.
-    const state = useEditor.getState(),
-      mode = activeTransformTool(state);
-    if (mode !== 'translate' && mode !== 'rotate') return;
-    const amount = mode === 'rotate' ? state.view.rotationSnapStep : state.view.snapStep;
-    const selection = transformSelection(state, mode);
-    const patches = stepTransform(selection, mode, axis, direction * amount);
-    if (selection.kind === 'warp') {
-      const moves = warpMovesFromPatches(selection, patches);
-      if (moves.length) state.moveWarpPoints(moves, 'end');
-    } else if (patches.length) state.transformMany(patches, true, mode === 'translate', true);
-  };
   return (
     <div className="transform-adjustments">
-      <div className="transform-mode-buttons" role="group" aria-label="Transform tool">
+      <div
+        className={points ? 'transform-mode-buttons with-scale' : 'transform-mode-buttons'}
+        role="group"
+        aria-label="Transform tool"
+      >
         {(
           [
             ['transform', 'Transform', Move, transformKey],
             ['translate', 'Move', Move3D, moveKey],
             ['rotate', 'Rotate', Rotate3D, rotateKey],
+            // The toolbar's Scale would leave the warp, so points choose it here.
+            ...(points ? ([['scale', 'Scale', Scaling, scaleKey]] as const) : []),
           ] as const
         ).map(([mode, label, Icon, key]) => (
           <button
@@ -146,9 +149,9 @@ export function TransformAdjustments() {
               <span>°</span>
             </div>
           </div>
-          {selection.blocked ? (
+          {selection.blocked || single ? (
             <p className="transform-help" role="status">
-              {selection.blocked}
+              {selection.blocked ?? needsTwo}
             </p>
           ) : null}
         </div>
@@ -195,7 +198,9 @@ export function TransformAdjustments() {
         {selection.axes === 'joint'
           ? 'Handles and steps follow the connected joint.'
           : selection.parts.length > 1
-            ? 'Groups use world axes and move together.'
+            ? points
+              ? 'Selected points move together in world axes.'
+              : 'Groups use world axes and move together.'
             : selection.axes === 'local'
               ? 'Handles and steps follow the part’s orientation.'
               : 'Handles and steps follow the scene’s fixed axes.'}
@@ -242,10 +247,10 @@ export function TransformAdjustments() {
                 {([-1, 1] as const).map((direction) => (
                   <button
                     key={direction}
-                    disabled={!!selection.blocked || !!selection.locks?.[i]}
+                    disabled={!!selection.blocked || !!selection.locks?.[i] || (rotating && single)}
                     aria-label={`${rotating ? 'Rotate' : 'Move'} ${axis} ${direction < 0 ? 'negative' : 'positive'}`}
                     title={`${direction < 0 ? '−' : '+'}${step} ${unit} on ${axis}`}
-                    onClick={() => adjust(i as 0 | 1 | 2, direction)}
+                    onClick={() => stepSelection(i as 0 | 1 | 2, direction)}
                   >
                     {direction < 0 ? (
                       <Minus size={14} aria-hidden="true" />
@@ -266,10 +271,10 @@ export function TransformAdjustments() {
             </p>
           ) : null}
           <div role="status" className="transform-availability">
-            {selection.blocked ? (
+            {selection.blocked || (rotating && single) ? (
               <>
                 <Info size={13} aria-hidden="true" />
-                <span>{selection.blocked}</span>
+                <span>{selection.blocked ?? needsTwo}</span>
               </>
             ) : selection.skipped ? (
               <span>
@@ -279,6 +284,12 @@ export function TransformAdjustments() {
             ) : null}
           </div>
         </>
+      ) : null}
+      {tool === 'scale' && points ? (
+        <p className="transform-help transform-availability" role="status">
+          {selection.blocked ??
+            (single ? needsTwo : 'Drag a scale handle to spread or gather the selected points.')}
+        </p>
       ) : null}
     </div>
   );
