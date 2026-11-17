@@ -11,10 +11,11 @@ import { writeRotation, type WarpState } from './warp-solve';
 
 export const warpNeighbourRange = 5;
 /**
- * A surface faces a neighbour when its normal points against the neighbour's outward normal by
- * more than this cosine. Float noise tilts a surface running straight past it by far less.
+ * A surface faces a neighbour when its normal is within 60° of directly opposing the neighbour's
+ * outward normal. Mating scan surfaces roughly oppose; a side wall leaning toward the neighbour
+ * runs alongside it and is neither pulled into it nor reported as a gap.
  */
-const facingCosine = 1e-3;
+export const warpFacingCosine = 0.5;
 
 export interface WarpNeighbour {
   part: Part;
@@ -171,7 +172,7 @@ export function closeGapTargets(
       (rotation[0] * x + rotation[1] * y + rotation[2] * z) * hit.normal.x +
       (rotation[3] * x + rotation[4] * y + rotation[5] * z) * hit.normal.y +
       (rotation[6] * x + rotation[7] * y + rotation[8] * z) * hit.normal.z;
-    if (facing > -facingCosine) continue;
+    if (facing >= -warpFacingCosine) continue;
     const k = d + overlap;
     result.push({
       node: n,
@@ -248,7 +249,7 @@ export function measureSeam(
       .fromArray(normals, v * 3)
       .applyMatrix3(toWorld)
       .normalize();
-    if (normal.dot(hit.normal) > -facingCosine) continue;
+    if (normal.dot(hit.normal) >= -warpFacingCosine) continue;
     const d = point.sub(hit.point).dot(hit.normal);
     vertices.push(v);
     gaps.push(d);

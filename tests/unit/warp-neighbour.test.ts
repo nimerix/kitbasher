@@ -1,5 +1,13 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { Box3, Quaternion, BoxGeometry, BufferGeometry, Matrix4, Vector3 } from 'three';
+import {
+  Box3,
+  Quaternion,
+  BoxGeometry,
+  BufferGeometry,
+  Matrix4,
+  PlaneGeometry,
+  Vector3,
+} from 'three';
 import { workerIndexTriangles } from '../../src/core/spatial-index';
 import { buildWarpModel } from '../../src/core/warp-model';
 import { createWarpOutput, evaluateWarp } from '../../src/core/warp-evaluate';
@@ -122,6 +130,40 @@ describe('warp neighbours', () => {
     const report = measureSeam(model, createWarpOutput(model), neighbours)!;
     expect(report.gaps.some((gap) => Math.abs(gap - 1) < 1e-5)).toBe(true);
     expect(report.largestGap).toBeCloseTo(1, 5);
+  });
+
+  it('counts only surface within 60 degrees of facing the neighbour', async () => {
+    const wall = neighbourOf(partOf('wall', new BoxGeometry(20, 40, 40), [21, 0, 0]));
+    /** A plate centred at x whose normal leans from +Y toward the wall's -X face at x = 11. */
+    const plate = async (lean: number, x: number) => {
+      const part = partOf('plate', new PlaneGeometry(4, 4, 4, 4), [x, 0, 0]);
+      const angle = (lean * Math.PI) / 180;
+      const normal = new Vector3(Math.sin(angle), Math.cos(angle), 0);
+      part.quaternion = new Quaternion()
+        .setFromUnitVectors(new Vector3(0, 0, 1), normal)
+        .toArray() as Quat;
+      const model = await modelOf(part.geometry, partMatrix(part));
+      const state = createWarpState(model.restNodes);
+      return {
+        model,
+        targets: closeGapTargets(model, state, [wall], overlap),
+        seam: measureSeam(model, createWarpOutput(model), [wall]),
+      };
+    };
+
+    // A side wall leaning 10° toward the neighbour, all of it in range, runs alongside it.
+    const side = await plate(10, 8.5);
+    for (let i = 0; i < side.model.restWorld.length; i += 3) {
+      expect(side.model.restWorld[i]).toBeGreaterThan(6);
+      expect(side.model.restWorld[i]).toBeLessThan(11);
+    }
+    expect(side.targets).toEqual([]);
+    expect(side.seam).toBeNull();
+
+    // A face 30° off directly facing it, in range and short of it, is part of the seam.
+    const face = await plate(60, 9);
+    expect(face.targets.length).toBe(face.model.grid.nodes.length);
+    expect(face.seam!.vertices.length).toBe(face.model.region.weldedCount);
   });
 
   it('returns null seam when nothing is within range', async () => {
