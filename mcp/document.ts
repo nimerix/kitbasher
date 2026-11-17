@@ -9,6 +9,7 @@ import {
   summarizePatch,
 } from '../src/core/sync';
 import type { ScenePatch } from '../src/core/sync';
+import { arraysOf, geometryBytes, historyBudgetBytes } from '../src/core/history-budget';
 import type { SceneDocument } from '../src/core/types';
 
 export const agent = 'agent';
@@ -53,6 +54,8 @@ export class SharedDocument {
   private readonly meshes = new Map<string, BufferGeometry>();
   private readonly uploads = new Map<string, number>();
   private readonly listeners = new Set<() => void>();
+
+  constructor(private readonly budget = historyBudgetBytes) {}
 
   get scene() {
     return useEditor.getState().scene;
@@ -224,8 +227,46 @@ export class SharedDocument {
     this.versions.delete(this.version - keepVersions);
     this.log.delete(this.version - keepVersions);
     for (const part of this.scene.parts) this.meshes.set(part.geometry.uuid, part.geometry);
+    this.trimMemory();
     if (this.version % 50 === 0) this.prune();
     for (const listener of this.listeners) listener();
+  }
+
+  /**
+   * Drops the oldest undo steps, then the farthest redo steps, then the oldest versions until the
+   * arrays that only history reaches fit the budget. Each author keeps their newest undo step and
+   * the current version stays.
+   */
+  private trimMemory() {
+    const patchGeometries = (patch: ScenePatch) =>
+      patch.flatMap((change) =>
+        change.kind === 'parts'
+          ? [change.before, change.after].flatMap((entity) =>
+              entity ? [entity.geometry as BufferGeometry] : [],
+            )
+          : [],
+      );
+    const kept = arraysOf(this.scene.parts.map((part) => part.geometry));
+    const over = () => {
+      const geometries: BufferGeometry[] = [];
+      for (const scene of this.versions.values())
+        for (const part of scene.parts) geometries.push(part.geometry);
+      for (const history of this.histories.values())
+        for (const patch of [...history.undo, ...history.redo])
+          geometries.push(...patchGeometries(patch));
+      return geometryBytes(geometries, kept) > this.budget;
+    };
+    if (!over()) return;
+    const histories = [...this.histories.values()];
+    const drop = () => {
+      const undo = histories.find((history) => history.undo.length > 1);
+      if (undo) return !!undo.undo.shift();
+      const redo = histories.find((history) => history.redo.length);
+      if (redo) return !!redo.redo.shift();
+      const old = [...this.versions.keys()].find((version) => version !== this.version);
+      return old !== undefined && this.versions.delete(old);
+    };
+    while (over() && drop());
   }
 
   /** Keeps every mesh that a version or an undo step can still bring back. */

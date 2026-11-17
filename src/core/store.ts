@@ -53,6 +53,7 @@ import { transformSelection } from './transform-selection';
 import type { FreeTransformMode, TransformAxis, TransformPatch } from './free-transform';
 import type { NavigationMode } from './navigation';
 import { createSample } from './sample';
+import { trimHistory } from './history-budget';
 import { captureComponents, instantiateComponents } from './clipboard';
 import type { ComponentClipboard } from './clipboard';
 import { referencePlanes, resolvePart } from './references';
@@ -176,6 +177,7 @@ interface EditorState {
   sceneEpoch: number;
   modal: Modal;
   toast: Toast | null;
+  historyTrimNotified: boolean;
   busy: string | null;
   indexingMeshes: number;
   focusRequest: {
@@ -298,14 +300,40 @@ interface EditorState {
   markSaved: (revision: number) => void;
 }
 
-const changed = (state: EditorState, scene: SceneDocument, checkpoint = true) => ({
-  scene,
-  revision: state.revision + 1,
-  ...(state.freeTransform ? { freeTransform: null } : {}),
-  ...(checkpoint
-    ? { past: [...state.past.slice(-(historyLimit - 1)), committedScene(state)], future: [] }
-    : {}),
-});
+const changed = (state: EditorState, scene: SceneDocument, checkpoint = true) => {
+  const base = committedScene(state);
+  let past = checkpoint ? [...state.past.slice(-(historyLimit - 1)), base] : state.past;
+  let notice = {};
+  if (checkpoint && newGeometry(base, scene)) {
+    const kept = trimHistory(
+      past,
+      [],
+      [scene, ...(state.clipboard ? [{ name: '', parts: state.clipboard.parts, joints: [] }] : [])],
+    );
+    if (kept.trimmed) {
+      past = kept.past;
+      if (!state.historyTrimNotified)
+        notice = {
+          historyTrimNotified: true,
+          toast: { id: uid(), message: 'Undo history was shortened to free memory.', kind: 'info' },
+        };
+    }
+  }
+  return {
+    scene,
+    revision: state.revision + 1,
+    ...(state.freeTransform ? { freeTransform: null } : {}),
+    ...(checkpoint ? { past, future: [] } : {}),
+    ...notice,
+  };
+};
+
+/** True when a part's geometry in `scene` is not in `base`. Costs one pass over the parts. */
+function newGeometry(base: SceneDocument, scene: SceneDocument) {
+  const known = new Set<BufferGeometry>();
+  for (const part of base.parts) known.add(part.geometry);
+  return scene.parts.some((part) => !known.has(part.geometry));
+}
 
 /** Picks on a removed part can never be completed, so restart the active tool. */
 const withoutRemovedParts = (state: EditorState, ids: string[]) => {
@@ -396,6 +424,7 @@ export const useEditor = create<EditorState>((set, get) => ({
   sceneEpoch: 0,
   modal: null,
   toast: null,
+  historyTrimNotified: false,
   busy: null,
   indexingMeshes: 0,
   focusRequest: { id: 0, all: true },
@@ -1602,6 +1631,7 @@ export const useEditor = create<EditorState>((set, get) => ({
       isolated: null,
       past: [],
       future: [],
+      historyTrimNotified: false,
       revision: state.revision + 1,
       savedRevision: recovered ? state.revision : state.revision + 1,
       tool: 'select',
