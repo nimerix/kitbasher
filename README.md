@@ -444,6 +444,50 @@ or incorrectly wound scans can affect solid results. Reported overlap volume is
 summed **per pair**, so a region shared by three parts is counted in each relevant
 pair. Exploded view is disabled until inspection is closed.
 
+## Close gaps with Warp
+
+Scanned pieces that fit perfectly in real life often leave small gaps where they meet,
+because the scan lost a little surface. **Warp** bends the surface of one part toward its
+neighbour so the two touch or slightly overlap along the join. It is also a general way to
+reshape a scan locally without leaving Kitbasher. Warp is desktop only.
+
+1. Select one visible, unlocked part and choose **Warp** in the toolbar, or press `W`, then
+   **Start warp**.
+2. Choose the **Region**. **Painted** lets you paint the area to bend with the usual
+   surface brush; the edge of the painted area stays exactly where it is. With nothing
+   painted, or with **Whole part**, every surface of the part can bend. Choose **Lay grid**.
+3. A coarse grid appears over the region. **Density** sets how coarse it is: coarser grids
+   bend broadly, finer grids bend locally. Changing Density or the region lays a new grid
+   and clears any earlier Close gap result.
+4. Click the surface to add a **control point**. Click a point to select it, or
+   `Shift` + click to add it to the selection. Move selected points with the same tools as
+   parts: the move arrows, the combined Transform tool, `Shift + G` / `Shift + R` pointer
+   placement, `Shift` for fine adjustment, and numeric entry. While warping, `G` / `R` / `S` /
+   `T` switch how points move. A single point only moves; rotate and scale need two or more
+   points. `Delete` removes the selected points, and `Ctrl/⌘ + Z` steps back through your
+   point edits without touching the scene's undo history.
+5. A control point you have not moved holds its spot, which keeps the warp from spreading
+   past where you want it.
+6. Turn on **Snap to neighbour** and a dragged point locks onto the nearest surface of
+   another visible part, pushed in by the **Overlap** depth (0.1 mm by default).
+7. **Close gap** pulls the surfaces that face the neighbour, within 60 degrees and within
+   5 mm of it, onto the neighbour's surface at the Overlap depth. Keep adjusting with
+   control points afterwards. Between grid nodes a small residual gap can remain; raise
+   Density or add points there.
+8. **Gap to neighbour** shows the largest gap that remains along the seam, or **Closed**,
+   and coloured dots mark where it is. It appears when another part is near the region.
+9. Folded triangles are highlighted with a warning. They do not block **Apply**.
+10. **Apply** is disabled until you move a point or close a gap, then bakes the result into
+    the part as one undo step. **Cancel**, or leaving the tool, discards an unapplied warp.
+
+Applying a warp changes only the part's surface. Pins, anchors and joints on the part, and
+every other part, stay exactly as they were, so an anchor can sit slightly off the surface
+it was placed on. Vertices outside the region keep their exact values. Pasted copies that
+shared the mesh keep the original.
+
+Warp works on parts of up to 10 million triangles. On a large region the grid lines follow
+your drag, and the surface updates when you release.
+
 ## Part colors and lighting
 
 Editor colors and lighting change only how the scene looks here. Both are undoable, are saved
@@ -613,6 +657,7 @@ During contact painting, undo removes the last brush stroke before scene changes
 | Constrain free placement to an axis   | `X` / `Y` / `Z`; press again to release                                          |
 | Confirm / cancel free placement       | `Enter` or left-click / `Esc` or right-click                                     |
 | Align / joint / measure               | `A` / `J` / `D`                                                                  |
+| Warp                                  | `W`                                                                              |
 | Paint contacts / pick pivot           | `B` / `P`                                                                        |
 | Front / right / top / projection      | `1` / `3` / `7` / `5`                                                            |
 | Apply / cancel active operation       | `Enter` / `Esc`                                                                  |
