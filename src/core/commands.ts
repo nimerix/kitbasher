@@ -5,7 +5,13 @@ import { matchKeyAction } from './keybindings';
 import type { KeyActionId, KeyInput } from './keybindings';
 import { primaryShortcutText, usePreferences } from './preferences';
 import { canRedo, canUndo, useEditor, type WarpGizmo } from './store';
-import { warpingPoints } from './transform-selection';
+import {
+  activeTransformTool,
+  stepTransform,
+  transformSelection,
+  warpMovesFromPatches,
+  warpingPoints,
+} from './transform-selection';
 import type { SurfacePoint } from './types';
 
 export async function saveCurrentScene() {
@@ -55,6 +61,21 @@ export function chooseTransformTool(tool: WarpGizmo) {
   const state = useEditor.getState();
   if (warpingPoints(state)) state.setWarpOptions({ gizmo: tool });
   else state.setTool(tool);
+}
+
+/** Moves or turns the selection one step along an axis: parts, or control points while warping. */
+export function stepSelection(axis: 0 | 1 | 2, direction: number) {
+  // Read fresh state so rapid repeated clicks always start from the last accepted pose.
+  const state = useEditor.getState(),
+    mode = activeTransformTool(state);
+  if (mode !== 'translate' && mode !== 'rotate') return;
+  const amount = mode === 'rotate' ? state.view.rotationSnapStep : state.view.snapStep;
+  const selection = transformSelection(state, mode);
+  const patches = stepTransform(selection, mode, axis, direction * amount);
+  if (selection.kind === 'warp') {
+    const moves = warpMovesFromPatches(selection, patches);
+    if (moves.length) state.moveWarpPoints(moves, 'end');
+  } else if (patches.length) state.transformMany(patches, true, mode === 'translate', true);
 }
 
 export interface CommandContext {

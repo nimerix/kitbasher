@@ -9,8 +9,7 @@ import {
   useRef,
   useState,
 } from 'react';
-import type { ComponentProps, ErrorInfo, ReactNode } from 'react';
-import type { TransformControls as TransformControlsImpl } from 'three-stdlib';
+import type { ErrorInfo, ReactNode } from 'react';
 import { Canvas, useThree } from '@react-three/fiber';
 import type { ThreeEvent } from '@react-three/fiber';
 import {
@@ -23,7 +22,6 @@ import {
   OrthographicCamera,
   PerspectiveCamera,
   ScreenSizer,
-  TransformControls,
 } from '@react-three/drei';
 import { DoubleSide, Group, Mesh, Object3D, Quaternion, Vector3 } from 'three';
 import type { BufferGeometry } from 'three';
@@ -55,10 +53,12 @@ import {
   vec,
   worldPoint,
 } from '../core/geometry';
-import { measureDistance, sceneLighting, useEditor } from '../core/store';
+import { measureDistance, paintingWarpRegion, sceneLighting, useEditor } from '../core/store';
 import { PrecisionDrag } from '../core/precision';
 import { FreeTransformController, FreeTransformPrompt } from './FreeTransform';
 import { CombinedTransform } from './CombinedTransform';
+import { ManagedTransformControls } from './ManagedTransformControls';
+import { WarpOverlay, shownWarpPreview, warpedPoint } from './WarpOverlay';
 import { transformSelection } from '../core/transform-selection';
 import { referencePlanes, resolvePart } from '../core/references';
 import type { Part, SurfacePoint, FitAnchor, SceneDocument, SceneLight } from '../core/types';
@@ -149,6 +149,9 @@ const PartMesh = memo(function PartMesh({
   const moving = useDisplayPerformance((s) => s.moving);
   const headset = useXR((s) => !!s.session);
   const pivotPicking = useEditor((s) => s.pivotPicking);
+  const warpPreview = useEditor((s) => shownWarpPreview(s.warp, part.id));
+  // Lines and points drawn on the warped surface stay in front of it.
+  const warping = useEditor((s) => s.tool === 'warp' && s.warp?.partId === part.id);
   const [proxy, setProxy] = useState<{ source: BufferGeometry; geometry: BufferGeometry } | null>(
     null,
   );
@@ -166,11 +169,14 @@ const PartMesh = memo(function PartMesh({
     !!nearby ||
     inspecting ||
     wireframe ||
-    (!headset && (pivotPicking || ['align', 'joint', 'measure', 'anchors', 'pins'].includes(tool)));
+    (!headset &&
+      (pivotPicking || ['align', 'joint', 'measure', 'anchors', 'pins', 'warp'].includes(tool)));
+  // Picking still uses the source and its index, which is fast on dense scans.
   const drawing =
-    proxy?.source === part.geometry && shouldDrawProxy(detail, moving, headset, precision)
+    warpPreview ??
+    (proxy?.source === part.geometry && shouldDrawProxy(detail, moving, headset, precision)
       ? proxy.geometry
-      : part.geometry;
+      : part.geometry);
   const [brushHit, setBrushHit] = useState<SurfacePoint | null>(null);
   const register = useCallback(
     (mesh: Mesh | null) => {
@@ -211,6 +217,24 @@ const PartMesh = memo(function PartMesh({
     if (state.tool === 'anchors') {
       if (state.anchorPicking) state.addFitAnchor(toSurface(event));
       else state.select(part.id);
+      return;
+    }
+    const { warp } = state;
+    if (state.tool === 'warp' && warp) {
+      if (warp.stage !== 'warp' || event.faceIndex == null) return;
+      if (explode) {
+        state.notify('Reset the exploded view before adding control points.', 'info');
+        return;
+      }
+      // The hit is on the source surface, and the point goes where that spot is warped to.
+      const hit = toSurface(event);
+      const preview = shownWarpPreview(warp, part.id);
+      state.addWarpPoint(
+        preview
+          ? { ...hit, point: warpedPoint(part.geometry, preview, event.faceIndex, hit.point) }
+          : hit,
+        event.faceIndex,
+      );
       return;
     }
     if (state.tool === 'align' && state.operation.mode === 'surface') return;
@@ -262,25 +286,25 @@ const PartMesh = memo(function PartMesh({
               event.shiftKey ||
               event.ctrlKey ||
               event.metaKey ||
-              event.faceIndex == null
+              event.faceIndex == null ||
+              state.navigationMode ||
+              state.temporaryOrbit ||
+              state.pivotPicking
             )
               return;
-            if (
-              state.tool === 'align' &&
-              state.operation.mode === 'surface' &&
-              !state.navigationMode &&
-              !state.temporaryOrbit &&
-              !state.pivotPicking
-            ) {
+            if (state.tool === 'align' && state.operation.mode === 'surface') {
               event.stopPropagation();
               state.paintSurface(toSurface(event), event.faceIndex, event.altKey, true);
+            } else if (paintingWarpRegion(state)) {
+              event.stopPropagation();
+              state.paintWarpRegion(toSurface(event), event.faceIndex, event.altKey, true);
             }
           }}
           onPointerMove={(event) => {
             const state = useEditor.getState();
+            const contact = state.tool === 'align' && state.operation.mode === 'surface';
             if (
-              state.tool !== 'align' ||
-              state.operation.mode !== 'surface' ||
+              (!contact && !paintingWarpRegion(state)) ||
               state.navigationMode ||
               state.temporaryOrbit ||
               state.pivotPicking ||
@@ -290,15 +314,16 @@ const PartMesh = memo(function PartMesh({
             event.stopPropagation();
             const point = toSurface(event);
             setBrushHit(point);
-            if (state.painting && event.buttons & 1)
-              state.paintSurface(point, event.faceIndex, event.altKey);
+            if (!state.painting || !(event.buttons & 1)) return;
+            if (contact) state.paintSurface(point, event.faceIndex, event.altKey);
+            else state.paintWarpRegion(point, event.faceIndex, event.altKey);
           }}
           onPointerOver={(e) => {
             e.stopPropagation();
             document.body.style.cursor = navigationMode
               ? 'grab'
               : useEditor.getState().pivotPicking ||
-                  ['align', 'joint', 'measure', 'anchors', 'pins'].includes(tool)
+                  ['align', 'joint', 'measure', 'anchors', 'pins', 'warp'].includes(tool)
                 ? 'crosshair'
                 : 'pointer';
           }}
@@ -322,12 +347,16 @@ const PartMesh = memo(function PartMesh({
             wireframe={!inspecting && !ghost && wireframe}
             emissive={selected && !inspecting && !ghost ? '#c77c39' : '#000000'}
             emissiveIntensity={selected && !ghost ? 0.12 : 0}
+            polygonOffset={warping}
+            polygonOffsetFactor={warping ? 1 : 0}
+            polygonOffsetUnits={warping ? 1 : 0}
           />
           {selected &&
           !inspecting &&
           !ghost &&
           !wireframe &&
           !nearby &&
+          !warpPreview &&
           triangleCount(part.geometry) < proxyThreshold ? (
             <Edges threshold={32} color="#e8aa6d" lineWidth={0.8} />
           ) : null}
@@ -337,25 +366,6 @@ const PartMesh = memo(function PartMesh({
     </>
   );
 });
-
-function ManagedTransformControls({
-  onFinishDrag,
-  ...props
-}: ComponentProps<typeof TransformControls> & { onFinishDrag: () => void }) {
-  const controls = useRef<TransformControlsImpl>(null);
-  const gl = useThree((s) => s.gl);
-  const connected = useThree((s) => s.events.connected);
-  useEffect(() => {
-    const current = controls.current;
-    current?.connect(connected instanceof HTMLElement ? connected : gl.domElement);
-    return () => {
-      // The controls keep document-level pointer listeners while dragging.
-      current?.dispose();
-      onFinishDrag();
-    };
-  }, [onFinishDrag, gl.domElement, connected]);
-  return <TransformControls ref={controls} {...props} onMouseUp={onFinishDrag} />;
-}
 
 function TransformGizmo() {
   const freeTransform = useEditor((s) => !!s.freeTransform);
@@ -1117,6 +1127,11 @@ function Scene({
             />
           ) : null}
           <AnchorOverlay />
+          <WarpOverlay
+            onPress={() => {
+              gizmoPressed = true;
+            }}
+          />
           <PinOverlay />
           <LightHandles />
           <AssemblyAnnotations />
@@ -1228,18 +1243,22 @@ export function Viewport() {
               raycaster.firstHitOnly = true;
             }}
             onPointerMissed={(event) => {
+              const state = useEditor.getState();
               if (
-                event.type === 'click' &&
-                event.button === 0 &&
-                !gizmoPressed &&
-                !useEditor.getState().temporaryOrbit &&
-                !useEditor.getState().navigationMode &&
-                !useEditor.getState().pivotPicking &&
-                tool !== 'align' &&
-                tool !== 'joint' &&
-                tool !== 'measure'
+                event.type !== 'click' ||
+                event.button !== 0 ||
+                gizmoPressed ||
+                state.temporaryOrbit ||
+                state.navigationMode ||
+                state.pivotPicking ||
+                tool === 'align' ||
+                tool === 'joint' ||
+                tool === 'measure'
               )
-                useEditor.getState().select(null);
+                return;
+              // While warping, an empty click clears the point selection and keeps the part.
+              if (tool !== 'warp' || !state.warp) state.select(null);
+              else if (state.warp.selectedPoints.length) state.selectWarpPoints([]);
             }}
           >
             <Scene inspection={inspection} projection={projection} />

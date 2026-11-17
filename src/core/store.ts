@@ -173,7 +173,14 @@ interface FreeTransform {
   baseline: SceneDocument;
   patches: TransformPatch[];
   /** A free move of warp control points, and the points to restore if it is cancelled. */
-  warp?: { model: WarpModel; points: WarpPoint[]; selection: WarpTransformSelection };
+  warp?: WarpBaseline;
+}
+
+/** The control points a drag began from, to put back if it is cancelled or ends where it began. */
+export interface WarpBaseline {
+  model: WarpModel;
+  points: WarpPoint[];
+  selection: WarpTransformSelection;
 }
 
 export type WarpGizmo = 'translate' | 'rotate' | 'scale' | 'transform';
@@ -565,6 +572,10 @@ const sameEdit = (a: WarpEdit, b: WarpEdit) =>
 const holdsWarp = (point: WarpPoint) =>
   point.target !== null ||
   Math.hypot(...point.pin.map((value, a) => value - point.restWorld[a])) > 1e-6;
+
+/** Whether Apply would change the mesh. */
+export const warpChanges = (warp: WarpSession) =>
+  warp.gapTargets.length > 0 || warp.points.some(holdsWarp);
 
 function warpConstraints({ model, points, gapTargets }: WarpSession): WarpConstraint[] {
   const rest = model!.restNodes;
@@ -1627,7 +1638,7 @@ export const useEditor = create<EditorState>((set, get) => ({
       warp = state.warp;
     if (!warp?.model || warp.stage !== 'warp') return false;
     // Nothing to bake, so the mesh keeps its exact bits.
-    if (!warp.gapTargets.length && !warp.points.some(holdsWarp)) return false;
+    if (!warpChanges(warp)) return false;
     const part = state.scene.parts.find((p) => p.id === warp.partId);
     if (!part || part.locked || part.geometry !== warp.source || state.sceneEpoch !== warp.epoch) {
       state.notify('The part changed, so the warp could not be applied.', 'error');
@@ -2038,15 +2049,8 @@ export const useEditor = create<EditorState>((set, get) => ({
     const session = get().freeTransform;
     if (!session) return;
     if (session.warp) {
-      const { selection } = session.warp;
-      const moves = confirm ? warpMovesFromPatches(selection, session.patches) : [];
-      const moved = moves.some(({ id, target }) => {
-        const start = selection.parts.find((point) => point.id === id)!.position;
-        return target.some((value, a) => Math.abs(value - start[a]) > 1e-9);
-      });
-      // Ending the drag in the session records it as one undo step and settles the surface.
-      if (moved) get().moveWarpPoints(moves, 'end');
-      else restoreWarpPoints(session.warp);
+      const moves = confirm ? warpMovesFromPatches(session.warp.selection, session.patches) : [];
+      finishWarpDrag(session.warp, moves);
       set({ freeTransform: null });
       return;
     }
@@ -2499,6 +2503,10 @@ export function useSharedHistory(handlers: typeof sharedHandlers) {
 /** The lighting the viewport draws: the scene's own, or the default. */
 export const sceneLighting = (state: EditorState) => state.scene.lighting ?? state.defaultLighting;
 
+/** Whether the brush paints a warp region: the region stage of a painted warp. */
+export const paintingWarpRegion = (state: Pick<EditorState, 'tool' | 'warp'>) =>
+  state.tool === 'warp' && state.warp?.stage === 'region' && state.warp.region === 'painted';
+
 export const canUndo = (state: EditorState) =>
   state.sharedHistory ? state.sharedHistory.undo > 0 : state.past.length > 0;
 export const canRedo = (state: EditorState) =>
@@ -2565,7 +2573,7 @@ useEditor.subscribe((state, previous) => {
 });
 
 /** Ends a free move of control points by putting them back and settling the surface again. */
-function restoreWarpPoints({ model, points }: NonNullable<FreeTransform['warp']>) {
+function restoreWarpPoints({ model, points }: WarpBaseline) {
   if (warpDrag?.model !== model) return;
   const { warp, moveWarpPoints } = useEditor.getState();
   if (warp?.model !== model) {
@@ -2574,6 +2582,19 @@ function restoreWarpPoints({ model, points }: NonNullable<FreeTransform['warp']>
   }
   useEditor.setState({ warp: { ...warp, points } });
   moveWarpPoints([], 'end');
+}
+
+/**
+ * Ends a drag of control points. A drag that moved them is one undo step. One that ends where it
+ * began puts them back, so unmoved points stay pins and no empty step is recorded.
+ */
+export function finishWarpDrag(baseline: WarpBaseline, moves: { id: string; target: Vec3 }[]) {
+  const moved = moves.some(({ id, target }) => {
+    const start = baseline.selection.parts.find((point) => point.id === id)?.position;
+    return !start || target.some((value, a) => Math.abs(value - start[a]) > 1e-9);
+  });
+  if (moved) useEditor.getState().moveWarpPoints(moves, 'end');
+  else restoreWarpPoints(baseline);
 }
 
 // Another edit can end a free move of control points before it is confirmed. It is cancelled.
@@ -2672,6 +2693,8 @@ async function layWarp(from: WarpSettled) {
   });
   completeTask(taskId, `${model.grid.nodes.length.toLocaleString()} grid nodes`);
   const { notify } = useEditor.getState();
+  if (current.gapTargets.length)
+    notify('Close gap again to close the seam at this density.', 'info');
   if (points.length < current.points.length)
     notify('Some control points were outside the new region and were removed.', 'info');
 }

@@ -21,6 +21,7 @@ import {
   FolderOpen,
   GitMerge,
   Grid2X2,
+  Grid3x3,
   Hand,
   Import,
   Link2,
@@ -368,6 +369,7 @@ function Toolbar({
     align: useShortcut('align'),
     paint: useShortcut('paint'),
     anchors: useShortcut('anchors'),
+    warp: useShortcut('warp'),
     joint: useShortcut('joint'),
     measure: useShortcut('measure'),
   };
@@ -462,6 +464,15 @@ function Toolbar({
           <Crosshair size={16} />
           <span>Anchors</span>
           {keys.anchors ? <Keyboard>{keys.anchors}</Keyboard> : null}
+        </button>
+        <button
+          className={`tool-button warp-tool ${tool === 'warp' ? 'active' : ''}`}
+          title={withShortcut('Warp a scanned surface', keys.warp)}
+          onClick={() => useEditor.getState().setTool('warp')}
+        >
+          <Grid3x3 size={16} />
+          <span>Warp</span>
+          {keys.warp ? <Keyboard>{keys.warp}</Keyboard> : null}
         </button>
         <button
           className={`tool-button ${tool === 'joint' ? 'active' : ''}`}
@@ -595,7 +606,8 @@ function StatusBar() {
     tool = useEditor((s) => s.tool),
     navigationMode = useEditor((s) => (s.temporaryOrbit ? 'orbit' : s.navigationMode)),
     indexing = useEditor((s) => s.indexingMeshes > 0),
-    live = useEditor((s) => s.liveStatus);
+    live = useEditor((s) => s.liveStatus),
+    warpStage = useEditor((s) => (s.tool === 'warp' ? s.warp?.stage : undefined));
   const hold = useShortcut('holdOrbit'),
     cancel = useShortcut('cancel'),
     pivot = useShortcut('pivot'),
@@ -627,17 +639,21 @@ function StatusBar() {
                   ? `Click a model surface to set its pivot${[pivot, cancel].some(Boolean) ? ` · ${[pivot, cancel].filter(Boolean).join(' or ')} to cancel` : ''}`
                   : surfacePainting
                     ? `Drag to paint · Alt erases${smaller || larger ? ` · ${[smaller, larger].filter(Boolean).join(' / ')} brush size` : ''} · ${orbitHint} orbits`
-                    : tool === 'align'
-                      ? `Pick source → target · ${orbitHint} orbits`
-                      : tool === 'pins'
-                        ? 'Place hard or soft pins on the surface · Move or rotate to adjust the part'
-                        : tool === 'anchors'
-                          ? 'Add surface anchors · Drag a target to fit · Shift for fine adjustment'
-                          : tool === 'joint'
-                            ? 'Pick anchors to connect parts'
-                            : ['translate', 'rotate', 'scale', 'transform'].includes(tool)
-                              ? 'Hold Shift while dragging for 10× finer adjustment'
-                              : 'Shift + click to select multiple'}
+                    : warpStage === 'warp'
+                      ? 'Click the surface to add a control point · Drag a handle to warp · Shift for fine adjustment'
+                      : warpStage
+                        ? `Paint the area to warp, or choose Whole part · Alt erases · ${orbitHint} orbits`
+                        : tool === 'align'
+                          ? `Pick source → target · ${orbitHint} orbits`
+                          : tool === 'pins'
+                            ? 'Place hard or soft pins on the surface · Move or rotate to adjust the part'
+                            : tool === 'anchors'
+                              ? 'Add surface anchors · Drag a target to fit · Shift for fine adjustment'
+                              : tool === 'joint'
+                                ? 'Pick anchors to connect parts'
+                                : ['translate', 'rotate', 'scale', 'transform'].includes(tool)
+                                  ? 'Hold Shift while dragging for 10× finer adjustment'
+                                  : 'Shift + click to select multiple'}
         </span>
       </div>
       <div className="local-save-status">
@@ -762,8 +778,7 @@ export default function App() {
     };
   }, []);
   useEffect(() => {
-    if (tool === 'align' || tool === 'joint' || tool === 'anchors' || tool === 'pins')
-      setRight(true);
+    if (['align', 'joint', 'anchors', 'pins', 'warp'].includes(tool)) setRight(true);
   }, [tool]);
   useEffect(() => {
     // Dropped files belong to one import dialog, not to the next one opened from a menu.

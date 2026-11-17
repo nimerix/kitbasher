@@ -12,13 +12,24 @@ import {
 } from 'three';
 import { MeshBVH } from 'three-mesh-bvh';
 import { requestTaskCancellation, useActivity } from '../../src/core/activity';
-import { chooseTransformTool, editorCommands, executeEditorCommand } from '../../src/core/commands';
+import {
+  chooseTransformTool,
+  editorCommands,
+  executeEditorCommand,
+  stepSelection,
+} from '../../src/core/commands';
 import { triangleCount } from '../../src/core/geometry';
 import { spatialIndexOptions, workerIndexTriangles } from '../../src/core/spatial-index';
-import { useEditor, type WarpPoint } from '../../src/core/store';
+import {
+  finishWarpDrag,
+  useEditor,
+  warpChanges,
+  type WarpBaseline,
+  type WarpPoint,
+} from '../../src/core/store';
 import { useXR } from '../../src/core/xr-session';
 import { readFace } from '../../src/core/surfaces';
-import { activeTransformTool } from '../../src/core/transform-selection';
+import { activeTransformTool, transformSelection } from '../../src/core/transform-selection';
 import { bindPoint } from '../../src/core/warp-bind';
 import { deformPoint } from '../../src/core/warp-evaluate';
 import { defaultWarpDensity } from '../../src/core/warp-grid';
@@ -434,6 +445,9 @@ describe('warp session', () => {
     expect(model).not.toBe(whole);
     expect(Array.from(model.region.faces)).toEqual(faces);
     expect(toast()).toBe('Some control points were outside the new region and were removed.');
+    expect(useActivity.getState().notifications.map((n) => n.message)).toContain(
+      'Close gap again to close the seam at this density.',
+    );
     expect(editor().paintHistory).toHaveLength(0);
     expect(warp.points.map((p) => p.id)).toEqual(['inside']);
     expect(warp.selectedPoints).toEqual(['inside']);
@@ -1320,5 +1334,112 @@ describe('warp commands', () => {
     chooseTransformTool('rotate');
     expect(editor().tool).toBe('rotate');
     expect(activeTransformTool(editor())).toBe('rotate');
+  });
+});
+
+describe('warp panel', () => {
+  it('steps selected points as one session undo step without scene history', async () => {
+    const a = plate('a');
+    setup([a], ['a']);
+    editor().patchParts(['a'], { color: '#112233' });
+    const { scene, past, revision } = editor();
+    await warpDisc(a, 0, 0, 9);
+    const p = addAt(a, 0, 0);
+    chooseTransformTool('translate');
+    const undo = session().undo.length;
+    stepSelection(2, 1);
+    expect(session().undo).toHaveLength(undo + 1);
+    expect(session().points[0].target).toEqual([0, 0, editor().view.snapStep]);
+    expect(distance(deformed(session().points[0]), [0, 0, editor().view.snapStep])).toBeLessThan(
+      0.01,
+    );
+    expect(editor().scene).toBe(scene);
+    expect(editor().past).toBe(past);
+    expect(editor().revision).toBe(revision);
+    expect(editor().tool).toBe('warp');
+
+    // Turning a single point about itself moves nothing, so it records nothing.
+    chooseTransformTool('rotate');
+    stepSelection(0, 1);
+    expect(session().undo).toHaveLength(undo + 1);
+
+    executeEditorCommand('undo');
+    expect(session().points[0].id).toBe(p.id);
+    expect(session().points[0].target).toBeNull();
+    expect(editor().past).toBe(past);
+  });
+
+  it('a drag that ends where it began restores its points and records nothing', async () => {
+    const a = plate('a');
+    setup([a], ['a']);
+    await warpDisc(a, 0, 0, 9);
+    const p = addAt(a, 0, 0);
+    const rest = Array.from(session().output!.positions);
+    const begin = (): WarpBaseline => ({
+      model: session().model!,
+      points: session().points,
+      selection: transformSelection(editor(), 'translate') as WarpBaseline['selection'],
+    });
+    const undo = session().undo.length;
+
+    let baseline = begin();
+    move(p.id, [0, 0, 2], 'drag');
+    expect(session().points[0].target).toEqual([0, 0, 2]);
+    finishWarpDrag(baseline, [{ id: p.id, target: [...p.pin] }]);
+    expect(session().points).toEqual(baseline.points);
+    expect(session().undo).toHaveLength(undo);
+    const settled = session().output!.positions;
+    expect(Math.max(...rest.map((value, i) => Math.abs(value - settled[i])))).toBeLessThan(0.01);
+    // The next drag starts from these points, not from the abandoned one.
+    baseline = begin();
+    move(p.id, [0, 0, 1], 'drag');
+    finishWarpDrag(baseline, [{ id: p.id, target: [0, 0, 1.5] }]);
+    expect(session().undo).toHaveLength(undo + 1);
+    expect(session().undo.at(-1)!.points).toBe(baseline.points);
+    expect(distance(deformed(session().points[0]), [0, 0, 1.5])).toBeLessThan(0.01);
+
+    // A press without motion reaches no session, so finishing it changes nothing.
+    const current = session();
+    finishWarpDrag(begin(), []);
+    expect(session()).toBe(current);
+  });
+
+  it('tells which sessions Apply would change', async () => {
+    const a = plate('a');
+    setup([a], ['a']);
+    await warpDisc(a, 0, 0, 9);
+    expect(warpChanges(session())).toBe(false);
+    const p = addAt(a, 0, 0);
+    expect(warpChanges(session())).toBe(false);
+    move(p.id, [0, 0, 1]);
+    expect(warpChanges(session())).toBe(true);
+    editor().undoWarpEdit();
+    expect(warpChanges(session())).toBe(false);
+    editor().removeWarpPoints([p.id]);
+    useEditor.setState({ warp: { ...session(), gapTargets: [{ node: 0, target: [0, 0, 0] }] } });
+    expect(warpChanges(session())).toBe(true);
+  });
+
+  it('asks for Close gap again when a rebuild drops its targets', async () => {
+    const block = solid('block', new BoxGeometry(20, 20, 20, 12, 12, 12), [0, 0, 0]);
+    const wall = solid('wall', new BoxGeometry(20, 20, 20, 12, 12, 12), [21, 0, 0]);
+    setup([block, wall], ['block']);
+    editor().setTool('warp');
+    editor().setWarpRegion('whole');
+    await editor().layWarpGrid();
+    await editor().setWarpDensity(2);
+    expect(toast()).toBeUndefined();
+
+    editor().closeWarpGap();
+    expect(session().gapTargets.length).toBeGreaterThan(0);
+    await editor().setWarpDensity(1);
+    expect(session().gapTargets).toEqual([]);
+    expect(toast()).toBe('Close gap again to close the seam at this density.');
+
+    useEditor.setState({ toast: null });
+    editor().closeWarpGap();
+    editor().setWarpRegion('whole');
+    await editor().layWarpGrid();
+    expect(toast()).toBe('Close gap again to close the seam at this density.');
   });
 });

@@ -646,6 +646,7 @@ function HelpDialog() {
     ['Paint contact surfaces', `${key('paint')} · drag to paint`],
     ['Paint brush size / Erase', `${key('brushSmaller')} and ${key('brushLarger')} / hold Alt`],
     ['Rigid anchor fit', `${key('anchors')} · add surface anchors, then drag a target`],
+    ['Warp a scanned surface', `${key('warp')} · lay a grid, then move control points`],
     ['Pick pivot on model', `${key('pivot')} · click a surface`],
     ['Align / Joint / Measure', keys('align', 'joint', 'measure')],
     ['Front / Right / Top', keys('viewFront', 'viewRight', 'viewTop')],

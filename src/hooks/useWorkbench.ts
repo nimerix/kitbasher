@@ -1,6 +1,6 @@
 import { useEffect, useRef } from 'react';
 import { joinLiveSession } from '../core/live';
-import { committedScene, liveSession, useEditor } from '../core/store';
+import { committedScene, liveSession, paintingWarpRegion, useEditor } from '../core/store';
 import { readRecovery, saveRecovery } from '../core/recovery';
 import { driveAutosave, useDrive } from '../core/drive-sync';
 import { chooseTransformTool, executeEditorCommand, shortcutCommand } from '../core/commands';
@@ -175,7 +175,7 @@ export function useKeyboard(openScene: () => void, searchParts: () => void) {
           return;
         case 'brushSmaller':
         case 'brushLarger':
-          if (!paintingSurface) return;
+          if (!paintingSurface && !paintingWarpRegion(state)) return;
           event.preventDefault();
           state.setBrush({
             radius: Number(
