@@ -275,7 +275,7 @@ Energy, with `g` rest and `g'` solved node positions and edges taken in both dir
 + warpConstraintStrength · Σ_c ‖Σ_j w_j (R_j (p_c − g_j) + g'_j) − t_c‖²
 ```
 
-Fixed nodes are eliminated (`g' = g`, `R = I`). Local step: per node, the rotation of the covariance `Σ_j (g_i − g_j)(g'_i − g'_j)ᵀ`, extracted with Müller et al. 2016 ("A Robust Method to Extract the Rotational Part of Deformations"), warm-started from the previous quaternion, 20 inner iterations. Global step: one SPD system shared by x, y, z, solved by Jacobi-preconditioned conjugate gradient warm-started from `state.positions`, relative tolerance 1e-8, at most 200 iterations. Assemble the matrix in CSR once per change of constraint node sets. When there are no constraints and no fixed nodes, return without moving anything.
+Fixed nodes are eliminated (`g' = g`, `R = I`). Local step: per node, the rotation R maximizing tr(Rᵀ A) for `A = Σ_j (g'_i − g'_j)(g_i − g_j)ᵀ` (deformed times rest transposed, so R maps rest edges onto deformed ones), extracted with Müller et al. 2016 ("A Robust Method to Extract the Rotational Part of Deformations"), warm-started from the previous quaternion, 20 inner iterations. Global step: one SPD system shared by x, y, z, solved by Jacobi-preconditioned conjugate gradient warm-started from `state.positions`, relative tolerance 1e-8, at most 200 iterations. Assemble the matrix in CSR once per change of constraint node sets. When there are no constraints and no fixed nodes, return without moving anything.
 
 - [ ] **Step 1: Write the failing tests**
 
