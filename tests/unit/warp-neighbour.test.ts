@@ -121,6 +121,7 @@ describe('warp neighbours', () => {
     for (const { target } of targets) expect(target[0]).toBeCloseTo(11.1, 5);
     const report = measureSeam(model, createWarpOutput(model), neighbours)!;
     expect(report.gaps.some((gap) => Math.abs(gap - 1) < 1e-5)).toBe(true);
+    expect(report.largestGap).toBeCloseTo(1, 5);
   });
 
   it('returns null seam when nothing is within range', async () => {
@@ -136,8 +137,11 @@ describe('warp neighbours', () => {
     const { model, neighbours } = await seam(1);
     const report = measureSeam(model, createWarpOutput(model), neighbours)!;
     expect(Math.min(...report.gaps)).toBeCloseTo(1, 5);
+    // The side faces that run up to the wall, up to 5 mm from it, are not counted.
+    expect(report.largestGap).toBeCloseTo(1, 5);
     expect(report.largestGap).toBe(Math.max(...report.gaps));
     expect(report.gaps.length).toBe(report.vertices.length);
+    for (const v of report.vertices) expect(model.restWorld[v * 3]).toBeGreaterThan(9.99);
   });
 
   it('skips a neighbour whose surface index is not ready and names it', () => {

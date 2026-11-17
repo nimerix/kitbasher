@@ -15,6 +15,7 @@ import { requestTaskCancellation, useActivity } from '../../src/core/activity';
 import { triangleCount } from '../../src/core/geometry';
 import { spatialIndexOptions, workerIndexTriangles } from '../../src/core/spatial-index';
 import { useEditor, type WarpPoint } from '../../src/core/store';
+import { useXR } from '../../src/core/xr-session';
 import { readFace } from '../../src/core/surfaces';
 import { bindPoint } from '../../src/core/warp-bind';
 import { deformPoint } from '../../src/core/warp-evaluate';
@@ -31,6 +32,17 @@ import type {
 } from '../../src/core/types';
 
 const job = vi.hoisted(() => ({ failure: null as Error | null }));
+const seams = vi.hoisted(() => ({ measured: 0 }));
+vi.mock('../../src/core/warp-neighbour', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../src/core/warp-neighbour')>();
+  return {
+    ...actual,
+    measureSeam: (...args: Parameters<typeof actual.measureSeam>) => {
+      seams.measured++;
+      return actual.measureSeam(...args);
+    },
+  };
+});
 vi.mock('../../src/core/warp-job', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../src/core/warp-job')>();
   return {
@@ -342,14 +354,23 @@ describe('warp session', () => {
     expect(useActivity.getState().notifications.some((n) => n.kind === 'error')).toBe(false);
   });
 
-  it('cancels when the scene is replaced', () => {
+  it('cancels when the scene is replaced', async () => {
     const scene = setup([plate('a')], ['a']);
     editor().setTool('warp');
-    expect(editor().warp).not.toBeNull();
+    await editor().layWarpGrid();
     // The same parts and geometry, but a new scene epoch.
     editor().setScene({ ...scene });
     expect(editor().warp).toBeNull();
     expect(toast()).toBe('The part changed, so the warp was cancelled.');
+  });
+
+  it('cancels quietly when nothing was done in the session', () => {
+    const scene = setup([plate('a')], ['a']);
+    editor().setTool('warp');
+    useEditor.setState({ toast: null });
+    editor().setScene({ ...scene });
+    expect(editor().warp).toBeNull();
+    expect(toast()).toBeUndefined();
   });
 
   it('discards edits when leaving the tool and cancels silently without them', async () => {
@@ -781,6 +802,18 @@ describe('warp points, close gap and apply', () => {
     }
   });
 
+  it('close gap on a whole part leaves no gap to report', async () => {
+    const block = solid('block', new BoxGeometry(20, 20, 20, 12, 12, 12), [0, 0, 0]);
+    const wall = solid('wall', new BoxGeometry(20, 20, 20, 12, 12, 12), [21, 0, 0]);
+    setup([block, wall], ['block']);
+    editor().setTool('warp');
+    editor().setWarpRegion('whole');
+    await editor().layWarpGrid();
+    expect(session().seam!.largestGap).toBeCloseTo(1, 5);
+    editor().closeWarpGap();
+    expect(session().seam!.largestGap).toBeLessThanOrEqual(0);
+  });
+
   it('undoWarpEdit restores the previous points and surface', async () => {
     const a = plate('a');
     setup([a], ['a']);
@@ -915,9 +948,12 @@ describe('warp points, close gap and apply', () => {
       undo: [],
     });
 
+    // The session after Apply has nothing in it, so undoing the Apply ends it quietly.
+    useEditor.setState({ toast: null });
     editor().undo();
     expect(partOf('a').geometry).toBe(a.geometry);
     expect(editor().warp).toBeNull();
+    expect(toast()).toBeUndefined();
     expect(editor().past).toHaveLength(past);
     editor().redo();
     expect(partOf('a').geometry).toBe(applied);
@@ -978,6 +1014,7 @@ describe('warp points, close gap and apply', () => {
 
   it('apply on a pasted copy leaves its sibling on the original geometry', async () => {
     const a = plate('a');
+    const positions = positionsOf(a.geometry);
     setup([a], ['a']);
     editor().copySelected();
     editor().pasteClipboard();
@@ -990,11 +1027,10 @@ describe('warp points, close gap and apply', () => {
 
     expect(editor().applyWarp()).toBe(true);
     expect(partOf(copy.id).geometry).not.toBe(a.geometry);
+    expect(positionsOf(partOf(copy.id).geometry)).not.toEqual(positions);
     expect(partOf('a')).toBe(original);
     expect(partOf('a').geometry).toBe(a.geometry);
-    expect(positionsOf(a.geometry).every((v, i) => v === positionsOf(original.geometry)[i])).toBe(
-      true,
-    );
+    expect(positionsOf(a.geometry)).toEqual(positions);
   });
 
   it('apply shares index and color with the source and refits its BVH', async () => {
@@ -1037,6 +1073,37 @@ describe('warp points, close gap and apply', () => {
     await editor().layWarpGrid();
     move(addAt(a, 0, 0).id, [0, 0, 6]);
     expect(positionsOf(applied)).toEqual(committed);
+  });
+
+  it('apply without a warp changes nothing', async () => {
+    const a = plate('a');
+    setup([a], ['a']);
+    await warpDisc(a, 0, 0, 8);
+    const { past, revision } = editor();
+    expect(editor().applyWarp()).toBe(false);
+    // An unmoved point holds the surface where it already is.
+    addAt(a, 0, 0);
+    expect(editor().applyWarp()).toBe(false);
+    expect(partOf('a').geometry).toBe(a.geometry);
+    expect(partOf('a').source).toBe('test');
+    expect(editor().past).toBe(past);
+    expect(editor().revision).toBe(revision);
+    expect(session().stage).toBe('warp');
+  });
+
+  it('measures the seam on Apply only for a session it keeps', async () => {
+    const a = plate('a');
+    const lid = solid('lid', new BoxGeometry(10, 10, 10), [0, 0, 7]);
+    for (const live of [false, true]) {
+      setup([a, lid], ['a']);
+      useEditor.setState({ liveStatus: live ? 'connected' : null });
+      await warpDisc(a, 0, 0, 8);
+      move(addAt(a, 0, 0).id, [0, 0, 1]);
+      const measured = seams.measured;
+      expect(editor().applyWarp()).toBe(true);
+      expect(seams.measured - measured).toBe(live ? 1 : 0);
+      if (live) expect(editor().warpPending!.session.seam).not.toBeNull();
+    }
   });
 
   it('apply is refused after the part changes', async () => {
@@ -1113,5 +1180,63 @@ describe('warp points, close gap and apply', () => {
     expect(editor().warpPending).toBeNull();
     expect(editor().warp).toBe(restarted);
     expect(toast()).toBeUndefined();
+    const messages = useActivity.getState().notifications.map((n) => n.message);
+    expect(messages).not.toContain('The part changed, so the warp was cancelled.');
+  });
+
+  it('lets go of a kept warp that can no longer reopen', async () => {
+    const a = plate('a');
+    /** Applies a warp in a live session, and returns the scene from before it. */
+    const applyLive = async () => {
+      setup([a], ['a']);
+      useEditor.setState({ liveStatus: 'connected' });
+      await warpDisc(a, 0, 0, 8);
+      move(addAt(a, 0, 0).id, [0, 0, 2]);
+      const confirmed = editor().scene;
+      expect(editor().applyWarp()).toBe(true);
+      const preview = editor().warpPending!.session.preview!;
+      let released = false;
+      preview.addEventListener('dispose', () => {
+        released = preview.index === null;
+      });
+      return { confirmed, released: () => released };
+    };
+    const refuse = (scene: SceneDocument) => {
+      editor().receiveScene(scene);
+      useEditor.setState({ toast: null });
+      editor().settleWarp(false);
+      expect(editor().warp).toBeNull();
+      expect(editor().warpPending).toBeNull();
+      expect(toast()).toBeUndefined();
+    };
+    const patched = (scene: SceneDocument, patch: Partial<Part>) => ({
+      ...scene,
+      parts: scene.parts.map((part) => ({ ...part, ...patch })),
+    });
+
+    let kept = await applyLive();
+    refuse(patched(kept.confirmed, { locked: true }));
+    expect(kept.released()).toBe(true);
+    kept = await applyLive();
+    refuse(patched(kept.confirmed, { visible: false }));
+    expect(kept.released()).toBe(true);
+    kept = await applyLive();
+    useXR.setState({ session: {} as XRSession });
+    try {
+      refuse(kept.confirmed);
+    } finally {
+      useXR.setState({ session: null });
+    }
+    expect(kept.released()).toBe(true);
+
+    // Waiting ends with the live session or the scene.
+    kept = await applyLive();
+    useEditor.setState({ liveStatus: 'disconnected' });
+    expect(editor().warpPending).toBeNull();
+    expect(kept.released()).toBe(true);
+    kept = await applyLive();
+    editor().setScene({ ...editor().scene });
+    expect(editor().warpPending).toBeNull();
+    expect(kept.released()).toBe(true);
   });
 });

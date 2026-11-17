@@ -69,6 +69,7 @@ import { transformSelection } from './transform-selection';
 import type { FreeTransformMode, TransformAxis, TransformPatch } from './free-transform';
 import type { NavigationMode } from './navigation';
 import { createSample } from './sample';
+import { useXR } from './xr-session';
 import { trimHistory } from './history-budget';
 import { captureComponents, instantiateComponents } from './clipboard';
 import type { ComponentClipboard } from './clipboard';
@@ -606,12 +607,13 @@ function deformWarpPreview({ model, state, output, preview }: WarpSession) {
 /**
  * Solves the grid for the session's points and gap targets. A drag takes a few iterations and
  * deforms the surface only for regions small enough to follow the pointer. The end of an edit
- * settles fully and refreshes folds and the seam.
+ * settles fully and refreshes folds and, unless `measure` is false, the seam.
  */
 function solveWarpSession(
   scene: SceneDocument,
   warp: WarpSession,
   gesture: 'drag' | 'end',
+  measure = true,
 ): WarpSession {
   const model = warp.model!;
   const constraints = warpConstraints(warp);
@@ -624,7 +626,11 @@ function solveWarpSession(
       if (solveWarp(model.grid, model.restNodes, constraints, warp.state!, 1) < warpSettleTolerance)
         break;
   if (gesture === 'end')
-    return { ...warp, folds: deformWarpPreview(warp), seam: warpSeam(scene, warp) };
+    return {
+      ...warp,
+      folds: deformWarpPreview(warp),
+      seam: measure ? warpSeam(scene, warp) : warp.seam,
+    };
   if (model.region.interiorCount <= warpDragVertices) deformWarpPreview(warp);
   return warp;
 }
@@ -1614,6 +1620,8 @@ export const useEditor = create<EditorState>((set, get) => ({
     const state = get(),
       warp = state.warp;
     if (!warp?.model || warp.stage !== 'warp') return false;
+    // Nothing to bake, so the mesh keeps its exact bits.
+    if (!warp.gapTargets.length && !warp.points.some(holdsWarp)) return false;
     const part = state.scene.parts.find((p) => p.id === warp.partId);
     if (!part || part.locked || part.geometry !== warp.source || state.sceneEpoch !== warp.epoch) {
       state.notify('The part changed, so the warp could not be applied.', 'error');
@@ -1622,11 +1630,11 @@ export const useEditor = create<EditorState>((set, get) => ({
     warpDrag = null;
     // The session starts again on the result, keeping the region and options.
     const { region, faces, seed, density, snap, overlap, gizmo } = warp;
-    const settled = solveWarpSession(state.scene, warp, 'end');
-    const geometry = appliedWarpGeometry(warp.source, settled.output!);
-    const warped: Part = { ...part, geometry, source: `Warp · ${part.source}` };
     // In a live session the server may still refuse it, so the session is kept to reopen.
     const live = state.liveStatus === 'connected';
+    const settled = solveWarpSession(state.scene, warp, 'end', live);
+    const geometry = appliedWarpGeometry(warp.source, settled.output!);
+    const warped: Part = { ...part, geometry, source: `Warp · ${part.source}` };
     if (state.warpPending) disposeWarpPreview(state.warpPending.session.preview);
     if (!live) disposeWarpPreview(settled.preview);
     set({
@@ -1659,11 +1667,14 @@ export const useEditor = create<EditorState>((set, get) => ({
     const reopen =
       !accepted &&
       part?.geometry === pending.source &&
+      part.visible &&
+      !part.locked &&
       state.sceneEpoch === session.epoch &&
-      same(partMatrix(part).elements, session.model!.matrix);
+      same(partMatrix(part).elements, session.model!.matrix) &&
+      // Warp is desktop only.
+      !useXR.getState().session;
     if (!reopen) {
-      disposeWarpPreview(session.preview);
-      set({ warpPending: null });
+      releaseWarpPending();
       return;
     }
     state.cancelWarp();
@@ -2524,6 +2535,21 @@ useEditor.subscribe((state, previous) => {
     useEditor.setState({ isolated: isolated.length ? isolated : null });
 });
 
+/** Lets go of a warp kept for the live server's answer. */
+function releaseWarpPending() {
+  const pending = useEditor.getState().warpPending;
+  if (!pending) return;
+  disposeWarpPreview(pending.session.preview);
+  useEditor.setState({ warpPending: null });
+}
+
+// A kept warp waits for one live server's answer about one scene.
+useEditor.subscribe((state) => {
+  const pending = state.warpPending;
+  if (pending && (state.liveStatus !== 'connected' || state.sceneEpoch !== pending.session.epoch))
+    releaseWarpPending();
+});
+
 /** Lays the session's grid. A build that stops returns the session to `from`. */
 async function layWarp(from: WarpSettled) {
   const state = useEditor.getState(),
@@ -2624,8 +2650,10 @@ useEditor.subscribe((state, previous) => {
     (!same(part.position, before.position) ||
       !same(part.quaternion, before.quaternion) ||
       !same(part.scale, before.scale));
+  // A session with nothing done in it, such as the one after Apply, ends without a word.
+  const edited = warp.stage !== 'region' || warp.points.length || warp.gapTargets.length;
   if (!part || part.geometry !== warp.source || state.sceneEpoch !== warp.epoch || moved)
-    state.cancelWarp('The part changed, so the warp was cancelled.');
+    state.cancelWarp(edited ? 'The part changed, so the warp was cancelled.' : undefined);
   else if (state.tool !== 'warp')
     state.cancelWarp(
       warp.points.length || warp.gapTargets.length

@@ -6,10 +6,15 @@ import { readFace } from './surfaces';
 import type { Part, SceneDocument, Vec3 } from './types';
 import type { WarpOutput } from './warp-evaluate';
 import type { WarpModel } from './warp-model';
-import { WarpRole } from './warp-region';
+import { WarpRole, type WarpRegion } from './warp-region';
 import { writeRotation, type WarpState } from './warp-solve';
 
 export const warpNeighbourRange = 5;
+/**
+ * A surface faces a neighbour when its normal points against the neighbour's outward normal by
+ * more than this cosine. Float noise tilts a surface running straight past it by far less.
+ */
+const facingCosine = 1e-3;
 
 export interface WarpNeighbour {
   part: Part;
@@ -166,7 +171,7 @@ export function closeGapTargets(
       (rotation[0] * x + rotation[1] * y + rotation[2] * z) * hit.normal.x +
       (rotation[3] * x + rotation[4] * y + rotation[5] * z) * hit.normal.y +
       (rotation[6] * x + rotation[7] * y + rotation[8] * z) * hit.normal.z;
-    if (facing >= 0) continue;
+    if (facing > -facingCosine) continue;
     const k = d + overlap;
     result.push({
       node: n,
@@ -182,6 +187,37 @@ export interface SeamReport {
   gaps: Float32Array;
 }
 
+/**
+ * Area-weighted normal of each welded region vertex on the deformed surface, in mesh-local space.
+ * Welded, so duplicates along split normals or in unindexed scans share one.
+ */
+function deformedNormals(region: WarpRegion, positions: Float32Array, first: Int32Array) {
+  const normals = new Float32Array(region.weldedCount * 3);
+  const { triangles } = region;
+  for (let t = 0; t < triangles.length; t += 3) {
+    const a = first[triangles[t]] * 3,
+      b = first[triangles[t + 1]] * 3,
+      c = first[triangles[t + 2]] * 3;
+    const ux = positions[b] - positions[a],
+      uy = positions[b + 1] - positions[a + 1],
+      uz = positions[b + 2] - positions[a + 2];
+    const vx = positions[c] - positions[a],
+      vy = positions[c + 1] - positions[a + 1],
+      vz = positions[c + 2] - positions[a + 2];
+    const nx = uy * vz - uz * vy,
+      ny = uz * vx - ux * vz,
+      nz = ux * vy - uy * vx;
+    for (let k = 0; k < 3; k++) {
+      const o = triangles[t + k] * 3;
+      normals[o] += nx;
+      normals[o + 1] += ny;
+      normals[o + 2] += nz;
+    }
+  }
+  return normals;
+}
+
+/** Gaps of the region's vertices that face a neighbour in range, as `closeGapTargets` counts them. */
 export function measureSeam(
   model: WarpModel,
   out: WarpOutput,
@@ -194,15 +230,25 @@ export function measureSeam(
     const w = region.weldOf[g];
     if (w !== 0xffffffff && first[w] < 0) first[w] = g;
   }
+  const normals = deformedNormals(region, out.positions, first);
+  // Local normals go to world by the normal matrix, which also turns them out on mirrored parts.
+  const toWorld = new Matrix3().getNormalMatrix(m);
   const vertices: number[] = [];
   const gaps: number[] = [];
-  const point = new Vector3();
+  const point = new Vector3(),
+    normal = new Vector3();
   let largest = -Infinity;
   for (let v = 0; v < region.weldedCount; v++) {
     if (region.role[v] === WarpRole.Outside || first[v] < 0) continue;
     point.fromArray(out.positions, first[v] * 3).applyMatrix4(m);
     const hit = closestHit(point, neighbours);
     if (!hit) continue;
+    // Surface beside the seam, such as a side face running up to the wall, is not part of it.
+    normal
+      .fromArray(normals, v * 3)
+      .applyMatrix3(toWorld)
+      .normalize();
+    if (normal.dot(hit.normal) > -facingCosine) continue;
     const d = point.sub(hit.point).dot(hit.normal);
     vertices.push(v);
     gaps.push(d);
