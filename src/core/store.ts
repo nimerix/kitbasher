@@ -1,9 +1,14 @@
 import { create } from 'zustand';
-import { notify as recordNotification } from './activity';
+import {
+  cancelTask,
+  completeTask,
+  failTask,
+  notify as recordNotification,
+  startTask,
+} from './activity';
 import type { DriveFileBinding } from './types';
-import { Quaternion } from 'three';
-import type { BufferGeometry } from 'three';
-import { quat, triangleCount, uid, worldPoint } from './geometry';
+import { BufferAttribute, BufferGeometry, Quaternion } from 'three';
+import { binaryGeometry, partMatrix, quat, triangleCount, uid, worldPoint } from './geometry';
 import { markInteraction } from './display-performance';
 import {
   anchorError,
@@ -18,6 +23,7 @@ import { alignmentPartDisplay } from './alignment-visibility';
 import { fitAnchors } from './anchor-fit';
 import {
   clipNote,
+  defaultClipSettings,
   placeClear,
   readClipSettings,
   sanitizeClipSettings,
@@ -57,6 +63,14 @@ import { trimHistory } from './history-budget';
 import { captureComponents, instantiateComponents } from './clipboard';
 import type { ComponentClipboard } from './clipboard';
 import { referencePlanes, resolvePart } from './references';
+import { bindPoint } from './warp-bind';
+import { createWarpOutput, type WarpOutput } from './warp-evaluate';
+import { defaultWarpDensity, warpDensityNodes } from './warp-grid';
+import { buildWarpModelJob } from './warp-job';
+import type { WarpModel, WarpModelInput } from './warp-model';
+import type { SeamReport } from './warp-neighbour';
+import type { WarpRegion } from './warp-region';
+import { createWarpState, type WarpState } from './warp-solve';
 import type {
   AssemblyOperation,
   BrushPlaneSettings,
@@ -66,6 +80,7 @@ import type {
   Pin,
   SceneDocument,
   SceneLighting,
+  SurfacePatch,
   SurfacePoint,
   SurfacePair,
   SurfaceSide,
@@ -129,6 +144,44 @@ interface FreeTransform {
   patches: TransformPatch[];
 }
 
+export type WarpGizmo = 'translate' | 'rotate' | 'scale' | 'transform';
+export interface WarpPoint {
+  id: string;
+  face: number;
+  barycentric: Vec3;
+  binding: { node: number[]; weight: number[] };
+  restWorld: Vec3;
+  /** Deformed world position when the point was added; an unmoved point holds it. */
+  pin: Vec3;
+  /** Null while unmoved, when the point acts as a pin. */
+  target: Vec3 | null;
+}
+export interface WarpSession {
+  partId: string;
+  source: BufferGeometry;
+  epoch: number;
+  stage: 'region' | 'building' | 'warp';
+  region: 'painted' | 'whole';
+  faces: number[];
+  /** The first painted hit; like a contact patch's seed, it fixes the brush plane. */
+  seed?: SurfacePatch['seed'];
+  density: number;
+  model: WarpModel | null;
+  state: WarpState | null;
+  output: WarpOutput | null;
+  /** Never in the scene or history: it owns new position and normal attributes only. */
+  preview: BufferGeometry | null;
+  points: WarpPoint[];
+  selectedPoints: string[];
+  gapTargets: { node: number; target: Vec3 }[];
+  snap: boolean;
+  overlap: number;
+  gizmo: WarpGizmo;
+  folds: Uint32Array;
+  seam: SeamReport | null;
+  undo: Pick<WarpSession, 'points' | 'gapTargets'>[];
+}
+
 interface EditorState {
   scene: SceneDocument;
   selected: string[];
@@ -156,8 +209,10 @@ interface EditorState {
   brushRadius: number;
   brushErase: boolean;
   brushPlane: BrushPlaneSettings;
-  paintHistory: SurfacePair[][];
+  /** The state before each stroke: contact patches, or the warp region while warping. */
+  paintHistory: (SurfacePair[] | Pick<WarpSession, 'faces' | 'seed'>)[];
   operation: AssemblyOperation;
+  warp: WarpSession | null;
   view: ViewSettings;
   /** Lighting for scenes that have none of their own. Kept in this browser. */
   defaultLighting: SceneLighting;
@@ -235,6 +290,14 @@ interface EditorState {
   paintSurface: (point: SurfacePoint, face: number, erase?: boolean, begin?: boolean) => boolean;
   endPaintStroke: () => void;
   undoPaintStroke: () => void;
+  /** Starts a session on the one selected part, or says why it cannot. */
+  startWarp: () => boolean;
+  /** Also returns a laid grid to the region stage, keeping its points for the next build. */
+  setWarpRegion: (mode: 'painted' | 'whole') => void;
+  paintWarpRegion: (point: SurfacePoint, face: number, erase?: boolean, begin?: boolean) => boolean;
+  layWarpGrid: () => Promise<void>;
+  setWarpDensity: (density: number) => Promise<void>;
+  cancelWarp: (notice?: string) => void;
   setOperation: (patch: Partial<AssemblyOperation>) => void;
   resetPicks: () => void;
   pick: (point: SurfacePoint) => void;
@@ -298,6 +361,130 @@ interface EditorState {
   notify: (message: string, kind?: Toast['kind']) => void;
   focus: (view?: EditorState['focusRequest']['view'], all?: boolean) => void;
   markSaved: (revision: number) => void;
+}
+
+const toolChange = (state: EditorState, tool: Tool): Partial<EditorState> => {
+  // Re-selecting the active tool must not discard picks or painted patches.
+  if (tool === state.tool && hasOperationWork(state.operation))
+    return { navigationMode: null, pivotPicking: false };
+  const mode = tool === 'joint' ? 'point' : state.operation.mode;
+  const pair = mode === 'surface' ? emptySurfacePair() : null;
+  return {
+    tool,
+    pinPicking:
+      tool === 'pins' && !state.scene.parts.find((p) => p.id === state.selected[0])?.pins?.length
+        ? 'hard'
+        : null,
+    anchorPicking:
+      tool === 'anchors' &&
+      !state.scene.parts.find((p) => p.id === state.selected[0])?.anchors?.length,
+    navigationMode: null,
+    pivotPicking: false,
+    painting: false,
+    paintHistory: [],
+    measurement: [],
+    operation: {
+      ...blankOperation(mode),
+      ...(tool === state.tool ? { view: state.operation.view } : {}),
+      sourceId: state.selected[0] ?? null,
+      targetId: state.selected[1] ?? null,
+      surfacePairs: pair ? [pair] : [],
+      activeSurface: pair ? { pairId: pair.id, side: 'source' as const } : null,
+    },
+    view: { ...state.view, explode: 0 },
+  };
+};
+
+const newWarpSession = (part: Part, epoch: number): WarpSession => ({
+  partId: part.id,
+  source: part.geometry,
+  epoch,
+  stage: 'region',
+  region: 'painted',
+  faces: [],
+  density: defaultWarpDensity,
+  model: null,
+  state: null,
+  output: null,
+  preview: null,
+  points: [],
+  selectedPoints: [],
+  gapTargets: [],
+  snap: false,
+  overlap: defaultClipSettings.overlap,
+  gizmo: 'translate',
+  folds: new Uint32Array(0),
+  seam: null,
+  undo: [],
+});
+
+// The grid build in flight, and the stage to return to if it is cancelled or fails.
+let warpBuild: { controller: AbortController; from: 'region' | 'warp' } | null = null;
+
+function abortWarpBuild() {
+  const build = warpBuild;
+  warpBuild = null;
+  build?.controller.abort();
+}
+
+function warpPreview(source: BufferGeometry, output: WarpOutput) {
+  const preview = new BufferGeometry();
+  preview.setAttribute('position', new BufferAttribute(output.positions, 3));
+  if (output.normals) preview.setAttribute('normal', new BufferAttribute(output.normals, 3));
+  preview.setIndex(source.index);
+  const color = source.getAttribute('color');
+  if (color) preview.setAttribute('color', color);
+  return preview;
+}
+
+/** Detaches the source's index and color first, so disposing does not free their GPU buffers. */
+function disposeWarpPreview(preview: BufferGeometry | null) {
+  if (!preview) return;
+  preview.setIndex(null);
+  preview.deleteAttribute('color');
+  preview.dispose();
+}
+
+/** Copies, because the build job transfers its input arrays to a worker. */
+function warpModelInput(part: Part, faces: number[] | null, density: number): WarpModelInput {
+  const mesh = binaryGeometry(part.geometry);
+  return {
+    positions: mesh.positions.slice(),
+    index: mesh.indices ? new Uint32Array(mesh.indices) : null,
+    normals: mesh.normals?.slice() ?? null,
+    matrix: partMatrix(part).elements,
+    faces,
+    density,
+  };
+}
+
+/** The face's position among the region triangles, or -1 when it is outside the region. */
+function regionTriangle(region: WarpRegion, face: number) {
+  const { faces } = region;
+  let lo = 0,
+    hi = faces.length - 1;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (faces[mid] < face) lo = mid + 1;
+    else hi = mid;
+  }
+  return faces.length && faces[lo] === face ? lo : -1;
+}
+
+/** Binds a point to a model, or returns null when its face is outside the model's region. */
+function bindWarpPoint(model: WarpModel, point: WarpPoint): WarpPoint | null {
+  const triangle = regionTriangle(model.region, point.face);
+  if (triangle < 0) return null;
+  const restWorld: Vec3 = [0, 0, 0];
+  for (let c = 0; c < 3; c++) {
+    const v = model.region.triangles[triangle * 3 + c];
+    for (let a = 0; a < 3; a++) restWorld[a] += point.barycentric[c] * model.restWorld[v * 3 + a];
+  }
+  return {
+    ...point,
+    binding: bindPoint(model.region, model.grid, model.binding, point.face, point.barycentric),
+    restWorld,
+  };
 }
 
 const changed = (state: EditorState, scene: SceneDocument, checkpoint = true) => {
@@ -385,6 +572,7 @@ export const useEditor = create<EditorState>((set, get) => ({
   brushPlane: { enabled: false, angle: 20, distance: 0.5 },
   paintHistory: [],
   operation: blankOperation(),
+  warp: null,
   view: {
     inspection: {
       enabled: false,
@@ -538,39 +726,13 @@ export const useEditor = create<EditorState>((set, get) => ({
           : state.selected,
     })),
   closeContextMenu: () => set({ contextMenu: null }),
-  setTool: (tool) =>
-    set((state) => {
-      // Re-selecting the active tool must not discard picks or painted patches.
-      if (tool === state.tool && hasOperationWork(state.operation))
-        return { navigationMode: null, pivotPicking: false };
-      const mode = tool === 'joint' ? 'point' : state.operation.mode;
-      const pair = mode === 'surface' ? emptySurfacePair() : null;
-      return {
-        tool,
-        pinPicking:
-          tool === 'pins' &&
-          !state.scene.parts.find((p) => p.id === state.selected[0])?.pins?.length
-            ? 'hard'
-            : null,
-        anchorPicking:
-          tool === 'anchors' &&
-          !state.scene.parts.find((p) => p.id === state.selected[0])?.anchors?.length,
-        navigationMode: null,
-        pivotPicking: false,
-        painting: false,
-        paintHistory: [],
-        measurement: [],
-        operation: {
-          ...blankOperation(mode),
-          ...(tool === state.tool ? { view: state.operation.view } : {}),
-          sourceId: state.selected[0] ?? null,
-          targetId: state.selected[1] ?? null,
-          surfacePairs: pair ? [pair] : [],
-          activeSurface: pair ? { pairId: pair.id, side: 'source' as const } : null,
-        },
-        view: { ...state.view, explode: 0 },
-      };
-    }),
+  setTool: (tool) => {
+    const state = get();
+    if (tool === 'warp' && state.tool === 'warp' && state.warp)
+      set({ navigationMode: null, pivotPicking: false });
+    else if (tool === 'warp') state.startWarp();
+    else set((state) => toolChange(state, tool));
+  },
   addFitAnchor: (point) => {
     const state = get();
     const part = state.scene.parts.find((p) => p.id === point.partId);
@@ -974,6 +1136,12 @@ export const useEditor = create<EditorState>((set, get) => ({
     set((state) => {
       const surfacePairs = state.paintHistory.at(-1);
       if (!surfacePairs) return {};
+      if (!Array.isArray(surfacePairs))
+        return {
+          painting: false,
+          paintHistory: state.paintHistory.slice(0, -1),
+          ...(state.warp ? { warp: { ...state.warp, ...surfacePairs } } : {}),
+        };
       const active = state.operation.activeSurface;
       return {
         painting: false,
@@ -986,6 +1154,190 @@ export const useEditor = create<EditorState>((set, get) => ({
         },
       };
     }),
+  startWarp: () => {
+    const state = get();
+    const part =
+      state.selected.length === 1
+        ? state.scene.parts.find((p) => p.id === state.selected[0])
+        : undefined;
+    if (!part || part.locked || !part.visible) {
+      state.notify('Select one visible, unlocked part to warp.', 'info');
+      return false;
+    }
+    if (triangleCount(part.geometry) > maxPaintTriangles) {
+      state.notify(`${part.name} has too many triangles to warp. The limit is 10 million.`, 'info');
+      return false;
+    }
+    abortWarpBuild();
+    disposeWarpPreview(state.warp?.preview ?? null);
+    set((state) => ({
+      ...toolChange(state, 'warp'),
+      warp: newWarpSession(part, state.sceneEpoch),
+    }));
+    return true;
+  },
+  setWarpRegion: (mode) => {
+    const { warp } = get();
+    if (!warp) return;
+    if (warp.stage === 'building') abortWarpBuild();
+    set({ painting: false, warp: { ...warp, region: mode, stage: 'region' } });
+  },
+  paintWarpRegion: (point, face, erase = false, begin = false) => {
+    const state = get(),
+      warp = state.warp;
+    if (
+      !warp ||
+      state.tool !== 'warp' ||
+      warp.stage !== 'region' ||
+      warp.region !== 'painted' ||
+      point.partId !== warp.partId ||
+      state.navigationMode ||
+      state.temporaryOrbit ||
+      state.pivotPicking ||
+      (!begin && !state.painting)
+    )
+      return false;
+    if (state.view.explode) {
+      if (begin) state.notify('Reset the exploded view before painting surfaces.', 'info');
+      return false;
+    }
+    const part = state.scene.parts.find((part) => part.id === warp.partId);
+    if (!part?.visible || part.geometry !== warp.source) return false;
+    const erasing = erase || state.brushErase;
+    let faces: number[];
+    try {
+      faces = facesUnderBrush(part, point, state.brushRadius, face, {
+        plane: erasing ? undefined : state.brushPlane,
+        patch: { partId: part.id, faces: warp.faces, seed: warp.seed },
+      });
+    } catch (error) {
+      if (!(error instanceof RangeError)) throw error;
+      if (begin) state.notify(`${part.name} has too many edges to paint a warp region.`, 'error');
+      return false;
+    }
+    if (!faces.length) return false;
+    const previous = warp.faces;
+    const touched = new Set(faces),
+      result = erasing
+        ? contiguousRemainder(
+            part.geometry,
+            previous.filter((face) => !touched.has(face)),
+            warp.seed?.face,
+          )
+        : [...new Set([...previous, ...faces])].sort((a, b) => a - b);
+    const same =
+      previous.length === result.length && previous.every((face, i) => face === result[i]);
+    set({
+      ...(begin
+        ? {
+            painting: true,
+            paintHistory: [
+              ...state.paintHistory.slice(-29),
+              { faces: warp.faces, seed: warp.seed },
+            ],
+          }
+        : {}),
+      ...(!same
+        ? {
+            warp: {
+              ...warp,
+              faces: result,
+              seed: result.length
+                ? ((previous.length ? warp.seed : undefined) ?? { ...point, face })
+                : undefined,
+            },
+          }
+        : {}),
+    });
+    return true;
+  },
+  layWarpGrid: async () => {
+    const state = get(),
+      warp = state.warp;
+    const part = warp && state.scene.parts.find((p) => p.id === warp.partId);
+    if (!warp || part?.geometry !== warp.source) return;
+    const from = warp.stage === 'building' ? (warpBuild?.from ?? 'region') : warp.stage;
+    abortWarpBuild();
+    const controller = new AbortController();
+    const build = (warpBuild = { controller, from });
+    // An empty painted region would leave the grid nothing to simplify, so it means the whole part.
+    const faces = warp.region === 'painted' && warp.faces.length ? warp.faces : null;
+    const taskId = startTask({
+      title: 'Preparing warp',
+      detail: `${(faces?.length ?? triangleCount(part.geometry)).toLocaleString()} triangles`,
+      progress: null,
+      notify: false,
+      cancel: () => controller.abort(),
+    });
+    controller.signal.addEventListener(
+      'abort',
+      () => cancelTask(taskId, 'Warp preparation cancelled.'),
+      { once: true },
+    );
+    set({ painting: false, paintHistory: [], warp: { ...warp, stage: 'building' } });
+    let model: WarpModel;
+    try {
+      model = await buildWarpModelJob(warpModelInput(part, faces, warp.density), controller.signal);
+    } catch (error) {
+      // A newer build or a cancelled session has already taken over.
+      if (warpBuild !== build) return;
+      warpBuild = null;
+      if (!controller.signal.aborted)
+        failTask(taskId, error instanceof Error ? error.message : String(error));
+      const current = get().warp;
+      if (current) set({ warp: { ...current, stage: from } });
+      return;
+    }
+    const current = get().warp;
+    if (warpBuild !== build || !current) return;
+    warpBuild = null;
+    const rebound = new Map<WarpPoint, WarpPoint | null>();
+    const rebind = (points: WarpPoint[]) =>
+      points.flatMap((point) => {
+        if (!rebound.has(point)) rebound.set(point, bindWarpPoint(model, point));
+        return rebound.get(point) ?? [];
+      });
+    const points = rebind(current.points);
+    const kept = new Set(points.map((point) => point.id));
+    const output = createWarpOutput(model);
+    disposeWarpPreview(current.preview);
+    set({
+      warp: {
+        ...current,
+        stage: 'warp',
+        model,
+        state: createWarpState(model.restNodes),
+        output,
+        preview: warpPreview(current.source, output),
+        points,
+        selectedPoints: current.selectedPoints.filter((id) => kept.has(id)),
+        gapTargets: [],
+        folds: new Uint32Array(0),
+        seam: null,
+        // Snapshots must bind to the same grid as the session; gap targets name old nodes.
+        undo: current.undo.map((step) => ({ points: rebind(step.points), gapTargets: [] })),
+      },
+    });
+    completeTask(taskId, `${model.grid.nodes.length.toLocaleString()} grid nodes`);
+    if (points.length < current.points.length)
+      get().notify('Some control points were outside the new region and were removed.', 'info');
+  },
+  setWarpDensity: async (density) => {
+    const { warp } = get();
+    if (!warp || !Number.isFinite(density)) return;
+    const level = Math.min(warpDensityNodes.length - 1, Math.max(0, Math.round(density)));
+    if (level === warp.density) return;
+    set({ warp: { ...warp, density: level } });
+    if (warp.stage !== 'region') await get().layWarpGrid();
+  },
+  cancelWarp: (notice) => {
+    const { warp } = get();
+    if (!warp) return;
+    abortWarpBuild();
+    disposeWarpPreview(warp.preview);
+    set({ warp: null, painting: false, paintHistory: [] });
+    if (notice) get().notify(notice, 'info');
+  },
   setOperation: (patch) =>
     set((state) => {
       const op = state.operation;
@@ -1830,6 +2182,29 @@ useEditor.subscribe((state, previous) => {
   const isolated = state.isolated.filter((id) => state.scene.parts.some((part) => part.id === id));
   if (isolated.length !== state.isolated.length)
     useEditor.setState({ isolated: isolated.length ? isolated : null });
+});
+
+// A warp is built from one geometry of one scene. Undo, another editor, opening a file
+// or leaving the tool by any route ends the session.
+useEditor.subscribe((state, previous) => {
+  const { warp } = state;
+  if (
+    !warp ||
+    (warp === previous.warp &&
+      state.scene === previous.scene &&
+      state.sceneEpoch === previous.sceneEpoch &&
+      state.tool === previous.tool)
+  )
+    return;
+  const part = state.scene.parts.find((p) => p.id === warp.partId);
+  if (!part || part.geometry !== warp.source || state.sceneEpoch !== warp.epoch)
+    state.cancelWarp('The part changed, so the warp was cancelled.');
+  else if (state.tool !== 'warp')
+    state.cancelWarp(
+      warp.points.length || warp.gapTargets.length
+        ? 'Warp discarded. Use Apply to keep a warp.'
+        : undefined,
+    );
 });
 
 export function measureDistance() {

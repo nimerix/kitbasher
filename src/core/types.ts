@@ -14,7 +14,8 @@ export type Tool =
   | 'joint'
   | 'measure'
   | 'pins'
-  | 'anchors';
+  | 'anchors'
+  | 'warp';
 export type AlignmentMode = 'point' | 'point-plane' | 'plane' | 'multi' | 'surface';
 export type AlignmentView = 'scene' | 'pair' | 'active' | 'ghost';
 
