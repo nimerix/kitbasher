@@ -9,7 +9,7 @@ import {
   summarizePatch,
 } from '../src/core/sync';
 import type { ScenePatch } from '../src/core/sync';
-import { arraysOf, geometryBytes, historyBudgetBytes } from '../src/core/history-budget';
+import { arraysOf, historyBudgetBytes } from '../src/core/history-budget';
 import type { SceneDocument } from '../src/core/types';
 
 export const agent = 'agent';
@@ -38,6 +38,14 @@ interface Logged {
 const keepVersions = 200;
 const keepSteps = 40;
 const keepUploadsMs = 10 * 60 * 1000;
+
+const introducesGeometry = (patch: ScenePatch) =>
+  patch.some(
+    (change) =>
+      change.kind === 'parts' &&
+      change.after &&
+      (change.after.geometry as BufferGeometry) !== (change.before?.geometry as BufferGeometry),
+  );
 
 /**
  * The one scene that the agent and every browser tab edit. Each change gets a version, so an edit
@@ -227,18 +235,32 @@ export class SharedDocument {
     this.versions.delete(this.version - keepVersions);
     this.log.delete(this.version - keepVersions);
     for (const part of this.scene.parts) this.meshes.set(part.geometry.uuid, part.geometry);
-    this.trimMemory();
+    if (introducesGeometry(patch)) this.trimMemory();
     if (this.version % 50 === 0) this.prune();
     for (const listener of this.listeners) listener();
   }
 
   /**
-   * Drops the oldest undo steps, then the farthest redo steps, then the oldest versions until the
-   * arrays that only history reaches fit the budget. Each author keeps their newest undo step and
-   * the current version stays.
+   * Drops the oldest undo steps, then the farthest redo steps, then the oldest versions with their
+   * log entries, until the arrays that only history reaches fit the budget. Each author keeps their
+   * newest undo step and the current version stays.
    */
   private trimMemory() {
-    const patchGeometries = (patch: ScenePatch) =>
+    const kept = arraysOf(this.scene.parts.map((part) => part.geometry));
+    const counts = new Map<ArrayLike<number>, number>();
+    let total = 0;
+    const hold = (geometries: BufferGeometry[], by: 1 | -1) => {
+      for (const array of arraysOf(geometries)) {
+        if (kept.has(array)) continue;
+        const bytes = (array as unknown as { byteLength: number }).byteLength;
+        const count = (counts.get(array) ?? 0) + by;
+        counts.set(array, count);
+        if (by === 1 && count === 1) total += bytes;
+        if (by === -1 && count === 0) total -= bytes;
+      }
+    };
+    const ofScene = (scene: SceneDocument) => scene.parts.map((part) => part.geometry);
+    const ofPatch = (patch: ScenePatch) =>
       patch.flatMap((change) =>
         change.kind === 'parts'
           ? [change.before, change.after].flatMap((entity) =>
@@ -246,27 +268,31 @@ export class SharedDocument {
             )
           : [],
       );
-    const kept = arraysOf(this.scene.parts.map((part) => part.geometry));
-    const over = () => {
-      const geometries: BufferGeometry[] = [];
-      for (const scene of this.versions.values())
-        for (const part of scene.parts) geometries.push(part.geometry);
-      for (const history of this.histories.values())
-        for (const patch of [...history.undo, ...history.redo])
-          geometries.push(...patchGeometries(patch));
-      return geometryBytes(geometries, kept) > this.budget;
-    };
-    if (!over()) return;
+    for (const scene of this.versions.values()) hold(ofScene(scene), 1);
+    for (const entry of this.log.values()) hold(ofPatch(entry.patch), 1);
     const histories = [...this.histories.values()];
+    for (const history of histories)
+      for (const patch of [...history.undo, ...history.redo]) hold(ofPatch(patch), 1);
+    if (total <= this.budget) return;
+
     const drop = () => {
       const undo = histories.find((history) => history.undo.length > 1);
-      if (undo) return !!undo.undo.shift();
+      if (undo) return (hold(ofPatch(undo.undo.shift()!), -1), true);
       const redo = histories.find((history) => history.redo.length);
-      if (redo) return !!redo.redo.shift();
+      if (redo) return (hold(ofPatch(redo.redo.shift()!), -1), true);
       const old = [...this.versions.keys()].find((version) => version !== this.version);
-      return old !== undefined && this.versions.delete(old);
+      if (old === undefined) return false;
+      hold(ofScene(this.versions.get(old)!), -1);
+      this.versions.delete(old);
+      for (const [at, entry] of this.log)
+        if (at <= old) {
+          hold(ofPatch(entry.patch), -1);
+          this.log.delete(at);
+        }
+      return true;
     };
-    while (over() && drop());
+    while (total > this.budget && drop());
+    this.prune();
   }
 
   /** Keeps every mesh that a version or an undo step can still bring back. */
@@ -274,12 +300,14 @@ export class SharedDocument {
     const used = new Set<string>();
     const scenes = [...this.versions.values()];
     for (const scene of scenes) for (const part of scene.parts) used.add(part.geometry.uuid);
-    for (const history of this.histories.values())
-      for (const patch of [...history.undo, ...history.redo])
-        for (const change of patch)
-          for (const entity of [change.before, change.after])
-            if (change.kind === 'parts' && entity)
-              used.add((entity.geometry as BufferGeometry).uuid);
+    const patches = [
+      ...[...this.histories.values()].flatMap((history) => [...history.undo, ...history.redo]),
+      ...[...this.log.values()].map((entry) => entry.patch),
+    ];
+    for (const patch of patches)
+      for (const change of patch)
+        for (const entity of [change.before, change.after])
+          if (change.kind === 'parts' && entity) used.add((entity.geometry as BufferGeometry).uuid);
     const recent = Date.now() - keepUploadsMs;
     for (const [key, time] of this.uploads) if (time > recent) used.add(key);
     for (const key of this.meshes.keys())

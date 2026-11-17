@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { BoxGeometry, BufferAttribute, BufferGeometry } from 'three';
 import { SharedDocument } from '../../mcp/document';
 import { geometryBytes, trimHistory } from '../../src/core/history-budget';
@@ -29,8 +29,21 @@ const sceneOf = (...geometries: BufferGeometry[]): SceneDocument => ({
   joints: [],
 });
 
+const tiny = vi.hoisted(() => ({ on: false }));
+vi.mock('../../src/core/history-budget', async (original) => {
+  const actual = await original<typeof import('../../src/core/history-budget')>();
+  return {
+    ...actual,
+    trimHistory: (...args: Parameters<typeof actual.trimHistory>) =>
+      actual.trimHistory(args[0], args[1], args[2], tiny.on ? 1 : args[3]),
+  };
+});
+
 const initial = useEditor.getState();
-afterEach(() => useEditor.setState(initial));
+afterEach(() => {
+  tiny.on = false;
+  useEditor.setState(initial);
+});
 
 describe('history budget', () => {
   it('counts shared arrays once', () => {
@@ -70,20 +83,56 @@ describe('history budget', () => {
     expect(state.toast).toBeNull();
   });
 
-  it('trims the shared document history over budget', () => {
+  it('trims history and notifies once when geometry checkpoints exceed the budget', () => {
+    tiny.on = true;
+    const notice = 'Undo history was shortened to free memory.';
+    useEditor.getState().setScene(sceneOf(mesh(30)));
+    for (let i = 0; i < 4; i++) useEditor.getState().patchParts(['p0'], { geometry: mesh(30 + i) });
+    let state = useEditor.getState();
+    expect(state.past.length).toBe(1);
+    expect(state.historyTrimNotified).toBe(true);
+    expect(state.toast?.message).toBe(notice);
+    const id = state.toast!.id;
+    useEditor.getState().patchParts(['p0'], { geometry: mesh(99) });
+    state = useEditor.getState();
+    expect(state.toast!.id).toBe(id);
+    useEditor.getState().setScene(sceneOf(mesh(30)));
+    expect(useEditor.getState().historyTrimNotified).toBe(false);
+  });
+
+  it('trims the shared document history over budget and frees dropped meshes', () => {
     const doc = new SharedDocument(1024 * 1024);
-    const first = sceneOf(mesh(100_000));
-    doc.replace(first);
+    doc.replace(sceneOf(mesh(100_000)));
+    const uuids: string[] = [];
     for (let i = 0; i < 6; i++) {
       const before = doc.scene;
+      const geometry = mesh(100_000 + i);
+      uuids.push(geometry.uuid);
       useEditor.setState((state) => ({
-        scene: { ...before, parts: [part('p0', mesh(100_000 + i))] },
+        scene: { ...before, parts: [part('p0', geometry)] },
         revision: state.revision + 1,
       }));
       doc.commit('agent', before);
     }
+    const internal = doc as unknown as {
+      meshes: Map<string, BufferGeometry>;
+      log: Map<number, { patch: { before?: Part; after?: Part }[] }>;
+      versions: Map<number, SceneDocument>;
+    };
     expect(doc.counts('agent').undo).toBeLessThan(6);
     expect(doc.counts('agent').undo).toBeGreaterThanOrEqual(1);
     expect(doc.version).toBe(7);
+    expect(internal.versions.has(7)).toBe(true);
+    const reachable = new Set<string>();
+    for (const scene of internal.versions.values())
+      for (const p of scene.parts) reachable.add(p.geometry.uuid);
+    for (const entry of internal.log.values())
+      for (const change of entry.patch)
+        for (const e of [change.before, change.after]) if (e) reachable.add(e.geometry.uuid);
+    expect(internal.versions.size).toBeLessThan(7);
+    const dropped = uuids.filter((id) => !reachable.has(id));
+    expect(dropped.length).toBeGreaterThan(0);
+    for (const id of dropped) expect(internal.meshes.has(id)).toBe(false);
+    expect(internal.meshes.has(doc.scene.parts[0].geometry.uuid)).toBe(true);
   });
 });
