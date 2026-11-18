@@ -49,8 +49,9 @@ import {
   Undo2,
   X,
 } from 'lucide-react';
-import { liveHost, liveSession, useEditor } from './core/store';
+import { liveHost, liveSession, useEditor, type WarpGizmo } from './core/store';
 import {
+  chooseTransformTool,
   downloadCurrentScene,
   editorCommands,
   executeEditorCommand,
@@ -75,7 +76,7 @@ import { Dialogs } from './components/Dialogs';
 import { IconButton, Keyboard, Logo, Modal, NumericInput, useDismiss } from './components/ui';
 import { clipLimits } from './core/clipping';
 import { partColorModes } from './core/appearance';
-import type { SceneDocument, Tool } from './core/types';
+import type { SceneDocument } from './core/types';
 
 const Viewport = lazy(() =>
   import('./components/Viewport').then((module) => ({ default: module.Viewport })),
@@ -374,7 +375,12 @@ function Toolbar({
     joint: useShortcut('joint'),
     measure: useShortcut('measure'),
   };
-  const tools: { id: Tool; label: string; shortcut: string; icon: typeof MousePointer2 }[] = [
+  const tools: {
+    id: 'select' | WarpGizmo;
+    label: string;
+    shortcut: string;
+    icon: typeof MousePointer2;
+  }[] = [
     { id: 'select', label: 'Select', shortcut: keys.select, icon: MousePointer2 },
     { id: 'translate', label: 'Move', shortcut: keys.move, icon: Move3D },
     { id: 'rotate', label: 'Rotate', shortcut: keys.rotate, icon: Rotate3D },
@@ -411,7 +417,10 @@ function Toolbar({
               key={id}
               label={withShortcut(label, shortcut)}
               active={tool === id}
-              onClick={() => useEditor.getState().setTool(id)}
+              // While warping, the transform tools choose the control point gizmo.
+              onClick={() =>
+                id === 'select' ? useEditor.getState().setTool(id) : chooseTransformTool(id)
+              }
             >
               <Icon size={17} />
               {id === 'translate' || id === 'rotate' || id === 'transform' ? (
