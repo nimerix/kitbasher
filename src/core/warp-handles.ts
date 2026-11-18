@@ -142,9 +142,10 @@ export function handleOffset(handle: Pick<WarpHandle, 'pin' | 'target'>): Vec3 {
 const samePosition = (a: Vec3, b: Vec3) => a[0] === b[0] && a[1] === b[1] && a[2] === b[2];
 
 /**
- * How much more firmly a sample the user placed or moved is held than an untouched automatic pin,
- * where something else acts on its nodes: other samples, guides or gap targets. It then lands on
- * its target however coarse the grid, unless what shares its nodes is held as firmly.
+ * How much more firmly a moved point is held than an untouched automatic pin, and a sample the user
+ * placed or moved where something else acts on its nodes: other handles' samples, guides or gap
+ * targets. It then lands on its target however coarse the grid, unless what shares its nodes is
+ * held as firmly.
  */
 export const warpPriorityStrength = 100;
 
@@ -155,9 +156,9 @@ export const untouchedAuto = (handle: Pick<WarpHandle, 'auto' | 'target'>) =>
 /**
  * One exact constraint per sample, moved by the handle's offset. Given the `guides` on `model`, an
  * untouched automatic point rides where the guides take the surface at its nodes, so a bump rises
- * smoothly over it; wherever nothing guided moves, it holds its pin. A sample of a handle the user
- * placed or moved outranks automatic pins, guides and the `exact` nodes, such as gap targets, that
- * act on its nodes.
+ * smoothly over it; wherever nothing guided moves, it holds its pin. A moved point outranks
+ * everything else on its nodes, and any other sample the user placed or moved outranks automatic
+ * pins, guides and the `exact` nodes, such as gap targets, that act on its nodes.
  */
 export function handleConstraints(
   handles: readonly WarpHandle[],
@@ -210,9 +211,11 @@ export function handleConstraints(
     // The nodes a handle moves as one already go where its samples do.
     const { reach } = handle;
     const own = reach?.grid === model?.grid ? reach?.node.subarray(0, reach.own) : undefined;
-    // Shared nodes outrank fully. Guides do by how firmly they hold the sample's nodes, so the
-    // surface stays continuous as a radius starts to reach them.
-    let contest = 0;
+    // A moved point lands; a line or an area does by moving its footprint as one, and many stiff
+    // samples on the same nodes would only slow the solve. Otherwise a sample outranks fully on
+    // shared nodes, and under guides by how firmly they hold its nodes, so the surface stays
+    // continuous as a radius reaches them.
+    let contest = handle.target !== null && handle.samples.length === 1 ? 1 : 0;
     for (let k = 0; k < node.length && contest < 1; k++) {
       const n = node[k];
       if (fixed?.[n]) continue;

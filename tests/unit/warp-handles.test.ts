@@ -459,27 +459,26 @@ describe('point handles', () => {
     expect(small.reach!.node.length).toBe(0);
     expect(warpGuides(model, [small])).toBeUndefined();
 
-    // The constraint a point has always made, with automatic pins among them. A pin on one of its
-    // nodes is outranked.
+    // The constraint a point has always made, held at priority once it is moved. Automatic pins
+    // among them, on its nodes or not, keep theirs.
     const sample = bare.samples[0];
     const target: Vec3 = [0.7, -0.4, 3];
-    const far = { ...nodePin(model, nearestNode(model, [-20, 15, 0]), rest), auto: true };
-    expect(far.samples[0].binding.node.some((n) => sample.binding.node.includes(n))).toBe(false);
-    expect(handleConstraints([{ ...bare, target }, far], model, undefined)).toEqual([
-      { ...sample.binding, rest: sample.restWorld, target },
-      { ...far.samples[0].binding, rest: far.samples[0].restWorld, target: far.samples[0].pin },
-    ]);
-    const pin = { ...nodePin(model, nearestNode(model, [8, 3, 0]), rest), auto: true };
-    expect(pin.samples[0].binding.node.some((n) => sample.binding.node.includes(n))).toBe(true);
-    expect(handleConstraints([{ ...bare, target }, pin], model, undefined)).toEqual([
-      { ...sample.binding, rest: sample.restWorld, target, strength: warpPriorityStrength },
-      { ...pin.samples[0].binding, rest: pin.samples[0].restWorld, target: pin.samples[0].pin },
-    ]);
+    const moved = { ...sample.binding, rest: sample.restWorld, target };
+    for (const at of [
+      [-20, 15, 0],
+      [8, 3, 0],
+    ] as Vec3[]) {
+      const pin = { ...nodePin(model, nearestNode(model, at), rest), auto: true };
+      expect(handleConstraints([{ ...bare, target }, pin], model, undefined)).toEqual([
+        { ...moved, strength: warpPriorityStrength },
+        { ...pin.samples[0].binding, rest: pin.samples[0].restWorld, target: pin.samples[0].pin },
+      ]);
+    }
     expect(handleConstraints([bare], model, undefined)[0].target).toBe(sample.pin);
 
     const before = createWarpState(model.restNodes),
       after = createWarpState(model.restNodes);
-    settle(model, before, [{ ...sample.binding, rest: sample.restWorld, target }]);
+    settle(model, before, [{ ...moved, strength: warpPriorityStrength }]);
     solveHandles(model, after, [{ ...small, target }]);
     expect(Array.from(after.positions)).toEqual(Array.from(before.positions));
     expect(Array.from(after.rotations)).toEqual(Array.from(before.rotations));

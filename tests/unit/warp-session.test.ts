@@ -44,6 +44,7 @@ import {
   handleGuides,
   reachHandle,
   snapshotOf,
+  warpPriorityStrength,
   type WarpSample,
 } from '../../src/core/warp-handles';
 import { isPaintedNode, type WarpModel } from '../../src/core/warp-model';
@@ -2328,7 +2329,7 @@ describe('warp handles', () => {
     expect(warpChanges(session())).toBe(false);
   });
 
-  it('points without a radius solve bit for bit as they did before handles', async () => {
+  it('points without a radius solve bit for bit as their own constraints, a moved one held first', async () => {
     const a = plate('a');
     setup([a], ['a']);
     await warpDisc(a, 0, 0, 12);
@@ -2342,6 +2343,7 @@ describe('warp handles', () => {
       ...point.samples[0].binding,
       rest: point.samples[0].restWorld,
       target: i === 0 ? ([0.4, 0.3, 2] as Vec3) : point.pin,
+      ...(i === 0 ? { strength: warpPriorityStrength } : {}),
     }));
     for (let i = 0; i < warpSettleIterations; i++)
       if (solveWarp(model!.grid, model!.restNodes, constraints, state, 1) < warpSettleTolerance)
