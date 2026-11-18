@@ -1,0 +1,144 @@
+import { afterEach, describe, expect, it } from 'vitest';
+import { PlaneGeometry, Triangle, Vector3, type BufferGeometry } from 'three';
+import { fittedSizeRange, partSize, triangleCount } from '../../src/core/geometry';
+import { fittedWarpBrushRadius, useEditor, warpBrushRadius } from '../../src/core/store';
+import { readFace } from '../../src/core/surfaces';
+import type { Part, SurfacePoint } from '../../src/core/types';
+
+function plate(id: string, size = 40, scale: Part['scale'] = [1, 1, 1]): Part {
+  return {
+    id,
+    name: id,
+    geometry: new PlaneGeometry(size, size, 32, 32),
+    position: [0, 0, 0],
+    quaternion: [0, 0, 0, 1],
+    scale,
+    color: '#aabbcc',
+    visible: true,
+    locked: false,
+    source: 'test',
+  };
+}
+
+function faceAt(geometry: BufferGeometry, x: number, y: number) {
+  const triangle = new Triangle(),
+    point = new Vector3(x, y, 0),
+    closest = new Vector3();
+  for (let face = 0; face < triangleCount(geometry); face++) {
+    readFace(geometry, face, triangle);
+    if (triangle.closestPointToPoint(point, closest).distanceTo(point) < 1e-6) return face;
+  }
+  throw new Error('No face under the point.');
+}
+
+const hit = (partId: string, x: number, y: number): SurfacePoint => ({
+  partId,
+  point: [x, y, 0],
+  normal: [0, 0, 1],
+});
+
+const editor = () => useEditor.getState();
+
+function warp(...parts: Part[]) {
+  editor().setScene({ name: 'Brush', parts, joints: [] });
+  useEditor.setState({ selected: [parts[0].id] });
+  editor().setTool('warp');
+}
+
+/** Paints one dab at the plate's centre and returns how many faces it covered. */
+function dab(part: Part) {
+  editor().paintWarpRegion(hit(part.id, 0, 0), faceAt(part.geometry, 0, 0), false, true);
+  editor().endPaintStroke();
+  return editor().warp!.faces.length;
+}
+
+const initial = useEditor.getState();
+afterEach(() => {
+  editor().cancelWarp();
+  useEditor.setState(initial);
+});
+
+describe('part size', () => {
+  it('is the largest scaled side, whichever way the part is turned', () => {
+    const part = { ...plate('a', 32), scale: [1, 2, 1] as Part['scale'] };
+    expect(partSize(part)).toBeCloseTo(64);
+    const turned: Part = { ...part, quaternion: [0, 0, Math.SQRT1_2, Math.SQRT1_2] };
+    expect(partSize(turned)).toBeCloseTo(64);
+    expect(partSize({ ...part, scale: [-1, 1, 1] })).toBeCloseTo(32);
+  });
+
+  it('fits a 32 mm model from 0.1 mm to a quarter of its size, clamped to 2–100 mm', () => {
+    expect(fittedSizeRange(32)).toEqual({ min: 0.1, max: 8 });
+    expect(fittedSizeRange(100)).toEqual({ min: 0.1, max: 25 });
+    expect(fittedSizeRange(4)).toEqual({ min: 0.1, max: 2 });
+    expect(fittedSizeRange(1000)).toEqual({ min: 0.1, max: 100 });
+    // Each doubling takes the same travel, so mid-travel is the geometric mean.
+    const { min, max } = fittedSizeRange(32);
+    expect(Math.sqrt(min * max)).toBeCloseTo(0.89, 2);
+  });
+});
+
+describe("Warp's brush", () => {
+  it('starts at 3 % of the part size', () => {
+    warp(plate('a', 32));
+    expect(warpBrushRadius(editor())).toBe(0.96);
+    editor().cancelWarp();
+    warp(plate('b', 40, [2.5, 1, 1]));
+    expect(warpBrushRadius(editor())).toBe(3);
+    expect(fittedWarpBrushRadius(plate('c', 1))).toBe(0.05);
+  });
+
+  it("is separate from Align's brush both ways", () => {
+    warp(plate('a'));
+    const align = editor().brushRadius;
+    editor().setWarpBrushRadius(5);
+    expect(warpBrushRadius(editor())).toBe(5);
+    expect(editor().brushRadius).toBe(align);
+    editor().setBrush({ radius: 12 });
+    expect(warpBrushRadius(editor())).toBe(5);
+    expect(editor().brushRadius).toBe(12);
+  });
+
+  it('keeps what was set across sessions on the same part, not on another', () => {
+    const a = plate('a'),
+      b = plate('b');
+    warp(a, b);
+    editor().setWarpBrushRadius(2.5);
+    editor().cancelWarp();
+    editor().setTool('select');
+    warp(a, b);
+    expect(warpBrushRadius(editor())).toBe(2.5);
+    editor().cancelWarp();
+    editor().setTool('select');
+    useEditor.setState({ selected: ['b'] });
+    editor().setTool('warp');
+    expect(warpBrushRadius(editor())).toBe(fittedWarpBrushRadius(b));
+  });
+
+  it('clamps to the numeric field and ignores values that are not numbers', () => {
+    warp(plate('a'));
+    editor().setWarpBrushRadius(0.01);
+    expect(warpBrushRadius(editor())).toBe(0.05);
+    editor().setWarpBrushRadius(500);
+    expect(warpBrushRadius(editor())).toBe(100);
+    editor().setWarpBrushRadius(Number.NaN);
+    expect(warpBrushRadius(editor())).toBe(100);
+  });
+
+  it('sets how much a dab paints, whatever Align uses', () => {
+    const part = plate('a');
+    warp(part);
+    editor().setBrush({ radius: 20 });
+    editor().setWarpBrushRadius(1);
+    const small = dab(part);
+    editor().undoPaintStroke();
+    expect(editor().warp!.faces).toEqual([]);
+    editor().setBrush({ radius: 0.1 });
+    editor().setWarpBrushRadius(6);
+    const large = dab(part);
+    // Cells are 1.25 mm, so a 1 mm dab covers a few faces and a 6 mm dab a disc of them.
+    expect(small).toBeGreaterThan(0);
+    expect(small).toBeLessThan(16);
+    expect(large).toBeGreaterThan(small * 10);
+  });
+});

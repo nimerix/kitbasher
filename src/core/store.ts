@@ -17,7 +17,15 @@ import {
   Vector3,
 } from 'three';
 import { MeshBVH } from 'three-mesh-bvh';
-import { binaryGeometry, partMatrix, quat, triangleCount, uid, worldPoint } from './geometry';
+import {
+  binaryGeometry,
+  partMatrix,
+  partSize,
+  quat,
+  triangleCount,
+  uid,
+  worldPoint,
+} from './geometry';
 import { markInteraction } from './display-performance';
 import {
   anchorError,
@@ -265,6 +273,8 @@ interface EditorState {
   brushRadius: number;
   brushErase: boolean;
   brushPlane: BrushPlaneSettings;
+  /** Warp's own brush radius, for the part it was set on. Align's brushRadius is separate. */
+  warpBrush: { partId: string; radius: number } | null;
   /** The state before each stroke: contact patches, or the warp region while warping. */
   paintHistory: (SurfacePair[] | Pick<WarpSession, 'faces' | 'seed'>)[];
   operation: AssemblyOperation;
@@ -344,6 +354,7 @@ interface EditorState {
     erase?: boolean;
     plane?: Partial<BrushPlaneSettings>;
   }) => void;
+  setWarpBrushRadius: (radius: number) => void;
   addSurfacePair: () => void;
   chooseSurface: (pairId: string, side: SurfaceSide) => void;
   paintSurface: (point: SurfacePoint, face: number, erase?: boolean, begin?: boolean) => boolean;
@@ -879,6 +890,7 @@ export const useEditor = create<EditorState>((set, get) => ({
   brushRadius: 3,
   brushErase: false,
   brushPlane: { enabled: false, angle: 20, distance: 0.5 },
+  warpBrush: null,
   paintHistory: [],
   operation: blankOperation(),
   warp: null,
@@ -1300,6 +1312,14 @@ export const useEditor = create<EditorState>((set, get) => ({
           : state.brushPlane.distance,
       },
     })),
+  setWarpBrushRadius: (radius) =>
+    set((state) =>
+      state.warp && Number.isFinite(radius)
+        ? {
+            warpBrush: { partId: state.warp.partId, radius: Math.max(0.05, Math.min(100, radius)) },
+          }
+        : {},
+    ),
   addSurfacePair: () =>
     set((state) => {
       const unfinished = state.operation.surfacePairs.find(
@@ -1528,7 +1548,7 @@ export const useEditor = create<EditorState>((set, get) => ({
     const erasing = erase || state.brushErase;
     let faces: number[];
     try {
-      faces = facesUnderBrush(part, point, state.brushRadius, face, {
+      faces = facesUnderBrush(part, point, warpBrushRadius(state), face, {
         plane: erasing ? undefined : state.brushPlane,
         patch: { partId: part.id, faces: warp.faces, seed: warp.seed },
       });
@@ -2653,6 +2673,18 @@ export const sceneLighting = (state: EditorState) => state.scene.lighting ?? sta
 /** Whether the brush paints a warp region: the region stage of a painted warp. */
 export const paintingWarpRegion = (state: Pick<EditorState, 'tool' | 'warp'>) =>
   state.tool === 'warp' && state.warp?.stage === 'region' && state.warp.region === 'painted';
+
+/** Warp's starting brush radius: 3 % of the part's size. */
+export const fittedWarpBrushRadius = (part: Pick<Part, 'geometry' | 'scale'>) =>
+  Math.max(0.05, Math.min(100, Number((partSize(part) * 0.03).toPrecision(2))));
+
+/** The brush radius everything uses while warping: what was set on this part, or its fitted start. */
+export function warpBrushRadius(state: Pick<EditorState, 'scene' | 'warp' | 'warpBrush'>) {
+  const { warp, warpBrush } = state;
+  if (warpBrush && warpBrush.partId === warp?.partId) return warpBrush.radius;
+  const part = warp && state.scene.parts.find((part) => part.id === warp.partId);
+  return part ? fittedWarpBrushRadius(part) : 0;
+}
 
 export const canUndo = (state: EditorState) =>
   state.sharedHistory ? state.sharedHistory.undo > 0 : state.past.length > 0;

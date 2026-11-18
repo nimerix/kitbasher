@@ -1,9 +1,21 @@
 import { Eraser, Paintbrush, Undo2 } from 'lucide-react';
 import { useEditor } from '../core/store';
-import { NumericInput } from './ui';
+import { LogRangeInput, NumericInput } from './ui';
 
-export function SurfaceBrushControls() {
-  const radius = useEditor((state) => state.brushRadius),
+type EditorState = ReturnType<typeof useEditor.getState>;
+
+/** With `fitted`, the radius is the caller's and the slider is logarithmic over its range. */
+export function SurfaceBrushControls({
+  fitted,
+}: {
+  fitted?: {
+    radius: (state: EditorState) => number;
+    range: { min: number; max: number };
+    set: (radius: number) => void;
+  };
+} = {}) {
+  const radius = useEditor((state) => (fitted ? fitted.radius(state) : state.brushRadius)),
+    setRadius = fitted?.set ?? ((radius: number) => useEditor.getState().setBrush({ radius })),
     erase = useEditor((state) => state.brushErase),
     history = useEditor((state) => state.paintHistory),
     plane = useEditor((state) => state.brushPlane);
@@ -40,21 +52,32 @@ export function SurfaceBrushControls() {
           value={radius}
           min={0.05}
           max={100}
-          step={0.5}
-          onCommit={(value) => useEditor.getState().setBrush({ radius: value })}
+          step={fitted ? 0.1 : 0.5}
+          onCommit={setRadius}
         />
         <small>mm</small>
       </label>
-      <input
-        className="brush-radius-slider"
-        aria-label="Brush radius slider"
-        type="range"
-        min={0.1}
-        max={20}
-        step={0.1}
-        value={Math.min(radius, 20)}
-        onChange={(event) => useEditor.getState().setBrush({ radius: Number(event.target.value) })}
-      />
+      {fitted ? (
+        <LogRangeInput
+          className="brush-radius-slider"
+          label="Brush radius slider"
+          value={radius}
+          min={fitted.range.min}
+          max={fitted.range.max}
+          onChange={setRadius}
+        />
+      ) : (
+        <input
+          className="brush-radius-slider"
+          aria-label="Brush radius slider"
+          type="range"
+          min={0.1}
+          max={20}
+          step={0.1}
+          value={Math.min(radius, 20)}
+          onChange={(event) => setRadius(Number(event.target.value))}
+        />
+      )}
       <div className="plane-brush-settings">
         <div className="appearance-row">
           <span>Stay on seed plane</span>
