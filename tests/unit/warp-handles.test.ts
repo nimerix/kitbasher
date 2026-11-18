@@ -18,6 +18,7 @@ import { createWarpOutput, deformPoint, evaluateWarp } from '../../src/core/warp
 import {
   distributionNodes,
   handleConstraints,
+  handleFootprint,
   handleGuides,
   nodeSample,
   reachActivation,
@@ -25,6 +26,7 @@ import {
   reachWeight,
   snapshotOf,
   transferSnapshot,
+  uniqueSamples,
   bandWidth,
   warpGuides,
   warpPathStretch,
@@ -764,6 +766,50 @@ describe('point handles', () => {
       if (model.region.role[v] === WarpRole.Interior) return;
       for (let a = 0; a < 3; a++) expect(output.positions[g * 3 + a]).toBe(source[g * 3 + a]);
     });
+  });
+});
+
+describe('footprints', () => {
+  it('are built by kind and keep reach while the footprint is the same', async () => {
+    const { geometry, model } = await sheet(3, 120);
+    const state = createWarpState(model.restNodes);
+    const point = pointHandle(model, geometry, [0.4, 0.3, 0], state, 0);
+    const again = pointHandle(model, geometry, [0.4, 0.3, 0], state, 0);
+    const other = pointHandle(model, geometry, [2.9, -1.2, 0], state, 0);
+    // A sample bound exactly as an earlier one only holds the same spot twice as firmly.
+    const samples = uniqueSamples([...point.samples, ...again.samples, ...other.samples]);
+    expect(samples).toEqual([point.samples[0], other.samples[0]]);
+
+    const bound = [...new Set(samples.flatMap(({ binding }) => binding.node))]
+      .filter((n) => !model.grid.fixed[n])
+      .sort((a, b) => a - b);
+    expect(handleFootprint(model, { kind: 'point', samples }).nodes).toEqual([]);
+    const line = reachHandle(model, { ...point, kind: 'line', samples });
+    expect(handleFootprint(model, line).nodes).toEqual(bound);
+    expect(Array.from(line.reach!.node.subarray(0, line.reach!.own))).toEqual(bound);
+    // The same footprint at the same radius keeps its reach; another radius measures it again.
+    expect(reachHandle(model, { ...line, falloff: 0.3 }).reach).toBe(line.reach);
+    const wider = reachHandle(model, { ...line, radius: 5 });
+    expect(wider.reach).not.toBe(line.reach);
+    expect(wider.reach!.own).toBe(bound.length);
+
+    // An area also holds the nodes on its faces.
+    const faces = disc(geometry, 9);
+    const area = reachHandle(model, { ...point, kind: 'area', samples, faces });
+    const onFaces = new Set(bound);
+    for (const face of faces) {
+      const triangle = readFace(geometry, face);
+      for (const corner of [triangle.a, triangle.b, triangle.c]) {
+        const n = nearestNode(model, corner.toArray());
+        if (
+          !model.grid.fixed[n] &&
+          distance(model.restNodes.subarray(n * 3, n * 3 + 3), corner.toArray()) < 1e-6
+        )
+          onFaces.add(n);
+      }
+    }
+    expect(area.reach!.own).toBe(onFaces.size);
+    expect(area.reach!.own).toBeGreaterThan(bound.length);
   });
 });
 

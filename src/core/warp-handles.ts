@@ -2,7 +2,7 @@ import type { Vec3 } from './types';
 import { bindTrianglePoint, warpBindingNodes, type WarpPointBinding } from './warp-bind';
 import type { WarpGrid } from './warp-grid';
 import { isPaintedNode, type WarpModel } from './warp-model';
-import { WarpRole } from './warp-region';
+import { regionTriangleOf, WarpRole } from './warp-region';
 import { deformPoint } from './warp-evaluate';
 import type { WarpConstraint, WarpGuides, WarpState } from './warp-solve';
 
@@ -47,7 +47,7 @@ export interface WarpFootprint {
 export interface WarpReach {
   grid: WarpGrid;
   radius: number;
-  /** What the reach was measured from, to tell when it must be measured again. */
+  /** The footprint the reach was measured from, to tell when it must be measured again. */
   key: unknown;
   /** Mean rest length of the grid edges at the footprint, mm. */
   spacing: number;
@@ -65,6 +65,8 @@ export interface WarpHandle {
   id: string;
   kind: WarpHandleKind;
   samples: readonly WarpSample[];
+  /** An area's source faces, geometry face ids. Its footprint covers the nodes on them. */
+  faces?: readonly number[];
   /** Where the handle's target is measured from: a point's sample pin. */
   pin: Vec3;
   /** Null while unmoved, when the handle acts as a pin. */
@@ -202,8 +204,12 @@ export function handleConstraints(
   const fixed = model?.grid.fixed;
   const edgeStart = model?.grid.edgeStart;
   constraints.forEach((constraint, c) => {
-    if (untouchedAuto(handles[owner[c]])) return;
+    const handle = handles[owner[c]];
+    if (untouchedAuto(handle)) return;
     const { node, weight } = constraint;
+    // The nodes a handle moves as one already go where its samples do.
+    const { reach } = handle;
+    const own = reach?.grid === model?.grid ? reach?.node.subarray(0, reach.own) : undefined;
     // Shared nodes outrank fully. Guides do by how firmly they hold the sample's nodes, so the
     // surface stays continuous as a radius starts to reach them.
     let contest = 0;
@@ -211,7 +217,7 @@ export function handleConstraints(
       const n = node[k];
       if (fixed?.[n]) continue;
       if (held.get(n) === -1) contest = 1;
-      else if (guides && edgeStart) {
+      else if (guides && edgeStart && !own?.includes(n)) {
         const g = guideIndex(guides, n);
         if (g >= 0)
           contest +=
@@ -323,20 +329,63 @@ export function warpEligibleNodes(model: WarpModel) {
   return eligible;
 }
 
-/** A point's footprint: its samples, with paths starting at the free nodes they are bound to. */
-export function handleFootprint(
-  model: WarpModel,
-  handle: Pick<WarpHandle, 'samples'>,
-): WarpFootprint {
+/** What a footprint is made from. Without a kind, a handle is a point. */
+type WarpFootprintOf = Pick<WarpHandle, 'samples'> & Partial<Pick<WarpHandle, 'kind' | 'faces'>>;
+
+/**
+ * Where a handle's reach is measured from, by kind. A point is its samples alone. A line or an area
+ * moves the free nodes its samples are bound to as one, and an area also the free nodes on its
+ * faces still in the region. Paths start at all of them.
+ */
+export function handleFootprint(model: WarpModel, handle: WarpFootprintOf): WarpFootprint {
   const eligible = warpEligibleNodes(model);
-  const seeds = new Set<number>();
+  const seeds = new Set<number>(),
+    nodes = new Set<number>();
   for (const { binding } of handle.samples)
     for (const n of binding.node) if (eligible[n]) seeds.add(n);
-  return {
-    nodes: [],
-    sources: handle.samples.map(({ restWorld }) => restWorld),
-    seeds: [...seeds].sort((a, b) => a - b),
-  };
+  const sources = handle.samples.map(({ restWorld }) => restWorld);
+  if (handle.kind && handle.kind !== 'point') for (const n of seeds) nodes.add(n);
+  if (handle.kind === 'area' && handle.faces) {
+    const { region, grid, restWorld } = model;
+    for (const face of handle.faces) {
+      const triangle = regionTriangleOf(region, face);
+      if (triangle < 0) continue;
+      for (let c = 0; c < 3; c++) {
+        const v = region.triangles[triangle * 3 + c];
+        sources.push([restWorld[v * 3], restWorld[v * 3 + 1], restWorld[v * 3 + 2]]);
+        const n = grid.nodeOf[v];
+        if (n !== 0xffffffff && eligible[n]) nodes.add(n);
+      }
+    }
+  }
+  const sorted = (set: Set<number>) => [...set].sort((a, b) => a - b);
+  for (const n of nodes) seeds.add(n);
+  return { nodes: sorted(nodes), sources, seeds: sorted(seeds) };
+}
+
+const sameNumbers = (a: readonly number[], b: readonly number[]) =>
+  a.length === b.length && a.every((value, i) => value === b[i]);
+
+/** Whether two footprints measure reach from the same nodes and points. */
+const sameFootprint = (a: WarpFootprint, b: WarpFootprint) =>
+  sameNumbers(a.nodes, b.nodes) &&
+  sameNumbers(a.seeds, b.seeds) &&
+  a.sources.length === b.sources.length &&
+  a.sources.every((p, i) => samePosition(p, b.sources[i]));
+
+/**
+ * The samples without those bound exactly as an earlier one is, which would only hold the same
+ * spot twice as firmly.
+ */
+export function uniqueSamples(samples: readonly WarpSample[]): WarpSample[] {
+  const kept: WarpSample[] = [];
+  const same = (a: WarpPointBinding, b: WarpPointBinding) =>
+    sameNumbers(a.node, b.node) &&
+    a.weight.every((w, k) => Math.abs(w - b.weight[k]) <= 1e-9) &&
+    a.fixed.every((x, k) => Math.abs(x - b.fixed[k]) <= 1e-9);
+  for (const sample of samples)
+    if (!kept.some(({ binding }) => same(binding, sample.binding))) kept.push(sample);
+  return kept;
 }
 
 class Heap {
@@ -511,15 +560,20 @@ export function footprintReach(
   };
 }
 
-/** The handle with its reach measured on `model`, reusing the one it has when still current. */
+/**
+ * The handle with its reach measured on `model` from its footprint, reusing the one it has when
+ * it was measured on the same grid at the same radius from the same footprint.
+ */
 export function reachHandle(model: WarpModel, handle: WarpHandle): WarpHandle {
   const { reach } = handle;
-  if (reach?.grid === model.grid && reach.radius === handle.radius && reach.key === handle.samples)
+  const footprint = handleFootprint(model, handle);
+  if (
+    reach?.grid === model.grid &&
+    reach.radius === handle.radius &&
+    sameFootprint(reach.key as WarpFootprint, footprint)
+  )
     return handle;
-  return {
-    ...handle,
-    reach: footprintReach(model, handleFootprint(model, handle), handle.radius, handle.samples),
-  };
+  return { ...handle, reach: footprintReach(model, footprint, handle.radius) };
 }
 
 /** Whether the handle guides any node beyond its samples' exact constraints. */
@@ -829,7 +883,7 @@ function piecesOf(model: WarpModel, through: Uint8Array) {
 export function distributionNodes(
   model: WarpModel,
   count: number,
-  handles: readonly Pick<WarpHandle, 'samples'>[] = [],
+  handles: readonly WarpFootprintOf[] = [],
 ) {
   const eligible = warpEligibleNodes(model);
   const { edgeStart, edges } = model.grid;

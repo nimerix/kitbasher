@@ -105,6 +105,7 @@ import {
   snapshotOf,
   spacingAt,
   transferSnapshot,
+  uniqueSamples,
   untouchedAuto,
   warpEligibleNodes,
   warpGuides,
@@ -711,22 +712,25 @@ function warpBinding(model: WarpModel, triangle: number, barycentric: Vec3) {
 }
 
 /**
- * Binds a handle to a new model, dropping samples whose face is no longer painted in its region.
- * Null when none is left, or when every node the samples are bound to is fixed, so it could not
- * move the surface.
+ * Binds a handle to a new model, dropping samples and an area's faces that are no longer painted
+ * in its region, and samples the new grid binds exactly as another. Null when no sample is left,
+ * or when every node the samples are bound to is fixed, so it could not move the surface.
  */
 function rebindHandle(model: WarpModel, handle: WarpPoint): WarpPoint | null {
-  const samples = handle.samples.flatMap((sample) => {
-    const triangle = isPaintedFace(model, sample.face)
-      ? regionTriangleOf(model.region, sample.face)
-      : -1;
-    return triangle < 0
-      ? []
-      : [{ ...sample, binding: warpBinding(model, triangle, sample.barycentric).binding }];
-  });
+  const samples = uniqueSamples(
+    handle.samples.flatMap((sample) => {
+      const triangle = isPaintedFace(model, sample.face)
+        ? regionTriangleOf(model.region, sample.face)
+        : -1;
+      return triangle < 0
+        ? []
+        : [{ ...sample, binding: warpBinding(model, triangle, sample.barycentric).binding }];
+    }),
+  );
   const { fixed } = model.grid;
   if (samples.every(({ binding }) => binding.node.every((node) => fixed[node]))) return null;
-  return reachHandle(model, { ...handle, samples, reach: null });
+  const faces = handle.faces?.filter((face) => isPaintedFace(model, face));
+  return reachHandle(model, { ...handle, samples, ...(faces ? { faces } : {}), reach: null });
 }
 
 /** The session's settled grid as a snapshot, or the grid as shown while it is still settling. */
