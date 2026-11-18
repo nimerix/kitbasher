@@ -45,7 +45,8 @@ export function createWarpOutput(model: WarpModel): WarpOutput {
 }
 
 /**
- * Writes interior vertices and their normals, touching only the region. Returns the region
+ * Writes interior vertices and their normals, touching only the region. A feathered model blends
+ * once, in the welded world buffer, and everything else reads that. Returns the region
  * triangles whose world normal flipped, or null when `folds` is false, as for a drag frame.
  */
 export function evaluateWarp(
@@ -82,7 +83,7 @@ export function evaluateWarp(
       rotations[n * 4 + 3],
     );
 
-  const restWorld = model.restWorld;
+  const { restWorld, blend } = model;
   for (let i = 0; i < interior.length; i++) {
     const v = interior[i];
     moved[v] = 0;
@@ -120,6 +121,16 @@ export function evaluateWarp(
     world[v * 3] = x / sum;
     world[v * 3 + 1] = y / sum;
     world[v * 3 + 2] = z / sum;
+  }
+  // The feather band writes part of the displacement: rest + b × (skinned − rest).
+  if (blend) {
+    const band = featherOf(model).band;
+    for (let i = 0; i < band.length; i++) {
+      const v = band[i],
+        b = blend[v];
+      for (let a = v * 3; a < v * 3 + 3; a++)
+        world[a] = restWorld[a] + b * (world[a] - restWorld[a]);
+    }
   }
 
   const { positions, moved: box } = out;
@@ -205,6 +216,26 @@ function triangleNormals(triangles: Uint32Array, points: Float64Array) {
   return normals;
 }
 
+const feathers = new WeakMap<WarpModel, { band: Uint32Array; borderCorners: Uint32Array }>();
+
+/** A feathered model's band vertices, and the normal offsets of region face corners on its border. */
+function featherOf(model: WarpModel) {
+  let feather = feathers.get(model);
+  if (!feather) {
+    const { faces, weldOf, role, interior } = model.region;
+    const blend = model.blend!;
+    const band = interior.filter((v) => blend[v] < 1);
+    const corners: number[] = [];
+    for (let t = 0; t < faces.length; t++)
+      for (let k = 0; k < 3; k++) {
+        const g = faces[t] * 3 + k;
+        if (role[weldOf[g]] === WarpRole.Border) corners.push(g * 3);
+      }
+    feathers.set(model, (feather = { band, borderCorners: Uint32Array.from(corners) }));
+  }
+  return feather;
+}
+
 function writeNormals(model: WarpModel, positions: Float32Array, normals: Float32Array) {
   const { region, index } = model;
   const { weldOf, role, faces, interiorVertices } = region;
@@ -234,6 +265,13 @@ function writeNormals(model: WarpModel, positions: Float32Array, normals: Float3
           normals[c + 2] = original[c + 2];
         }
     }
+    // A feathered outer border keeps its corners' normal bits, as an indexed border vertex does.
+    if (model.blend)
+      for (const c of featherOf(model).borderCorners) {
+        normals[c] = original[c];
+        normals[c + 1] = original[c + 1];
+        normals[c + 2] = original[c + 2];
+      }
     return;
   }
 
@@ -332,6 +370,29 @@ export function joinedRanges(items: ArrayLike<number>, size: number) {
     else ranges.push(starts[i], ends[i] - starts[i]);
   }
   return Uint32Array.from(ranges);
+}
+
+/**
+ * World position of each grid node where the surface is written: its solved position, blended
+ * toward rest across a feather band. Writes into `out` and returns it.
+ */
+export function writtenNodePositions(
+  model: WarpModel,
+  state: WarpState,
+  out: Float32Array | Float64Array = new Float32Array(state.positions.length),
+) {
+  const { blend, restNodes, grid } = model;
+  const positions = state.positions;
+  if (!blend) {
+    out.set(positions);
+    return out;
+  }
+  for (let n = 0; n < grid.nodes.length; n++) {
+    const b = blend[grid.nodes[n]];
+    for (let a = n * 3; a < n * 3 + 3; a++)
+      out[a] = b === 1 ? positions[a] : restNodes[a] + b * (positions[a] - restNodes[a]);
+  }
+  return out;
 }
 
 export function deformPoint(

@@ -31,11 +31,12 @@ export interface WarpRegion {
 
 export function buildWarpRegion(
   geometry: BufferGeometry,
-  faces: readonly number[] | null,
+  faces: ArrayLike<number> | null,
+  weld: { indices: Uint32Array; vertices: number } = weldedPositionIndex(geometry),
 ): WarpRegion {
   const position = geometry.getAttribute('position');
   const index = geometry.index;
-  const { indices: corner, vertices: weldedCount } = weldedPositionIndex(geometry);
+  const { indices: corner, vertices: weldedCount } = weld;
   const faceCount = triangleCount(geometry);
 
   const weldOf = new Uint32Array(position.count).fill(0xffffffff);
@@ -56,7 +57,7 @@ export function buildWarpRegion(
   const inRegion = new Uint8Array(faceCount);
   let regionCount = faceCount;
   if (faces) {
-    for (const face of faces) inRegion[face] = 1;
+    for (let i = 0; i < faces.length; i++) inRegion[faces[i]] = 1;
     regionCount = 0;
     for (let f = 0; f < faceCount; f++) regionCount += inRegion[f];
   } else inRegion.fill(1);
