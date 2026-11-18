@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { PlaneGeometry, Triangle, Vector3, type BufferGeometry } from 'three';
+import { logSliderPosition, logSliderValue } from '../../src/components/ui';
 import { fittedSizeRange, partSize, triangleCount } from '../../src/core/geometry';
 import { fittedWarpBrushRadius, useEditor, warpBrushRadius } from '../../src/core/store';
 import { readFace } from '../../src/core/surfaces';
@@ -78,6 +79,38 @@ describe('part size', () => {
   });
 });
 
+describe('logarithmic slider', () => {
+  it('sets a value at every step that shows that same step', () => {
+    for (const { min, max } of [
+      { min: 0.1, max: 7.8 },
+      { min: 0.1, max: 2 },
+      { min: 0.1, max: 100 },
+      { min: 0.05, max: 25 },
+    ])
+      for (const zero of [false, true])
+        for (let step = 0; step <= 200; step++) {
+          const value = logSliderValue(step, min, max, zero);
+          expect(logSliderPosition(value, min, max, zero), `${min}–${max} ${zero} ${step}`).toBe(
+            step,
+          );
+        }
+  });
+
+  it('moves one step from either end, and from 0 onto the scale and back', () => {
+    const [min, max] = [0.1, 7.8];
+    expect(logSliderValue(1, min, max)).toBeGreaterThan(min);
+    expect(logSliderPosition(logSliderValue(1, min, max), min, max)).toBe(1);
+    expect(logSliderValue(199, min, max)).toBeLessThan(max);
+    expect(logSliderPosition(logSliderValue(199, min, max), min, max)).toBe(199);
+    expect(logSliderValue(200, min, max)).toBe(max);
+    expect(logSliderValue(0, min, max)).toBe(min);
+    expect(logSliderPosition(0, min, max, true)).toBe(0);
+    expect(logSliderValue(1, min, max, true)).toBe(min);
+    expect(logSliderValue(0, min, max, true)).toBe(0);
+    expect(logSliderPosition(logSliderValue(2, min, max, true), min, max, true)).toBe(2);
+  });
+});
+
 describe("Warp's brush", () => {
   it('starts at 3 % of the part size', () => {
     warp(plate('a', 32));
@@ -113,6 +146,41 @@ describe("Warp's brush", () => {
     useEditor.setState({ selected: ['b'] });
     editor().setTool('warp');
     expect(warpBrushRadius(editor())).toBe(fittedWarpBrushRadius(b));
+  });
+
+  it("keeps each part's own radius through strokes, Apply, Cancel and switching parts", async () => {
+    const a = plate('a'),
+      b = plate('b');
+    const edit = (part: Part) => {
+      editor().cancelWarp();
+      editor().setTool('select');
+      useEditor.setState({ selected: [part.id] });
+      editor().setTool('warp');
+      expect(editor().warp!.partId).toBe(part.id);
+    };
+    warp(a, b);
+    editor().setWarpBrushRadius(2.4);
+    dab(a);
+    editor().undoPaintStroke();
+    expect(warpBrushRadius(editor())).toBe(2.4);
+
+    // Apply restarts the session on the warped part.
+    dab(a);
+    await editor().layWarpGrid();
+    editor().addWarpPoint(hit('a', 0, 0), faceAt(a.geometry, 0, 0));
+    const [point] = editor().warp!.points;
+    editor().moveWarpPoints([{ id: point.id, target: [0, 0, 1] }], 'end');
+    expect(editor().applyWarp()).toBe(true);
+    expect(editor().warp!.partId).toBe('a');
+    expect(warpBrushRadius(editor())).toBe(2.4);
+
+    edit(b);
+    expect(warpBrushRadius(editor())).toBe(fittedWarpBrushRadius(b));
+    editor().setWarpBrushRadius(4);
+    edit(a);
+    expect(warpBrushRadius(editor())).toBe(2.4);
+    edit(b);
+    expect(warpBrushRadius(editor())).toBe(4);
   });
 
   it('clamps to the numeric field and ignores values that are not numbers', () => {

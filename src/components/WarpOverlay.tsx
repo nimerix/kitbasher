@@ -3,25 +3,12 @@ import type { ReactNode } from 'react';
 import { useThree } from '@react-three/fiber';
 import type { ThreeEvent } from '@react-three/fiber';
 import { ScreenSizer } from '@react-three/drei';
-import {
-  BufferAttribute,
-  BufferGeometry,
-  Color,
-  DoubleSide,
-  InstancedInterleavedBuffer,
-  InterleavedBufferAttribute,
-  Object3D,
-  type Mesh,
-} from 'three';
-import { LineMaterial } from 'three/addons/lines/LineMaterial.js';
-import { LineSegments2 } from 'three/addons/lines/LineSegments2.js';
-import { LineSegmentsGeometry } from 'three/addons/lines/LineSegmentsGeometry.js';
+import { BufferAttribute, BufferGeometry, Color, DoubleSide, Object3D, type Mesh } from 'three';
 import { partMatrix, transformFromMatrix } from '../core/geometry';
 import { hiddenByIsolation } from '../core/isolation';
 import { PrecisionDrag } from '../core/precision';
 import { finishWarpDrag, useEditor, type WarpBaseline, type WarpSession } from '../core/store';
 import { patchGeometry } from '../core/surfaces';
-import { writtenNodePositions } from '../core/warp-evaluate';
 import {
   transformSelection,
   warpMovesFromPatches,
@@ -32,6 +19,7 @@ import { reachWeight } from '../core/warp-handles';
 import { CombinedTransform } from './CombinedTransform';
 import { ManagedTransformControls } from './ManagedTransformControls';
 import { warpRegionColor } from './SurfacePainter';
+import { WarpGrid } from './WarpGrid';
 
 const noRaycast: Mesh['raycast'] = () => {};
 const pointAccent = '#ed9b54',
@@ -75,7 +63,7 @@ export function WarpOverlay({ onPress, pressed }: { onPress: () => void; pressed
             {warp.folds.length ? <Folds warp={warp} preview={preview} /> : null}
             {warp.seam ? <Seam warp={warp} /> : null}
           </PartSpace>
-          <GridLines warp={warp} />
+          <WarpGrid warp={warp} />
           <Reach warp={warp} />
           {warp.points.map((point) => (
             <PointMarker
@@ -178,201 +166,6 @@ function Seam({ warp }: { warp: WarpSession }) {
   );
 }
 
-/** World position of each grid node, as the grid is drawn. */
-const gridNodePositions = (warp: WarpSession) =>
-  warp.model!.blend ? writtenNodePositions(warp.model!, warp.state!) : warp.state!.positions;
-
-/**
- * Grid edges are chords between scan vertices, so on a curved surface their middles dip under
- * it. Each edge is drawn nearer the camera by this many times its estimated dip, over the cosine
- * of the angle it is seen at, and never by more than a quarter of its length.
- */
-const gridDepthBias = 2;
-/**
- * A sharper turn between node normals than half a radian is a crease, which no small bias
- * lifts a chord over. Squared, as |n_a - n_b|².
- */
-const maxTurn = (2 * Math.sin(0.25)) ** 2;
-
-/** A grid line material whose edges are pulled toward the camera by `gridDepthBias`. */
-function gridMaterial(color: string, linewidth: number, opacity: number) {
-  const material = new LineMaterial({
-    color,
-    linewidth,
-    opacity,
-    transparent: true,
-    depthWrite: false,
-    toneMapped: false,
-  });
-  material.uniforms.depthBias = { value: gridDepthBias };
-  const end = 'vec4 end = modelViewMatrix * vec4( instanceEnd, 1.0 );';
-  material.vertexShader = material.vertexShader
-    .replace(
-      'uniform float linewidth;',
-      'uniform float linewidth;\nuniform float depthBias;\nattribute vec3 instanceNormal;\nattribute float instanceSag;',
-    )
-    .replace(
-      end,
-      `${end}
-      bool perspectiveView = projectionMatrix[ 2 ][ 3 ] == - 1.0;
-      vec3 toEye = perspectiveView ? normalize( - start.xyz - end.xyz ) : vec3( 0.0, 0.0, 1.0 );
-      vec3 normal = normalMatrix * instanceNormal;
-      float facing = max( abs( dot( normal, toEye ) ) / max( length( normal ), 1e-6 ), 0.1 );
-      float pull = min( depthBias * instanceSag / facing, 0.25 * distance( start.xyz, end.xyz ) );
-      if ( perspectiveView ) {
-        start.xyz *= max( 0.5, 1.0 - pull / length( start.xyz ) );
-        end.xyz *= max( 0.5, 1.0 - pull / length( end.xyz ) );
-      } else {
-        start.z += pull;
-        end.z += pull;
-      }`,
-    );
-  return material;
-}
-
-/** Area-weighted unit normal per node, from the grid's own triangles. */
-function nodeNormals(nodes: ArrayLike<number>, triangles: Uint32Array, out: Float64Array) {
-  out.fill(0);
-  for (let t = 0; t < triangles.length; t += 3) {
-    const a = triangles[t] * 3,
-      b = triangles[t + 1] * 3,
-      c = triangles[t + 2] * 3;
-    const ux = nodes[b] - nodes[a],
-      uy = nodes[b + 1] - nodes[a + 1],
-      uz = nodes[b + 2] - nodes[a + 2],
-      vx = nodes[c] - nodes[a],
-      vy = nodes[c + 1] - nodes[a + 1],
-      vz = nodes[c + 2] - nodes[a + 2];
-    const x = uy * vz - uz * vy,
-      y = uz * vx - ux * vz,
-      z = ux * vy - uy * vx;
-    out[a] += x;
-    out[a + 1] += y;
-    out[a + 2] += z;
-    out[b] += x;
-    out[b + 1] += y;
-    out[b + 2] += z;
-    out[c] += x;
-    out[c + 1] += y;
-    out[c + 2] += z;
-  }
-  for (let n = 0; n < out.length; n += 3) {
-    const scale =
-      1 / (Math.sqrt(out[n] * out[n] + out[n + 1] * out[n + 1] + out[n + 2] * out[n + 2]) || 1);
-    out[n] *= scale;
-    out[n + 1] *= scale;
-    out[n + 2] *= scale;
-  }
-}
-
-/**
- * Grid edges between the deformed node positions: a dark core over a light casing, so they
- * read over light and dark surfaces alike. Both draw from one endpoint buffer.
- */
-function GridLines({ warp }: { warp: WarpSession }) {
-  const model = warp.model!;
-  const invalidate = useThree((s) => s.invalidate);
-  const size = useThree((s) => s.size);
-  const grid = useMemo(() => {
-    const { edgeStart, edges } = model.grid;
-    let count = 0;
-    for (let n = 0; n + 1 < edgeStart.length; n++)
-      for (let k = edgeStart[n]; k < edgeStart[n + 1]; k++) if (edges[k] > n) count++;
-    const pairs = new Uint32Array(count * 2);
-    for (let n = 0, e = 0; n + 1 < edgeStart.length; n++)
-      for (let k = edgeStart[n]; k < edgeStart[n + 1]; k++)
-        if (edges[k] > n) {
-          pairs[e++] = n;
-          pairs[e++] = edges[k];
-        }
-    // Per edge: both ends, its normal, and how far its middle dips under the surface.
-    const buffer = new InstancedInterleavedBuffer(new Float32Array(count * 10), 10, 1);
-    const geometry = new LineSegmentsGeometry();
-    geometry.setAttribute('instanceStart', new InterleavedBufferAttribute(buffer, 3, 0));
-    geometry.setAttribute('instanceEnd', new InterleavedBufferAttribute(buffer, 3, 3));
-    geometry.setAttribute('instanceNormal', new InterleavedBufferAttribute(buffer, 3, 6));
-    geometry.setAttribute('instanceSag', new InterleavedBufferAttribute(buffer, 1, 9));
-    geometry.instanceCount = count;
-    const casing = new LineSegments2(geometry, gridMaterial('#f2f5f4', 4.5, 0.85)),
-      core = new LineSegments2(geometry, gridMaterial('#0e1114', 2, 1));
-    casing.name = 'warp-grid:casing';
-    core.name = 'warp-grid:core';
-    casing.renderOrder = 6;
-    core.renderOrder = 7;
-    for (const line of [casing, core]) {
-      line.frustumCulled = false;
-      line.raycast = noRaycast;
-    }
-    return {
-      pairs,
-      buffer,
-      normals: new Float64Array(model.restNodes.length),
-      geometry,
-      casing,
-      core,
-    };
-  }, [model]);
-  useEffect(
-    () => () => {
-      grid.geometry.dispose();
-      grid.casing.material.dispose();
-      grid.core.material.dispose();
-    },
-    [grid],
-  );
-  useLayoutEffect(() => {
-    grid.casing.material.resolution.set(size.width, size.height);
-    grid.core.material.resolution.set(size.width, size.height);
-    invalidate();
-  }, [grid, size, invalidate]);
-  useLayoutEffect(() => {
-    const nodes = gridNodePositions(warp),
-      { pairs, buffer, normals } = grid;
-    nodeNormals(nodes, model.grid.triangles, normals);
-    const array = buffer.array as Float32Array;
-    for (let e = 0; e < pairs.length / 2; e++) {
-      const a = pairs[e * 2] * 3,
-        b = pairs[e * 2 + 1] * 3,
-        o = e * 10;
-      for (let i = 0; i < 3; i++) {
-        array[o + i] = nodes[a + i];
-        array[o + 3 + i] = nodes[b + i];
-        array[o + 6 + i] = normals[a + i] + normals[b + i];
-      }
-      const dx = nodes[b] - nodes[a],
-        dy = nodes[b + 1] - nodes[a + 1],
-        dz = nodes[b + 2] - nodes[a + 2];
-      // Normals that spread apart along the edge mean a convex surface, above the chord there.
-      const convex =
-        (normals[b] - normals[a]) * dx +
-          (normals[b + 1] - normals[a + 1]) * dy +
-          (normals[b + 2] - normals[a + 2]) * dz >
-        0;
-      if (!convex) {
-        array[o + 9] = 0;
-        continue;
-      }
-      // An arc of length L whose normals turn by θ dips about L θ / 8 below its chord, and
-      // |n_a - n_b| is θ closely enough below the cap.
-      const turn =
-        2 -
-        2 *
-          (normals[a] * normals[b] +
-            normals[a + 1] * normals[b + 1] +
-            normals[a + 2] * normals[b + 2]);
-      array[o + 9] = Math.sqrt((dx * dx + dy * dy + dz * dz) * Math.min(turn, maxTurn)) / 8;
-    }
-    buffer.needsUpdate = true;
-    invalidate();
-  }, [grid, warp, model, invalidate]);
-  return (
-    <>
-      <primitive object={grid.casing} />
-      <primitive object={grid.core} />
-    </>
-  );
-}
-
 /**
  * The grid nodes the selected points move, lighter where they carry more of the move, each on a
  * dark dot so it shows on light and dark parts alike.
@@ -419,6 +212,7 @@ function Reach({ warp }: { warp: WarpSession }) {
  * A control point, sized in pixels; a point placed automatically is smaller and dimmer. Clicking
  * it selects it, and Shift adds it.
  */
+/** A control point, sized in pixels. Clicking it selects it, and Shift adds it. */
 function PointMarker({
   id,
   position,
