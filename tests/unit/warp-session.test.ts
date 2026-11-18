@@ -1036,6 +1036,50 @@ describe('warp points, close gap and apply', () => {
     expect(partOf('a').geometry).toBe(applied);
   });
 
+  it('frees a mesh that leaves the history without freeing the index and color it shares', async () => {
+    const a = plate('a');
+    setup([a], ['a']);
+    const { index } = a.geometry,
+      color = a.geometry.getAttribute('color');
+    /** What each disposal left on the geometry for the renderer to free. */
+    const disposals = (geometry: BufferGeometry) => {
+      const seen: { index: unknown; names: string[] }[] = [];
+      geometry.addEventListener('dispose', () =>
+        seen.push({ index: geometry.index, names: Object.keys(geometry.attributes).sort() }),
+      );
+      return seen;
+    };
+    const source = disposals(a.geometry);
+
+    await warpDisc(a, 0, 0, 8);
+    move(addAt(a, 0, 0).id, [0, 0, 2]);
+    editor().applyWarp();
+    const applied = partOf('a').geometry;
+    expect(applied.index).toBe(index);
+    expect(applied.getAttribute('color')).toBe(color);
+    const first = disposals(applied);
+
+    // Undo the Apply, then edit: the warped mesh leaves the history while the source shows.
+    editor().undo();
+    editor().patchParts(['a'], { name: 'Plate' });
+    expect(first).toEqual([{ index: null, names: ['normal', 'position'] }]);
+    expect(source).toEqual([]);
+    // Whole again afterwards, for anything that still holds it.
+    expect(applied.index).toBe(index);
+    expect(applied.getAttribute('color')).toBe(color);
+
+    // Apply again, then push the source out of the history while the warp shows.
+    await warpDisc(partOf('a'), 0, 0, 8);
+    move(addAt(partOf('a'), 0, 0).id, [0, 0, 2]);
+    editor().applyWarp();
+    const second = partOf('a').geometry;
+    for (let i = 0; i < 40; i++) editor().patchParts(['a'], { name: `Plate ${i}` });
+    expect(source).toEqual([{ index: null, names: ['normal', 'position', 'uv'] }]);
+    expect(second.index).toBe(index);
+    expect(second.getAttribute('color')).toBe(color);
+    expect(a.geometry.index).toBe(index);
+  });
+
   it('apply leaves pins, anchors, pivot and joints unchanged and moves no other part', async () => {
     const a: Part = {
       ...plate('a'),

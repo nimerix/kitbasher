@@ -515,12 +515,9 @@ function warpPreview(source: BufferGeometry, output: WarpOutput) {
   return preview;
 }
 
-/** Detaches the source's index and color first, so disposing does not free their GPU buffers. */
+/** Frees a warp preview's own buffers. Its index and color are the source's. */
 function disposeWarpPreview(preview: BufferGeometry | null) {
-  if (!preview) return;
-  preview.setIndex(null);
-  preview.deleteAttribute('color');
-  preview.dispose();
+  if (preview) releaseGeometries([preview], useEditor.getState());
 }
 
 /** Copies, because the build job transfers its input arrays to a worker. */
@@ -2607,9 +2604,38 @@ useEditor.subscribe((state, previous) => {
   )
     return;
   const reachable = reachableGeometries(state);
-  for (const geometry of trackedGeometries) if (!reachable.has(geometry)) geometry.dispose();
+  const dropped = [...trackedGeometries].filter((geometry) => !reachable.has(geometry));
   trackedGeometries = reachable;
+  if (dropped.length) releaseGeometries(dropped, state, reachable);
 });
+
+/**
+ * Frees the GPU buffers of geometries nothing will draw again. A warp shares its source's index
+ * and color, and the renderer frees every buffer a disposed geometry holds, so the ones another
+ * geometry still draws with are set aside during the disposal and put back after it.
+ */
+function releaseGeometries(
+  geometries: BufferGeometry[],
+  state: EditorState,
+  reachable = reachableGeometries(state),
+) {
+  const released = new Set(geometries);
+  const inUse = new Set<unknown>();
+  for (const geometry of [...reachable, state.warp?.preview, state.warpPending?.session.preview]) {
+    if (!geometry || released.has(geometry)) continue;
+    if (geometry.index) inUse.add(geometry.index);
+    for (const name in geometry.attributes) inUse.add(geometry.attributes[name]);
+  }
+  for (const geometry of released) {
+    const index = geometry.index && inUse.has(geometry.index) ? geometry.index : null;
+    const shared = Object.entries(geometry.attributes).filter(([, value]) => inUse.has(value));
+    if (index) geometry.setIndex(null);
+    for (const [name] of shared) geometry.deleteAttribute(name);
+    geometry.dispose();
+    if (index) geometry.setIndex(index);
+    for (const [name, attribute] of shared) geometry.setAttribute(name, attribute);
+  }
+}
 
 // Parts can leave the scene by many routes, such as delete, undo, or another editor.
 useEditor.subscribe((state, previous) => {
