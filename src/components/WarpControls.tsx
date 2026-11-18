@@ -13,6 +13,7 @@ import {
   warpBrushRadius,
   warpChanges,
   warpDistributeCounts,
+  warpPinDrift,
   warpPointRadius,
   warpShortfall,
   warpShortfallShown,
@@ -97,6 +98,7 @@ function PointSettingsControls({ warp, part }: { warp: WarpSession; part: Part |
   const coarse = selected.some((point) => point.radius > 0 && !handleGuides(point));
   const fade = shown && handleGuides(shown) ? fadeWidth(shown) : null;
   const shortfall = warpShortfall(warp);
+  const drift = warpPinDrift(warp);
   const commit = (patch: PointSettings) => useEditor.getState().setWarpPointSettings(patch, 'end');
   const owned = (slider: Slider) => ({
     'data-slider': slider,
@@ -185,6 +187,14 @@ function PointSettingsControls({ warp, part }: { warp: WarpSession; part: Part |
           The surface stops {shortfall.toFixed(2)} mm short of the{' '}
           {selected.length === 1 ? "point's target" : "selected points' targets"}. A point on the
           same spot or the fixed edge holds it back.
+        </p>
+      ) : null}
+      {drift > warpShortfallShown ? (
+        <p className="warp-warning" role="status">
+          <TriangleAlert size={13} aria-hidden="true" />
+          The surface has moved {drift.toFixed(2)} mm from where the{' '}
+          {selected.length === 1 ? 'selected point holds' : 'selected points hold'} it. A moved
+          point beside it pulls it away.
         </p>
       ) : null}
       <div className="warp-distribute-row">

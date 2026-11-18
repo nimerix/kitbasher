@@ -97,6 +97,7 @@ import {
 import { defaultWarpDensity, warpDensityNodes } from './warp-grid';
 import {
   distributionNodes,
+  handleCarry,
   handleConstraints,
   handleGuides,
   heldWhereItIs,
@@ -828,6 +829,25 @@ export function warpShortfall(warp: WarpSession) {
 /** A selected handle whose surface stops farther than this from its target says so, mm. */
 export const warpShortfallShown = 0.02;
 
+/**
+ * How far the written surface has moved from the pins of the selected unmoved handles the user
+ * placed, at worst, mm. Untouched automatic points ride with the surface, so they are left out.
+ */
+export function warpPinDrift(warp: WarpSession) {
+  const { model, state } = warp;
+  if (!model || !state || warp.stage !== 'warp') return 0;
+  let worst = 0;
+  for (const point of warp.points)
+    if (point.target === null && !point.auto && warp.selectedPoints.includes(point.id)) {
+      const at = writtenCentre(model, state, point);
+      worst = Math.max(
+        worst,
+        Math.hypot(at[0] - point.pin[0], at[1] - point.pin[1], at[2] - point.pin[2]),
+      );
+    }
+  return worst;
+}
+
 /** Whether Apply would change the mesh. */
 export const warpChanges = (warp: WarpSession) =>
   warp.gapTargets.length > 0 || warp.points.some(holdsWarp);
@@ -845,6 +865,7 @@ type WarpSolveInput = Pick<WarpSession, 'model' | 'points' | 'gapTargets'>;
 function warpConstraints(
   { model, points, gapTargets }: WarpSolveInput,
   guides: WarpGuides | undefined,
+  carry?: ReadonlyMap<WarpPoint, number>,
 ): WarpConstraint[] {
   const rest = model!.restNodes;
   return [
@@ -853,6 +874,7 @@ function warpConstraints(
       model!,
       guides,
       gapTargets.map(({ node }) => node),
+      carry,
     ),
     // A seam closes as exactly as a point the user moved lands.
     ...gapTargets.map(({ node, target }) => ({
@@ -872,6 +894,26 @@ const sessionGuides = ({ model, points, gapTargets }: WarpSolveInput) =>
     points,
     gapTargets.map(({ node }) => node),
   );
+
+/**
+ * What the solve is given: guides and constraints, with each grab the fixed edge or a pin holds
+ * back carrying only the share of its offset it can. A drag frame solves without priority.
+ */
+function warpSolveInput(warp: WarpSolveInput, drag = false) {
+  const exact = warp.gapTargets.map(({ node }) => node);
+  const plain = (constraints: WarpConstraint[]) =>
+    drag
+      ? constraints.map(({ strength, ...constraint }) => (void strength, constraint))
+      : constraints;
+  let guides = sessionGuides(warp);
+  let constraints = plain(warpConstraints(warp, guides));
+  const carry = handleCarry(warp.model!, warp.points, constraints, guides, exact);
+  if (carry.size) {
+    guides = warpGuides(warp.model!, warp.points, exact, carry);
+    constraints = plain(warpConstraints(warp, guides, carry));
+  }
+  return { guides, constraints };
+}
 
 /** World box around the grid as it is now deformed. */
 function warpBounds(state: WarpState) {
@@ -1006,21 +1048,13 @@ function solveWarpSession(
   measure = true,
 ): WarpSession {
   const model = warp.model!;
-  const guides = sessionGuides(warp);
-  const constraints = warpConstraints(warp, guides);
+  // A drag frame costs what it did before priority: the end of the gesture lands the handle.
+  const { guides, constraints } = warpSolveInput(warp, gesture === 'drag');
   let move = 0;
   // With nothing holding it, the grid rests rather than staying where the last points left it.
   if (!constraints.length) warp = { ...warp, state: createWarpState(model.restNodes) };
   else if (gesture === 'drag')
-    // A drag frame costs what it did before priority: the end of the gesture lands the handle.
-    solveWarp(
-      model.grid,
-      model.restNodes,
-      constraints.map(({ strength, ...constraint }) => (void strength, constraint)),
-      warp.state!,
-      warpDragIterations,
-      guides,
-    );
+    solveWarp(model.grid, model.restNodes, constraints, warp.state!, warpDragIterations, guides);
   else move = settleGrid(model, constraints, warp.state!, guides);
   if (gesture === 'end')
     return showWarp(
@@ -1085,8 +1119,9 @@ function stepWarpSettle(budget: number) {
   ) {
     progress.warp = warp;
     progress.iterations = 0;
-    progress.guides = sessionGuides(warp);
-    progress.constraints = warpConstraints(warp, progress.guides);
+    const input = warpSolveInput(warp);
+    progress.guides = input.guides;
+    progress.constraints = input.constraints;
   }
   const deadline = performance.now() + budget;
   let move = Infinity;
@@ -2406,9 +2441,7 @@ export const useEditor = create<EditorState>((set, get) => ({
     // Found on the surface the points alone hold, so pressing again or changing the overlap keeps
     // the nodes earlier targets pulled in.
     const held = createWarpState(model.restNodes);
-    const pointsOnly = { ...warp, gapTargets: [] };
-    const guides = sessionGuides(pointsOnly);
-    const constraints = warpConstraints(pointsOnly, guides);
+    const { guides, constraints } = warpSolveInput({ ...warp, gapTargets: [] });
     if (constraints.length) settleGrid(model, constraints, held, guides);
     const { neighbours, indexing } = warpNeighbours(state.scene, warp.partId, warpBounds(held));
     if (indexing.length) {
@@ -2444,8 +2477,8 @@ export const useEditor = create<EditorState>((set, get) => ({
         positions: warp.state!.positions.slice(),
         rotations: warp.state!.rotations.slice(),
       };
-      const guides = sessionGuides(free);
-      settleGrid(model, warpConstraints(free, guides), trial, guides);
+      const input = warpSolveInput(free);
+      settleGrid(model, input.constraints, trial, input.guides);
       let pull = 0;
       for (const { node, target } of gapTargets)
         pull = Math.max(pull, distanceTo(held.positions, node, target));

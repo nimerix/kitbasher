@@ -187,12 +187,25 @@ Radius adds soft per-node **guides** around them.
 
 - **Priority.** A moved point's sample, and gap targets, are held at 100 times the strength of
   an automatic pin. Any other sample the user placed or moved is too where other handles'
-  samples or gap targets share its nodes, and by how firmly guides hold its nodes where they do
-  (the nodes a handle moves as one do not count), so the surface stays continuous in the radius.
-  A moved point then lands on its target within 0.01 mm at default density and 0.03 mm on the
-  coarsest grid, unless a point the user placed on the same spot or the fixed edge holds it,
-  which the panel states when it exceeds 0.02 mm; its marker shows where the surface is and the
-  gizmo stays on the target. A drag frame solves without priority, so it costs what it did.
+  samples or gap targets share its nodes, an unmoved one also where it is bound to a free node a
+  moved handle's samples are bound to or beside one, and by how firmly guides hold its nodes
+  where they do (the nodes a handle moves as one do not count), so the surface stays continuous
+  in the radius. A moved point then lands on its target within 0.01 mm at default density and
+  0.03 mm on the coarsest grid, unless a point the user placed beside it or the fixed edge holds
+  it; its marker shows where the surface is and the gizmo stays on the target. A drag frame
+  solves without priority, so it costs what it did.
+- **Carry.** A moved handle bound partly to fixed nodes, or whose constraints fight an unmoved
+  handle the user placed on or beside its nodes, carries only the share of its offset the
+  surface can take; its constraints and guides move by that share, and it stops short. The share
+  comes from the solve's linear response to the handle's travel with rotations held (one more
+  conjugate-gradient solve on the system the solve builds anyway): no node moves more than 1.25
+  times the travel, an unmoved point the user placed moves no more than 0.005 mm, and, bound
+  partly to fixed nodes, no edge with a fixed end rises by more than its rest length and no node
+  map beside the fixed edge loses more than half its determinant. Otherwise the stiff constraint
+  reached its target by overdriving the few free nodes it had: on a scan a 1 mm pull beside the
+  fixed edge moved a node 4.5 mm and turned node maps inside out. Handles on free surface with no
+  such pin beside them are left alone. The panel states a moved handle's shortfall from its
+  target, and an unmoved one's drift from its pin, once either exceeds 0.02 mm.
 - **Settling.** The end of an edit settles for up to 50 iterations. A solve whose last iteration
   still moved a node by 1 µm or more is marked settling and goes on in idle steps of 8 ms,
   redrawing every 200 ms, until it converges (or 20,000 iterations). Undo restores the surface
