@@ -11,6 +11,17 @@ export interface WarpConstraint {
   fixed?: Vec3;
 }
 
+/**
+ * Soft per-node targets: each entry adds `stiffness × |p − target|²` to the energy. Nodes and
+ * stiffnesses shape the system; targets may change every frame without rebuilding it.
+ */
+export interface WarpGuides {
+  node: ArrayLike<number>;
+  stiffness: ArrayLike<number>;
+  /** World target per entry, three values each. */
+  target: ArrayLike<number>;
+}
+
 export interface WarpState {
   /** World position per node. */
   positions: Float64Array;
@@ -40,6 +51,8 @@ export function createWarpState(restNodes: Float64Array): WarpState {
 interface WarpSystem {
   /** Per valid constraint: its index, entry count, nodes, then their weights. */
   key: Float64Array;
+  /** Guide nodes, then their stiffnesses. */
+  guideKey: Float64Array;
   /** Matrix row of each node, -1 when fixed. */
   row: Int32Array;
   /** Node of each matrix row. */
@@ -76,13 +89,22 @@ function constraintKey(constraints: WarpConstraint[]) {
   return key;
 }
 
+function guideKey(guides: WarpGuides | undefined) {
+  const key: number[] = [];
+  if (!guides) return key;
+  const { node, stiffness } = guides;
+  for (let g = 0; g < node.length; g++) key.push(node[g]);
+  for (let g = 0; g < node.length; g++) key.push(stiffness[g]);
+  return key;
+}
+
 function sameKey(a: Float64Array, b: number[]) {
   if (a.length !== b.length) return false;
   for (let i = 0; i < b.length; i++) if (a[i] !== b[i]) return false;
   return true;
 }
 
-function buildSystem(grid: WarpGrid, key: number[]): WarpSystem {
+function buildSystem(grid: WarpGrid, key: number[], guides: number[]): WarpSystem {
   const { fixed, edgeStart, edges } = grid;
   const count = fixed.length;
   const row = new Int32Array(count).fill(-1);
@@ -118,6 +140,11 @@ function buildSystem(grid: WarpGrid, key: number[]): WarpSystem {
     }
     i = weights + length;
   }
+  const guided = guides.length / 2;
+  for (let g = 0; g < guided; g++) {
+    const k = row[guides[g]];
+    if (k >= 0) diagonal[k] += guides[guided + g];
+  }
 
   const rowStart = new Uint32Array(free + 1);
   const columns: number[] = [];
@@ -144,6 +171,7 @@ function buildSystem(grid: WarpGrid, key: number[]): WarpSystem {
   for (let k = 0; k < free; k++) inverseDiagonal[k] = diagonal[k] > 0 ? 1 / diagonal[k] : 0;
   return {
     key: Float64Array.from(key),
+    guideKey: Float64Array.from(guides),
     row,
     freeNodes,
     diagonal,
@@ -186,6 +214,7 @@ function assemble(
   system: WarpSystem,
   restNodes: Float64Array,
   constraints: WarpConstraint[],
+  guides: WarpGuides | undefined,
 ) {
   const { edgeStart, edges } = grid;
   const { key, row, freeNodes, rotation: R, rhs } = system;
@@ -254,6 +283,18 @@ function assemble(
     }
     i = weights + length;
   }
+
+  // Guides: s (t − g).
+  if (guides)
+    for (let g = 0; g < guides.node.length; g++) {
+      const n = guides.node[g],
+        k = row[n];
+      if (k < 0) continue;
+      const s = guides.stiffness[g];
+      rhs[k * 3] += s * (guides.target[g * 3] - restNodes[n * 3]);
+      rhs[k * 3 + 1] += s * (guides.target[g * 3 + 1] - restNodes[n * 3 + 1]);
+      rhs[k * 3 + 2] += s * (guides.target[g * 3 + 2] - restNodes[n * 3 + 2]);
+    }
 }
 
 /** q = A p; returns p·q per axis in `dot`. */
@@ -470,18 +511,24 @@ function fitRotations(
   }
 }
 
-/** Warm-starts from and updates `state`. Returns the largest node move in the last iteration, mm. */
+/**
+ * Warm-starts from and updates `state`. Returns the largest node move in the last iteration, mm.
+ * Several guides on one node add.
+ */
 export function solveWarp(
   grid: WarpGrid,
   restNodes: Float64Array,
   constraints: WarpConstraint[],
   state: WarpState,
   iterations: number,
+  guides?: WarpGuides,
 ): number {
   const key = constraintKey(constraints);
-  if (!key.length && !grid.fixed.includes(1)) return 0;
+  const guiding = guideKey(guides);
+  if (!key.length && !guiding.length && !grid.fixed.includes(1)) return 0;
   let system = systems.get(grid);
-  if (!system || !sameKey(system.key, key)) systems.set(grid, (system = buildSystem(grid, key)));
+  if (!system || !sameKey(system.key, key) || !sameKey(system.guideKey, guiding))
+    systems.set(grid, (system = buildSystem(grid, key, guiding)));
 
   const { fixed } = grid;
   const { freeNodes, rotation, x } = system;
@@ -507,7 +554,7 @@ export function solveWarp(
 
   let largest = 0;
   for (let iteration = 0; iteration < iterations; iteration++) {
-    assemble(grid, system, restNodes, constraints);
+    assemble(grid, system, restNodes, constraints, guides);
     for (let k = 0; k < freeNodes.length; k++) {
       const i3 = freeNodes[k] * 3;
       x[k * 3] = positions[i3] - restNodes[i3];
