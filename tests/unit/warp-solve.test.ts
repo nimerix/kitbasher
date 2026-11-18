@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { BoxGeometry, Euler, Matrix4, Quaternion, SphereGeometry, Vector3 } from 'three';
+import { BoxGeometry, Euler, Matrix3, Matrix4, Quaternion, SphereGeometry, Vector3 } from 'three';
 import { partMatrix } from '../../src/core/geometry';
 import type { Part, Vec3 } from '../../src/core/types';
 import { bindPoint, bindRegion } from '../../src/core/warp-bind';
@@ -7,6 +7,7 @@ import { buildWarpGrid } from '../../src/core/warp-grid';
 import { buildWarpRegion } from '../../src/core/warp-region';
 import {
   createWarpState,
+  skinMapOf,
   solveWarp,
   warpDragIterations,
   warpSettleIterations,
@@ -58,22 +59,32 @@ async function sphere(faces: number[] | null, matrix = new Matrix4()) {
       target: [rest[0] + move[0], rest[1] + move[1], rest[2] + move[2]],
     };
   };
-  return { grid, restNodes, point, state: createWarpState(restNodes) };
+  const deformed = (c: WarpConstraint, state: WarpState) => deformedOn(grid, restNodes, c, state);
+  return { grid, restNodes, point, deformed, state: createWarpState(restNodes) };
 }
 
-function deformed(c: WarpConstraint, restNodes: Float64Array, state: WarpState): Vec3 {
+/** Where skinning puts a constrained point: each node's skin map applied to its offset. */
+function deformedOn(
+  grid: Awaited<ReturnType<typeof buildWarpGrid>>,
+  restNodes: Float64Array,
+  c: WarpConstraint,
+  state: WarpState,
+): Vec3 {
   const out = new Vector3(...(c.fixed ?? [0, 0, 0])),
-    q = new Quaternion(),
+    map = new Matrix3(),
     v = new Vector3();
+  const m = new Float64Array(9);
   for (let k = 0; k < c.node.length; k++) {
     const n = c.node[k];
     const rest = c.restByNode?.[k] ?? c.rest;
+    skinMapOf(grid, restNodes, state, n, m);
+    map.set(m[0], m[1], m[2], m[3], m[4], m[5], m[6], m[7], m[8]);
     v.set(
       rest[0] - restNodes[n * 3],
       rest[1] - restNodes[n * 3 + 1],
       rest[2] - restNodes[n * 3 + 2],
     )
-      .applyQuaternion(q.fromArray(state.rotations, n * 4))
+      .applyMatrix3(map)
       .add(new Vector3().fromArray(state.positions, n * 3));
     out.addScaledVector(v, c.weight[k]);
   }
@@ -127,17 +138,16 @@ describe('solveWarp', () => {
   });
 
   it('meets a single moved point within 0.01 mm while others pin', async () => {
-    const { grid, restNodes, point, state } = await sphere(null);
+    const { grid, restNodes, point, deformed, state } = await sphere(null);
     const moved = point([1, 0, 0], [0, 2, 0]);
     const pins = [point([-1, 0, 0]), point([0, 0.6, -0.8]), point([0, -0.6, 0.8])];
     solveWarp(grid, restNodes, [moved, ...pins], state, warpSettleIterations);
-    expect(distance(deformed(moved, restNodes, state), moved.target)).toBeLessThan(0.01);
-    for (const pin of pins)
-      expect(distance(deformed(pin, restNodes, state), pin.target)).toBeLessThan(0.01);
+    expect(distance(deformed(moved, state), moved.target)).toBeLessThan(0.01);
+    for (const pin of pins) expect(distance(deformed(pin, state), pin.target)).toBeLessThan(0.01);
   });
 
   it('warm start converges below warpSettleTolerance within warpSettleIterations', async () => {
-    const { grid, restNodes, point, state } = await sphere(cap);
+    const { grid, restNodes, point, deformed, state } = await sphere(cap);
     const handle = point([0, 1, 0]);
     const pin = point([0.5, 0.8, 0]);
     for (let frame = 1; frame <= 30; frame++) {
@@ -149,7 +159,7 @@ describe('solveWarp', () => {
     for (let i = 0; i < warpSettleIterations && move >= warpSettleTolerance; i++)
       move = solveWarp(grid, restNodes, [handle, pin], state, 1);
     expect(move).toBeLessThan(warpSettleTolerance);
-    expect(distance(deformed(handle, restNodes, state), handle.target)).toBeLessThan(0.01);
+    expect(distance(deformed(handle, state), handle.target)).toBeLessThan(0.01);
   });
 
   it('stays rigid in world space for a mirrored, non-uniform part', async () => {

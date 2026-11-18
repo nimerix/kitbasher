@@ -753,6 +753,8 @@ describe('point handles', () => {
     const handle = moved(pointHandle(model, geometry, [36, 0.3, 0], state, 8), [0, 0, 1.5]);
     expect(Array.from(handle.reach!.node).some((n) => model.grid.fixed[n])).toBe(false);
     converge(model, state, [handle]);
+    // The fixed border 4 mm away steepens the bump; skin maps that stretch with the grid land the
+    // point within 0.2 %.
     expect(distance(tipOf(model, state, handle), handle.target!)).toBeLessThan(0.02);
     for (let n = 0; n < model.grid.nodes.length; n++)
       if (model.grid.fixed[n])
