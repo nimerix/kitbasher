@@ -175,6 +175,16 @@ function addAt(part: Part, x: number, y: number, z = 0) {
 const move = (id: string, target: Vec3, gesture: 'drag' | 'end' = 'end') =>
   editor().moveWarpPoints([{ id, target }], gesture);
 
+/** The automatic point nearest the middle of a plate laid whole, wherever the grid put it. */
+const middleAuto = () =>
+  session()
+    .points.filter(({ auto }) => auto)
+    .reduce((best, point) =>
+      Math.hypot(point.pin[0], point.pin[1]) < Math.hypot(best.pin[0], best.pin[1]) ? point : best,
+    );
+/** A spot 1.2 mm beside a point, where a handle lifted 5 mm carries it more than 2 mm up. */
+const beside = (point: WarpPoint) => [point.pin[0] + 1.2, point.pin[1] - 0.15] as const;
+
 /** Where a point sits on the solved warp, in world space. */
 const deformed = (point: WarpPoint) =>
   deformPoint(
@@ -2033,12 +2043,11 @@ describe('warp handles', () => {
     setup([a, wall], ['a']);
     editor().setTool('warp');
     await editor().layWarpGrid();
-    const rider = session().points.find(
-      (point) => Math.hypot(point.pin[0] + 2.5, point.pin[1] - 3.75) < 0.1,
-    )!;
+    const rider = middleAuto();
     expect(rider.auto).toBe(true);
-    const lift = addAt(a, -1.3, 3.6);
-    move(lift.id, [-1.3, 3.6, 5]);
+    const [x, y] = beside(rider);
+    const lift = addAt(a, x, y);
+    move(lift.id, [x, y, 5]);
     finishWarpSettling();
     const now = deformed(session().points.find(({ id }) => id === rider.id)!);
     expect(now[2] - rider.pin[2]).toBeGreaterThan(2);
@@ -2302,8 +2311,11 @@ describe('warp handles', () => {
     }
     // Each step comes back as closely as the new grid holds the current surface itself.
     for (const error of errors) expect(error).toBeLessThan(errors[0] * 1.05 + 0.02);
-    // The evenly spaced grids at these two densities hold the handles 0.88 mm apart, from 0.47.
-    expect(errors[0]).toBeLessThan(0.9);
+    // Largest beside the downward point, whose dip around it is a node spacing wide. The evenly
+    // spaced grids at the two densities place that dip differently: 0.56 to 1.69 mm as the point
+    // shifts by up to 0.6 mm, where the simplifier's grids, on this plate's rows at both densities,
+    // gave 0.50 to 0.89.
+    expect(errors[0]).toBeLessThan(1.4);
   });
 
   it('a rebuild drops points that could only sit on fixed nodes, from undo steps too', async () => {
@@ -2381,11 +2393,10 @@ describe('warp handles that must land', () => {
     setup([a], ['a']);
     editor().setTool('warp');
     await editor().layWarpGrid();
-    const rider = session().points.find(
-      (point) => Math.hypot(point.pin[0] + 2.5, point.pin[1] - 3.75) < 0.1,
-    )!;
-    const lift = addAt(a, -1.3, 3.6);
-    move(lift.id, [-1.3, 3.6, 5]);
+    const rider = middleAuto();
+    const [x, y] = beside(rider);
+    const lift = addAt(a, x, y);
+    move(lift.id, [x, y, 5]);
     finishWarpSettling();
     return { a, rider: current(rider.id), lift: current(lift.id) };
   }
@@ -2674,7 +2685,9 @@ describe('line and area handles through a session', () => {
     const line = handleOf('line', samples);
     expect(line.samples).toHaveLength(13);
     const between = Array.from({ length: 12 }, (_, i): [number, number] => [-2.75 + i * 0.5, 0.3]);
-    await lifecycle(line, between, 0.05);
+    // On the evenly spaced grid a radius of 4 pulls a footprint node 0.1 mm under the ridge, and
+    // the line's end samples ride their nodes' tilted skin maps to 1.971 and 2.056 mm.
+    await lifecycle(line, between, 0.06);
   });
 
   it('an area moves as one patch, also one smaller than a grid cell', async () => {

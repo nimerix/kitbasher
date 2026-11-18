@@ -42,7 +42,13 @@ export const warpSettleTolerance = 1e-4;
  */
 export const warpStretchRidge = 0.01;
 
-const rotationIterations = 20;
+// Each solve iteration refines its warm-started rotations a few steps; later iterations go on
+// from there, so a settled grid is the same and a frame costs far less.
+const rotationIterations = 3;
+// Cotangent edge weights are clamped to this range, so an obtuse or sliver triangle neither
+// loosens nor locks an edge.
+const edgeWeightFloor = 0.5;
+const edgeWeightCeiling = 10;
 const solverTolerance = 1e-8;
 const solverIterations = 200;
 
@@ -194,6 +200,35 @@ function constraintTerms(
   return { key, terms };
 }
 
+/** Where the solve takes a constraint's point to be for `state`: Σ_k a_k p_k + Σ_n R_n r_n. */
+export function modelledPoint(
+  grid: WarpGrid,
+  restNodes: Float64Array,
+  constraint: WarpConstraint,
+  state: WarpState,
+): Vec3 {
+  const { node, weight, fixed } = constraint;
+  let sum = 0;
+  for (let k = 0; k < node.length; k++) sum += weight[k];
+  const term = termOf(constraint, grid, restNodes, sum);
+  const { coefficient, rotatedNode, rotated } = term;
+  const out: Vec3 = fixed ? [...fixed] : [0, 0, 0];
+  term.node.forEach((n, k) => {
+    for (let a = 0; a < 3; a++) out[a] += coefficient[k] * state.positions[n * 3 + a];
+  });
+  const r = new Float64Array(9),
+    q = state.rotations;
+  rotatedNode.forEach((n, s) => {
+    writeRotation(r, 0, q[n * 4], q[n * 4 + 1], q[n * 4 + 2], q[n * 4 + 3]);
+    for (let a = 0; a < 3; a++)
+      out[a] +=
+        r[a * 3] * rotated[s * 3] +
+        r[a * 3 + 1] * rotated[s * 3 + 1] +
+        r[a * 3 + 2] * rotated[s * 3 + 2];
+  });
+  return out;
+}
+
 function guideKey(guides: WarpGuides | undefined) {
   const key: number[] = [];
   if (!guides) return key;
@@ -209,8 +244,14 @@ function sameKey(a: Float64Array, b: number[]) {
   return true;
 }
 
-function buildSystem(grid: WarpGrid, key: number[], guides: number[]): WarpSystem {
+function buildSystem(
+  grid: WarpGrid,
+  restNodes: Float64Array,
+  key: number[],
+  guides: number[],
+): WarpSystem {
   const { fixed, edgeStart, edges } = grid;
+  const { edgeWeight, stiffness } = stretchFrame(grid, restNodes);
   const count = fixed.length;
   const row = new Int32Array(count).fill(-1);
   let free = 0;
@@ -220,7 +261,7 @@ function buildSystem(grid: WarpGrid, key: number[], guides: number[]): WarpSyste
   for (let n = 0; n < count; n++)
     if (row[n] >= 0) {
       freeNodes[row[n]] = n;
-      diagonal[row[n]] = 2 * (edgeStart[n + 1] - edgeStart[n]);
+      diagonal[row[n]] = stiffness[n];
     }
 
   const coupled = new Map<number, Map<number, number>>();
@@ -262,7 +303,7 @@ function buildSystem(grid: WarpGrid, key: number[], guides: number[]): WarpSyste
       const column = row[edges[e]];
       if (column < 0) continue;
       columns.push(column);
-      values.push(-2 + (entries?.get(column) ?? 0));
+      values.push(-2 * edgeWeight[e] + (entries?.get(column) ?? 0));
       entries?.delete(column);
     }
     if (entries)
@@ -324,8 +365,9 @@ function assemble(
   guides: WarpGuides | undefined,
 ) {
   const { edgeStart, edges } = grid;
+  const { edgeWeight } = stretchFrame(grid, restNodes);
   const { key, row, freeNodes, rotation: R, rhs } = system;
-  // Edges in both directions: Σ_j (R_i + R_j − 2I)(g_i − g_j).
+  // Edges in both directions: Σ_j w_ij (R_i + R_j − 2I)(g_i − g_j).
   for (let k = 0; k < freeNodes.length; k++) {
     const i = freeNodes[k];
     const gx = restNodes[i * 3],
@@ -339,10 +381,11 @@ function assemble(
       bz = 0;
     for (let e = edgeStart[i]; e < edgeStart[i + 1]; e++) {
       const j = edges[e],
-        m = j * 9;
-      const ex = gx - restNodes[j * 3],
-        ey = gy - restNodes[j * 3 + 1],
-        ez = gz - restNodes[j * 3 + 2];
+        m = j * 9,
+        w = edgeWeight[e];
+      const ex = w * (gx - restNodes[j * 3]),
+        ey = w * (gy - restNodes[j * 3 + 1]),
+        ez = w * (gz - restNodes[j * 3 + 2]);
       sx += ex;
       sy += ey;
       sz += ez;
@@ -520,6 +563,10 @@ interface StretchFrame {
   ridge: Float64Array;
   /** Per directed grid edge, its rest vector from the far node to the near one. */
   edge: Float64Array;
+  /** Per directed grid edge, its weight in the solve. */
+  edgeWeight: Float64Array;
+  /** Per node, twice its edges' summed weight: the solve's diagonal before constraints. */
+  stiffness: Float64Array;
 }
 const stretchFrames = new WeakMap<WarpGrid, StretchFrame>();
 
@@ -574,8 +621,65 @@ function stretchFrame(grid: WarpGrid, restNodes: Float64Array): StretchFrame {
     inverse[o + 5] = inverse[o + 7] = c12 / det;
     inverse[o + 8] = c22 / det;
   }
-  stretchFrames.set(grid, (frame = { rest: restNodes, inverse, ridge, edge }));
+  const edgeWeight = edgeWeights(grid, restNodes);
+  const stiffness = new Float64Array(count);
+  for (let i = 0; i < count; i++)
+    for (let e = edgeStart[i]; e < edgeStart[i + 1]; e++) stiffness[i] += 2 * edgeWeight[e];
+  stretchFrames.set(
+    grid,
+    (frame = { rest: restNodes, inverse, ridge, edge, edgeWeight, stiffness }),
+  );
   return frame;
+}
+
+/**
+ * Per directed grid edge, its cotangent weight at rest, scaled so an equilateral grid's are 1. Unlike
+ * equal weights, these follow the shape of an uneven grid: an even stretch of a flat grid is
+ * exact however it is triangulated, and a node close to the fixed border follows it as the
+ * surface between them would.
+ */
+function edgeWeights(grid: WarpGrid, restNodes: Float64Array) {
+  const { edgeStart, edges, triangles } = grid;
+  const weight = new Float64Array(edges.length);
+  const find = (i: number, j: number) => {
+    let lo = edgeStart[i],
+      hi = edgeStart[i + 1] - 1;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (edges[mid] < j) lo = mid + 1;
+      else hi = mid;
+    }
+    return lo <= hi && edges[lo] === j ? lo : -1;
+  };
+  const scale = Math.sqrt(3) / 2;
+  for (let t = 0; t < triangles.length; t += 3)
+    for (let k = 0; k < 3; k++) {
+      const c = triangles[t + k],
+        a = triangles[t + ((k + 1) % 3)],
+        b = triangles[t + ((k + 2) % 3)];
+      if (a === b || a === c || b === c) continue;
+      const ux = restNodes[a * 3] - restNodes[c * 3],
+        uy = restNodes[a * 3 + 1] - restNodes[c * 3 + 1],
+        uz = restNodes[a * 3 + 2] - restNodes[c * 3 + 2];
+      const vx = restNodes[b * 3] - restNodes[c * 3],
+        vy = restNodes[b * 3 + 1] - restNodes[c * 3 + 1],
+        vz = restNodes[b * 3 + 2] - restNodes[c * 3 + 2];
+      const cross = Math.hypot(uy * vz - uz * vy, uz * vx - ux * vz, ux * vy - uy * vx);
+      if (!(cross > 0)) continue;
+      const cot = (scale * (ux * vx + uy * vy + uz * vz)) / cross;
+      const ab = find(a, b),
+        ba = find(b, a);
+      if (ab >= 0) weight[ab] += cot;
+      if (ba >= 0) weight[ba] += cot;
+    }
+  for (let e = 0; e < weight.length; e++)
+    weight[e] = Math.min(edgeWeightCeiling, Math.max(edgeWeightFloor, weight[e]));
+  return weight;
+}
+
+/** Node n's diagonal in the solve before constraints: how firmly its edges hold it. */
+export function warpNodeStiffness(grid: WarpGrid, restNodes: Float64Array, n: number) {
+  return stretchFrame(grid, restNodes).stiffness[n];
 }
 
 /** Whether node n's skin map stretches with its edges; otherwise it is its rotation. */
@@ -678,7 +782,7 @@ export function skinMapOf(
 }
 
 /**
- * Local step: per free node, the rotation of Σ_j (g'_i − g'_j)(g_i − g_j)ᵀ by Müller et al.
+ * Local step: per free node, the rotation of Σ_j w_ij (g'_i − g'_j)(g_i − g_j)ᵀ by Müller et al.
  * 2016, warm-started from the node's quaternion.
  */
 function fitRotations(
@@ -690,7 +794,7 @@ function fitRotations(
   const { edgeStart, edges } = grid;
   const { freeNodes, rotation } = system;
   const { positions: P, rotations: Q } = state;
-  const { edge } = stretchFrame(grid, restNodes);
+  const { edge, edgeWeight } = stretchFrame(grid, restNodes);
   for (let k = 0; k < freeNodes.length; k++) {
     const i = freeNodes[k];
     if (edgeStart[i] === edgeStart[i + 1]) continue;
@@ -705,10 +809,11 @@ function fitRotations(
       a21 = 0,
       a22 = 0;
     for (let e = edgeStart[i]; e < edgeStart[i + 1]; e++) {
-      const j3 = edges[e] * 3;
-      const ex = edge[e * 3],
-        ey = edge[e * 3 + 1],
-        ez = edge[e * 3 + 2];
+      const j3 = edges[e] * 3,
+        w = edgeWeight[e];
+      const ex = w * edge[e * 3],
+        ey = w * edge[e * 3 + 1],
+        ez = w * edge[e * 3 + 2];
       const fx = P[i3] - P[j3],
         fy = P[i3 + 1] - P[j3 + 1],
         fz = P[i3 + 2] - P[j3 + 2];
@@ -799,7 +904,7 @@ export function solveWarp(
   if (!key.length && !guiding.length && !grid.fixed.includes(1)) return 0;
   let system = systems.get(grid);
   if (!system || !sameKey(system.key, key) || !sameKey(system.guideKey, guiding))
-    systems.set(grid, (system = buildSystem(grid, key, guiding)));
+    systems.set(grid, (system = buildSystem(grid, restNodes, key, guiding)));
 
   const { fixed } = grid;
   const { freeNodes, rotation, x } = system;

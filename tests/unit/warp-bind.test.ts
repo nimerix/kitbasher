@@ -11,7 +11,12 @@ import { createWarpOutput, deformPoint, evaluateWarp } from '../../src/core/warp
 import { buildWarpGrid } from '../../src/core/warp-grid';
 import { buildWarpModel, type WarpModel } from '../../src/core/warp-model';
 import { buildWarpRegion, WarpRole } from '../../src/core/warp-region';
-import { createWarpState, solveWarp, warpSettleIterations } from '../../src/core/warp-solve';
+import {
+  createWarpState,
+  modelledPoint,
+  solveWarp,
+  warpSettleIterations,
+} from '../../src/core/warp-solve';
 import type { Vec3 } from '../../src/core/types';
 
 const K = warpBindingNodes;
@@ -148,8 +153,8 @@ describe('equidistant nodes', () => {
 
 describe('skinning', () => {
   /** A cap on a mirrored, non-uniformly scaled sphere, with many vertices between grid nodes. */
-  async function cap() {
-    const g = new SphereGeometry(10, 96, 64);
+  async function cap(density = 1, fine = 1) {
+    const g = new SphereGeometry(10, 96 * fine, 64 * fine);
     const matrix = new Matrix4().compose(
       new Vector3(4, -3, 7),
       new Quaternion().setFromAxisAngle(new Vector3(1, 2, 0).normalize(), 0.7),
@@ -160,8 +165,8 @@ describe('skinning', () => {
       index: new Uint32Array(g.index!.array),
       normals: null,
       matrix: matrix.elements.slice(),
-      faces: [...Array(3000).keys()],
-      density: 1,
+      faces: [...Array(3000 * fine * fine).keys()],
+      density,
     });
     expect(model.grid.nodes.length * 4).toBeLessThan(model.region.interiorCount);
     return { model, matrix };
@@ -247,4 +252,37 @@ describe('skinning', () => {
     }
     expect(checked).toBeGreaterThan(20);
   });
+
+  for (const density of [0, 3])
+    it(`is where the solve models a control point, off nodes and beside the border, at density ${density}`, async () => {
+      const { model, matrix } = await cap(density, density ? 2 : 1);
+      const { state, out } = bent(model);
+      const { region } = model;
+      let beside = 0,
+        inside = 0;
+      for (let t = 0; t < region.faces.length; t += 13) {
+        const barycentric: Vec3 = [0.2, 0.5, 0.3];
+        const binding = bindTrianglePoint(region, model.binding, model.restWorld, t, barycentric);
+        if (!binding.node.length) continue;
+        const point = new Vector3(
+          ...modelledPoint(
+            model.grid,
+            model.restNodes,
+            { ...binding, rest: [0, 0, 0], target: [0, 0, 0] },
+            state,
+          ),
+        );
+        const written = new Vector3();
+        for (let k = 0; k < 3; k++) {
+          const g = model.index![region.faces[t] * 3 + k];
+          written.addScaledVector(world(out.positions, g, matrix), barycentric[k]);
+        }
+        expect(point.distanceTo(written)).toBeLessThan(1e-4);
+        if ([0, 1, 2].some((k) => region.role[region.triangles[t * 3 + k]] !== WarpRole.Interior))
+          beside++;
+        else inside++;
+      }
+      expect(beside).toBeGreaterThan(5);
+      expect(inside).toBeGreaterThan(20);
+    });
 });

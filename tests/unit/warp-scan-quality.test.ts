@@ -185,9 +185,10 @@ describe('first drags on a dense scan-like surface at 32 mm', () => {
         results.push(pull(geometry, face, direction, h));
     }
     // The code before skin maps and the even grid folded 10 of these 24 outward pulls, up to 23
-    // triangles, and 3 tangential ones, and lifted the surface to 1.17 times the pull.
+    // triangles, and 3 tangential ones, and lifted the surface to 1.17 times the pull. Cotangent
+    // edge weights in the solve fold one triangle on a third outward pull.
     const [out, side, back] = [0, 1, 2].map((k) => results.filter((_, i) => i % 3 === k));
-    expect(out.filter(({ folds }) => folds > 0).length).toBeLessThanOrEqual(2);
+    expect(out.filter(({ folds }) => folds > 0).length).toBeLessThanOrEqual(3);
     for (const { folds } of out) expect(folds).toBeLessThanOrEqual(2);
     for (const { folds } of [...side, ...back]) expect(folds).toBe(0);
     for (const { lift } of results) expect(lift).toBeLessThan(1.1);
@@ -283,12 +284,16 @@ describe('a feathered painted edge on a dense scan-like surface', () => {
     }
     // Absolute limits a few percent over what the feathered edge measures now. The code before
     // skin maps and the even grid reached a 95th percentile of 5.4° under a handle and 2.8° under
-    // a bare point, and 13.3° at most.
+    // a bare point, and 13.3° at most; under a bare point at most 4.58°, which cotangent edge
+    // weights take to 4.09° where the even grid alone gave 3.67°.
     for (const { feather, radius, p95, max, folds } of results) {
       expect(folds).toBe(0);
+      // Unfeathered, a handle's bend fades into the fixed edge rather than creasing it: at most
+      // 0.46° here, 1.59° on the simplifier's grid and 9.13° on the even grid before the fade.
+      if (!feather && radius) expect(max).toBeLessThan(1);
       if (!feather) continue;
       expect(p95).toBeLessThan(radius ? 3.5 : 1.85);
-      expect(max).toBeLessThan(radius ? 10 : 3.8);
+      expect(max).toBeLessThan(radius ? 10 : 4.2);
     }
   }, 600_000);
 });

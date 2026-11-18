@@ -4,7 +4,12 @@ import type { WarpGrid } from './warp-grid';
 import { isPaintedNode, type WarpModel } from './warp-model';
 import { regionTriangleOf, WarpRole } from './warp-region';
 import { deformPoint } from './warp-evaluate';
-import type { WarpConstraint, WarpGuides, WarpState } from './warp-solve';
+import {
+  warpNodeStiffness,
+  type WarpConstraint,
+  type WarpGuides,
+  type WarpState,
+} from './warp-solve';
 
 /** A surface point a handle holds. Immutable: moving a handle moves every sample by its offset. */
 export interface WarpSample {
@@ -227,7 +232,8 @@ export function handleConstraints(
             weight[k] *
             Math.min(
               1,
-              guides.stiffness[g] / (warpGuideStiffness * 2 * (edgeStart[n + 1] - edgeStart[n])),
+              guides.stiffness[g] /
+                (warpGuideStiffness * warpNodeStiffness(model.grid, model.restNodes, n)),
             );
       }
     }
@@ -287,13 +293,12 @@ function rideOffset(
   binding: WarpPointBinding,
 ): Vec3 | null {
   if (baseline.grid !== model.grid) return null;
-  const { edgeStart } = model.grid;
   const offset: Vec3 = [0, 0, 0];
   let moved = false;
   binding.node.forEach((n, k) => {
     const g = guideIndex(guides, n);
     if (g < 0) return;
-    const full = warpGuideStiffness * 2 * (edgeStart[n + 1] - edgeStart[n]);
+    const full = warpGuideStiffness * warpNodeStiffness(model.grid, model.restNodes, n);
     const share = binding.weight[k] * Math.min(1, guides.stiffness[g] / full);
     for (let a = 0; a < 3; a++) {
       const d = share * (guides.target[g * 3 + a] - baseline.positions[n * 3 + a]);
@@ -481,6 +486,34 @@ function relax(
   return settled;
 }
 
+const borderDistances = new WeakMap<WarpGrid, Float64Array>();
+
+/**
+ * Each node's distance along the grid, as reach measures it, from the nearest fixed node the paint
+ * meets directly. A feathered band between them already carries the bend.
+ */
+function borderDistance(model: WarpModel) {
+  const { grid } = model;
+  let distance = borderDistances.get(grid);
+  if (distance) return distance;
+  const { fixed, edgeStart, edges } = grid;
+  const count = grid.nodes.length;
+  distance = new Float64Array(count).fill(Infinity);
+  const seeds: [number, number][] = [];
+  for (let n = 0; n < count; n++) {
+    if (!fixed[n]) continue;
+    for (let e = edgeStart[n]; e < edgeStart[n + 1]; e++)
+      if (!fixed[edges[e]] && isPaintedNode(model, edges[e])) {
+        seeds.push([n, 0]);
+        break;
+      }
+  }
+  relax(model, seeds, distance, new Uint8Array(count).fill(1));
+  for (let n = 0; n < count; n++) distance[n] /= warpPathStretch;
+  borderDistances.set(grid, distance);
+  return distance;
+}
+
 /** Mean rest length of the grid edges at these nodes. */
 export function spacingAt(model: WarpModel, nodes: Iterable<number>) {
   const { grid, restNodes } = model;
@@ -618,12 +651,14 @@ export function warpGuides(
   );
   if (!guiding.length) return undefined;
   const count = grid.nodes.length;
+  const border = borderDistance(model);
   const blocked = new Uint8Array(count);
   for (const n of exact) blocked[n] = 1;
   const profiles = guiding.map((handle) => {
     const reach = handle.reach!;
     const motion = motionOf(handle);
     const { radius, falloff } = handle;
+    const fade = fadeWidth(handle);
     const band = bandWidth(falloff, reach.spacing),
       tail = warpTailSpacings * reach.spacing;
     const weight = new Float64Array(reach.node.length),
@@ -634,7 +669,10 @@ export function warpGuides(
         continue;
       }
       const d = reach.distance[i];
-      const w = handleWeight(d, radius, falloff, reach.spacing);
+      // A bend fades into the fixed border as it does at its radius, so the border does not crease.
+      const w =
+        handleWeight(d, radius, falloff, reach.spacing) *
+        (fade > 0 ? smoothstep(border[reach.node[i]] / fade) : 1);
       const held =
         d <= radius
           ? 1
@@ -662,7 +700,6 @@ export function warpGuides(
       } else if (m > second[n]) second[n] = m;
     }
   });
-  const { edgeStart } = grid;
   const stiffness = new Float64Array(count),
     target = new Float64Array(count * 3);
   const touched: number[] = [];
@@ -671,7 +708,7 @@ export function warpGuides(
     for (let i = 0; i < reach.node.length; i++) {
       const n = reach.node[i];
       if (blocked[n]) continue;
-      const full = warpGuideStiffness * 2 * (edgeStart[n + 1] - edgeStart[n]);
+      const full = warpGuideStiffness * warpNodeStiffness(grid, model.restNodes, n);
       const others = leader[n] === h ? second[n] : first[n];
       const drive = full * weight[i] * (1 - (1 - motion) * others);
       const hold = full * (profile[i] - weight[i]) * (1 - others);
