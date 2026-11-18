@@ -1131,6 +1131,7 @@ function Scene({
             onPress={() => {
               gizmoPressed = true;
             }}
+            pressed={() => gizmoPressed}
           />
           <PinOverlay />
           <LightHandles />
