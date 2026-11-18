@@ -1,4 +1,5 @@
 import { expect, test, type Page } from '@playwright/test';
+import { releases } from '../../src/docs/changelog';
 import { articleById, articles } from '../../src/docs/content';
 
 const guideUrl = (id: string) => `/docs/?guide=${encodeURIComponent(id)}`;
@@ -343,4 +344,34 @@ test('enlarges screenshots and diagrams in place with accessible dismissal on de
   await expect.poll(() => page.evaluate(() => window.scrollY)).toBeGreaterThan(scrollBefore);
   await expect(page).toHaveURL(overviewUrl);
   expect(popupCount).toBe(0);
+});
+
+test('lists every release on the What’s new page and links to the newest from the overview', async ({
+  page,
+}) => {
+  const [latest] = releases;
+  await page.goto('/docs/');
+  await page.locator('.home-release').click();
+  await expect(page).toHaveURL(/guide=whats-new/);
+  await expect(page).toHaveTitle('What’s new · Kitbasher Docs');
+  await expect(page.getByRole('heading', { level: 1, name: 'What’s new' })).toBeVisible();
+  await expect(
+    page
+      .getByRole('navigation', { name: 'Documentation' })
+      .getByRole('link', { name: /What’s new/ }),
+  ).toHaveAttribute('aria-current', 'page');
+  await expect(page.locator('.release')).toHaveCount(releases.length);
+  await expect(page.locator('.release').first()).toContainText(latest.version);
+  await expect(page.locator('.release').first()).toContainText(latest.title);
+
+  const linked = releases.flatMap((release) => release.changes).find((change) => change.guide)!;
+  const guide = articleById.get(linked.guide!)!;
+  await page.locator('.release-body a', { hasText: guide.title }).first().click();
+  await expect(
+    page.getByRole('heading', { level: 1, name: guide.title, exact: true }),
+  ).toBeVisible();
+
+  await page.setViewportSize({ width: 320, height: 740 });
+  await page.goto('/docs/?guide=whats-new');
+  await expectNoOverflow(page);
 });
