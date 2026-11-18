@@ -24,6 +24,7 @@ import {
 } from '../../src/core/warp-evaluate';
 import {
   buildWarpModel,
+  featherWarning,
   isPaintedFace,
   isPaintedNode,
   warpNodeBlend,
@@ -279,6 +280,30 @@ describe('feathered region growth', () => {
       expect(blend![ray[i]]).toBeLessThanOrEqual(blend![ray[i - 1]]);
   });
 
+  it('shows one feather warning: none when joined, coarse when nothing joined, else the anchor', async () => {
+    const g = sheet();
+    const joined = await buildWarpModel(inputOf(g, disc(g, 10), 3));
+    expect(joined.feather).toMatchObject({ anchored: 0, unanchored: false });
+    expect(joined.feather!.joined).toBeGreaterThan(0);
+    expect(featherWarning(joined.feather)).toBeNull();
+
+    const coarse = new PlaneGeometry(60, 60, 6, 6);
+    const tooCoarse = await buildWarpModel(inputOf(coarse, disc(coarse, 12), 1));
+    expect(tooCoarse.feather).toMatchObject({ joined: 0, anchored: 0 });
+    expect(featherWarning(tooCoarse.feather)).toBe('coarse');
+
+    // The anchor takes the whole band, so nothing joins, but the mesh is not too coarse.
+    const sphere = new SphereGeometry(10, 64, 48);
+    const faces: number[] = [];
+    for (let f = 0; f < faceCount(sphere); f++) if (centroid(sphere, f).y < 9.98) faces.push(f);
+    const anchored = await buildWarpModel(inputOf(sphere, faces, 4));
+    expect(anchored.feather).toMatchObject({ joined: 0, edge: 64, anchored: 1 });
+    expect(featherWarning(anchored.feather)).toBe('anchored');
+
+    expect(featherWarning(null)).toBeNull();
+    expect(featherWarning({ ...anchored.feather!, unanchored: true })).toBe('unanchored');
+  });
+
   it('keeps a fixed edge and says so when the mesh is too coarse for the width', async () => {
     const g = new PlaneGeometry(60, 60, 6, 6);
     const faces = disc(g, 12);
@@ -291,6 +316,7 @@ describe('feathered region growth', () => {
       edge: expect.any(Number),
       fixedEdge: expect.any(Number),
       anchored: 0,
+      unanchored: false,
     });
     expect(model.feather!.edge).toBeGreaterThan(0);
     expect(model.feather!.fixedEdge).toBeGreaterThan(0);
@@ -504,6 +530,27 @@ describe('feathered surface', () => {
     expectOutsideKept(on, soft.out);
   });
 
+  // Recorded, not passing: under a centred drag a six-ring band leaves the painted edge at 0.219
+  // (regular) and 0.271 (irregular) of the unfeathered crease, above the design's 0.20. These
+  // limits hold it where it is.
+  it('holds the painted edge of a six-ring band to its recorded share under a centred drag', async () => {
+    for (const [g, limit] of [
+      [sheet(), 0.222],
+      [irregularSheet(), 0.275],
+    ] as const) {
+      const { offEdge, onEdge, onOuter, rings } = await compareCreases(
+        g,
+        disc(g, 10),
+        4.5,
+        undefined,
+        cluster,
+      );
+      expect(rings).toBe(6);
+      expect(onEdge / offEdge).toBeLessThan(limit);
+      expect(onOuter).toBeLessThan(offEdge / 5);
+    }
+  });
+
   it('keeps a wider band smooth under a drag in the middle of the paint', async () => {
     const g = sheet();
     const { offEdge, onEdge, onOuter, rings } = await compareCreases(
@@ -595,10 +642,19 @@ describe('feathered surface at the default density', () => {
     expect(edge).toBeLessThanOrEqual(1.25 * interior + 0.1);
 
   it('leaves the painted edge no rougher than the paint inside it', async () => {
-    for (const at of [cluster, edgeCluster]) {
+    // Absolute limits, about 2% over what each strip measures now, so neither can get rougher.
+    const limits = [
+      { at: cluster, strip: [0.87, 1.87], interior: [0.94, 1.67] },
+      { at: edgeCluster, strip: [1.09, 2.4], interior: [1.22, 3.86] },
+    ];
+    for (const { at, strip: stripLimit, interior: interiorLimit } of limits) {
       const { strip, interior } = await edgeAgainstInterior(at);
       within(p95(strip), p95(interior));
       within(strip.at(-1)!, interior.at(-1)!);
+      expect(p95(strip)).toBeLessThan(stripLimit[0]);
+      expect(strip.at(-1)!).toBeLessThan(stripLimit[1]);
+      expect(p95(interior)).toBeLessThan(interiorLimit[0]);
+      expect(interior.at(-1)!).toBeLessThan(interiorLimit[1]);
     }
   });
 
@@ -927,7 +983,7 @@ describe('feathered band limits', () => {
     expect(faceCount(g) - faces.length).toBe(448);
     const model = await buildWarpModel(inputOf(g, faces, 4));
     expect(model.feather!.anchored).toBe(1);
-    expect(model.grid.fixed.reduce((n, x) => n + x, 0)).toBeGreaterThan(0);
+    expect(model.grid.fixed.reduce((n, x) => n + x, 0)).toBe(64);
     const drag = [new Vector3(10, 0, 0), new Vector3(1, 0, 0)] as const;
     const { out } = pull(model, g, ...drag);
     // The pole is in the anchor and keeps its bits. The far side swings about the fixed cap
@@ -940,6 +996,55 @@ describe('feathered band limits', () => {
       1.25 * largestMove(g, plain.positions, fixedEdge.positions, far),
     );
     expectOutsideKept(model, out);
+  });
+
+  it('anchors a closed part that another face touches at a single vertex', async () => {
+    // The vertex it touches is fixed, but a lone vertex is no fixed edge and the grid may drop it.
+    for (const contact of [(p: Vector3) => p.y < -9.999, (p: Vector3) => p.x < -9.99]) {
+      const sphere = new SphereGeometry(10, 64, 48);
+      const position = sphere.getAttribute('position');
+      const p = new Vector3();
+      let touch = 0;
+      while (!contact(p.fromBufferAttribute(position, touch))) touch++;
+      const out = p.clone().multiplyScalar(1.2);
+      const g = new BufferGeometry();
+      g.setAttribute(
+        'position',
+        new BufferAttribute(
+          new Float32Array([
+            ...position.array,
+            out.x + 0.5,
+            out.y,
+            out.z,
+            out.x,
+            out.y + 0.5,
+            out.z,
+          ]),
+          3,
+        ),
+      );
+      const normal = sphere.getAttribute('normal');
+      g.setAttribute(
+        'normal',
+        new BufferAttribute(new Float32Array([...normal.array, 0, 0, 1, 0, 0, 1]), 3),
+      );
+      g.setIndex([...sphere.index!.array, touch, position.count, position.count + 1]);
+      const faces: number[] = [];
+      for (let f = 0; f < faceCount(sphere); f++) if (centroid(g, f).y < 9.6) faces.push(f);
+      expect(faceCount(g) - faces.length).toBe(449);
+      const drag = [new Vector3(10, 0, 0), new Vector3(1, 0, 0)] as const;
+      const plain = await buildWarpModel(inputOf(g, faces));
+      expect(plain.grid.fixed.reduce((n, x) => n + x, 0)).toBe(64);
+      expect(
+        largestMove(g, plain.positions, pull(plain, g, ...drag).out.positions, (q) => q.y > 9.9),
+      ).toBe(0);
+      const model = await buildWarpModel(inputOf(g, faces, 4));
+      expect(model.feather).toMatchObject({ anchored: 1, unanchored: false });
+      expect(model.grid.fixed.reduce((n, x) => n + x, 0)).toBe(64);
+      const { out: moved } = pull(model, g, ...drag);
+      expect(largestMove(g, model.positions, moved.positions, (q) => q.y > 9.9)).toBe(0);
+      expectOutsideKept(model, moved);
+    }
   });
 
   it('keeps an unpainted rim inside the band fixed and feathers toward it', async () => {
