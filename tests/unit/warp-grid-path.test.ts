@@ -256,7 +256,7 @@ const editor = () => useEditor.getState();
 const initial = useEditor.getState();
 
 /** A 40 mm plate warped over its whole surface, with points held at four corners. */
-async function heldPlate(segments = 64) {
+async function heldPlate(segments = 64, density?: number) {
   const geometry = new PlaneGeometry(40, 40, segments, segments);
   const part: Part = {
     id: 'plate',
@@ -275,6 +275,7 @@ async function heldPlate(segments = 64) {
   editor().setTool('warp');
   editor().setWarpRegion('whole');
   editor().setWarpOptions({ autoPoints: false });
+  if (density !== undefined) await editor().setWarpDensity(density);
   await editor().layWarpGrid();
   const faceAt = (x: number, y: number) => {
     const triangle = new Triangle(),
@@ -330,6 +331,32 @@ describe('the drawn grid', () => {
       const drawing = new WarpGridDrawing(path, model.restNodes.length / 3);
       drawing.update(after.nodes, after.positions, after.normals, 1);
       expect(worstGap(after.surface, drawing.drawn()), `${segments}`).toBeLessThan(0.02);
+      editor().cancelWarp();
+    }
+  });
+
+  it('chooses its points again on a plate bent between held points, at every density', async () => {
+    // Fine enough that a coarse grid's edges cross dozens of mesh edges between nodes.
+    for (const density of [0, 1, 2, 3, 4, 5, 6]) {
+      const id = await heldPlate(80, density);
+      const model = editor().warp!.model!;
+      const path = traceWarpGridPathNow(model);
+      expect(path.failed).toBe(0);
+      editor().moveWarpPoints([{ id, target: [0.3, 0.2, 2] }], 'end');
+      const after = written();
+      // The surface under the pulled point rose with it.
+      let lifted = 0;
+      for (let v = 0; v < after.positions.length; v += 3)
+        if (Math.hypot(after.positions[v] - 0.3, after.positions[v + 1] - 0.2) < 0.5)
+          lifted = Math.max(lifted, after.positions[v + 2]);
+      expect(lifted, `density ${density}`).toBeGreaterThan(1.8);
+      const drawing = new WarpGridDrawing(path, model.restNodes.length / 3);
+      drawing.update(after.nodes, after.positions, after.normals, 1);
+      drawing.refine(after.positions, after.normals);
+      expect(drawing.refined).toBe(1);
+      expect(drawing.segments).toBeLessThanOrEqual(drawing.capacity);
+      const gap = worstGap(after.surface, drawing.drawn());
+      expect(gap, `density ${density}`).toBeLessThan(0.1);
       editor().cancelWarp();
     }
   });
