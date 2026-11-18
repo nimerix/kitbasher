@@ -50,6 +50,23 @@ export function transformFromMatrix<T extends Pick<Part, 'position' | 'quaternio
   };
 }
 
+/** The part's largest side in world units, from its own box and scale, whichever way it is turned. */
+export function partSize(part: Pick<Part, 'geometry' | 'scale'>) {
+  if (!part.geometry.boundingBox) part.geometry.computeBoundingBox();
+  const size = part.geometry.boundingBox!.getSize(new Vector3());
+  return Math.max(
+    size.x * Math.abs(part.scale[0]),
+    size.y * Math.abs(part.scale[1]),
+    size.z * Math.abs(part.scale[2]),
+  );
+}
+
+/** Slider limits in mm for a brush, radius or width on a part of this size. */
+export const fittedSizeRange = (size: number) => ({
+  min: 0.1,
+  max: Math.min(100, Math.max(2, Number((size / 4).toPrecision(2)))),
+});
+
 /** A connected anchor takes priority over a custom pivot, then the visible mesh center. */
 export function partPivot(part: Part, localAnchor?: Vec3): Vector3 {
   const localPivot = localAnchor ?? part.pivot;
