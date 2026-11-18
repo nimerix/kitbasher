@@ -292,8 +292,11 @@ interface EditorState {
   brushRadius: number;
   brushErase: boolean;
   brushPlane: BrushPlaneSettings;
-  /** Warp's own brush radius for each part it was set on. Align's brushRadius is separate. */
-  warpBrush: Record<string, number>;
+  /**
+   * Warp's own brush radius for each part it was set on in this document, kept for a removed
+   * part only while undo or redo can bring it back. Align's brushRadius is separate.
+   */
+  warpBrush: ReadonlyMap<string, number>;
   /** The state before each stroke: contact patches, or the warp region while warping. */
   paintHistory: (SurfacePair[] | Pick<WarpSession, 'faces' | 'seed'>)[];
   operation: AssemblyOperation;
@@ -1002,14 +1005,42 @@ const changed = (state: EditorState, scene: SceneDocument, checkpoint = true) =>
         };
     }
   }
+  const warpBrush = checkpoint
+    ? keptWarpBrush(
+        { scene, past, future: [], sharedHistory: state.sharedHistory },
+        state.warpBrush,
+      )
+    : state.warpBrush;
   return {
     scene,
     revision: state.revision + 1,
     ...(state.freeTransform ? { freeTransform: null } : {}),
     ...(checkpoint ? { past, future: [] } : {}),
+    ...(warpBrush !== state.warpBrush ? { warpBrush } : {}),
     ...notice,
   };
 };
+
+/**
+ * Warp brush radii for parts in the scene or in local undo history; the same map when nothing
+ * is dropped. A shared scene's history is the server's, so there only the scene counts.
+ */
+function keptWarpBrush(
+  state: Pick<EditorState, 'scene' | 'past' | 'future' | 'sharedHistory'>,
+  brush: ReadonlyMap<string, number>,
+) {
+  if (!brush.size) return brush;
+  const scenes = state.sharedHistory
+    ? [state.scene]
+    : [state.scene, ...state.past, ...state.future];
+  const missing = [...brush.keys()].filter(
+    (id) => !scenes.some((scene) => scene.parts.some((part) => part.id === id)),
+  );
+  if (!missing.length) return brush;
+  const kept = new Map(brush);
+  for (const id of missing) kept.delete(id);
+  return kept;
+}
 
 /** True when a part's geometry in `scene` is not in `base`. Costs one pass over the parts. */
 function newGeometry(base: SceneDocument, scene: SceneDocument) {
@@ -1066,7 +1097,7 @@ export const useEditor = create<EditorState>((set, get) => ({
   brushRadius: 3,
   brushErase: false,
   brushPlane: { enabled: false, angle: 20, distance: 0.5 },
-  warpBrush: {},
+  warpBrush: new Map(),
   paintHistory: [],
   operation: blankOperation(),
   warp: null,
@@ -1493,10 +1524,10 @@ export const useEditor = create<EditorState>((set, get) => ({
     set((state) =>
       state.warp && Number.isFinite(radius)
         ? {
-            warpBrush: {
-              ...state.warpBrush,
-              [state.warp.partId]: Math.max(0.05, Math.min(100, radius)),
-            },
+            warpBrush: new Map(keptWarpBrush(state, state.warpBrush)).set(
+              state.warp.partId,
+              Math.max(0.05, Math.min(100, radius)),
+            ),
           }
         : {},
     ),
@@ -2836,6 +2867,7 @@ export const useEditor = create<EditorState>((set, get) => ({
       isolated: null,
       past: [],
       future: [],
+      warpBrush: new Map(),
       historyTrimNotified: false,
       revision: state.revision + 1,
       savedRevision: recovered ? state.revision : state.revision + 1,
@@ -2868,7 +2900,12 @@ export const useEditor = create<EditorState>((set, get) => ({
         freeTransform: null,
         selected: state.selected.filter((id) => ids.has(id)),
         revision: state.revision + 1,
-        ...(removed.length ? withoutRemovedParts(state, removed) : {}),
+        ...(removed.length
+          ? {
+              ...withoutRemovedParts(state, removed),
+              warpBrush: keptWarpBrush({ ...state, scene }, state.warpBrush),
+            }
+          : {}),
       };
     }),
   renameScene: (name) =>
@@ -2983,7 +3020,8 @@ export const fittedWarpBrushRadius = (part: Pick<Part, 'geometry' | 'scale'>) =>
 /** The brush radius everything uses while warping: what was set on this part, or its fitted start. */
 export function warpBrushRadius(state: Pick<EditorState, 'scene' | 'warp' | 'warpBrush'>) {
   const { warp, warpBrush } = state;
-  if (warp && warpBrush[warp.partId] !== undefined) return warpBrush[warp.partId];
+  const set = warp && warpBrush.get(warp.partId);
+  if (typeof set === 'number') return set;
   const part = warp && state.scene.parts.find((part) => part.id === warp.partId);
   return part ? fittedWarpBrushRadius(part) : 0;
 }
