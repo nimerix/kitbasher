@@ -432,6 +432,31 @@ export function RangeInput({
   );
 }
 
+const logSteps = 200;
+
+/** The step of a logarithmic slider that shows a value. */
+export function logSliderPosition(value: number, min: number, max: number, zero = false) {
+  const first = zero ? 1 : 0;
+  if (zero && value <= 0) return 0;
+  const clamped = Math.min(max, Math.max(min, value));
+  return first + Math.round((Math.log(clamped / min) / Math.log(max / min)) * (logSteps - first));
+}
+
+/**
+ * The value a step of a logarithmic slider sets: as few significant digits as still show that
+ * same step, so moving by one step always moves the thumb.
+ */
+export function logSliderValue(position: number, min: number, max: number, zero = false) {
+  const first = zero ? 1 : 0;
+  if (zero && position <= 0) return 0;
+  const raw = min * Math.exp((Math.log(max / min) * (position - first)) / (logSteps - first));
+  for (let digits = raw < 1 ? 2 : 3; digits < 10; digits++) {
+    const value = Number(raw.toPrecision(digits));
+    if (logSliderPosition(value, min, max, zero) === position) return value;
+  }
+  return raw;
+}
+
 /**
  * A slider where each doubling of the value takes the same travel. With `zero`, the far left
  * is 0 and the scale starts just after it.
@@ -455,12 +480,6 @@ export function LogRangeInput({
   disabled?: boolean;
   onChange: (value: number) => void;
 }) {
-  const steps = 200,
-    first = zero ? 1 : 0;
-  const span = Math.log(max / min);
-  const clamped = Math.min(max, Math.max(min, value));
-  const position =
-    zero && value <= 0 ? 0 : first + Math.round((Math.log(clamped / min) / span) * (steps - first));
   return (
     <input
       type="range"
@@ -468,16 +487,11 @@ export function LogRangeInput({
       aria-label={label}
       aria-valuetext={`${Number(value.toPrecision(3))} mm`}
       min={0}
-      max={steps}
+      max={logSteps}
       step={1}
-      value={position}
+      value={logSliderPosition(value, min, max, zero)}
       disabled={disabled}
-      onChange={(event) => {
-        const at = Number(event.target.value);
-        if (zero && at === 0) return onChange(0);
-        const raw = min * Math.exp((span * (at - first)) / (steps - first));
-        onChange(Number(raw.toPrecision(raw < 1 ? 2 : 3)));
-      }}
+      onChange={(event) => onChange(logSliderValue(Number(event.target.value), min, max, zero))}
     />
   );
 }

@@ -273,8 +273,8 @@ interface EditorState {
   brushRadius: number;
   brushErase: boolean;
   brushPlane: BrushPlaneSettings;
-  /** Warp's own brush radius, for the part it was set on. Align's brushRadius is separate. */
-  warpBrush: { partId: string; radius: number } | null;
+  /** Warp's own brush radius for each part it was set on. Align's brushRadius is separate. */
+  warpBrush: Record<string, number>;
   /** The state before each stroke: contact patches, or the warp region while warping. */
   paintHistory: (SurfacePair[] | Pick<WarpSession, 'faces' | 'seed'>)[];
   operation: AssemblyOperation;
@@ -890,7 +890,7 @@ export const useEditor = create<EditorState>((set, get) => ({
   brushRadius: 3,
   brushErase: false,
   brushPlane: { enabled: false, angle: 20, distance: 0.5 },
-  warpBrush: null,
+  warpBrush: {},
   paintHistory: [],
   operation: blankOperation(),
   warp: null,
@@ -1316,7 +1316,10 @@ export const useEditor = create<EditorState>((set, get) => ({
     set((state) =>
       state.warp && Number.isFinite(radius)
         ? {
-            warpBrush: { partId: state.warp.partId, radius: Math.max(0.05, Math.min(100, radius)) },
+            warpBrush: {
+              ...state.warpBrush,
+              [state.warp.partId]: Math.max(0.05, Math.min(100, radius)),
+            },
           }
         : {},
     ),
@@ -2681,7 +2684,7 @@ export const fittedWarpBrushRadius = (part: Pick<Part, 'geometry' | 'scale'>) =>
 /** The brush radius everything uses while warping: what was set on this part, or its fitted start. */
 export function warpBrushRadius(state: Pick<EditorState, 'scene' | 'warp' | 'warpBrush'>) {
   const { warp, warpBrush } = state;
-  if (warpBrush && warpBrush.partId === warp?.partId) return warpBrush.radius;
+  if (warp && warpBrush[warp.partId] !== undefined) return warpBrush[warp.partId];
   const part = warp && state.scene.parts.find((part) => part.id === warp.partId);
   return part ? fittedWarpBrushRadius(part) : 0;
 }
