@@ -64,6 +64,7 @@ async function editorState(page: Page) {
       past: state.past.length as number,
       source: block.source as string,
       mesh: Array.from(block.geometry.getAttribute('position').array) as number[],
+      previewIndexed: Boolean(warp?.preview?.boundsTree),
       preview: warp?.preview
         ? (Array.from(warp.preview.getAttribute('position').array) as number[])
         : null,
@@ -138,13 +139,13 @@ async function interruptedDrag(page: Page, from: { x: number; y: number }, by = 
   return { dragging, interrupted };
 }
 
-async function open(page: Page) {
+async function open(page: Page, scene = fixture) {
   await page.goto('/');
   await expect(page.locator('canvas')).toBeVisible();
   await page.getByLabel('Open Kitbasher scene').setInputFiles({
     name: 'warp.kitbash',
     mimeType: 'application/json',
-    buffer: Buffer.from(JSON.stringify(fixture)),
+    buffer: Buffer.from(JSON.stringify(scene)),
   });
   await page.getByRole('button', { name: 'Open scene', exact: true }).click();
   await page.locator('.part-select[title="Scanned block"]').click();
@@ -155,7 +156,13 @@ async function open(page: Page) {
 const differs = (a: number[], b: number[]) => a.some((value, i) => Math.abs(value - b[i]) > 1e-4);
 
 test('closes a seam, moves a control point, applies, undoes and cancels', async ({ page }) => {
-  await open(page);
+  const indexedGeometry = serializeGeometry(new BoxGeometry(20, 20, 20, 52, 52, 52));
+  await open(page, {
+    ...fixture,
+    parts: fixture.parts.map((part) =>
+      part.id === 'block' ? { ...part, geometry: indexedGeometry } : part,
+    ),
+  });
   const original = await editorState(page);
 
   await page.keyboard.press('w');
@@ -195,6 +202,7 @@ test('closes a seam, moves a control point, applies, undoes and cancels', async 
   const front = await screen(page, clicked);
   await page.mouse.click(front.x, front.y);
   const added = await editorState(page);
+  expect(added.previewIndexed).toBe(true);
   expect(added.points).toHaveLength(1);
   expect(added.points[0].moved).toBe(false);
   expect(added.selectedPoints).toBe(1);

@@ -100,6 +100,17 @@ describe('history budget', () => {
     expect(useEditor.getState().historyTrimNotified).toBe(false);
   });
 
+  it('keeps undo steps when Cut retains the removed meshes in the new clipboard', () => {
+    tiny.on = true;
+    useEditor.getState().setScene(sceneOf(mesh(30), mesh(30)));
+    useEditor.getState().renameScene('first change');
+    useEditor.getState().renameScene('second change');
+    useEditor.setState({ selected: ['p0', 'p1'] });
+    useEditor.getState().copySelected(true);
+    expect(useEditor.getState().clipboard?.parts).toHaveLength(2);
+    expect(useEditor.getState().past).toHaveLength(3);
+  });
+
   it('trims the shared document history over budget and frees dropped meshes', () => {
     const doc = new SharedDocument(1024 * 1024);
     doc.replace(sceneOf(mesh(100_000)));

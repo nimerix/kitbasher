@@ -892,6 +892,26 @@ describe('warp points, close gap and apply', () => {
     expect(session().seam!.largestGap).toBeLessThanOrEqual(0);
   });
 
+  it('continues dense seam measurement after a rename and refreshes it for a moved neighbour', async () => {
+    const source = solid('a', new PlaneGeometry(10, 10, 225, 225), [0, 0, 0]);
+    const neighbour = solid('b', new PlaneGeometry(20, 20).rotateY(Math.PI), [0, 0, 1]);
+    setup([source, neighbour], ['a']);
+    editor().setTool('warp');
+    editor().setWarpRegion('whole');
+    vi.stubGlobal('window', {});
+    try {
+      await editor().layWarpGrid();
+      expect(session().seam).toBeNull();
+      editor().renameScene('Renamed');
+      await vi.waitFor(() => expect(session().seam?.largestGap).toBeCloseTo(1));
+      move(addAt(source, 0, 0).id, [0, 0, 0.1]);
+      editor().transform('b', { position: [0, 0, 2] });
+      await vi.waitFor(() => expect(session().seam?.largestGap).toBeCloseTo(2, 0));
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it('close gap again finds the same targets and keeps the seam closed', async () => {
     const block = solid('block', new BoxGeometry(20, 20, 20, 12, 12, 12), [0, 0, 0]);
     const wall = solid('wall', new BoxGeometry(20, 20, 20, 12, 12, 12), [21, 0, 0]);
@@ -1296,10 +1316,10 @@ describe('warp points, close gap and apply', () => {
     expect(editor().applyWarp()).toBe(true);
     const pending = editor().warpPending!;
     expect(pending).toMatchObject({ partId: 'a', source: a.geometry });
-    expect(pending.applied).toBe(partOf('a').geometry);
+    expect(partOf('a').geometry).not.toBe(a.geometry);
     expect(pending.session).toMatchObject({ stage: 'warp', source: a.geometry });
     expect(pending.session.points.map((point) => point.target)).toEqual([[0, 0, 2]]);
-    expect(session().source).toBe(pending.applied);
+    expect(session().source).toBe(partOf('a').geometry);
 
     // live.ts shows the server's scene again, then settles the warp.
     editor().receiveScene(confirmed);
@@ -1340,6 +1360,56 @@ describe('warp points, close gap and apply', () => {
     expect(toast()).toBeUndefined();
     const messages = useActivity.getState().notifications.map((n) => n.message);
     expect(messages).not.toContain('The part changed, so the warp was cancelled.');
+  });
+
+  it('applies successive offline warps and reopens the first draft after a coalesced refusal', async () => {
+    const a = plate('a');
+    const b = plate('b', 100);
+    const confirmed = setup([a, b], ['a']);
+    useEditor.setState({ liveStatus: 'disconnected' });
+    await warpDisc(a, 0, 0, 8);
+    move(addAt(a, 0, 0).id, [0, 0, 2]);
+    expect(editor().applyWarp()).toBe(true);
+    const first = editor().warpPending!;
+    editor().setTool('select');
+    editor().select('b');
+    await warpDisc(b, 0, 0, 8);
+    move(addAt(b, 0, 0).id, [100, 0, 2]);
+    expect(editor().applyWarp()).toBe(true);
+    expect(partOf('b').geometry).not.toBe(b.geometry);
+    expect(editor().warpPending).toBe(first);
+
+    editor().submitWarp();
+    expect(editor().warpInFlight).toBe(first);
+    editor().receiveScene(confirmed);
+    editor().settleWarp(false);
+    expect(session().id).toBe(first.session.id);
+    expect(editor().warpPending).toBeNull();
+    expect(editor().warpInFlight).toBeNull();
+  });
+
+  it('settles only the submitted warp when another warp has since been queued', async () => {
+    const a = plate('a');
+    const b = plate('b', 100);
+    setup([a, b], ['a']);
+    useEditor.setState({ liveStatus: 'connected' });
+    await warpDisc(a, 0, 0, 8);
+    move(addAt(a, 0, 0).id, [0, 0, 2]);
+    expect(editor().applyWarp()).toBe(true);
+    const first = editor().warpPending!;
+    editor().submitWarp();
+
+    editor().setTool('select');
+    editor().select('b');
+    await warpDisc(b, 0, 0, 8);
+    move(addAt(b, 0, 0).id, [100, 0, 2]);
+    expect(editor().applyWarp()).toBe(true);
+    const second = editor().warpPending!;
+    expect(editor().warpInFlight).toBe(first);
+    expect(second.partId).toBe('b');
+    editor().settleWarp(true, true);
+    expect(editor().warpInFlight).toBeNull();
+    expect(editor().warpPending).toBe(second);
   });
 
   it('lets go of a kept warp that can no longer reopen', async () => {

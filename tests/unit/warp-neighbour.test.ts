@@ -7,6 +7,7 @@ import {
   BufferGeometry,
   Matrix4,
   PlaneGeometry,
+  SphereGeometry,
   Vector3,
 } from 'three';
 import { workerIndexTriangles } from '../../src/core/spatial-index';
@@ -152,6 +153,22 @@ describe('warp neighbours', () => {
     }
   });
 
+  it('keeps a seated ball closed at the concave socket edges', async () => {
+    const socket = new SphereGeometry(10, 48, 32);
+    const index = socket.index!;
+    for (let i = 0; i < index.count; i += 3) {
+      const a = index.getX(i);
+      index.setX(i, index.getX(i + 1));
+      index.setX(i + 1, a);
+    }
+    socket.computeVertexNormals();
+    const neighbours = [neighbourOf(partOf('socket', socket, [0, 0, 0]))];
+    const model = await modelOf(new SphereGeometry(10.1, 40, 30), new Matrix4());
+    const report = measureSeam(model, createWarpOutput(model), neighbours)!;
+    expect(report.vertices.length).toBeGreaterThan(1000);
+    expect(report.largestGap).toBeLessThan(0);
+  });
+
   it('finds the nearest world surface of a non-uniformly scaled neighbour', () => {
     const geometry = new BufferGeometry();
     geometry.setAttribute(
@@ -165,6 +182,16 @@ describe('warp neighbours', () => {
     part.scale = [10, 1, 1];
     const target = snapToNeighbour(new Vector3(), [neighbourOf(part)], 0)!;
     expect(target.toArray()).toEqual([0, 1, 0]);
+  });
+
+  it('uses the imported affine transform even when the quaternion is nearly unit length', () => {
+    const part = partOf('target', new PlaneGeometry(1, 1), [0, 0, 0]);
+    part.quaternion = [0, 0, 0.7001, 0.7001];
+    part.scale = [1, 1, 2];
+    const neighbour = neighbourOf(part);
+    const edge = new Vector3(0.5, 0, 0).applyMatrix4(neighbour.matrix);
+    const query = edge.clone().normalize().multiplyScalar(4.94).add(edge);
+    expect(snapToNeighbour(query, [neighbour], 0)?.distanceTo(edge)).toBeLessThan(1e-8);
   });
 
   it('counts only surface within 60 degrees of facing the neighbour', async () => {

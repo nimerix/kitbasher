@@ -1,4 +1,4 @@
-import { Box3, Matrix3, Matrix4, Triangle, Vector3 } from 'three';
+import { Box3, DoubleSide, Matrix3, Matrix4, Ray, Triangle, Vector3 } from 'three';
 import type { MeshBVH } from 'three-mesh-bvh';
 import { treeOf } from './clipping';
 import { partMatrix } from './geometry';
@@ -49,6 +49,7 @@ export function warpNeighbours(
 }
 
 interface Hit {
+  owner: WarpNeighbour;
   point: Vector3;
   normal: Vector3;
 }
@@ -60,52 +61,106 @@ const worldTriangle = new Triangle();
 const worldHit = new Vector3();
 const separation = new Vector3();
 
+const outwardRay = new Ray();
+
 function surfaceGap(point: Vector3, hit: Hit) {
   separation.subVectors(point, hit.point);
   const depth = separation.dot(hit.normal);
-  // Only count penetration when projecting onto the finite face actually reaches it.
-  if (depth < 0 && separation.addScaledVector(hit.normal, -depth).lengthSq() <= 1e-12) return depth;
-  return point.distanceTo(hit.point);
+  const distance = separation.length();
+  if (depth >= -1e-7) return distance;
+  if (separation.addScaledVector(hit.normal, -depth).lengthSq() <= 1e-12) return -distance;
+
+  // At an edge the nearest face's plane extends beyond the mesh. A ray toward its outward
+  // side must exit an actual face to count penetration. This also handles concave joins.
+  const { inverse, tree } = hit.owner;
+  const m = inverse.elements;
+  const { x, y, z } = hit.normal;
+  outwardRay.origin.copy(point).applyMatrix4(inverse);
+  outwardRay.direction.set(
+    m[0] * x + m[4] * y + m[8] * z,
+    m[1] * x + m[5] * y + m[9] * z,
+    m[2] * x + m[6] * y + m[10] * z,
+  );
+  const localDistance = outwardRay.direction.length();
+  outwardRay.direction.multiplyScalar(1 / localDistance);
+  const exit = tree.raycastFirst(outwardRay, DoubleSide, 0, warpNeighbourRange * localDistance);
+  return exit?.face && exit.face.normal.dot(outwardRay.direction) > 0 ? -distance : distance;
+}
+
+/** Squared distance to a world AABB enclosing the affine image of a local BVH box. */
+function worldBoundsDistanceSquared(box: Box3, m: number[], px: number, py: number, pz: number) {
+  const x = (box.min.x + box.max.x) / 2,
+    hx = box.max.x - x;
+  const y = (box.min.y + box.max.y) / 2,
+    hy = box.max.y - y;
+  const z = (box.min.z + box.max.z) / 2,
+    hz = box.max.z - z;
+  const dx = Math.max(
+    0,
+    Math.abs(px - (m[0] * x + m[4] * y + m[8] * z)) -
+      (Math.abs(m[0]) * hx + Math.abs(m[4]) * hy + Math.abs(m[8]) * hz),
+  );
+  const dy = Math.max(
+    0,
+    Math.abs(py - (m[1] * x + m[5] * y + m[9] * z)) -
+      (Math.abs(m[1]) * hx + Math.abs(m[5]) * hy + Math.abs(m[9]) * hz),
+  );
+  const dz = Math.max(
+    0,
+    Math.abs(pz - (m[2] * x + m[6] * y + m[10] * z)) -
+      (Math.abs(m[2]) * hx + Math.abs(m[6]) * hy + Math.abs(m[10]) * hz),
+  );
+  return dx * dx + dy * dy + dz * dz;
 }
 
 function closestHit(point: Vector3, neighbours: WarpNeighbour[]): Hit | null {
   const closest: { owner: WarpNeighbour | null; face: number } = { owner: null, face: 0 };
-  let best = warpNeighbourRange;
+  let bestSquared = warpNeighbourRange ** 2;
   const nearest = new Vector3();
   for (const n of neighbours) {
-    local.copy(point).applyMatrix4(n.inverse);
     const [sx, sy, sz] = n.part.scale.map(Math.abs);
-    const minScale = Math.min(sx, sy, sz);
-    if (sx === sy && sx === sz) {
-      const hit = n.tree.closestPointToPoint(local, undefined, 0, best / minScale);
+    const [qx, qy, qz, qw] = n.part.quaternion;
+    const unit = Math.abs(qx * qx + qy * qy + qz * qz + qw * qw - 1) < 1e-15;
+    if (sx === sy && sx === sz && unit) {
+      local.copy(point).applyMatrix4(n.inverse);
+      const hit = n.tree.closestPointToPoint(
+        local,
+        undefined,
+        0,
+        (Math.sqrt(bestSquared) + 1e-12) / sx,
+      );
       if (!hit) continue;
       const world = hit.point.applyMatrix4(n.matrix);
-      const distance = world.distanceTo(point);
-      if (distance > best) continue;
-      best = distance;
+      const distanceSquared = world.distanceToSquared(point);
+      if (distanceSquared > bestSquared) continue;
+      bestSquared = distanceSquared;
       closest.owner = n;
       closest.face = hit.faceIndex;
       nearest.copy(world);
       continue;
     }
-    // The local nearest triangle can differ after non-uniform scaling. Prune with a
-    // conservative lower bound, then compare exact point-to-triangle distances in world space.
+    // Evaluate both bounds and candidates in world space. This accounts for anisotropic
+    // scales and the actual linear transform of imported, approximately unit quaternions.
+    const m = n.matrix.elements;
+    const px = point.x - m[12],
+      py = point.y - m[13],
+      pz = point.z - m[14];
     n.tree.shapecast({
-      boundsTraverseOrder: (box) => box.distanceToPoint(local),
-      intersectsBounds: (_box, _leaf, score) => score! * minScale <= best,
+      boundsTraverseOrder: (box) => worldBoundsDistanceSquared(box, m, px, py, pz),
+      intersectsBounds: (_box, _leaf, score) => score! <= bestSquared,
       intersectsTriangle: (tri, index) => {
         worldTriangle.a.copy(tri.a).applyMatrix4(n.matrix);
         worldTriangle.b.copy(tri.b).applyMatrix4(n.matrix);
         worldTriangle.c.copy(tri.c).applyMatrix4(n.matrix);
         worldTriangle.closestPointToPoint(point, worldHit);
-        const distance = worldHit.distanceTo(point);
-        if (distance <= best) {
-          best = distance;
+        const distanceSquared = worldHit.distanceToSquared(point);
+        if (distanceSquared <= bestSquared) {
+          bestSquared = distanceSquared;
           closest.owner = n;
           closest.face = index;
           nearest.copy(worldHit);
         }
-        return false;
+        return distanceSquared === 0;
       },
     });
   }
@@ -113,7 +168,7 @@ function closestHit(point: Vector3, neighbours: WarpNeighbour[]): Hit | null {
   if (!owner) return null;
   const normal = readFace(owner.part.geometry, face, triangle).getNormal(new Vector3());
   normal.applyMatrix3(normalMatrix.getNormalMatrix(owner.matrix)).normalize();
-  return { point: nearest, normal };
+  return { owner, point: nearest, normal };
 }
 
 /** Closest neighbour surface point within range, pushed `overlap` inside along its outward normal. */
@@ -186,7 +241,6 @@ export function closeGapTargets(
     point.fromArray(state.positions, n * 3);
     const hit = closestHit(point, neighbours);
     if (!hit) continue;
-    if (surfaceGap(point, hit) <= -overlap) continue;
     writeRotation(
       rotation,
       0,
@@ -202,7 +256,7 @@ export function closeGapTargets(
       (rotation[0] * x + rotation[1] * y + rotation[2] * z) * hit.normal.x +
       (rotation[3] * x + rotation[4] * y + rotation[5] * z) * hit.normal.y +
       (rotation[6] * x + rotation[7] * y + rotation[8] * z) * hit.normal.z;
-    if (facing >= -warpFacingCosine) continue;
+    if (facing >= -warpFacingCosine || surfaceGap(point, hit) <= -overlap) continue;
     result.push({ node: n, target: hit.point.addScaledVector(hit.normal, -overlap).toArray() });
   }
   return result;
@@ -268,8 +322,8 @@ export function* seamMeasurement(
     normal = new Vector3();
   let largest = -Infinity;
   for (let v = 0; v < region.weldedCount; v++) {
-    if ((v & 127) === 0) yield;
     if (region.role[v] === WarpRole.Outside || first[v] < 0) continue;
+    yield;
     point.fromArray(out.positions, first[v] * 3).applyMatrix4(m);
     const hit = closestHit(point, neighbours);
     if (!hit) continue;
