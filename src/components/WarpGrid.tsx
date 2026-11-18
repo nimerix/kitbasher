@@ -23,7 +23,7 @@ import {
   Vector3,
   type Camera,
 } from 'three';
-import { useEditor, type WarpSession } from '../core/store';
+import { isWarpDragging, useEditor, type WarpSession } from '../core/store';
 import { writtenNodePositions } from '../core/warp-evaluate';
 import type { WarpModel } from '../core/warp-model';
 import {
@@ -369,8 +369,11 @@ function largestCell(
   return nearest > 0 ? (cell * scale) / nearest : Infinity;
 }
 
-/** How long the written surface stays as it is before the drawn points are chosen on it again. */
+/** How long the written surface stays as it is before the drawn line is checked against it. */
 const refineDelay = 80;
+
+/** How far the drawn line may stray from the written surface, in mm or a pixel if less. */
+const refineStray = 0.1;
 
 /** Uploads the first `count` floats of a buffer that changed. */
 function upload(buffer: InstancedInterleavedBuffer | InstancedBufferAttribute, count: number) {
@@ -474,6 +477,8 @@ function SurfaceWarpGrid({ warp }: { warp: WarpSession }) {
       radius: Infinity,
       local: new Float32Array(nodeCount * 3),
       drawn: new Float64Array(nodeCount * 3).fill(Number.NaN),
+      // The smallest pixel on the grid, in the part's space.
+      pixel: Infinity,
       version: -1,
       refine: undefined as ReturnType<typeof setTimeout> | undefined,
     };
@@ -494,37 +499,54 @@ function SurfaceWarpGrid({ warp }: { warp: WarpSession }) {
   }, [grid, size, invalidate]);
   useLayoutEffect(() => invalidate(), [grid, invalidate]);
 
-  /** Once the written surface has stayed put a moment, chooses the drawn points on it again. */
+  /**
+   * Once the written surface has stayed put a moment, and the solve has settled and no drag is
+   * under way, checks the drawn line against it. Only a line that strays from it by more than a
+   * pixel or `refineStray` has its points chosen again, so each settled edit does so once at most.
+   */
   const refineLater = (version: number) => {
     clearTimeout(grid.refine);
     if (!path.crossings) return;
     const current = () => {
       const warp = latest.current;
       const position = warp.preview?.getAttribute('position') as BufferAttribute | undefined;
-      return warp.model === model && warp.output && (position?.version ?? 0) === version
+      return warp.model === model &&
+        warp.output &&
+        !warp.settling &&
+        !isWarpDragging() &&
+        (position?.version ?? 0) === version
         ? warp.output
         : null;
     };
     grid.refine = setTimeout(() => {
       const output = current();
       if (!output || grid.drawing.written !== version) return;
-      const job = grid.drawing.refining(output.positions);
+      const drawing = grid.drawing,
+        limit = Math.min(refineStray / grid.scale, grid.pixel);
+      const job = (function* () {
+        if ((yield* drawing.straying(output.positions)) <= limit) return false;
+        return yield* drawing.refining(output.positions);
+      })();
       const slice = () => {
         if (!current()) return;
         const deadline = performance.now() + 4;
         do {
-          if (job.next().done) {
+          const step = job.next();
+          if (step.done) {
             const output = current();
-            if (!output || grid.drawing.written !== version) return;
-            const changed = grid.drawing.adopt(output.positions, output.normals);
-            const segments = grid.drawing.segments;
-            if (changed.base) upload(grid.base, segments * 6);
-            if (changed.normals) upload(grid.normals, segments * 6);
-            if (changed.layout) {
-              upload(grid.weights, segments * 4);
-              upload(grid.cells, segments);
+            if (!output || drawing.written !== version) return;
+            if (step.value) {
+              const changed = drawing.adopt(output.positions, output.normals);
+              const segments = drawing.segments;
+              if (changed.base) upload(grid.base, segments * 6);
+              if (changed.normals) upload(grid.normals, segments * 6);
+              if (changed.layout) {
+                upload(grid.weights, segments * 4);
+                upload(grid.cells, segments);
+              }
+              invalidate();
             }
-            invalidate();
+            drawing.refined = version;
             return;
           }
         } while (performance.now() < deadline);
@@ -601,6 +623,7 @@ function SurfaceWarpGrid({ warp }: { warp: WarpSession }) {
       else nearest = 1 + uniforms.cell.value;
       nearest -= uniforms.cell.value;
       const pixel = (2 * nearest) / (p[5] * size.height) / grid.scale;
+      grid.pixel = pixel > 0 ? pixel : Infinity;
       const bound = Math.min(
         0.5 * style.tolerance * pixel,
         (0.75 * style.toleranceMax) / grid.scale,
