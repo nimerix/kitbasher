@@ -118,19 +118,19 @@ export function evaluateWarp(
       continue;
     }
     moved[v] = 1;
-    x /= sum;
-    y /= sum;
-    z /= sum;
-    // The feather band writes part of the displacement: rest + b × (skinned − rest).
-    if (blend && blend[v] !== 1) {
-      const b = blend[v];
-      x = px + b * (x - px);
-      y = py + b * (y - py);
-      z = pz + b * (z - pz);
+    world[v * 3] = x / sum;
+    world[v * 3 + 1] = y / sum;
+    world[v * 3 + 2] = z / sum;
+  }
+  // The feather band writes part of the displacement: rest + b × (skinned − rest).
+  if (blend) {
+    const band = featherOf(model).band;
+    for (let i = 0; i < band.length; i++) {
+      const v = band[i],
+        b = blend[v];
+      for (let a = v * 3; a < v * 3 + 3; a++)
+        world[a] = restWorld[a] + b * (world[a] - restWorld[a]);
     }
-    world[v * 3] = x;
-    world[v * 3 + 1] = y;
-    world[v * 3 + 2] = z;
   }
 
   const { positions, moved: box } = out;
@@ -216,14 +216,32 @@ function triangleNormals(triangles: Uint32Array, points: Float64Array) {
   return normals;
 }
 
+const feathers = new WeakMap<WarpModel, { band: Uint32Array; borderCorners: Uint32Array }>();
+
+/** A feathered model's band vertices, and the normal offsets of region face corners on its border. */
+function featherOf(model: WarpModel) {
+  let feather = feathers.get(model);
+  if (!feather) {
+    const { faces, weldOf, role, interior } = model.region;
+    const blend = model.blend!;
+    const band = interior.filter((v) => blend[v] < 1);
+    const corners: number[] = [];
+    for (let t = 0; t < faces.length; t++)
+      for (let k = 0; k < 3; k++) {
+        const g = faces[t] * 3 + k;
+        if (role[weldOf[g]] === WarpRole.Border) corners.push(g * 3);
+      }
+    feathers.set(model, (feather = { band, borderCorners: Uint32Array.from(corners) }));
+  }
+  return feather;
+}
+
 function writeNormals(model: WarpModel, positions: Float32Array, normals: Float32Array) {
   const { region, index } = model;
   const { weldOf, role, faces, interiorVertices } = region;
   const original = model.normals!;
 
   if (!index) {
-    // A feathered outer border keeps its corners' normal bits, as an indexed border vertex does.
-    const keepBorder = model.blend !== null;
     for (let t = 0; t < faces.length; t++) {
       const o = faces[t] * 9;
       const ux = positions[o + 3] - positions[o],
@@ -237,8 +255,7 @@ function writeNormals(model: WarpModel, positions: Float32Array, normals: Float3
         nz = ux * vy - uy * vx;
       const length = Math.sqrt(nx * nx + ny * ny + nz * nz);
       for (let c = o; c < o + 9; c += 3)
-        if (keepBorder && role[weldOf[c / 3]] === WarpRole.Border) continue;
-        else if (length > 0) {
+        if (length > 0) {
           normals[c] = nx / length;
           normals[c + 1] = ny / length;
           normals[c + 2] = nz / length;
@@ -248,6 +265,13 @@ function writeNormals(model: WarpModel, positions: Float32Array, normals: Float3
           normals[c + 2] = original[c + 2];
         }
     }
+    // A feathered outer border keeps its corners' normal bits, as an indexed border vertex does.
+    if (model.blend)
+      for (const c of featherOf(model).borderCorners) {
+        normals[c] = original[c];
+        normals[c + 1] = original[c + 1];
+        normals[c + 2] = original[c + 2];
+      }
     return;
   }
 

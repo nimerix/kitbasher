@@ -81,17 +81,16 @@ export function growWarpRegion(
   const paintedFace = new Uint8Array(faceCount);
   for (let i = 0; i < faces.length; i++) paintedFace[faces[i]] = 1;
   const paintedVertex = new Uint8Array(weldedCount);
+  // Welded vertex to unpainted face incidence.
+  const start = new Uint32Array(weldedCount + 1);
+  let painted = 0;
   for (let f = 0; f < faceCount; f++)
-    if (paintedFace[f])
+    if (paintedFace[f] && ++painted)
       paintedVertex[corner[f * 3]] =
         paintedVertex[corner[f * 3 + 1]] =
         paintedVertex[corner[f * 3 + 2]] =
           1;
-
-  // Welded vertex to unpainted face incidence.
-  const start = new Uint32Array(weldedCount + 1);
-  for (let f = 0; f < faceCount; f++)
-    if (!paintedFace[f]) for (let k = 0; k < 3; k++) start[corner[f * 3 + k] + 1]++;
+    else for (let k = 0; k < 3; k++) start[corner[f * 3 + k] + 1]++;
   for (let v = 0; v < weldedCount; v++) start[v + 1] += start[v];
   const incident = new Uint32Array(start[weldedCount]);
   const fill = start.slice(0, weldedCount);
@@ -138,24 +137,27 @@ export function growWarpRegion(
     }
   }
 
-  let joined = 0,
-    count = 0;
-  const member = new Uint8Array(faceCount);
-  for (let f = 0; f < faceCount; f++) {
-    if (paintedFace[f]) member[f] = 1;
-    else if (
+  // Only a face with a corner the search reached can join.
+  const near: number[] = [];
+  for (let v = 0; v < weldedCount; v++)
+    if (dist[v] <= width) for (let e = start[v]; e < start[v + 1]; e++) near.push(incident[e]);
+  near.sort((a, b) => a - b);
+  const joinedFaces: number[] = [];
+  for (let i = 0; i < near.length; i++) {
+    const f = near[i];
+    if (
+      (i === 0 || f !== near[i - 1]) &&
       dist[corner[f * 3]] <= width &&
       dist[corner[f * 3 + 1]] <= width &&
       dist[corner[f * 3 + 2]] <= width
-    ) {
-      member[f] = 1;
-      joined++;
-    }
-    count += member[f];
+    )
+      joinedFaces.push(f);
   }
-  const grown = new Uint32Array(count);
-  for (let f = 0, i = 0; f < faceCount; f++) if (member[f]) grown[i++] = f;
-  return { faces: grown, paintedFace, paintedVertex, joined };
+  const grown = new Uint32Array(painted + joinedFaces.length);
+  for (let f = 0, i = 0, j = 0; i + j < grown.length; f++)
+    if (paintedFace[f]) grown[i++ + j] = f;
+    else if (joinedFaces[j] === f) grown[i + j++] = f;
+  return { faces: grown, paintedFace, paintedVertex, joined: joinedFaces.length };
 }
 
 const belowOne = 1 - 2 ** -24;
@@ -170,19 +172,22 @@ export function featherBlend(
   restWorld: Float64Array,
   paintedVertex: Uint8Array,
 ): Float32Array {
-  const { weldedCount, role } = region;
+  const { weldedCount, role, interior } = region;
   const blend = new Float32Array(weldedCount);
   for (let v = 0; v < weldedCount; v++) if (paintedVertex[v]) blend[v] = 1;
-  const band = (v: number) => role[v] === WarpRole.Interior && !paintedVertex[v];
+  const band = interior.filter((v) => !paintedVertex[v]);
+  const inBand = new Uint8Array(weldedCount);
+  for (let i = 0; i < band.length; i++) inBand[band[i]] = 1;
   const inner = distancesInto(
     region,
     restWorld,
-    (v) => paintedVertex[v] === 1 && role[v] === WarpRole.Interior,
     band,
+    inBand,
+    (v) => paintedVertex[v] === 1 && role[v] === WarpRole.Interior,
   );
-  const outer = distancesInto(region, restWorld, (v) => role[v] === WarpRole.Border, band);
-  for (let v = 0; v < weldedCount; v++) {
-    if (!band(v)) continue;
+  const outer = distancesInto(region, restWorld, band, inBand, (v) => role[v] === WarpRole.Border);
+  for (let i = 0; i < band.length; i++) {
+    const v = band[i];
     const din = inner[v],
       dout = outer[v];
     const t = !(din < Infinity) ? 0 : !(dout < Infinity) ? 1 : dout / (din + dout);
@@ -194,24 +199,26 @@ export function featherBlend(
   return blend;
 }
 
-/** Multi-source surface distances from `source` vertices into `into` vertices. */
+/** Surface distances across the band from the `source` vertices beside it. */
 function distancesInto(
   region: WarpRegion,
   restWorld: Float64Array,
+  band: Uint32Array,
+  inBand: Uint8Array,
   source: (v: number) => boolean,
-  into: (v: number) => boolean,
 ) {
-  const { weldedCount, adjacencyStart, adjacency } = region;
-  const dist = new Float64Array(weldedCount).fill(Infinity);
+  const { adjacencyStart, adjacency } = region;
+  const dist = new Float64Array(region.weldedCount).fill(Infinity);
   const heap = new DistanceHeap();
-  for (let v = 0; v < weldedCount; v++) {
-    if (!source(v)) continue;
-    for (let e = adjacencyStart[v]; e < adjacencyStart[v + 1]; e++)
-      if (into(adjacency[e])) {
-        dist[v] = 0;
-        heap.push(0, v);
-        break;
+  for (let i = 0; i < band.length; i++) {
+    const v = band[i];
+    for (let e = adjacencyStart[v]; e < adjacencyStart[v + 1]; e++) {
+      const u = adjacency[e];
+      if (dist[u] !== 0 && !inBand[u] && source(u)) {
+        dist[u] = 0;
+        heap.push(0, u);
       }
+    }
   }
   while (heap.size) {
     const u = heap.pop(),
@@ -219,7 +226,7 @@ function distancesInto(
     if (d > dist[u]) continue;
     for (let e = adjacencyStart[u]; e < adjacencyStart[u + 1]; e++) {
       const w = adjacency[e];
-      if (!into(w)) continue;
+      if (!inBand[w]) continue;
       const next =
         d +
         Math.hypot(
