@@ -38,7 +38,7 @@ export const warpGridPathLimits = {
   /** Points kept per grid edge. */
   perEdge: 32,
   /** Points kept over the whole grid; the ones that matter least go first. */
-  total: 48_000,
+  total: 32_000,
   /**
    * Evenly spaced points every edge keeps first, by halving: level 1 is the middle, 2 the
    * quarters, 3 the eighths. A flat edge needs them to follow the surface once it bends.
@@ -49,7 +49,7 @@ export const warpGridPathLimits = {
   /** A walk or a mesh-edge path longer than this many times its chord has lost its way. */
   stray: 3,
   /** Vertices a mesh-edge path may visit. */
-  reroute: 4096,
+  reroute: 32_768,
   /** A point that bends the line by less than this share of its edge's length is left out. */
   tolerance: 1e-3,
 };
@@ -668,7 +668,23 @@ export function* traceWarpGridPath(
       work += m;
       for (let s = 1; s + 1 < kept; s++) {
         const i = keptIndex[s];
-        points.push(cu[i], cv[i], ct[i], arc[i] / total, keptRank[s]);
+        let rank = keptRank[s];
+        // Within a spine level, a point where the line bends more goes later.
+        if (rank >= 2) {
+          const i0 = keptIndex[s - 1],
+            i1 = keptIndex[s + 1];
+          const bend = bendOf(
+            i,
+            position(i0, 0),
+            position(i0, 1),
+            position(i0, 2),
+            position(i1, 0),
+            position(i1, 1),
+            position(i1, 2),
+          );
+          rank += Math.min(0.99, bend / length[e]);
+        }
+        points.push(cu[i], cv[i], ct[i], arc[i] / total, rank);
       }
       counts[e] = kept - 2;
     }
