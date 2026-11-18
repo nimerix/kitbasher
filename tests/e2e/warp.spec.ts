@@ -294,3 +294,31 @@ test('closes a seam, moves a control point, applies, undoes and cancels', async 
   expect(cancelled.drawn).toEqual(original.mesh);
   expect(cancelled.past).toBe(original.past);
 });
+
+test.describe('with clipping on, as by default', () => {
+  test.use({ storageState: { cookies: [], origins: [] } });
+
+  test('the Warp button keeps the toolbar on one row at 1440 px', async ({ page }) => {
+    await open(page);
+    await expect(page.getByRole('button', { name: 'Avoid clipping', exact: true })).toHaveAttribute(
+      'aria-pressed',
+      'true',
+    );
+    const toolbar = page.locator('.toolbar');
+    // Transform already took two rows with clipping on before Warp was added.
+    for (const tool of [
+      'Select (V)',
+      'Move (G)',
+      'Rotate (R)',
+      'Scale (S)',
+      'Warp a scanned surface (W)',
+    ]) {
+      await toolbar.getByTitle(tool, { exact: true }).click();
+      // One row is 46 px tall, two are 78.
+      expect((await toolbar.boundingBox())!.height, tool).toBeLessThan(50);
+    }
+    // The labels it hides stay in the tooltips.
+    await expect(page.getByTitle('Pin parts in space')).toBeVisible();
+    await expect(page.getByTitle(/^Create joint/)).toBeVisible();
+  });
+});

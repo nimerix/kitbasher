@@ -6600,9 +6600,32 @@ optgroup {
 .transform-mode-buttons.with-scale {
   grid-template-columns: repeat(3, minmax(0, 1fr));
 }
-/* Narrower toolbars keep the Warp icon and its tooltip, so the strip still fits on one row. */
+/* Narrower toolbars show Pin, Joint and Warp as icons, so the strip still fits on one row. Their
+   names stay in the tooltip and for assistive technology. */
 @media (max-width: 1500px) {
-  .warp-tool > span {
-    display: none;
+  .toolbar-left .compact-tool {
+    position: relative;
+  }
+  .toolbar-left .compact-tool > span {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    overflow: hidden;
+    clip-path: inset(50%);
+  }
+}
+@media (max-width: 1700px) {
+  .toolbar-left .warp-tool {
+    position: relative;
+  }
+  .toolbar-left .warp-tool > span,
+  .toolbar-left .warp-tool > kbd {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    overflow: hidden;
+    clip-path: inset(50%);
   }
 }

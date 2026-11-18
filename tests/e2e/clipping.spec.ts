@@ -40,21 +40,6 @@ async function block(page: Page) {
 }
 
 async function handle(page: Page) {
-  // Choosing a tool can wrap the toolbar onto two rows, which resizes the canvas.
-  await expect
-    .poll(() =>
-      page.evaluate(async () => {
-        const url = performance
-          .getEntriesByType('resource')
-          .map((e) => e.name)
-          .find((u) => u.includes('/@react-three_fiber.js'))!;
-        const canvas = document.querySelector('canvas')!;
-        const root = (await import(url))._roots.get(canvas).store.getState();
-        await new Promise(requestAnimationFrame);
-        return root.size.height === canvas.parentElement!.getBoundingClientRect().height;
-      }),
-    )
-    .toBe(true);
   const bounds = (await page.locator('canvas').boundingBox())!;
   const ndc = await page.evaluate(async () => {
     const url = performance
