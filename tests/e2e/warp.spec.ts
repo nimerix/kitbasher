@@ -72,6 +72,7 @@ async function editorState(page: Page) {
         root.scene.getObjectByName('part:block').geometry.getAttribute('position').array,
       ) as number[],
       controls: root.controls.enabled as boolean,
+      camera: root.camera.position.toArray() as number[],
     };
   });
 }
@@ -300,6 +301,24 @@ test('closes a seam, moves a control point, applies, undoes and cancels', async 
   expect(cancelled.mesh).toEqual(original.mesh);
   expect(cancelled.drawn).toEqual(original.mesh);
   expect(cancelled.past).toBe(original.past);
+});
+
+test('dragging the region brush paints a stroke without orbiting', async ({ page }) => {
+  await open(page);
+  await page.keyboard.press('w');
+  await expect(page.locator('.statusbar')).toContainText(
+    'Paint the area to warp, or choose Whole part · Alt erases',
+  );
+  const [start, end] = [await screen(page, [-6, 10, 10]), await screen(page, [6, 10, 10])];
+  await page.mouse.move(start.x, start.y);
+  await page.mouse.down();
+  const dab = await editorState(page);
+  expect(dab.faces).toBeGreaterThan(0);
+  await page.mouse.move(end.x, end.y, { steps: 8 });
+  await page.mouse.up();
+  const stroke = await editorState(page);
+  expect(stroke.camera).toEqual(dab.camera);
+  expect(stroke.faces).toBeGreaterThan(dab.faces);
 });
 
 test('toolbar transform buttons choose the control point gizmo while warping', async ({ page }) => {
