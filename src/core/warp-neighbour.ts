@@ -1,4 +1,4 @@
-import { Box3, DoubleSide, Matrix3, Matrix4, Ray, Triangle, Vector3 } from 'three';
+import { Box3, Matrix3, Matrix4, Triangle, Vector3 } from 'three';
 import type { MeshBVH } from 'three-mesh-bvh';
 import { treeOf } from './clipping';
 import { partMatrix } from './geometry';
@@ -50,6 +50,7 @@ export function warpNeighbours(
 
 interface Hit {
   owner: WarpNeighbour;
+  face: number;
   point: Vector3;
   normal: Vector3;
 }
@@ -61,29 +62,82 @@ const worldTriangle = new Triangle();
 const worldHit = new Vector3();
 const separation = new Vector3();
 
-const outwardRay = new Ray();
+const featureTolerance = 1e-5;
+const featureToleranceSquared = featureTolerance ** 2;
+const barycentric = new Vector3();
+const cornerNormal = new Vector3();
+const featureNormal = new Vector3();
+const linear = new Matrix3();
+const edgeA = new Vector3();
+const edgeB = new Vector3();
+
+const sameVertex = (a: Vector3, b: Vector3) => a.distanceToSquared(b) <= featureToleranceSquared;
+
+/** The signed side of a shared edge or a closed vertex fan. Open boundaries have no inside. */
+function featureSide(hit: Hit, difference: Vector3, faceSide: number) {
+  const { owner } = hit;
+  local.copy(hit.point).applyMatrix4(owner.inverse);
+  readFace(owner.part.geometry, hit.face, triangle);
+  const weights = triangle.getBarycoord(local, barycentric);
+  if (!weights) return faceSide;
+  const feature = [triangle.a, triangle.b, triangle.c].filter(
+    (_, i) => weights.getComponent(i) > 1e-7,
+  );
+  if (feature.length === 3) return faceSide;
+  const [first, second] = feature;
+  if (!first) return 0;
+
+  featureNormal.set(0, 0, 0);
+  normalMatrix.getNormalMatrix(owner.matrix);
+  linear.setFromMatrix4(owner.matrix);
+  let faces = 0;
+  let edgeDirection = 0;
+  const vertexEdges: { point: Vector3; count: number; direction: number }[] = [];
+  const addEdge = (point: Vector3, direction: number) => {
+    let edge = vertexEdges.find((entry) => sameVertex(entry.point, point));
+    if (!edge) vertexEdges.push((edge = { point: point.clone(), count: 0, direction: 0 }));
+    edge.count++;
+    edge.direction += direction;
+  };
+  owner.tree.shapecast({
+    intersectsBounds: (box) => box.distanceToPoint(local) <= featureTolerance,
+    intersectsTriangle: (tri) => {
+      const corners = [tri.a, tri.b, tri.c];
+      const i = corners.findIndex((p) => sameVertex(p, first));
+      if (i < 0) return false;
+      const next = corners[(i + 1) % 3],
+        prev = corners[(i + 2) % 3];
+      let weight = 1;
+      if (second) {
+        // The two incident faces must traverse the shared edge in opposite directions.
+        if (sameVertex(next, second)) edgeDirection++;
+        else if (sameVertex(prev, second)) edgeDirection--;
+        else return false;
+      } else {
+        addEdge(next, 1);
+        addEdge(prev, -1);
+        edgeA.subVectors(next, corners[i]).applyMatrix3(linear);
+        edgeB.subVectors(prev, corners[i]).applyMatrix3(linear);
+        weight = edgeA.angleTo(edgeB);
+      }
+      faces++;
+      tri.getNormal(cornerNormal).applyMatrix3(normalMatrix).normalize();
+      featureNormal.addScaledVector(cornerNormal, weight);
+      return false;
+    },
+  });
+  const shared = second
+    ? faces === 2 && edgeDirection === 0
+    : faces >= 3 && vertexEdges.every(({ count, direction }) => count === 2 && direction === 0);
+  return shared ? featureNormal.normalize().dot(difference) : 0;
+}
 
 function surfaceGap(point: Vector3, hit: Hit) {
   separation.subVectors(point, hit.point);
   const depth = separation.dot(hit.normal);
-  const distance = separation.length();
-  if (depth >= -1e-7) return distance;
-  if (separation.addScaledVector(hit.normal, -depth).lengthSq() <= 1e-12) return -distance;
-
-  // At an edge the nearest face's plane extends beyond the mesh. A ray toward its outward
-  // side must exit an actual face to count penetration. This also handles concave joins.
-  const { inverse, tree } = hit.owner;
-  const m = inverse.elements;
-  const { x, y, z } = hit.normal;
-  outwardRay.origin.copy(point).applyMatrix4(inverse);
-  outwardRay.direction.set(
-    m[0] * x + m[4] * y + m[8] * z,
-    m[1] * x + m[5] * y + m[9] * z,
-    m[2] * x + m[6] * y + m[10] * z,
-  );
-  outwardRay.direction.normalize();
-  const exit = tree.raycastFirst(outwardRay, DoubleSide);
-  return exit?.face && exit.face.normal.dot(outwardRay.direction) > 0 ? -distance : distance;
+  const distanceSquared = separation.lengthSq();
+  const side = distanceSquared - depth ** 2 <= 1e-12 ? depth : featureSide(hit, separation, depth);
+  return (side < -1e-7 ? -1 : 1) * Math.sqrt(distanceSquared);
 }
 
 /** Squared distance to a world AABB enclosing the affine image of a local BVH box. */
@@ -183,7 +237,7 @@ function closestHit(point: Vector3, neighbours: WarpNeighbour[]): Hit | null {
   if (!owner) return null;
   const normal = readFace(owner.part.geometry, face, triangle).getNormal(new Vector3());
   normal.applyMatrix3(normalMatrix.getNormalMatrix(owner.matrix)).normalize();
-  return { owner, point: nearest, normal };
+  return { owner, face, point: nearest, normal };
 }
 
 /** Closest neighbour surface point within range, pushed `overlap` inside along its outward normal. */

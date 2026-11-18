@@ -12,6 +12,7 @@ import {
   SphereGeometry,
   Vector3,
 } from 'three';
+import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import { workerIndexTriangles } from '../../src/core/spatial-index';
 import { buildWarpModel } from '../../src/core/warp-model';
 import { createWarpOutput, evaluateWarp } from '../../src/core/warp-evaluate';
@@ -199,6 +200,21 @@ describe('warp neighbours', () => {
     const report = measureSeam(model, createWarpOutput(model), [neighbour])!;
     expect(report.vertices).toHaveLength(4);
     expect(report.largestGap).toBeLessThan(0);
+  });
+
+  it('keeps a finite open edge separated when a disconnected face lies behind it', async () => {
+    const near = new PlaneGeometry(2, 2);
+    const far = new PlaneGeometry(8, 8).translate(0, 0, 12);
+    const part = partOf('open plates', mergeGeometries([near, far]), [0, 0, 0]);
+    const source = new PlaneGeometry(0.25, 0.25, 2, 2).rotateY(Math.PI);
+    const model = await modelOf(source, new Matrix4().makeTranslation(1.5, 0, -0.15));
+    const neighbours = [neighbourOf(part)];
+    const report = measureSeam(model, createWarpOutput(model), neighbours)!;
+    expect(report.vertices).toHaveLength(9);
+    expect(Math.min(...report.gaps)).toBeGreaterThan(0.3);
+    expect(
+      closeGapTargets(model, createWarpState(model.restNodes), neighbours, overlap),
+    ).not.toEqual([]);
   });
 
   it('finds the nearest world surface of a non-uniformly scaled neighbour', () => {
