@@ -48,30 +48,91 @@ export interface WarpGridCrossings {
 }
 
 export const warpGridPathLimits = {
-  /** Points kept per grid edge. */
-  perEdge: 32,
-  /** Points an edge may keep once chosen again on a bent surface, within the same total. */
-  bentPerEdge: 64,
-  /** The tightest bend, in mm, that evenly spaced points are kept ready for once the surface bends again. */
-  bentRadius: 10,
-  /** Points kept over the whole grid; the ones that matter least go first. */
-  total: 32_000,
   /**
-   * Evenly spaced points every edge keeps first, by halving: level 1 is the middle, 2 the
-   * quarters, 3 the eighths. A flat edge needs them to follow the surface once it bends.
+   * Points every edge keeps, evenly spaced: all it crosses, up to this many, while `total` holds
+   * them, so a long edge flat at rest follows the surface as soon as it bends. A short edge
+   * crosses few.
    */
-  spine: 3,
+  perEdge: 256,
+  /** Points an edge may keep once chosen again on a bent surface, within the same total. */
+  bentPerEdge: 512,
+  /** Points kept over the whole grid. Beyond it, every edge's are spaced further apart. */
+  total: 32_000,
   /** Triangles a walk may cross before it gives up. */
   steps: 4096,
   /** A walk or a mesh-edge path longer than this many times its chord has lost its way. */
   stray: 3,
   /** Vertices a mesh-edge path may visit. */
   reroute: 32_768,
-  /** A point that bends the line by less than this share of its edge's length is left out. */
+  /** A point chosen again that bends the line by less than this share of its edge is left out. */
   tolerance: 1e-3,
 };
 
 const none = 0xffffffff;
+
+/** Evenly spaced points an edge with `crossings` points keeps: `spacing` apart, or all for 0. */
+export const warpGridEvenCount = (
+  length: number,
+  crossings: number,
+  spacing: number,
+  limits = warpGridPathLimits,
+) =>
+  Math.min(
+    limits.perEdge,
+    crossings,
+    spacing > 0 ? Math.max(0, Math.ceil(length / spacing) - 1) : Infinity,
+  );
+
+/**
+ * How far apart every edge's evenly spaced points are: 0, for all of them, while the total holds
+ * them, or else the closest spacing it holds.
+ */
+export function warpGridEvenSpacing(
+  lengths: ArrayLike<number>,
+  crossings: (edge: number) => number,
+  limits = warpGridPathLimits,
+) {
+  const needed = (spacing: number) => {
+    let count = 0;
+    for (let e = 0; e < lengths.length; e++)
+      count += warpGridEvenCount(lengths[e], crossings(e), spacing, limits);
+    return count;
+  };
+  if (needed(0) <= limits.total) return 0;
+  let low = 0,
+    high = 1;
+  while (needed(high) > limits.total) high *= 2;
+  for (let i = 0; i < 40; i++) {
+    const middle = (low + high) / 2;
+    if (needed(middle) > limits.total) low = middle;
+    else high = middle;
+  }
+  return high;
+}
+
+/**
+ * Visits, in order, the points from `begin` to `end` nearest `count` even shares of their edge,
+ * by how far along it each lies: all of them when there are no more.
+ */
+export function warpGridEvenPoints(
+  along: ArrayLike<number>,
+  begin: number,
+  end: number,
+  count: number,
+  visit: (point: number) => void,
+) {
+  if (count >= end - begin) {
+    for (let i = begin; i < end; i++) visit(i);
+    return;
+  }
+  let last = -1;
+  for (let j = 1, i = begin; j <= count; j++) {
+    const share = j / (count + 1);
+    while (i + 1 < end && along[i + 1] <= share) i++;
+    const point = i + 1 < end && along[i + 1] - share < share - along[i] ? i + 1 : i;
+    if (point !== last) visit((last = point));
+  }
+}
 
 /** The grid's edges as straight chords: what is drawn until a path is traced. */
 export function warpGridChords(model: WarpModel): WarpGridPath {
@@ -117,10 +178,9 @@ class Points {
   to = new Uint32Array(1024);
   t = new Float32Array(1024);
   along = new Float32Array(1024);
-  rank = new Float64Array(1024);
   size = 0;
 
-  push(from: number, to: number, t: number, along: number, rank: number) {
+  push(from: number, to: number, t: number, along: number) {
     if (this.size === this.from.length) {
       const grow = <T extends Uint32Array | Float32Array | Float64Array>(a: T) => {
         const b = new (a.constructor as new (n: number) => T)(a.length * 2);
@@ -131,14 +191,12 @@ class Points {
       this.to = grow(this.to);
       this.t = grow(this.t);
       this.along = grow(this.along);
-      this.rank = grow(this.rank);
     }
     const i = this.size++;
     this.from[i] = from;
     this.to[i] = to;
     this.t[i] = t;
     this.along[i] = along;
-    this.rank[i] = rank;
   }
 }
 
@@ -299,11 +357,6 @@ export function* traceWarpGridPath(
   // Geometry vertices for the line's normal at each node of the edge being traced.
   let startCopy = none,
     endCopy = none;
-  // Refinement scratch: kept point indices, and per gap the point in it that bends most.
-  const keptIndex = new Int32Array(limits.perEdge + 2),
-    keptRank = new Float64Array(limits.perEdge + 2),
-    gapAt = new Int32Array(limits.perEdge + 2),
-    gapBend = new Float64Array(limits.perEdge + 2);
   let arc = new Float64Array(256);
 
   const contains = (t: number, v: number) =>
@@ -539,40 +592,15 @@ export function* traceWarpGridPath(
     return count;
   };
 
-  /** Distance from point i to the segment between two positions. */
-  const bendOf = (
-    i: number,
-    sx: number,
-    sy: number,
-    sz: number,
-    ex: number,
-    ey: number,
-    ez: number,
-  ) => {
-    const qx = cp[i * 3] - sx,
-      qy = cp[i * 3 + 1] - sy,
-      qz = cp[i * 3 + 2] - sz;
-    const lx = ex - sx,
-      ly = ey - sy,
-      lz = ez - sz;
-    const ll = lx * lx + ly * ly + lz * lz;
-    const f = ll > 0 ? Math.min(1, Math.max(0, (qx * lx + qy * ly + qz * lz) / ll)) : 0;
-    return Math.hypot(qx - f * lx, qy - f * ly, qz - f * lz);
-  };
-
-  const points = new Points(),
-    every = new Points();
+  const every = new Points();
   const edgeCount = ends.length / 2;
-  const counts = new Uint32Array(edgeCount),
-    everyCounts = new Uint32Array(edgeCount),
+  const everyCounts = new Uint32Array(edgeCount),
     drawn = new Uint8Array(edgeCount),
     endVertex = new Uint32Array(edgeCount * 2);
   let failed = 0,
     rerouted = 0,
     work = 0,
     e = 0;
-  // Spine points rank above any bend, the coarser levels first.
-  const spineRank = (level: number) => 2 + limits.spine - level;
   for (e = 0; e < edgeCount; e++) {
     const na = ends[e * 2],
       nb = ends[e * 2 + 1];
@@ -621,94 +649,9 @@ export function* traceWarpGridPath(
         );
         arc[k] = total;
       }
-      for (let k = 0; k < m; k++) every.push(cu[k], cv[k], ct[k], arc[k] / total, 0);
+      for (let k = 0; k < m; k++) every.push(cu[k], cv[k], ct[k], arc[k] / total);
       everyCounts[e] = m;
-      keptIndex[0] = -1;
-      keptIndex[1] = m;
-      let kept = 2;
-      const keep = (i: number, rank: number) => {
-        let slot = 1;
-        while (keptIndex[slot] < i) slot++;
-        if (keptIndex[slot] === i || kept - 2 >= limits.perEdge) return;
-        keptIndex.copyWithin(slot + 1, slot, kept);
-        keptRank.copyWithin(slot + 1, slot, kept);
-        keptIndex[slot] = i;
-        keptRank[slot] = rank;
-        kept++;
-      };
-      // The points nearest each spine fraction of the path's length.
-      for (let level = 1, k = 0; level <= limits.spine; level++) {
-        const parts = 1 << level;
-        for (let j = 1; j < parts; j += 2) {
-          const target = (total * j) / parts;
-          while (k + 1 < m && arc[k + 1] <= target) k++;
-          const i = k + 1 < m && arc[k + 1] - target < target - arc[k] ? k + 1 : k;
-          keep(i, spineRank(level));
-        }
-        k = 0;
-      }
-      // Then the points that bend the line most, until it is straight enough or full. Each gap
-      // between kept points remembers the point in it that bends most.
-      const tolerance = limits.tolerance * length[e];
-      const best = (slot: number) => {
-        const i0 = keptIndex[slot],
-          i1 = keptIndex[slot + 1];
-        const sx = position(i0, 0),
-          sy = position(i0, 1),
-          sz = position(i0, 2),
-          ex = position(i1, 0),
-          ey = position(i1, 1),
-          ez = position(i1, 2);
-        let most = tolerance,
-          at = -1;
-        for (let i = i0 + 1; i < i1; i++) {
-          const bend = bendOf(i, sx, sy, sz, ex, ey, ez);
-          if (bend > most) {
-            most = bend;
-            at = i;
-          }
-        }
-        gapAt[slot] = at;
-        gapBend[slot] = most;
-      };
-      for (let g = 0; g + 1 < kept; g++) best(g);
-      while (kept - 2 < limits.perEdge) {
-        let slot = -1;
-        for (let g = 0; g + 1 < kept; g++)
-          if (gapAt[g] >= 0 && (slot < 0 || gapBend[g] > gapBend[slot])) slot = g;
-        if (slot < 0) break;
-        keptIndex.copyWithin(slot + 2, slot + 1, kept);
-        keptRank.copyWithin(slot + 2, slot + 1, kept);
-        gapAt.copyWithin(slot + 1, slot, kept - 1);
-        gapBend.copyWithin(slot + 1, slot, kept - 1);
-        keptIndex[slot + 1] = gapAt[slot];
-        keptRank[slot + 1] = Math.min(1, gapBend[slot] / length[e]);
-        kept++;
-        best(slot);
-        best(slot + 1);
-      }
       work += m;
-      for (let s = 1; s + 1 < kept; s++) {
-        const i = keptIndex[s];
-        let rank = keptRank[s];
-        // Within a spine level, a point where the line bends more goes later.
-        if (rank >= 2) {
-          const i0 = keptIndex[s - 1],
-            i1 = keptIndex[s + 1];
-          const bend = bendOf(
-            i,
-            position(i0, 0),
-            position(i0, 1),
-            position(i0, 2),
-            position(i1, 0),
-            position(i1, 1),
-            position(i1, 2),
-          );
-          rank += Math.min(0.99, bend / length[e]);
-        }
-        points.push(cu[i], cv[i], ct[i], arc[i] / total, rank);
-      }
-      counts[e] = kept - 2;
     }
     if (work > 4096) {
       work = 0;
@@ -716,25 +659,15 @@ export function* traceWarpGridPath(
     }
   }
 
-  // Over the budget, the points that matter least are left out: bends before spine points, and
-  // finer spine levels before coarser ones.
-  let cutoff = -1;
-  if (points.size > limits.total) {
-    const ranks = points.rank.slice(0, points.size).sort();
-    cutoff = ranks[points.size - limits.total - 1];
-  }
-  let kept = 0,
-    drawnCount = 0;
-  for (let i = 0; i < points.size; i++) if (points.rank[i] > cutoff) kept++;
+  // Every point each edge crosses, or where the total cannot hold them, evenly spaced ones.
+  const spacing = warpGridEvenSpacing(length, (e) => everyCounts[e], limits);
+  const kept = new Points();
+  let drawnCount = 0;
   for (let i = 0; i < edgeCount; i++) drawnCount += drawn[i];
   const outEnds = new Uint32Array(drawnCount * 2),
     outLength = new Float32Array(drawnCount),
     outEndVertex = new Uint32Array(drawnCount * 2),
-    start = new Uint32Array(drawnCount + 1),
-    from = new Uint32Array(kept),
-    to = new Uint32Array(kept),
-    t = new Float32Array(kept),
-    along = new Float32Array(kept);
+    start = new Uint32Array(drawnCount + 1);
   const crossings: WarpGridCrossings = {
     start: new Uint32Array(drawnCount + 1),
     from: every.from.slice(0, every.size),
@@ -742,13 +675,12 @@ export function* traceWarpGridPath(
     t: every.t.slice(0, every.size),
     along: every.along.slice(0, every.size),
   };
-  for (let e = 0, d = 0, i = 0, o = 0, c = 0; e < edgeCount; e++) {
-    const end = i + counts[e];
-    if (!drawn[e]) {
-      i = end;
-      continue;
-    }
+  const keep = (i: number) => kept.push(every.from[i], every.to[i], every.t[i], every.along[i]);
+  for (let e = 0, d = 0, c = 0; e < edgeCount; e++) {
+    if (!drawn[e]) continue;
     crossings.start[d] = c;
+    const count = warpGridEvenCount(length[e], everyCounts[e], spacing, limits);
+    warpGridEvenPoints(every.along, c, c + everyCounts[e], count, keep);
     c += everyCounts[e];
     crossings.start[d + 1] = c;
     outEnds[d * 2] = ends[e * 2];
@@ -756,25 +688,17 @@ export function* traceWarpGridPath(
     outEndVertex[d * 2] = endVertex[e * 2];
     outEndVertex[d * 2 + 1] = endVertex[e * 2 + 1];
     outLength[d] = length[e];
-    start[d] = o;
-    for (; i < end; i++)
-      if (points.rank[i] > cutoff) {
-        from[o] = points.from[i];
-        to[o] = points.to[i];
-        t[o] = points.t[i];
-        along[o++] = points.along[i];
-      }
-    start[++d] = o;
+    start[++d] = kept.size;
   }
   const nodeVertex = new Uint32Array(nodeCount);
   for (let n = 0; n < nodeCount; n++) nodeVertex[n] = first[grid.nodes[n]];
   return {
     ends: outEnds,
     start,
-    from,
-    to,
-    t,
-    along,
+    from: kept.from.slice(0, kept.size),
+    to: kept.to.slice(0, kept.size),
+    t: kept.t.slice(0, kept.size),
+    along: kept.along.slice(0, kept.size),
     length: outLength,
     nodeVertex,
     endVertex: outEndVertex,
@@ -1060,8 +984,8 @@ type WarpGridSelection = Pick<
  *
  * Edges are drawn coarsest level first, so drawing the first `levelEnd[k]` segments draws every
  * edge of level k and coarser. Which of an edge's points are drawn is first the trace's choice;
- * `refine` chooses again on the surface as written, and `detail` leaves out those that bend the
- * line by less than a view can show.
+ * where `straying` finds the line off the surface as written, `refine` chooses again on it, and
+ * `detail` leaves out those that bend the line by less than a view can show.
  */
 export class WarpGridDrawing {
   /** Segments drawn now. */
@@ -1085,9 +1009,14 @@ export class WarpGridDrawing {
   readonly atWrite: Float32Array;
   /** Whether any node has moved since the surface was written. */
   shifted = false;
-  /** The surface version last written, and the one the drawn points were chosen on. */
+  /**
+   * The surface version last written, and the last one the drawn points were checked against
+   * and, if they strayed from it, chosen again on.
+   */
   written = Number.NaN;
   refined = Number.NaN;
+  /** How many times points chosen again have been drawn. */
+  adopted = 0;
   /** Path edges in drawing order, and each one's level. */
   readonly order: Uint32Array;
   readonly levels: Uint8Array;
@@ -1287,11 +1216,66 @@ export class WarpGridDrawing {
   }
 
   /**
+   * The furthest any point the trace found lies from the line drawn through it, on the surface
+   * written last, which `written` must hold: how far the line strays from it. A slice at a time.
+   */
+  *straying(written: ArrayLike<number>): Generator<void, number> {
+    const { path, atWrite, order, selection } = this;
+    const crossings = path.crossings;
+    if (!crossings) return 0;
+    const at = (f: number, g: number, s: number, out: Float64Array) => {
+      for (let a = 0; a < 3; a++) out[a] = written[f + a] + s * (written[g + a] - written[f + a]);
+    };
+    const from = new Float64Array(3),
+      to = new Float64Array(3),
+      point = new Float64Array(3);
+    let worst = 0,
+      work = 0;
+    for (let o = 0; o < order.length; o++) {
+      const e = order[o];
+      const b = path.ends[e * 2 + 1] * 3;
+      for (let a = 0; a < 3; a++) from[a] = atWrite[path.ends[e * 2] * 3 + a];
+      let k = selection.start[o];
+      const end = selection.start[o + 1];
+      /** The far end of the drawn segment from `from`, and how far along the edge it lies. */
+      const reach = () => {
+        if (k < end) at(selection.from[k] * 3, selection.to[k] * 3, selection.t[k], to);
+        else for (let a = 0; a < 3; a++) to[a] = atWrite[b + a];
+        return k < end ? selection.along[k] : 1;
+      };
+      let ahead = reach();
+      for (let i = crossings.start[e]; i < crossings.start[e + 1]; i++) {
+        while (k < end && crossings.along[i] >= ahead) {
+          from.set(to);
+          k++;
+          ahead = reach();
+        }
+        at(crossings.from[i] * 3, crossings.to[i] * 3, crossings.t[i], point);
+        const lx = to[0] - from[0],
+          ly = to[1] - from[1],
+          lz = to[2] - from[2],
+          qx = point[0] - from[0],
+          qy = point[1] - from[1],
+          qz = point[2] - from[2];
+        const ll = lx * lx + ly * ly + lz * lz;
+        const f = ll > 0 ? Math.min(1, Math.max(0, (qx * lx + qy * ly + qz * lz) / ll)) : 0;
+        worst = Math.max(worst, Math.hypot(qx - f * lx, qy - f * ly, qz - f * lz));
+      }
+      work += crossings.start[e + 1] - crossings.start[e] + 1;
+      if (work > 0xffff) {
+        work = 0;
+        yield;
+      }
+    }
+    return worst;
+  }
+
+  /**
    * Chooses the points drawn along each edge again, on the surface written last, a slice at a
-   * time: each edge first keeps its middle, then the points furthest from the line drawn so far
-   * go in, wherever on the grid they are, while any lies further than the tolerance and the
-   * budget lasts; then the rest of each edge's evenly spaced points, so that it can follow the
-   * surface as it bends again. Returns false for a path not yet traced.
+   * time: each edge first keeps evenly spaced points within half the budget, so it can follow the
+   * surface as it bends again, then the points furthest from the line drawn so far go in, wherever
+   * on the grid they are, while any lies further than the tolerance and the budget lasts. Returns
+   * false for a path not yet traced.
    */
   *refining(written: ArrayLike<number>, limits = warpGridPathLimits): Generator<void, boolean> {
     const { path, atWrite } = this;
@@ -1337,17 +1321,13 @@ export class WarpGridDrawing {
           position[b + 2] - position[a + 2],
         );
     }
-    /** The sag of an arc of radius `bentRadius` over an edge's chord, or over its halves. */
-    const sag = (e: number, pieces: number) =>
-      (tolerance[e] / limits.tolerance / pieces) ** 2 / (8 * limits.bentRadius);
     const edgeOfSlot = (slot: number) => (slot < count ? edgeOfPoint[slot] : (slot - count) >> 1);
     // The points between a kept slot and the next: from the first after it to the last before.
     const first = (slot: number) => (slot < count ? slot + 1 : start[(slot - count) >> 1]);
     const last = (slot: number) => (slot < count ? slot : start[((slot - count) >> 1) + 1]);
     let budget = limits.total;
-    // How far each kept point bent the line when it went in. The middle and quarters count for at
-    // least the sag the edge or its halves would have bent to `bentRadius`, so they show wherever
-    // a further bend could.
+    // How far each kept point bent the line when it went in. Evenly spaced points count as
+    // bending it without end, so every view draws them.
     const bends = new Float64Array(count);
     const insert = (i: number, bend: number) => {
       const e = edgeOfPoint[i];
@@ -1408,18 +1388,12 @@ export class WarpGridDrawing {
       // A max-heap by bend.
       if (at >= 0) heap.push(-most, slot);
     };
-    /** The point of edge e nearest a share of its length at rest. */
-    const nearest = (e: number, share: number) => {
-      let best = -1,
-        gap = Infinity;
-      for (let i = start[e]; i < start[e + 1]; i++) {
-        const d = Math.abs(along[i] - share);
-        if (d < gap) [best, gap] = [i, d];
-      }
-      return best;
-    };
-    for (let e = 0; e < edgeCount; e++)
-      if (start[e + 1] > start[e]) insert(nearest(e, 0.5), sag(e, 1));
+    const half = { ...limits, total: limits.total / 2 };
+    const spacing = warpGridEvenSpacing(path.length, (e) => start[e + 1] - start[e], half);
+    for (let e = 0; e < edgeCount; e++) {
+      const even = warpGridEvenCount(path.length[e], start[e + 1] - start[e], spacing, half);
+      warpGridEvenPoints(along, start[e], start[e + 1], even, (i) => insert(i, Infinity));
+    }
     yield;
     for (let e = 0; e < edgeCount; e++) {
       for (let slot = count + e * 2; next[slot] >= 0; slot = next[slot]) measure(slot);
@@ -1436,14 +1410,6 @@ export class WarpGridDrawing {
       measure(slot);
       measure(i);
       if ((++work & 0xff) === 0) yield;
-    }
-    for (let level = 2; level <= limits.spine && budget > 0; level++) {
-      const parts = 1 << level;
-      for (let e = 0; e < edgeCount; e++)
-        if (start[e + 1] > start[e])
-          for (let j = 1; j < parts; j += 2)
-            insert(nearest(e, j / parts), level === 2 ? sag(e, 2) : 0);
-      yield;
     }
     // The choice, in drawing order.
     const order = this.order;
@@ -1472,6 +1438,7 @@ export class WarpGridDrawing {
     this.selection = this.filtered();
     this.pending = null;
     this.refined = this.written;
+    this.adopted++;
     this.lay();
     this.write(written, normals, changed);
     changed.layout = true;
