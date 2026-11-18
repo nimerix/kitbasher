@@ -329,8 +329,8 @@ describe('point handles', () => {
     const { world } = written(model, state);
     for (const v of model.region.interior) {
       const d = Math.hypot(model.restWorld[v * 3], model.restWorld[v * 3 + 1]);
-      if (d < 6) expect(world[v * 3 + 2]).toBeGreaterThan(1.9);
-      if (d > 13) expect(Math.abs(world[v * 3 + 2])).toBeLessThan(0.05 * 2);
+      if (d < 7) expect(world[v * 3 + 2]).toBeGreaterThan(1.9);
+      if (d > 13) expect(Math.abs(world[v * 3 + 2])).toBeLessThan(0.03 * 2);
     }
   });
 

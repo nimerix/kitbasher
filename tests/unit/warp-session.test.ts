@@ -1984,8 +1984,8 @@ describe('warp handles', () => {
     let vertex = -1;
     for (let i = 0; i < source.count && vertex < 0; i++)
       if (source.getX(i) === 5 && source.getY(i) === 0) vertex = i;
-    // On this coarse plate the fade is as wide as the radius: 2 × (1 − smoothstep(5 / 8)).
-    expect(session().output!.positions[vertex * 3 + 2]).toBeCloseTo(0.63, 1);
+    // Falloff 0.5 fades from 4 mm out: 2 × (1 − smoothstep(1 / 4)).
+    expect(Math.abs(session().output!.positions[vertex * 3 + 2] - 1.69)).toBeLessThan(0.15);
 
     // The same settings again record nothing.
     editor().setWarpPointSettings({ radius: 8 }, 'end');

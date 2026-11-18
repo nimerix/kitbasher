@@ -66,10 +66,10 @@ export interface WarpHandle {
 export const warpGuideStiffness = 4;
 // First-order ARAP bends like a plate, so a bump whose guides fade out at the radius carries its
 // slope on past it. Guides also hold a band beyond the radius at zero weight, fading over it.
-const skirtShare = 0.25,
+const skirtShare = 0.5,
   skirtSpacings = 2.5;
 // A cliff sharper than the grid turns the nodes on it on edge, and the bend carries on past it.
-const edgeSpacings = 3;
+const edgeSpacings = 1;
 // Distance is measured in a straight line, which grid paths overstate unevenly, among nodes the
 // grid connects within this multiple of the reach, so it does not jump across thin walls.
 const reachSlack = 1.5;
