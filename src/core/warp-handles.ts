@@ -3,7 +3,8 @@ import { bindTrianglePoint, warpBindingNodes, type WarpPointBinding } from './wa
 import type { WarpGrid } from './warp-grid';
 import { isPaintedNode, type WarpModel } from './warp-model';
 import { WarpRole } from './warp-region';
-import type { WarpConstraint, WarpGuides } from './warp-solve';
+import { deformPoint } from './warp-evaluate';
+import type { WarpConstraint, WarpGuides, WarpState } from './warp-solve';
 
 /** A surface point a handle holds. Immutable: moving a handle moves every sample by its offset. */
 export interface WarpSample {
@@ -137,25 +138,41 @@ export function handleOffset(handle: Pick<WarpHandle, 'pin' | 'target'>): Vec3 {
 const samePosition = (a: Vec3, b: Vec3) => a[0] === b[0] && a[1] === b[1] && a[2] === b[2];
 
 /**
+ * How much more firmly a sample the user placed or moved is held than an untouched automatic pin,
+ * where something else acts on its nodes: other samples, guides or gap targets. It then lands on
+ * its target however coarse the grid, unless what shares its nodes is held as firmly.
+ */
+export const warpPriorityStrength = 100;
+
+/** Whether a handle is an automatic point no one has moved or edited. */
+export const untouchedAuto = (handle: Pick<WarpHandle, 'auto' | 'target'>) =>
+  handle.auto && handle.target === null;
+
+/**
  * One exact constraint per sample, moved by the handle's offset. Given the `guides` on `model`, an
  * untouched automatic point rides where the guides take the surface at its nodes, so a bump rises
- * smoothly over it; wherever nothing guided moves, it holds its pin.
+ * smoothly over it; wherever nothing guided moves, it holds its pin. A sample of a handle the user
+ * placed or moved outranks automatic pins, guides and the `exact` nodes, such as gap targets, that
+ * act on its nodes.
  */
 export function handleConstraints(
   handles: readonly WarpHandle[],
   model?: WarpModel,
   guides?: WarpGuides,
+  exact: Iterable<number> = [],
 ): WarpConstraint[] {
   const riding =
     !!model &&
     !!guides &&
     handles.some((handle) => handle.target !== null && handle.reach?.grid === model.grid);
   const constraints: WarpConstraint[] = [];
-  for (const handle of handles) {
+  const owner: number[] = [];
+  handles.forEach((handle, h) => {
     const offset = handleOffset(handle);
-    const rides = riding && handle.auto && handle.target === null;
+    const rides = riding && untouchedAuto(handle);
     for (const sample of handle.samples) {
       const ride = rides ? rideOffset(model!, guides!, handle.baseline, sample.binding) : null;
+      owner.push(h);
       constraints.push({
         ...sample.binding,
         rest: sample.restWorld,
@@ -169,8 +186,83 @@ export function handleConstraints(
               : [sample.pin[0] + offset[0], sample.pin[1] + offset[1], sample.pin[2] + offset[2]],
       });
     }
-  }
+  });
+  // Which handle's samples are bound to each node, or -1 when several handles' are or an exact
+  // node is there.
+  const held = new Map<number, number>();
+  for (const n of exact) held.set(n, -1);
+  constraints.forEach(({ node }, c) => {
+    for (let k = 0; k < node.length; k++) {
+      const by = held.get(node[k]);
+      held.set(node[k], by === undefined || by === owner[c] ? owner[c] : -1);
+    }
+  });
+  const fixed = model?.grid.fixed;
+  const edgeStart = model?.grid.edgeStart;
+  constraints.forEach((constraint, c) => {
+    if (untouchedAuto(handles[owner[c]])) return;
+    const { node, weight } = constraint;
+    // Shared nodes outrank fully. Guides do by how firmly they hold the sample's nodes, so the
+    // surface stays continuous as a radius starts to reach them.
+    let contest = 0;
+    for (let k = 0; k < node.length && contest < 1; k++) {
+      const n = node[k];
+      if (fixed?.[n]) continue;
+      if (held.get(n) === -1) contest = 1;
+      else if (guides && edgeStart) {
+        const g = guideIndex(guides, n);
+        if (g >= 0)
+          contest +=
+            weight[k] *
+            Math.min(
+              1,
+              guides.stiffness[g] / (warpGuideStiffness * 2 * (edgeStart[n + 1] - edgeStart[n])),
+            );
+      }
+    }
+    if (contest > 0) constraint.strength = 1 + (warpPriorityStrength - 1) * Math.min(1, contest);
+  });
   return constraints;
+}
+
+/** Where `state` writes the handle's centre: its pin, carried by its samples' mean motion. */
+export function writtenCentre(
+  model: WarpModel,
+  state: Pick<WarpState, 'positions' | 'rotations'>,
+  handle: Pick<WarpHandle, 'samples' | 'pin'>,
+): Vec3 {
+  if (handle.samples.length === 1) {
+    const [{ binding, restWorld }] = handle.samples;
+    return deformPoint(model, state, binding, restWorld);
+  }
+  const centre: Vec3 = [...handle.pin];
+  const share = 1 / handle.samples.length;
+  for (const { binding, restWorld, pin } of handle.samples) {
+    const at = deformPoint(model, state, binding, restWorld);
+    for (let a = 0; a < 3; a++) centre[a] += share * (at[a] - pin[a]);
+  }
+  return centre;
+}
+
+/**
+ * The handle pinned where `state` writes it, with `baseline` for its guides: what an automatic
+ * point that has ridden becomes when the user takes it over, so taking it changes nothing.
+ */
+export function heldWhereItIs(
+  model: WarpModel,
+  state: Pick<WarpState, 'positions' | 'rotations'>,
+  handle: WarpHandle,
+  baseline: WarpSnapshot,
+): WarpHandle {
+  return {
+    ...handle,
+    pin: writtenCentre(model, state, handle),
+    samples: handle.samples.map((sample) => ({
+      ...sample,
+      pin: deformPoint(model, state, sample.binding, sample.restWorld),
+    })),
+    baseline,
+  };
 }
 
 /**
