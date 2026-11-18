@@ -341,9 +341,35 @@ export function warpEligibleNodes(model: WarpModel) {
 type WarpFootprintOf = Pick<WarpHandle, 'samples'> & Partial<Pick<WarpHandle, 'kind' | 'faces'>>;
 
 /**
+ * A line or an area moves as one the free nodes within this many node spacings of it. A sample's
+ * binding reaches farther, unevenly to either side, so taking every node bound would make the
+ * ridge's width depend on which triangles the samples fell in, and so on pointer speed.
+ */
+export const warpFootprintSpacings = 0.75;
+
+/** Distance from a point to the segment from `a` to `b`. */
+function segmentDistance(p: ArrayLike<number>, a: Vec3, b: Vec3) {
+  const ux = b[0] - a[0],
+    uy = b[1] - a[1],
+    uz = b[2] - a[2];
+  const length = ux * ux + uy * uy + uz * uz;
+  const t =
+    length > 0
+      ? Math.max(
+          0,
+          Math.min(1, ((p[0] - a[0]) * ux + (p[1] - a[1]) * uy + (p[2] - a[2]) * uz) / length),
+        )
+      : 0;
+  return Math.hypot(p[0] - a[0] - t * ux, p[1] - a[1] - t * uy, p[2] - a[2] - t * uz);
+}
+
+/**
  * Where a handle's reach is measured from, by kind. A point is its samples alone. A line or an area
- * moves the free nodes its samples are bound to as one, and an area also the free nodes on its
- * faces still in the region. Paths start at all of them.
+ * moves as one the free nodes on it: within `warpFootprintSpacings` of the line through its
+ * samples in order, or of an area's samples, found along the grid from the nodes the samples are
+ * bound to. A sample with none of its own nodes among them adds its most heavily bound one. An area
+ * also moves the free nodes on its faces still in the region. Paths start at every free node the
+ * samples are bound to.
  */
 export function handleFootprint(model: WarpModel, handle: WarpFootprintOf): WarpFootprint {
   const eligible = warpEligibleNodes(model);
@@ -352,7 +378,46 @@ export function handleFootprint(model: WarpModel, handle: WarpFootprintOf): Warp
   for (const { binding } of handle.samples)
     for (const n of binding.node) if (eligible[n]) seeds.add(n);
   const sources = handle.samples.map(({ restWorld }) => restWorld);
-  if (handle.kind && handle.kind !== 'point') for (const n of seeds) nodes.add(n);
+  if (handle.kind && handle.kind !== 'point') {
+    const { restNodes } = model;
+    const { edgeStart, edges } = model.grid;
+    const on = (n: number) => {
+      const at = restNodes.subarray(n * 3, n * 3 + 3);
+      const limit = warpFootprintSpacings * spacingAt(model, [n]);
+      for (let s = 0; s < sources.length; s++) {
+        const d =
+          handle.kind === 'line' && s > 0
+            ? segmentDistance(at, sources[s - 1], sources[s])
+            : Math.hypot(at[0] - sources[s][0], at[1] - sources[s][1], at[2] - sources[s][2]);
+        if (d <= limit) return true;
+      }
+      return false;
+    };
+    const seen = new Set(seeds),
+      stack = [...seeds];
+    while (stack.length) {
+      const n = stack.pop()!;
+      const inside = on(n);
+      if (inside) nodes.add(n);
+      else if (!seeds.has(n)) continue;
+      for (let e = edgeStart[n]; e < edgeStart[n + 1]; e++) {
+        const j = edges[e];
+        if (eligible[j] && !seen.has(j)) {
+          seen.add(j);
+          stack.push(j);
+        }
+      }
+    }
+    for (const { binding } of handle.samples) {
+      if (binding.node.some((n) => nodes.has(n))) continue;
+      let heaviest = -1;
+      binding.node.forEach((n, k) => {
+        if (eligible[n] && (heaviest < 0 || binding.weight[k] > binding.weight[heaviest]))
+          heaviest = k;
+      });
+      if (heaviest >= 0) nodes.add(binding.node[heaviest]);
+    }
+  }
   if (handle.kind === 'area' && handle.faces) {
     const { region, grid, restWorld } = model;
     for (const face of handle.faces) {
