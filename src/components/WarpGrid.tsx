@@ -50,9 +50,9 @@ export function gridNodePositions(warp: WarpSession) {
 /**
  * How grid lines are drawn, in CSS pixels against the cell's length on screen. The dark core is
  * what makes the grid stand out: full width and opaque down to `coreFull`, then thinner to
- * `coreThin` px and fading out to `coreGone`. The light casing lifts only what is darker than it,
- * so it shows on dark parts and leaves light ones alone, and fades out from `casingFull` to
- * `casingGone`.
+ * `coreThin` px and fading out to `coreGone`, by cells shrunk as the surface turns away. The
+ * light casing lifts only what is darker than it, so it shows on dark parts and leaves light ones
+ * alone, and fades out from `casingFull` to `casingGone`.
  */
 export const warpGridStyle = {
   core: '#0e1114',
@@ -60,8 +60,8 @@ export const warpGridStyle = {
   coreThin: 1,
   coreFull: 13,
   coreGone: 6,
-  casing: '#9ba1a4',
-  casingWidth: 3.5,
+  casing: '#b0b5b8',
+  casingWidth: 4,
   casingFull: 22,
   casingGone: 12,
   /** How far a line may sit behind the surface and still show: pixels, and at most mm. */
