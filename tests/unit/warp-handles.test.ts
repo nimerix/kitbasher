@@ -18,6 +18,7 @@ import { createWarpOutput, deformPoint, evaluateWarp } from '../../src/core/warp
 import {
   distributionNodes,
   handleConstraints,
+  handleFootprint,
   handleGuides,
   nodeSample,
   reachActivation,
@@ -25,9 +26,11 @@ import {
   reachWeight,
   snapshotOf,
   transferSnapshot,
+  uniqueSamples,
   bandWidth,
   warpGuides,
   warpPathStretch,
+  warpPriorityStrength,
   warpTailSpacings,
   type WarpHandle,
   type WarpSnapshot,
@@ -456,19 +459,26 @@ describe('point handles', () => {
     expect(small.reach!.node.length).toBe(0);
     expect(warpGuides(model, [small])).toBeUndefined();
 
-    // The constraint a point has always made, with automatic pins among them.
+    // The constraint a point has always made, held at priority once it is moved. Automatic pins
+    // among them, on its nodes or not, keep theirs.
     const sample = bare.samples[0];
     const target: Vec3 = [0.7, -0.4, 3];
-    const pin = { ...nodePin(model, nearestNode(model, [8, 3, 0]), rest), auto: true };
-    expect(handleConstraints([{ ...bare, target }, pin], model, undefined)).toEqual([
-      { ...sample.binding, rest: sample.restWorld, target },
-      { ...pin.samples[0].binding, rest: pin.samples[0].restWorld, target: pin.samples[0].pin },
-    ]);
+    const moved = { ...sample.binding, rest: sample.restWorld, target };
+    for (const at of [
+      [-20, 15, 0],
+      [8, 3, 0],
+    ] as Vec3[]) {
+      const pin = { ...nodePin(model, nearestNode(model, at), rest), auto: true };
+      expect(handleConstraints([{ ...bare, target }, pin], model, undefined)).toEqual([
+        { ...moved, strength: warpPriorityStrength },
+        { ...pin.samples[0].binding, rest: pin.samples[0].restWorld, target: pin.samples[0].pin },
+      ]);
+    }
     expect(handleConstraints([bare], model, undefined)[0].target).toBe(sample.pin);
 
     const before = createWarpState(model.restNodes),
       after = createWarpState(model.restNodes);
-    settle(model, before, [{ ...sample.binding, rest: sample.restWorld, target }]);
+    settle(model, before, [{ ...moved, strength: warpPriorityStrength }]);
     solveHandles(model, after, [{ ...small, target }]);
     expect(Array.from(after.positions)).toEqual(Array.from(before.positions));
     expect(Array.from(after.rotations)).toEqual(Array.from(before.rotations));
@@ -631,8 +641,7 @@ describe('point handles', () => {
     const lift = moved(pointHandle(model, geometry, [0, 0, 0], state, 12), [0, 0, 3]);
     converge(model, state, [lift, hold]);
     expect(distance(tipOf(model, state, lift), lift.target!)).toBeLessThan(0.02);
-    // Its exact constraint shares its nodes with the lift's guides, which pull it a little.
-    expect(distance(tipOf(model, state, hold), hold.pin)).toBeLessThan(0.1);
+    expect(distance(tipOf(model, state, hold), hold.pin)).toBeLessThan(0.01);
     // Its holding gives way to the lift: over its radius the bump still mostly rises.
     const free = createWarpState(model.restNodes);
     converge(model, free, [lift]);
@@ -723,9 +732,7 @@ describe('point handles', () => {
     );
     expect(handle.reach!.activation).toBeGreaterThan(0.5);
     converge(model, state, [pin, handle]);
-    // Its nodes lie up to 7 mm from it, where the guides lift the surface less than the point, so
-    // on this coarsest grid it lands about 2.5 % short.
-    expect(distance(tipOf(model, state, handle), handle.target!)).toBeLessThan(0.1);
+    expect(distance(tipOf(model, state, handle), handle.target!)).toBeLessThan(0.03);
     expect(distance(tipOf(model, state, pin), pin.pin)).toBeLessThan(0.01);
     const { world, folds } = written(model, state);
     expect(folds.length).toBe(0);
@@ -746,9 +753,7 @@ describe('point handles', () => {
     const handle = moved(pointHandle(model, geometry, [36, 0.3, 0], state, 8), [0, 0, 1.5]);
     expect(Array.from(handle.reach!.node).some((n) => model.grid.fixed[n])).toBe(false);
     converge(model, state, [handle]);
-    // The fixed border 4 mm away steepens the bump and turns the point's nodes, which pulls it
-    // about 1.7 % short; a bare point lands within 0.5 %.
-    expect(distance(tipOf(model, state, handle), handle.target!)).toBeLessThan(0.03);
+    expect(distance(tipOf(model, state, handle), handle.target!)).toBeLessThan(0.02);
     for (let n = 0; n < model.grid.nodes.length; n++)
       if (model.grid.fixed[n])
         expect(Array.from(state.positions.subarray(n * 3, n * 3 + 3))).toEqual(
@@ -760,6 +765,50 @@ describe('point handles', () => {
       if (model.region.role[v] === WarpRole.Interior) return;
       for (let a = 0; a < 3; a++) expect(output.positions[g * 3 + a]).toBe(source[g * 3 + a]);
     });
+  });
+});
+
+describe('footprints', () => {
+  it('are built by kind and keep reach while the footprint is the same', async () => {
+    const { geometry, model } = await sheet(3, 120);
+    const state = createWarpState(model.restNodes);
+    const point = pointHandle(model, geometry, [0.4, 0.3, 0], state, 0);
+    const again = pointHandle(model, geometry, [0.4, 0.3, 0], state, 0);
+    const other = pointHandle(model, geometry, [2.9, -1.2, 0], state, 0);
+    // A sample bound exactly as an earlier one only holds the same spot twice as firmly.
+    const samples = uniqueSamples([...point.samples, ...again.samples, ...other.samples]);
+    expect(samples).toEqual([point.samples[0], other.samples[0]]);
+
+    const bound = [...new Set(samples.flatMap(({ binding }) => binding.node))]
+      .filter((n) => !model.grid.fixed[n])
+      .sort((a, b) => a - b);
+    expect(handleFootprint(model, { kind: 'point', samples }).nodes).toEqual([]);
+    const line = reachHandle(model, { ...point, kind: 'line', samples });
+    expect(handleFootprint(model, line).nodes).toEqual(bound);
+    expect(Array.from(line.reach!.node.subarray(0, line.reach!.own))).toEqual(bound);
+    // The same footprint at the same radius keeps its reach; another radius measures it again.
+    expect(reachHandle(model, { ...line, falloff: 0.3 }).reach).toBe(line.reach);
+    const wider = reachHandle(model, { ...line, radius: 5 });
+    expect(wider.reach).not.toBe(line.reach);
+    expect(wider.reach!.own).toBe(bound.length);
+
+    // An area also holds the nodes on its faces.
+    const faces = disc(geometry, 9);
+    const area = reachHandle(model, { ...point, kind: 'area', samples, faces });
+    const onFaces = new Set(bound);
+    for (const face of faces) {
+      const triangle = readFace(geometry, face);
+      for (const corner of [triangle.a, triangle.b, triangle.c]) {
+        const n = nearestNode(model, corner.toArray());
+        if (
+          !model.grid.fixed[n] &&
+          distance(model.restNodes.subarray(n * 3, n * 3 + 3), corner.toArray()) < 1e-6
+        )
+          onFaces.add(n);
+      }
+    }
+    expect(area.reach!.own).toBe(onFaces.size);
+    expect(area.reach!.own).toBeGreaterThan(bound.length);
   });
 });
 

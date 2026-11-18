@@ -23,10 +23,13 @@ import { triangleCount } from '../../src/core/geometry';
 import { spatialIndexOptions, workerIndexTriangles } from '../../src/core/spatial-index';
 import {
   finishWarpDrag,
+  finishWarpSettling,
   isWarpDragging,
   useEditor,
   warpChanges,
   warpRadiusSpacings,
+  warpShortfall,
+  warpShortfallShown,
   warpWholeDensity,
   type WarpBaseline,
   type WarpPoint,
@@ -34,10 +37,16 @@ import {
 import { useXR } from '../../src/core/xr-session';
 import { readFace } from '../../src/core/surfaces';
 import { activeTransformTool, transformSelection } from '../../src/core/transform-selection';
-import { bindPoint } from '../../src/core/warp-bind';
+import { bindPoint, bindTrianglePoint } from '../../src/core/warp-bind';
 import { deformPoint } from '../../src/core/warp-evaluate';
 import { defaultWarpDensity } from '../../src/core/warp-grid';
-import { handleGuides, snapshotOf } from '../../src/core/warp-handles';
+import {
+  handleGuides,
+  reachHandle,
+  snapshotOf,
+  warpPriorityStrength,
+  type WarpSample,
+} from '../../src/core/warp-handles';
 import { isPaintedNode, type WarpModel } from '../../src/core/warp-model';
 import {
   createWarpState,
@@ -45,7 +54,7 @@ import {
   warpSettleIterations,
   warpSettleTolerance,
 } from '../../src/core/warp-solve';
-import { WarpRole } from '../../src/core/warp-region';
+import { regionTriangleOf, WarpRole } from '../../src/core/warp-region';
 import type {
   Joint,
   Part,
@@ -592,6 +601,34 @@ describe('warp session', () => {
     expect(session()).toMatchObject({ stage: 'warp', density: 1 });
     expect(session().model).not.toBe(model);
     expect(failures()).toHaveLength(1);
+  });
+
+  it('keeps the feather of the grid it has when a re-lay fails, and of the grid it reuses', async () => {
+    const a = plate('a', 0, 64);
+    setup([a], ['a']);
+    useEditor.setState({ warpFeather: { enabled: true, width: 3 } });
+    await warpDisc(a, 0, 0, 8);
+    expect(session()).toMatchObject({ feather: 3, laid: { feather: 3 } });
+    const model = session().model!;
+
+    editor().setWarpFeather({ width: 6 });
+    editor().setWarpRegion('painted');
+    job.failure = new Error('The warp worker stopped.');
+    await editor().layWarpGrid();
+    expect(session().model).toBe(model);
+    expect(session().feather).toBe(3);
+
+    // Back to the width it was laid with: the grid is reused, and a density change keeps it.
+    job.failure = null;
+    editor().setWarpFeather({ width: 3 });
+    editor().setWarpRegion('painted');
+    await editor().layWarpGrid();
+    expect(session().model).toBe(model);
+    expect(session().feather).toBe(3);
+    editor().setWarpFeather({ width: 6 });
+    await editor().setWarpDensity(2);
+    expect(session().model!.feather).toMatchObject({ width: 3 });
+    useEditor.setState({ warpFeather: { enabled: false, width: null } });
   });
 
   it('never writes to the source geometry arrays', async () => {
@@ -1965,6 +2002,59 @@ describe('warp handles', () => {
     expect(session().points.map(({ id }) => id)).toContain(touched.id);
   });
 
+  it('close gap closes the box seam whatever the number of automatic points', async () => {
+    for (const count of [8, 16, 32]) {
+      const block = solid('block', new BoxGeometry(20, 20, 20, 12, 12, 12), [0, 0, 0]);
+      const wall = solid('wall', new BoxGeometry(20, 20, 20, 12, 12, 12), [21, 0, 0]);
+      setup([block, wall], ['block']);
+      editor().setTool('warp');
+      editor().setWarpRegion('whole');
+      editor().setWarpOptions({ distributeCount: count });
+      await editor().layWarpGrid();
+      const auto = session().points;
+      expect(auto).toHaveLength(count);
+      editor().closeWarpGap();
+      finishWarpSettling();
+      expect(session().points.length).toBeLessThan(count);
+      // Points away from the +X face stay.
+      for (const point of auto)
+        if (point.pin[0] < -9.9)
+          expect(session().points.some(({ id }) => id === point.id)).toBe(true);
+      expect(session().seam!.largestGap).toBeLessThan(0.05);
+
+      editor().cancelWarp();
+    }
+  });
+
+  it('close gap keeps an automatic point that has ridden with a bump when the seam barely moves it', async () => {
+    const a = plate('a', 0, 64);
+    // 1 mm over the plate's +X side only.
+    const wall = solid('wall', new BoxGeometry(14, 30, 4), [13, 0, 3]);
+    setup([a, wall], ['a']);
+    editor().setTool('warp');
+    await editor().layWarpGrid();
+    const rider = session().points.find(
+      (point) => Math.hypot(point.pin[0] + 2.5, point.pin[1] - 3.75) < 0.1,
+    )!;
+    expect(rider.auto).toBe(true);
+    const lift = addAt(a, -1.3, 3.6);
+    move(lift.id, [-1.3, 3.6, 5]);
+    finishWarpSettling();
+    const now = deformed(session().points.find(({ id }) => id === rider.id)!);
+    expect(now[2] - rider.pin[2]).toBeGreaterThan(2);
+    editor().closeWarpGap();
+    finishWarpSettling();
+    expect(session().gapTargets.length).toBeGreaterThan(0);
+    expect(session().points.some(({ id }) => id === rider.id)).toBe(true);
+    expect(
+      distance(deformed(session().points.find(({ id }) => id === rider.id)!), now),
+    ).toBeLessThan(0.05);
+    for (const { node, target } of session().gapTargets)
+      expect(
+        distance(session().state!.positions.subarray(node * 3, node * 3 + 3), target),
+      ).toBeLessThan(0.01);
+  });
+
   it('close gap leaves the automatic points on a sheet it does not pull', async () => {
     // Two sheets 2 mm apart in one part, back to back, the front one 1 mm under a wall.
     const sheets = mergeGeometries([
@@ -2239,7 +2329,7 @@ describe('warp handles', () => {
     expect(warpChanges(session())).toBe(false);
   });
 
-  it('points without a radius solve bit for bit as they did before handles', async () => {
+  it('points without a radius solve bit for bit as their own constraints, a moved one held first', async () => {
     const a = plate('a');
     setup([a], ['a']);
     await warpDisc(a, 0, 0, 12);
@@ -2253,6 +2343,7 @@ describe('warp handles', () => {
       ...point.samples[0].binding,
       rest: point.samples[0].restWorld,
       target: i === 0 ? ([0.4, 0.3, 2] as Vec3) : point.pin,
+      ...(i === 0 ? { strength: warpPriorityStrength } : {}),
     }));
     for (let i = 0; i < warpSettleIterations; i++)
       if (solveWarp(model!.grid, model!.restNodes, constraints, state, 1) < warpSettleTolerance)
@@ -2279,5 +2370,357 @@ describe('warp handles', () => {
     for (const point of session().points.slice(1))
       for (const n of point.samples[0].binding.node) expect(isPaintedNode(model, n)).toBe(true);
     useEditor.setState({ warpFeather: { enabled: false, width: null } });
+  });
+});
+
+describe('warp handles that must land', () => {
+  /** Lays a whole 40 mm plate with its automatic points and lifts a handle beside one of them. */
+  async function ridden() {
+    const a = plate('a', 0, 64);
+    setup([a], ['a']);
+    editor().setTool('warp');
+    await editor().layWarpGrid();
+    const rider = session().points.find(
+      (point) => Math.hypot(point.pin[0] + 2.5, point.pin[1] - 3.75) < 0.1,
+    )!;
+    const lift = addAt(a, -1.3, 3.6);
+    move(lift.id, [-1.3, 3.6, 5]);
+    finishWarpSettling();
+    return { a, rider: current(rider.id), lift: current(lift.id) };
+  }
+  const current = (id: string) => session().points.find((point) => point.id === id)!;
+  const surfaceChange = (a: number[], b: number[]) =>
+    Math.max(...a.map((value, i) => Math.abs(value - b[i])));
+  /** Where the written mesh puts a point's sample, from its face's written corners. */
+  const writtenSample = (point: WarpPoint) => {
+    const { face, barycentric } = point.samples[0];
+    const { positions } = session().output!;
+    const index = partOf(session().partId).geometry.index;
+    const at: Vec3 = [0, 0, 0];
+    for (let c = 0; c < 3; c++) {
+      const v = index ? index.getX(face * 3 + c) : face * 3 + c;
+      for (let a = 0; a < 3; a++) at[a] += barycentric[c] * positions[v * 3 + a];
+    }
+    return at;
+  };
+
+  it('takes over an automatic point that has ridden with a bump where it is', async () => {
+    const { rider } = await ridden();
+    expect(rider.auto).toBe(true);
+    const at = deformed(rider);
+    expect(at[2]).toBeGreaterThan(2);
+    // Its gizmo starts where it is drawn.
+    editor().selectWarpPoints([rider.id]);
+    const selection = transformSelection(editor(), 'translate');
+    expect(selection.kind === 'warp' && selection.parts[0].position).toEqual(at);
+    const before = positionsOf(session().preview!);
+    const steps = session().undo.length;
+
+    // Given a radius without moving it, nothing moves.
+    editor().setWarpPointSettings({ radius: 8 }, 'end');
+    finishWarpSettling();
+    expect(current(rider.id)).toMatchObject({ auto: false, radius: 8, pin: at });
+    expect(distance(deformed(current(rider.id)), at)).toBeLessThan(1e-3);
+    expect(surfaceChange(positionsOf(session().preview!), before)).toBeLessThan(1e-3);
+    expect(session().undo).toHaveLength(steps + 1);
+    editor().undoWarpEdit();
+    expect(current(rider.id)).toEqual(rider);
+    expect(positionsOf(session().preview!)).toEqual(before);
+
+    // Moved 0.1 mm, its surface moves 0.1 mm.
+    move(rider.id, [at[0], at[1], at[2] + 0.1]);
+    finishWarpSettling();
+    expect(distance(deformed(current(rider.id)), [at[0], at[1], at[2] + 0.1])).toBeLessThan(0.002);
+    editor().undoWarpEdit();
+    expect(current(rider.id)).toEqual(rider);
+    expect(positionsOf(session().preview!)).toEqual(before);
+  });
+
+  it('a snapped point lands on its target on a coarse grid, releasing the automatic pins under it', async () => {
+    for (const density of [0, defaultWarpDensity]) {
+      const a = plate('a', 0, 32);
+      // A neighbour face at z = 2, so snapping puts the target at 2.1.
+      const lid = solid('lid', new BoxGeometry(30, 30, 10), [0, 0, 7]);
+      setup([a, lid], ['a']);
+      editor().setTool('warp');
+      editor().setWarpRegion('whole');
+      await editor().setWarpDensity(density);
+      await editor().layWarpGrid();
+      const auto = session().points.map(({ id }) => id);
+      const p = addAt(a, 0.37, 0.21);
+      editor().setWarpOptions({ snap: true });
+      move(p.id, [0.37, 0.21, 1.5]);
+      finishWarpSettling();
+      const target = current(p.id).target!;
+      expect(target[2]).toBeCloseTo(2.1, 6);
+      const tolerance = density === 0 ? 0.03 : 0.01;
+      expect(distance(deformed(current(p.id)), target)).toBeLessThan(tolerance);
+      // The triangles written there reach it too.
+      expect(Math.abs(writtenSample(current(p.id))[2] - 2.1)).toBeLessThan(tolerance);
+      expect(warpShortfall(session())).toBeLessThan(warpShortfallShown);
+      const released = auto.filter((id) => !session().points.some((point) => point.id === id));
+      if (density === 0) expect(released.length).toBeGreaterThan(0);
+      for (const id of released) {
+        const pin = session()
+          .undo.at(-1)!
+          .points.find((point) => point.id === id)!;
+        expect(
+          pin.samples[0].binding.node.some((n) =>
+            current(p.id).samples[0].binding.node.includes(n),
+          ),
+        ).toBe(true);
+      }
+      // Released in the same step as the move.
+      editor().undoWarpEdit();
+      expect(session().points.map(({ id }) => id)).toEqual([...auto, p.id]);
+      editor().cancelWarp();
+    }
+  });
+
+  it('says how far a point stops short when a pin on its spot holds it', async () => {
+    const a = plate('a', 0, 32);
+    setup([a], ['a']);
+    await warpDisc(a, 0, 0, 12);
+    editor().setWarpPointSettings({ radius: 0 }, 'end');
+    const pin = addAt(a, 0.5, 0.3);
+    const p = addAt(a, 0.53, 0.31);
+    move(p.id, [0.53, 0.31, 2]);
+    finishWarpSettling();
+    editor().selectWarpPoints([p.id]);
+    const short = distance(deformed(current(p.id)), [0.53, 0.31, 2]);
+    expect(short).toBeGreaterThan(warpShortfallShown);
+    expect(warpShortfall(session())).toBeCloseTo(short, 9);
+    // It is the pin's own spot that holds it, not the grid.
+    editor().removeWarpPoints([pin.id]);
+    finishWarpSettling();
+    editor().selectWarpPoints([p.id]);
+    expect(warpShortfall(session())).toBeLessThan(0.01);
+  });
+
+  it('Apply bakes exactly the surface shown, also while it is still settling', async () => {
+    for (const radius of [0, null]) {
+      const a = plate('a', 0, 64);
+      setup([a], ['a']);
+      editor().setTool('warp');
+      await editor().layWarpGrid();
+      if (radius !== null) editor().setWarpPointSettings({ radius }, 'end');
+      const p = addAt(a, 0.3, 0.2);
+      move(p.id, [0.3, 0.2, 3]);
+      expect(session().settling).toBe(true);
+      const shown = positionsOf(session().preview!);
+      expect(editor().applyWarp()).toBe(true);
+      expect(positionsOf(partOf('a').geometry)).toEqual(shown);
+      editor().cancelWarp();
+    }
+  });
+
+  it('settles a grid until it has converged, so an edit settles only what it changed', async () => {
+    const { lift } = await ridden();
+    expect(session().settling).toBe(false);
+    expect(session().surface).toMatchObject({ settled: true, converged: true });
+    editor().selectWarpPoints([lift.id]);
+    // Typed in, its own radius only becomes the one new points take.
+    editor().setWarpPointSettings({ radius: lift.radius }, 'end');
+    const checkpoint = positionsOf(session().preview!);
+    const steps = session().undo.length;
+    // The same value again does nothing.
+    editor().setWarpPointSettings({ radius: lift.radius }, 'end');
+    move(lift.id, lift.target!);
+    expect(positionsOf(session().preview!)).toEqual(checkpoint);
+    expect(session().undo).toHaveLength(steps);
+
+    const edit = (radius: number) => {
+      editor().setWarpPointSettings({ radius }, 'end');
+      finishWarpSettling();
+      return positionsOf(session().preview!);
+    };
+    edit(lift.radius + 0.01);
+    const twice = edit(lift.radius + 0.02);
+    editor().undoWarpEdit();
+    editor().undoWarpEdit();
+    expect(positionsOf(session().preview!)).toEqual(checkpoint);
+    const once = edit(lift.radius + 0.02);
+    expect(surfaceChange(twice, once)).toBeLessThan(1e-3);
+    expect(surfaceChange(once, checkpoint)).toBeLessThan(0.05);
+  });
+});
+
+describe('line and area handles through a session', () => {
+  /** A sample on the plate at a mesh-local point, pinned where the surface is now. */
+  function sampleAt(part: Part, x: number, y: number): WarpSample {
+    const model = session().model!;
+    const face = faceAt(part.geometry, x, y);
+    const barycentric = readFace(part.geometry, face)
+      .getBarycoord(new Vector3(x, y, 0), new Vector3())!
+      .toArray();
+    const restWorld: Vec3 = [x, y, 0];
+    const binding = bindPoint(model.region, model.binding, model.restWorld, face, barycentric);
+    return {
+      face,
+      barycentric,
+      binding,
+      restWorld,
+      pin: deformPoint(model, session().state!, binding, restWorld),
+    };
+  }
+
+  /** A handle of many samples made directly, as line and area creation will. */
+  function handleOf(kind: 'line' | 'area', samples: WarpSample[], faces?: number[]): WarpPoint {
+    const pin: Vec3 = [0, 0, 0];
+    for (const sample of samples)
+      for (let a = 0; a < 3; a++) pin[a] += sample.pin[a] / samples.length;
+    const handle = reachHandle(session().model!, {
+      id: `${kind}-${samples.length}`,
+      kind,
+      samples,
+      ...(faces ? { faces } : {}),
+      pin,
+      target: null,
+      radius: 0,
+      falloff: 1,
+      auto: false,
+      baseline: snapshotOf(session().model!.grid, session().state!),
+      reach: null,
+    });
+    useEditor.setState({
+      warp: { ...session(), points: [...session().points, handle], selectedPoints: [handle.id] },
+    });
+    return handle;
+  }
+
+  /** The free nodes the footprint must hold: its samples' and, for an area, those on its faces. */
+  function footprintNodes(handle: WarpPoint) {
+    const model = session().model!;
+    const nodes = new Set<number>();
+    for (const { binding } of handle.samples)
+      for (const n of binding.node) if (!model.grid.fixed[n]) nodes.add(n);
+    for (const face of handle.faces ?? []) {
+      const triangle = regionTriangleOf(model.region, face);
+      for (let c = 0; c < 3; c++) {
+        const n = model.grid.nodeOf[model.region.triangles[triangle * 3 + c]];
+        if (n !== 0xffffffff && !model.grid.fixed[n]) nodes.add(n);
+      }
+    }
+    return [...nodes].sort((a, b) => a - b);
+  }
+
+  const current = (id: string) => session().points.find((point) => point.id === id)!;
+  /** Lowest and highest written height over a handle's samples and its probe spots. */
+  function heights(handle: WarpPoint, probes: [number, number][]) {
+    const model = session().model!;
+    const zs = handle.samples.map(
+      ({ binding, restWorld }) => deformPoint(model, session().state!, binding, restWorld)[2],
+    );
+    for (const [x, y] of probes) {
+      const face = faceAt(partOf('a').geometry, x, y);
+      const triangle = regionTriangleOf(model.region, face);
+      const barycentric = readFace(partOf('a').geometry, face)
+        .getBarycoord(new Vector3(x, y, 0), new Vector3())!
+        .toArray();
+      const binding = bindTrianglePoint(
+        model.region,
+        model.binding,
+        model.restWorld,
+        triangle,
+        barycentric,
+      );
+      zs.push(deformPoint(model, session().state!, binding, [x, y, 0])[2]);
+    }
+    return [Math.min(...zs), Math.max(...zs)];
+  }
+
+  /** Moves, widens, re-lays at another density, undoes and applies, checking the footprint holds. */
+  async function lifecycle(handle: WarpPoint, probes: [number, number][], tolerance: number) {
+    const intact = () => {
+      const { reach } = current(handle.id);
+      const nodes = footprintNodes(current(handle.id));
+      expect(nodes.length).toBeGreaterThan(2);
+      expect(reach!.own).toBe(nodes.length);
+      expect(Array.from(reach!.node.subarray(0, reach!.own))).toEqual(nodes);
+    };
+    const lifted = () => {
+      finishWarpSettling();
+      const [low, high] = heights(current(handle.id), probes);
+      expect(low).toBeGreaterThan(2 - tolerance);
+      expect(high).toBeLessThan(2 + tolerance);
+    };
+    intact();
+    move(handle.id, [handle.pin[0], handle.pin[1], 2]);
+    intact();
+    lifted();
+    editor().selectWarpPoints([handle.id]);
+    editor().setWarpPointSettings({ radius: 4 }, 'end');
+    intact();
+    lifted();
+    await editor().setWarpDensity(defaultWarpDensity + 1);
+    intact();
+    lifted();
+    expect(current(handle.id).samples.length).toBeLessThanOrEqual(handle.samples.length);
+    editor().undoWarpEdit();
+    expect(current(handle.id).radius).toBe(0);
+    intact();
+    lifted();
+    const shown = positionsOf(session().preview!);
+    expect(editor().applyWarp()).toBe(true);
+    expect(positionsOf(partOf('a').geometry)).toEqual(shown);
+  }
+
+  it('a line moves as one ridge through a move, a radius edit, a density change, undo and Apply', async () => {
+    const a = plate('a', 0, 64);
+    setup([a], ['a']);
+    await warpDisc(a, 0, 0, 14);
+    const samples = Array.from({ length: 13 }, (_, i) => sampleAt(a, -3 + i * 0.5, 0.3));
+    const line = handleOf('line', samples);
+    expect(line.samples).toHaveLength(13);
+    const between = Array.from({ length: 12 }, (_, i): [number, number] => [-2.75 + i * 0.5, 0.3]);
+    await lifecycle(line, between, 0.05);
+  });
+
+  it('an area moves as one patch, also one smaller than a grid cell', async () => {
+    const a = plate('a', 0, 64);
+    setup([a], ['a']);
+    await warpDisc(a, 0, 0, 14);
+    const centre = new Vector3(2, -2, 0);
+    const faces = Array.from({ length: triangleCount(a.geometry) }, (_, f) => f).filter(
+      (f) => readFace(a.geometry, f).getMidpoint(new Vector3()).distanceTo(centre) < 1.5,
+    );
+    const centres = faces.map((f) => readFace(a.geometry, f).getMidpoint(new Vector3()));
+    const samples = centres.filter((_, i) => i % 3 === 0).map((c) => sampleAt(a, c.x, c.y));
+    const area = handleOf('area', samples, faces);
+    expect(area.faces).toEqual(faces);
+    const inside = centres.map((c): [number, number] => [c.x, c.y]);
+    await lifecycle(area, inside, 0.05);
+
+    // One face, smaller than a cell, with a few samples on it.
+    editor().cancelWarp();
+    const b = plate('a', 0, 64);
+    setup([b], ['a']);
+    await warpDisc(b, 0, 0, 14);
+    const face = faceAt(b.geometry, -4.1, 3.2);
+    const triangle = readFace(b.geometry, face);
+    const corners = [triangle.a, triangle.b, triangle.c];
+    const spot = (w: Vec3) =>
+      corners.reduce((sum, corner, c) => sum.addScaledVector(corner, w[c]), new Vector3());
+    const spots = [
+      spot([0.6, 0.2, 0.2]),
+      spot([0.2, 0.6, 0.2]),
+      spot([0.2, 0.2, 0.6]),
+      spot([1 / 3, 1 / 3, 1 / 3]),
+    ];
+
+    const small = handleOf(
+      'area',
+      spots.map((p) => sampleAt(b, p.x, p.y)),
+      [face],
+    );
+    const edges = [triangle.a.distanceTo(triangle.b), triangle.b.distanceTo(triangle.c)];
+    expect(Math.max(...edges, triangle.c.distanceTo(triangle.a))).toBeLessThan(
+      small.reach!.spacing,
+    );
+    await lifecycle(
+      small,
+      spots.map((p): [number, number] => [p.x, p.y]),
+      0.05,
+    );
   });
 });
