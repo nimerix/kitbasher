@@ -4,7 +4,7 @@ import { nextIsolation } from './isolation';
 import { matchKeyAction } from './keybindings';
 import type { KeyActionId, KeyInput } from './keybindings';
 import { primaryShortcutText, usePreferences } from './preferences';
-import { canRedo, canUndo, useEditor, type WarpGizmo } from './store';
+import { canRedo, canUndo, useEditor, warpEdited, type WarpGizmo } from './store';
 import {
   activeTransformTool,
   stepTransform,
@@ -40,21 +40,31 @@ export async function downloadCurrentScene() {
 
 type EditorState = ReturnType<typeof useEditor.getState>;
 
+/** Whether scene undo and redo would end a warp session that holds work. */
+const holdingWarp = (state: EditorState) =>
+  state.tool === 'warp' && !!state.warp && warpEdited(state.warp);
+
 /**
- * What Undo steps back first: a paint stroke, a control-point edit in a warp session, or the
- * scene. Scene undo while warping would leave the tool and discard the session.
+ * What Undo steps back first: a paint stroke, a step of the warp session, or the scene. Scene
+ * undo would leave the warp tool and end the session, so it waits until the session holds no work.
  */
 function undoTarget(state: EditorState) {
-  const painting =
-    (state.tool === 'align' && state.operation.mode === 'surface') ||
-    (state.tool === 'warp' && state.warp?.stage === 'region');
-  if (painting && state.paintHistory.length) return 'stroke';
-  if (warpingPoints(state) && state.warp!.undo.length) return 'warp';
+  if (state.tool === 'warp' && state.warp) {
+    if (state.paintHistory.length) return 'stroke';
+    if (state.warp.undo.length) return 'warp';
+    return holdingWarp(state) ? null : 'scene';
+  }
+  if (state.tool === 'align' && state.operation.mode === 'surface' && state.paintHistory.length)
+    return 'stroke';
   return 'scene';
 }
 
-export const undoAvailable = (state: EditorState) =>
-  canUndo(state) || state.paintHistory.length > 0 || undoTarget(state) === 'warp';
+export const undoAvailable = (state: EditorState) => {
+  const target = undoTarget(state);
+  return target === 'scene' ? canUndo(state) || state.paintHistory.length > 0 : target !== null;
+};
+
+export const redoAvailable = (state: EditorState) => canRedo(state) && !holdingWarp(state);
 
 /** Chooses a transform tool, or while warping, the gizmo that moves control points. */
 export function chooseTransformTool(tool: WarpGizmo) {
@@ -109,12 +119,12 @@ export function editorCommands(context: CommandContext = {}) {
         const target = undoTarget(state);
         if (target === 'stroke') state.undoPaintStroke();
         else if (target === 'warp') state.undoWarpEdit();
-        else state.undo();
+        else if (target === 'scene') state.undo();
       },
       idle && undoAvailable(state),
       'undo',
     ),
-    redo: command('Redo', state.redo, idle && canRedo(state), 'redo'),
+    redo: command('Redo', state.redo, idle && redoAvailable(state), 'redo'),
     selectAll: command(
       'Select all components',
       state.selectAll,

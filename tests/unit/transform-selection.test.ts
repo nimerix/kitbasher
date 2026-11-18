@@ -200,6 +200,7 @@ const warping = (patch: Partial<WarpSession> = {}, tool: 'warp' | 'select' = 'wa
     stage: 'warp',
     region: 'whole',
     faces: [],
+    startFaces: [],
     density: 3,
     model: null,
     state: null,

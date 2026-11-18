@@ -49,11 +49,12 @@ import {
   Undo2,
   X,
 } from 'lucide-react';
-import { canRedo, liveHost, liveSession, useEditor } from './core/store';
+import { liveHost, liveSession, useEditor } from './core/store';
 import {
   downloadCurrentScene,
   editorCommands,
   executeEditorCommand,
+  redoAvailable,
   saveCurrentScene,
   undoAvailable,
 } from './core/commands';
@@ -353,7 +354,7 @@ function Toolbar({
   const tool = useEditor((s) => s.tool),
     view = useEditor((s) => s.view),
     undoable = useEditor(undoAvailable),
-    redoable = useEditor(canRedo),
+    redoable = useEditor(redoAvailable),
     selected = useEditor((s) => s.selected);
   const pivotPicking = useEditor((s) => s.pivotPicking);
   const surfacePainting = useEditor((s) => s.tool === 'align' && s.operation.mode === 'surface');
@@ -398,7 +399,7 @@ function Toolbar({
           <IconButton
             label={withShortcut('Redo', keys.redo)}
             disabled={!redoable}
-            onClick={() => useEditor.getState().redo()}
+            onClick={() => executeEditorCommand('redo')}
           >
             <Redo2 size={15} />
           </IconButton>

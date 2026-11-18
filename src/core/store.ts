@@ -208,6 +208,8 @@ export interface WarpSession {
   stage: 'region' | 'building' | 'warp';
   region: 'painted' | 'whole';
   faces: number[];
+  /** The region the session began with. Painting since then is work that ending it would lose. */
+  startFaces: number[];
   /** The first painted hit; like a contact patch's seed, it fixes the brush plane. */
   seed?: SurfacePatch['seed'];
   density: number;
@@ -463,13 +465,14 @@ const toolChange = (state: EditorState, tool: Tool): Partial<EditorState> => {
   };
 };
 
-const newWarpSession = (part: Part, epoch: number): WarpSession => ({
+const newWarpSession = (part: Part, epoch: number, faces: number[] = []): WarpSession => ({
   partId: part.id,
   source: part.geometry,
   epoch,
   stage: 'region',
   region: 'painted',
-  faces: [],
+  faces,
+  startFaces: faces,
   density: defaultWarpDensity,
   model: null,
   state: null,
@@ -583,6 +586,14 @@ const holdsWarp = (point: WarpPoint) =>
 /** Whether Apply would change the mesh. */
 export const warpChanges = (warp: WarpSession) =>
   warp.gapTargets.length > 0 || warp.points.some(holdsWarp);
+
+/** Whether ending the session would lose work: a grid, points, gap targets, steps or painting. */
+export const warpEdited = (warp: WarpSession) =>
+  warp.stage !== 'region' ||
+  warp.points.length > 0 ||
+  warp.gapTargets.length > 0 ||
+  warp.undo.length > 0 ||
+  warp.faces !== warp.startFaces;
 
 function warpConstraints({ model, points, gapTargets }: WarpSession): WarpConstraint[] {
   const rest = model!.restNodes;
@@ -1369,7 +1380,13 @@ export const useEditor = create<EditorState>((set, get) => ({
   endPaintStroke: () => {
     if (get().painting) set({ painting: false });
   },
-  undoPaintStroke: () =>
+  undoPaintStroke: () => {
+    const { warp, paintHistory } = get();
+    // A grid being built from the region the stroke painted stops.
+    const step = paintHistory.at(-1);
+    const settled =
+      warp?.stage === 'building' && step && !Array.isArray(step) ? settledWarp(warp) : null;
+    if (settled) abortWarpBuild();
     set((state) => {
       const surfacePairs = state.paintHistory.at(-1);
       if (!surfacePairs) return {};
@@ -1377,7 +1394,7 @@ export const useEditor = create<EditorState>((set, get) => ({
         return {
           painting: false,
           paintHistory: state.paintHistory.slice(0, -1),
-          ...(state.warp ? { warp: { ...state.warp, ...surfacePairs } } : {}),
+          ...(state.warp ? { warp: { ...state.warp, ...surfacePairs, ...settled } } : {}),
         };
       const active = state.operation.activeSurface;
       return {
@@ -1390,7 +1407,8 @@ export const useEditor = create<EditorState>((set, get) => ({
           activeSurface: surfacePairs.some((pair) => pair.id === active?.pairId) ? active : null,
         },
       };
-    }),
+    });
+  },
   startWarp: () => {
     const state = get();
     const part =
@@ -1690,9 +1708,8 @@ export const useEditor = create<EditorState>((set, get) => ({
         parts: state.scene.parts.map((p) => (p.id === part.id ? warped : p)),
       }),
       warp: {
-        ...newWarpSession(warped, state.sceneEpoch),
+        ...newWarpSession(warped, state.sceneEpoch, faces),
         region,
-        faces,
         seed,
         density,
         snap,
