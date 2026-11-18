@@ -670,7 +670,8 @@ export const snapshotOf = (
 /**
  * A snapshot carried from one grid to another: each node of `to` sits where `from`'s binding of
  * its scan vertex puts it under the snapshot, turned by the blend of its bound nodes' rotations.
- * Vertices `from` did not move stay at rest.
+ * Vertices `from` did not move stay at rest. A vertex `from` feathered and `to` paints sits where
+ * it was written.
  */
 export function transferSnapshot(
   from: WarpModel,
@@ -723,9 +724,20 @@ export function transferSnapshot(
       total += w;
     }
     if (!(total > 0)) continue;
-    positions[n * 3] = px / total;
-    positions[n * 3 + 1] = py / total;
-    positions[n * 3 + 2] = pz / total;
+    // A vertex in the old feather band that the new region paints takes the position it was
+    // written at. Where a feather still applies the blend comes later, so it stays unblended.
+    const b = from.blend && isPaintedNode(to, n) ? from.blend[v] : 1;
+    positions[n * 3] = b === 1 ? px / total : x + b * (px / total - x);
+    positions[n * 3 + 1] = b === 1 ? py / total : y + b * (py / total - y);
+    positions[n * 3 + 2] = b === 1 ? pz / total : z + b * (pz / total - z);
+    if (b < 1) {
+      // Turned as far as it was written: part way from no turn.
+      const side = qw < 0 ? -b : b;
+      qx *= side;
+      qy *= side;
+      qz *= side;
+      qw = side * qw + (1 - b) * total;
+    }
     const length = Math.hypot(qx, qy, qz, qw) || 1;
     rotations[n * 4] = qx / length;
     rotations[n * 4 + 1] = qy / length;
