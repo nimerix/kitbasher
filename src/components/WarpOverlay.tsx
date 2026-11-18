@@ -55,8 +55,11 @@ export function warpedPoint(
     .toArray();
 }
 
-/** The painted region, the grid, the control points and their gizmo, the seam and folds. */
-export function WarpOverlay({ onPress }: { onPress: () => void }) {
+/**
+ * The painted region, the grid, the control points and their gizmo, the seam and folds.
+ * `pressed` says whether the pointer gesture under way began on a gizmo handle.
+ */
+export function WarpOverlay({ onPress, pressed }: { onPress: () => void; pressed: () => boolean }) {
   const warp = useEditor((s) => (s.tool === 'warp' ? s.warp : null));
   const part = useEditor((s) =>
     s.warp ? s.scene.parts.find((p) => p.id === s.warp!.partId) : undefined,
@@ -89,6 +92,7 @@ export function WarpOverlay({ onPress }: { onPress: () => void }) {
               id={point.id}
               position={point.target ?? point.pin}
               selected={warp.selectedPoints.includes(point.id)}
+              pressed={pressed}
             />
           ))}
           <PointGizmo gizmo={warp.gizmo} onPress={onPress} />
@@ -220,10 +224,12 @@ function PointMarker({
   id,
   position,
   selected,
+  pressed,
 }: {
   id: string;
   position: Vec3;
   selected: boolean;
+  pressed: () => boolean;
 }) {
   const [hovered, setHovered] = useState(false);
   const hovering = useRef(false);
@@ -242,7 +248,14 @@ function PointMarker({
         onClick={(event: ThreeEvent<MouseEvent>) => {
           event.stopPropagation();
           const state = useEditor.getState();
-          if (event.button !== 0 || event.delta > 5 || state.navigationMode || state.temporaryOrbit)
+          // The gizmo centre lies over the marker, and a press there is not a selection click.
+          if (
+            event.button !== 0 ||
+            event.delta > 5 ||
+            pressed() ||
+            state.navigationMode ||
+            state.temporaryOrbit
+          )
             return;
           state.selectWarpPoints([id], event.shiftKey || event.metaKey || event.ctrlKey);
         }}

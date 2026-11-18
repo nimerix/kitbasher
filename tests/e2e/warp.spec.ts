@@ -330,6 +330,32 @@ test('toolbar transform buttons choose the control point gizmo while warping', a
   expect((await editorState(page)).stage).toBeNull();
 });
 
+test('a Shift press on the gizmo centre leaves its point selected', async ({ page }) => {
+  await open(page);
+  await page.keyboard.press('w');
+  await page.getByRole('radio', { name: 'Whole part', exact: true }).click();
+  await page.getByRole('button', { name: 'Lay grid', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'Close gap', exact: true })).toBeEnabled();
+  const front = await screen(page, [-4.5, 10.5, 10]);
+  await page.mouse.click(front.x, front.y);
+  const added = await editorState(page);
+  expect(added.selectedPoints).toBe(1);
+
+  // The marker lies under the gizmo's centre handle, which takes the press.
+  const centre = await screen(page, added.points[0].at);
+  await page.keyboard.down('Shift');
+  await page.mouse.click(centre.x, centre.y);
+  expect((await editorState(page)).selectedPoints).toBe(1);
+  await page.mouse.move(centre.x, centre.y);
+  await page.mouse.down();
+  await page.mouse.move(centre.x + 2, centre.y + 1, { steps: 2 });
+  await page.mouse.up();
+  await page.keyboard.up('Shift');
+  const after = await editorState(page);
+  expect(after.selectedPoints).toBe(1);
+  expect(after.points).toHaveLength(1);
+});
+
 test.describe('with clipping on, as by default', () => {
   test.use({ storageState: { cookies: [], origins: [] } });
 
