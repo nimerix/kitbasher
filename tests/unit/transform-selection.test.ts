@@ -12,6 +12,7 @@ import {
 } from '../../src/core/transform-selection';
 import { useEditor, type WarpPoint, type WarpSession } from '../../src/core/store';
 import type { Joint, Part, Vec3 } from '../../src/core/types';
+import type { WarpSnapshot } from '../../src/core/warp-handles';
 
 const original = useEditor.getState();
 const state = () => useEditor.getState();
@@ -198,6 +199,12 @@ const point = (id: string, pin: Vec3, target: Vec3 | null = null): WarpPoint => 
   radius: 0,
   falloff: 1,
   auto: false,
+  baseline: {
+    grid: null as unknown as WarpSnapshot['grid'],
+    positions: new Float64Array(0),
+    rotations: new Float64Array(0),
+    settled: true,
+  },
   reach: null,
 });
 const points = [point('a', [1, 2, 3]), point('b', [4, 0, 0], [5, 0, 0]), point('c', [9, 9, 9])];
@@ -213,8 +220,11 @@ const warping = (patch: Partial<WarpSession> = {}, tool: 'warp' | 'select' = 'wa
     faces: [],
     startFaces: [],
     density: 3,
+    densityChosen: false,
+    laid: null,
     model: null,
     state: null,
+    surface: null,
     output: null,
     preview: null,
     points,
