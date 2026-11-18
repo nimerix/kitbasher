@@ -5,7 +5,7 @@ import { partMatrix } from './geometry';
 import { readFace } from './surfaces';
 import type { Part, SceneDocument, Vec3 } from './types';
 import type { WarpOutput } from './warp-evaluate';
-import type { WarpModel } from './warp-model';
+import { isPaintedNode, type WarpModel } from './warp-model';
 import { WarpRole, type WarpRegion } from './warp-region';
 import { writeRotation, type WarpState } from './warp-solve';
 
@@ -306,7 +306,8 @@ export function closeGapTargets(
   const point = new Vector3();
   const result: { node: number; target: Vec3 }[] = [];
   for (let n = 0; n < grid.nodes.length; n++) {
-    if (grid.fixed[n]) continue;
+    // A feather band carries the bend to the outer border, so only painted nodes are pulled.
+    if (grid.fixed[n] || !isPaintedNode(model, n)) continue;
     point.fromArray(state.positions, n * 3);
     const hit = closestHit(point, neighbours);
     if (!hit) continue;
@@ -368,13 +369,16 @@ function* deformedNormals(region: WarpRegion, positions: Float32Array, first: In
   return normals;
 }
 
-/** Gaps of the region's vertices that face a neighbour in range, as `closeGapTargets` counts them. */
+/**
+ * Gaps of the region's painted vertices that face a neighbour in range, as `closeGapTargets`
+ * counts them. A feather band is not measured, since Close gap does not pull it.
+ */
 export function* seamMeasurement(
   model: WarpModel,
   out: WarpOutput,
   neighbours: WarpNeighbour[],
 ): Generator<void, SeamReport | null> {
-  const { region, matrix } = model;
+  const { region, matrix, blend } = model;
   const m = new Matrix4().fromArray(matrix);
   const first = new Int32Array(region.weldedCount).fill(-1);
   for (let g = 0; g < region.weldOf.length; g++) {
@@ -391,7 +395,7 @@ export function* seamMeasurement(
     normal = new Vector3();
   let largest = -Infinity;
   for (let v = 0; v < region.weldedCount; v++) {
-    if (region.role[v] === WarpRole.Outside || first[v] < 0) continue;
+    if (region.role[v] === WarpRole.Outside || first[v] < 0 || (blend && blend[v] !== 1)) continue;
     yield;
     point.fromArray(out.positions, first[v] * 3).applyMatrix4(m);
     const hit = closestHit(point, neighbours);
