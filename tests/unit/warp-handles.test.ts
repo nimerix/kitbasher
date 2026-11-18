@@ -17,6 +17,7 @@ import { bindPoint } from '../../src/core/warp-bind';
 import { createWarpOutput, deformPoint, evaluateWarp } from '../../src/core/warp-evaluate';
 import {
   distributionNodes,
+  fadeWidth,
   handleConstraints,
   handleFootprint,
   handleGuides,
@@ -767,6 +768,36 @@ describe('point handles', () => {
       if (model.region.role[v] === WarpRole.Interior) return;
       for (let a = 0; a < 3; a++) expect(output.positions[g * 3 + a]).toBe(source[g * 3 + a]);
     });
+  });
+
+  it('fades into a fixed border its radius reaches as it does at its radius', async () => {
+    const { geometry, model } = await sheet(3, 120);
+    const state = createWarpState(model.restNodes);
+    const handle = moved(pointHandle(model, geometry, [37, 0.3, 0], state, 8), [0, 0, 1.5]);
+    const guides = warpGuides(model, [handle])!;
+    const { fixed, edgeStart, edges } = model.grid;
+    const { restNodes } = model;
+    const fade = fadeWidth(handle);
+    const t = (x: number) => (x >= 1 ? 1 : x * x * (3 - 2 * x));
+    let beside = 0;
+    for (let g = 0; g < guides.node.length; g++) {
+      const n = guides.node[g];
+      for (let e = edgeStart[n]; e < edgeStart[n + 1]; e++) {
+        if (!fixed[edges[e]]) continue;
+        const run = distance(
+          restNodes.subarray(n * 3, n * 3 + 3),
+          restNodes.subarray(edges[e] * 3, edges[e] * 3 + 3),
+        );
+        // Its drive is no more than the bend's own fade allows that close to the border.
+        expect(guides.target[g * 3 + 2] - state.positions[n * 3 + 2]).toBeLessThanOrEqual(
+          1.5 * t(run / fade) + 1e-9,
+        );
+        beside++;
+      }
+    }
+    expect(beside).toBeGreaterThan(5);
+    converge(model, state, [handle]);
+    expect(distance(tipOf(model, state, handle), handle.target!)).toBeLessThan(0.02);
   });
 });
 

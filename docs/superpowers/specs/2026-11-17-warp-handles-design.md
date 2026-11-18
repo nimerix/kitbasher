@@ -195,6 +195,9 @@ Radius adds soft per-node **guides** around them.
   handle's profile, gives way by the largest driving weight any other moved handle has there.
   Unmoved becomes moved over the first quarter spacing of travel, so nothing jumps. `κ = 4`,
   of the node's diagonal from its weighted edges.
+- **Fixed edge.** Where a radius reaches a fixed edge the paint meets directly, the drive fades
+  to it as at the radius: `w` times a smoothstep of the node's distance from that edge over the
+  fade. A feathered band between them carries the bend instead.
 - **Accumulation.** Stiffnesses add and the target is their stiffness-weighted mean; nothing
   depends on the order of handles. Gap-target nodes get no guides.
 - **Solver.** `solveWarp` takes the per-node guide set. Guide nodes and stiffnesses are part of

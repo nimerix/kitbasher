@@ -486,6 +486,34 @@ function relax(
   return settled;
 }
 
+const borderDistances = new WeakMap<WarpGrid, Float64Array>();
+
+/**
+ * Each node's distance along the grid, as reach measures it, from the nearest fixed node the paint
+ * meets directly. A feathered band between them already carries the bend.
+ */
+function borderDistance(model: WarpModel) {
+  const { grid } = model;
+  let distance = borderDistances.get(grid);
+  if (distance) return distance;
+  const { fixed, edgeStart, edges } = grid;
+  const count = grid.nodes.length;
+  distance = new Float64Array(count).fill(Infinity);
+  const seeds: [number, number][] = [];
+  for (let n = 0; n < count; n++) {
+    if (!fixed[n]) continue;
+    for (let e = edgeStart[n]; e < edgeStart[n + 1]; e++)
+      if (!fixed[edges[e]] && isPaintedNode(model, edges[e])) {
+        seeds.push([n, 0]);
+        break;
+      }
+  }
+  relax(model, seeds, distance, new Uint8Array(count).fill(1));
+  for (let n = 0; n < count; n++) distance[n] /= warpPathStretch;
+  borderDistances.set(grid, distance);
+  return distance;
+}
+
 /** Mean rest length of the grid edges at these nodes. */
 export function spacingAt(model: WarpModel, nodes: Iterable<number>) {
   const { grid, restNodes } = model;
@@ -623,12 +651,14 @@ export function warpGuides(
   );
   if (!guiding.length) return undefined;
   const count = grid.nodes.length;
+  const border = borderDistance(model);
   const blocked = new Uint8Array(count);
   for (const n of exact) blocked[n] = 1;
   const profiles = guiding.map((handle) => {
     const reach = handle.reach!;
     const motion = motionOf(handle);
     const { radius, falloff } = handle;
+    const fade = fadeWidth(handle);
     const band = bandWidth(falloff, reach.spacing),
       tail = warpTailSpacings * reach.spacing;
     const weight = new Float64Array(reach.node.length),
@@ -639,7 +669,10 @@ export function warpGuides(
         continue;
       }
       const d = reach.distance[i];
-      const w = handleWeight(d, radius, falloff, reach.spacing);
+      // A bend fades into the fixed border as it does at its radius, so the border does not crease.
+      const w =
+        handleWeight(d, radius, falloff, reach.spacing) *
+        (fade > 0 ? smoothstep(border[reach.node[i]] / fade) : 1);
       const held =
         d <= radius
           ? 1

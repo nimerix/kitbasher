@@ -288,6 +288,9 @@ describe('a feathered painted edge on a dense scan-like surface', () => {
     // weights take to 4.09° where the even grid alone gave 3.67°.
     for (const { feather, radius, p95, max, folds } of results) {
       expect(folds).toBe(0);
+      // Unfeathered, a handle's bend fades into the fixed edge rather than creasing it: at most
+      // 0.46° here, 1.59° on the simplifier's grid and 9.13° on the even grid before the fade.
+      if (!feather && radius) expect(max).toBeLessThan(1);
       if (!feather) continue;
       expect(p95).toBeLessThan(radius ? 3.5 : 1.85);
       expect(max).toBeLessThan(radius ? 10 : 4.2);
