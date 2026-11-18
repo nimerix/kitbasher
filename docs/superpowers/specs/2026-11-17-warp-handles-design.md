@@ -71,20 +71,25 @@ A grid edge is a straight chord between two scan vertices, so on a convex surfac
 runs under the surface and is hidden however it is coloured. Each edge is therefore laid on
 the surface (`warp-grid-path.ts`): it is traced across the region's triangles along the plane
 through its chord and the nodes' averaged normal, and keeps points where it crosses mesh
-edges. Every edge keeps evenly spaced points first (its middle, quarters and eighths), so an
-edge flat at rest still follows the surface once it bends, then the points that bend it most,
-within 32 per edge and 32,000 in all. A walk that fails is retried from the other node and
+edges. Every edge keeps every point it crosses, up to 256, while 32,000 in all hold them;
+beyond that, every edge keeps evenly spaced ones, as close as the total allows. A coarse grid
+has few edges, so its long edges keep all their points and follow the surface as soon as it
+bends; a fine grid's short edges cross few. A walk that fails is retried from the other node and
 with each node's own normal; if every walk fails, the edge follows the shortest bounded path
 over mesh edges, or is not drawn. The trace runs a few milliseconds at a time; until it is
 done, edges are chords.
 
 The trace keeps every point it found. Once the written surface has stayed put a moment, the
-points drawn are chosen again on it, a few milliseconds at a time: each edge keeps its middle,
-then the points furthest from the line drawn so far go in wherever on the grid they are, up to
-64 per edge and 32,000 in all, then each edge's quarters, so that it follows the surface as it
-bends again. Each point remembers how far it bent the line; a view leaves out those that bend it
-by less than half its smallest pixel on the grid, and never by more than 0.0375 mm, so a chord
-never dips under the pull toward the camera.
+solve has settled and no drag is under way, the drawn line is checked against it, a few
+milliseconds at a time: the furthest any found point lies from the segment drawn through it.
+Only a line that strays by more than 0.1 mm, or a pixel where that is less, has its points
+chosen again: each edge keeps evenly spaced points within half the total, then the points
+furthest from the line drawn so far go in wherever on the grid they are, up to 512 per edge and
+32,000 in all. While a solve settles in idle time the points stay as they are, so a settled
+edit chooses them again once at most, and in the ordinary case not at all. Each point chosen
+again remembers how far it bent the line; a view leaves out those that bend it by less than half
+its smallest pixel on the grid, and never by more than 0.0375 mm, so a chord never dips under
+the pull toward the camera. Evenly spaced points always show.
 
 Coarser nets of the grid's own edges keep a readable grid when its cells are too small to show:
 level k picks nodes of the net below about 2^k typical edges apart along it and joins each two
@@ -121,7 +126,8 @@ Distinct colours and white at that zoom and close up, from two directions; the l
 3:1 on a near-black part; at least 90 % of front-facing grid length is visible on the curved
 part; the far side, the other sheet of a thin shell and anything 0.2 mm or more behind an
 opaque surface do not show through at working distance; the grid stays on the written surface before and after
-deformation, no drawn point more than 0.1 mm off it on a coarse grid over a fine mesh; at the
+deformation, no drawn point more than 0.1 mm off it on a coarse grid over a fine mesh from the
+first surface written after a pull, and no line moving once it is released; at the
 highest density a coarser net still shows as the part is zoomed out, without a sudden change.
 
 ### 2. Brush size fitted to the part

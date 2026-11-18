@@ -361,6 +361,50 @@ describe('the drawn grid', () => {
     }
   });
 
+  it('follows a plate bent between held points at once, before choosing its points again', async () => {
+    // The surface is first written as the pull is released: the points the trace chose on the
+    // flat plate must already follow it, at every density.
+    for (const density of [0, 1, 2, 3, 4, 5, 6]) {
+      const id = await heldPlate(80, density);
+      const model = editor().warp!.model!;
+      const path = traceWarpGridPathNow(model);
+      editor().moveWarpPoints([{ id, target: [0.3, 0.2, 2] }], 'end');
+      const after = written();
+      const drawing = new WarpGridDrawing(path, model.restNodes.length / 3);
+      drawing.update(after.nodes, after.positions, after.normals, 1);
+      expect(drawing.adopted).toBe(0);
+      expect(worstGap(after.surface, drawing.drawn()), `density ${density}`).toBeLessThan(0.1);
+      editor().cancelWarp();
+    }
+  });
+
+  it('measures how far its line strays from the surface written, which choosing again cures', async () => {
+    // Few points per edge, so the coarse grid's long edges cut across the bend.
+    const limits = { ...warpGridPathLimits, perEdge: 3 };
+    const id = await heldPlate(80, 0);
+    const model = editor().warp!.model!;
+    const path = traceWarpGridPathNow(model, limits);
+    editor().moveWarpPoints([{ id, target: [0.3, 0.2, 2] }], 'end');
+    const after = written();
+    const drawing = new WarpGridDrawing(path, model.restNodes.length / 3, null, limits);
+    drawing.update(after.nodes, after.positions, after.normals, 1);
+    const stray = (() => {
+      const job = drawing.straying(after.positions);
+      for (;;) {
+        const step = job.next();
+        if (step.done) return step.value;
+      }
+    })();
+    // The furthest point the trace found off the line bounds how far its segments lie off the
+    // surface, which runs straight between those points.
+    const gap = worstGap(after.surface, drawing.drawn());
+    expect(gap).toBeGreaterThan(0.3);
+    expect(stray).toBeGreaterThan(0.9 * gap);
+    drawing.refine(after.positions, after.normals, limits);
+    expect(drawing.adopted).toBe(1);
+    expect(worstGap(after.surface, drawing.drawn())).toBeLessThan(0.1);
+  });
+
   it('starts a trace finished part way through a large drag from the surface last written', async () => {
     const id = await heldPlate();
     const model = editor().warp!.model!;

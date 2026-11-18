@@ -285,7 +285,11 @@ test('a mirrored part and a turned, unevenly scaled plate draw their grids whole
   }
 });
 
-/** The furthest any drawn segment lies from the written surface, sampled along each one. */
+/**
+ * The furthest any drawn segment lies from the written surface, sampled along each one, once the
+ * grid's buffers hold the surface as last written. Also what was sampled: segments, and samples
+ * on edges drawn along mesh edges after their walks failed, whose points lie on mesh vertices.
+ */
 function gapFromSurface(page: Page) {
   return page.evaluate(async () => {
     const urls = performance.getEntriesByType('resource').map((entry) => entry.name);
@@ -297,22 +301,47 @@ function gapFromSurface(page: Page) {
     const { useEditor } = await import(
       urls.find((url) => /\/src\/core\/store\.ts(?:\?.*)?$/.test(url))!
     );
-    const { preview } = useEditor.getState().warp;
+    const { preview, settling } = useEditor.getState().warp;
+    const version = preview.getAttribute('position').version;
     const drawing = root.scene.getObjectByName('warp-grid').userData.drawing;
+    for (let frame = 0; frame < 120 && drawing.written !== version; frame++) {
+      root.invalidate();
+      await new Promise((done) => requestAnimationFrame(done));
+    }
     const drawn: Float32Array = drawing.drawn();
     const surface = new THREE.BufferGeometry();
     surface.setAttribute('position', preview.getAttribute('position').clone());
     if (preview.index) surface.setIndex(preview.index.clone());
     const bvh = new MeshBVH(surface);
+    const { path } = drawing;
+    const rerouted = (e: number) =>
+      path.start[e + 1] > path.start[e] &&
+      path.from
+        .subarray(path.start[e], path.start[e + 1])
+        .every((from: number, i: number) => from === path.to[path.start[e] + i]);
     const point = new THREE.Vector3();
-    let worst = 0;
+    let worst = 0,
+      reroutedSamples = 0;
     for (let s = 0; s < drawing.segments; s++)
       for (const f of [0.25, 0.5, 0.75]) {
         point.fromArray(drawn, s * 6).lerp(new THREE.Vector3().fromArray(drawn, s * 6 + 3), f);
         worst = Math.max(worst, bvh.closestPointToPoint(point).distance);
+        if (rerouted(drawing.edgeOf[s])) reroutedSamples++;
       }
-    const { path } = drawing;
-    return { worst, failed: path.failed, rerouted: path.rerouted, edges: path.ends.length / 2 };
+    return {
+      worst,
+      failed: path.failed,
+      rerouted: path.rerouted,
+      edges: path.ends.length / 2,
+      segments: drawing.segments,
+      reroutedSamples,
+      // The surface measured, the one the drawn line was last checked against, and how many
+      // times points chosen again were drawn.
+      version: drawing.written === version ? version : -1,
+      refined: drawing.refined,
+      adopted: drawing.adopted,
+      settling,
+    };
   });
 }
 
@@ -389,21 +418,35 @@ test('the grid stays on a flat plate once it bends, and in view', async ({ page 
   expect(grid.shares.core[facing].shown).toBeGreaterThan(0.9);
 });
 
-test('a coarse grid on a finely meshed plate follows it between the points that bend it', async ({
+test('a coarse grid on a finely meshed plate follows it at once as it bends, and stays put', async ({
   page,
 }) => {
-  // Each coarse grid edge crosses dozens of mesh edges, chosen first on the flat plate.
-  await layGrid(page, new PlaneGeometry(40, 40, 80, 80), flat);
-  await setDensity(page, 1);
-  const pulled = await pullPlate(page);
-  note('pulled', pulled);
-  expect(pulled.points).toBe(5);
-  expect(pulled.rise).toBeGreaterThan(1.8);
-  await gridTraced(page);
-  const gap = await gapFromSurface(page);
-  note('gap', gap);
-  expect(gap.failed).toBe(0);
-  expect(gap.worst).toBeLessThan(0.1);
+  test.setTimeout(120_000);
+  for (const density of [0, 1]) {
+    // Each coarse grid edge crosses dozens of mesh edges, chosen on the flat plate.
+    await layGrid(page, new PlaneGeometry(40, 40, 80, 80), flat, [], density);
+    const before = await gapFromSurface(page);
+    const pulled = await pullPlate(page);
+    note(`density ${density}, pulled`, pulled);
+    expect(pulled.points).toBe(5);
+    expect(pulled.rise).toBeGreaterThan(1.8);
+    // On the first surface written, as the drawn points were chosen on the flat plate.
+    const first = await gapFromSurface(page);
+    note(`density ${density}, first`, first);
+    expect(first.version).toBeGreaterThan(before.version);
+    expect(first.adopted).toBe(before.adopted);
+    expect(first.worst).toBeLessThan(0.1);
+    // Once the solve has settled and the drawn line was checked against the surface it ends on.
+    await gridTraced(page);
+    const settled = await gapFromSurface(page);
+    note(`density ${density}, settled`, settled);
+    expect(settled.settling).toBe(false);
+    expect(settled.refined).toBe(settled.version);
+    expect(settled.failed).toBe(0);
+    expect(settled.worst).toBeLessThan(0.1);
+    // Its points were never chosen again, so no line moved once the pull was released.
+    expect(settled.adopted).toBe(before.adopted);
+  }
 });
 
 /** A plate turned 55° away from the camera about x, and a part of its own shape and turn. */
@@ -514,9 +557,14 @@ test('on a scan-like part, failed walks are drawn along the surface, never acros
   for (const level of [0, 3]) {
     await setDensity(page, level);
     const gap = await gapFromSurface(page);
-    note(`density ${level}`, gap);
+    const cover = await gridCoverage(page);
+    note(`density ${level}`, { gap, cover });
     expect(gap.failed).toBeGreaterThan(0);
     expect(gap.rerouted).toBe(gap.failed);
+    // What is measured is drawn and shows: segments between points, some along rerouted edges.
+    expect(gap.segments).toBeGreaterThan(gap.edges);
+    expect(gap.reroutedSamples).toBeGreaterThan(100);
+    expect(cover.touched).toBeGreaterThan(0.05);
     expect(gap.worst).toBeLessThan(0.05);
   }
 });
