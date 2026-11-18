@@ -803,10 +803,13 @@ export const warpEdited = (warp: WarpSession) =>
 
 type WarpSolveInput = Pick<WarpSession, 'model' | 'points' | 'gapTargets'>;
 
-function warpConstraints({ model, points, gapTargets }: WarpSolveInput): WarpConstraint[] {
+function warpConstraints(
+  { model, points, gapTargets }: WarpSolveInput,
+  guides: WarpGuides | undefined,
+): WarpConstraint[] {
   const rest = model!.restNodes;
   return [
-    ...handleConstraints(points, model!),
+    ...handleConstraints(points, model!, guides),
     ...gapTargets.map(({ node, target }) => ({
       node: [node],
       weight: [1],
@@ -944,8 +947,8 @@ function solveWarpSession(
   measure = true,
 ): WarpSession {
   const model = warp.model!;
-  const constraints = warpConstraints(warp);
   const guides = sessionGuides(warp);
+  const constraints = warpConstraints(warp, guides);
   // With nothing holding it, the grid rests rather than staying where the last points left it.
   if (!constraints.length) warp = { ...warp, state: createWarpState(model.restNodes) };
   else if (gesture === 'drag')
@@ -2159,9 +2162,10 @@ export const useEditor = create<EditorState>((set, get) => ({
     // Found on the surface the points alone hold, so pressing again or changing the overlap keeps
     // the nodes earlier targets pulled in.
     const held = createWarpState(model.restNodes);
-    const constraints = warpConstraints({ ...warp, gapTargets: [] });
-    if (constraints.length)
-      settleGrid(model, constraints, held, sessionGuides({ ...warp, gapTargets: [] }));
+    const pointsOnly = { ...warp, gapTargets: [] };
+    const guides = sessionGuides(pointsOnly);
+    const constraints = warpConstraints(pointsOnly, guides);
+    if (constraints.length) settleGrid(model, constraints, held, guides);
     const { neighbours, indexing } = warpNeighbours(state.scene, warp.partId, warpBounds(held));
     if (indexing.length) {
       state.notify(
@@ -2193,7 +2197,8 @@ export const useEditor = create<EditorState>((set, get) => ({
         gapTargets,
       };
       const trial = { positions: held.positions.slice(), rotations: held.rotations.slice() };
-      settleGrid(model, warpConstraints(free), trial, sessionGuides(free));
+      const guides = sessionGuides(free);
+      settleGrid(model, warpConstraints(free, guides), trial, guides);
       let pull = 0;
       for (const { node, target } of gapTargets)
         pull = Math.max(pull, distanceTo(held.positions, node, target));

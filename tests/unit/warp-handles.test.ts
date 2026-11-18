@@ -157,19 +157,14 @@ function solveHandles(
   handles: WarpHandle[],
   iterations?: number,
 ) {
-  return settle(
-    model,
-    state,
-    handleConstraints(handles, model),
-    warpGuides(model, handles),
-    iterations,
-  );
+  const guides = warpGuides(model, handles);
+  return settle(model, state, handleConstraints(handles, model, guides), guides, iterations);
 }
 
 /** Solves until the grid stops moving: the fixed point of the handles' law. */
 function converge(model: WarpModel, state: WarpState, handles: WarpHandle[]) {
-  const constraints = handleConstraints(handles, model),
-    guides = warpGuides(model, handles);
+  const guides = warpGuides(model, handles),
+    constraints = handleConstraints(handles, model, guides);
   for (let i = 0; i < 4000; i++)
     if (solveWarp(model.grid, model.restNodes, constraints, state, 1, guides) < 1e-9) return;
 }
@@ -465,11 +460,11 @@ describe('point handles', () => {
     const sample = bare.samples[0];
     const target: Vec3 = [0.7, -0.4, 3];
     const pin = { ...nodePin(model, nearestNode(model, [8, 3, 0]), rest), auto: true };
-    expect(handleConstraints([{ ...bare, target }, pin], model)).toEqual([
+    expect(handleConstraints([{ ...bare, target }, pin], model, undefined)).toEqual([
       { ...sample.binding, rest: sample.restWorld, target },
       { ...pin.samples[0].binding, rest: pin.samples[0].restWorld, target: pin.samples[0].pin },
     ]);
-    expect(handleConstraints([bare], model)[0].target).toBe(sample.pin);
+    expect(handleConstraints([bare], model, undefined)[0].target).toBe(sample.pin);
 
     const before = createWarpState(model.restNodes),
       after = createWarpState(model.restNodes);
@@ -680,7 +675,11 @@ describe('point handles', () => {
     const near = { ...nodePin(model, nearestNode(model, [2, 0, 0]), state, 'near'), auto: true };
     const far = { ...nodePin(model, nearestNode(model, [25, 0, 0]), state, 'far'), auto: true };
     const lift = moved(pointHandle(model, geometry, [0, 0, 0], state, 10), [0, 0, 2]);
-    const [, ride, hold] = handleConstraints([lift, near, far], model);
+    const [, ride, hold] = handleConstraints(
+      [lift, near, far],
+      model,
+      warpGuides(model, [lift, near, far]),
+    );
     const weight = reachWeight(
       distance(near.samples[0].restWorld, lift.samples[0].restWorld),
       10,
@@ -689,12 +688,14 @@ describe('point handles', () => {
     );
     expect(ride.target[2]).toBeGreaterThan(0.5 * 2 * weight);
     expect(ride.target[2]).toBeLessThanOrEqual(2);
-    expect(hold.target).toBe(far.samples[0].pin);
+    expect(distance(hold.target, far.samples[0].pin)).toBeLessThan(1e-9);
     solveHandles(model, state, [lift, near, far], 300);
     expect(written(model, state).folds.length).toBe(0);
     // A pin the user has placed holds.
     const placed = { ...near, auto: false };
-    expect(handleConstraints([lift, placed], model)[1].target).toBe(placed.samples[0].pin);
+    expect(
+      handleConstraints([lift, placed], model, warpGuides(model, [lift, placed]))[1].target,
+    ).toBe(placed.samples[0].pin);
   });
 
   it('on a coarse 60-node grid an off-grid point reaches its target and bends a broad area', async () => {
@@ -841,7 +842,7 @@ describe('close gap under a guide', () => {
     const covered = gapTargets.filter(({ node }) => guide.reach!.node.includes(node));
     expect(covered.length).toBeGreaterThan(0);
     const constraints = [
-      ...handleConstraints(handles, model),
+      ...handleConstraints(handles, model, warpGuides(model, handles)),
       ...gapTargets.map(({ node, target }) => ({
         node: [node],
         weight: [1],

@@ -168,7 +168,9 @@ function PointSettingsControls({ warp, part }: { warp: WarpSession; part: Part |
           ? radius > 0
             ? `Moves the surface within ${Number(radius.toPrecision(3))} mm of the selected ${selected.length === 1 ? 'point' : 'points'}${fade !== null ? `, fading over the outer ${Number(fade.toPrecision(2))} mm` : ''}. New points use the same settings.`
             : `The selected ${selected.length === 1 ? 'point moves' : 'points move'} the surface at the point only.`
-          : 'New points use this radius and falloff.'}
+          : warp.pointRadius === null
+            ? 'New points use this falloff, and reach a few grid spacings where you click until you set a radius.'
+            : 'New points use this radius and falloff.'}
         {coarse
           ? ' This grid is too coarse for that radius here. A finer grid lets it take effect.'
           : ''}

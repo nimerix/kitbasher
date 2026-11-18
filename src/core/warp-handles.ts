@@ -118,6 +118,10 @@ export function reachWeight(distance: number, radius: number, falloff: number, e
   return 1 - smoothstep((distance - inner) / fade);
 }
 
+/** A handle's weight at a distance, on a grid with this node spacing. */
+export const handleWeight = (distance: number, radius: number, falloff: number, spacing: number) =>
+  reachWeight(distance, radius, falloff, warpFadeSpacings * spacing);
+
 /** Fade width the grid gives a handle at this falloff, mm. */
 export const fadeWidth = (handle: Pick<WarpHandle, 'radius' | 'falloff' | 'reach'>) => {
   const edge = warpFadeSpacings * (handle.reach?.spacing ?? 0);
@@ -133,26 +137,25 @@ export function handleOffset(handle: Pick<WarpHandle, 'pin' | 'target'>): Vec3 {
 const samePosition = (a: Vec3, b: Vec3) => a[0] === b[0] && a[1] === b[1] && a[2] === b[2];
 
 /**
- * One exact constraint per sample, moved by the handle's offset. On `model`, an untouched
- * automatic point inside the radius of a moved handle rides with it by that handle's weight
- * there, so a bump rises smoothly over it; it holds its pin wherever nothing drives the
- * surface. Where several handles reach it, their weights share it out, so it never moves farther
- * than the farthest of them.
+ * One exact constraint per sample, moved by the handle's offset. Given the `guides` on `model`, an
+ * untouched automatic point rides where the guides take the surface at its nodes, so a bump rises
+ * smoothly over it; wherever nothing guided moves, it holds its pin.
  */
 export function handleConstraints(
   handles: readonly WarpHandle[],
   model?: WarpModel,
+  guides?: WarpGuides,
 ): WarpConstraint[] {
-  const guiding = model
-    ? handles.filter((handle) => handle.reach?.grid === model.grid && handleGuides(handle))
-    : [];
-  const driving = guiding.some((handle) => handle.target !== null) ? guiding : [];
+  const riding =
+    !!model &&
+    !!guides &&
+    handles.some((handle) => handle.target !== null && handle.reach?.grid === model.grid);
   const constraints: WarpConstraint[] = [];
   for (const handle of handles) {
     const offset = handleOffset(handle);
-    const riding = driving.length && handle.auto && handle.target === null;
+    const rides = riding && handle.auto && handle.target === null;
     for (const sample of handle.samples) {
-      const ride = riding ? rideOffset(driving, sample.binding) : null;
+      const ride = rides ? rideOffset(model!, guides!, handle.baseline, sample.binding) : null;
       constraints.push({
         ...sample.binding,
         rest: sample.restWorld,
@@ -171,44 +174,41 @@ export function handleConstraints(
 }
 
 /**
- * Each handle's offset by its weight at the nodes a sample is bound to, shared out by how much
- * each drives there; unmoved handles take no share.
+ * How far the guides take a sample's nodes from where the point holds them, blended by the
+ * binding, each node by how firmly it is guided.
  */
-function rideOffset(driving: readonly WarpHandle[], binding: WarpPointBinding): Vec3 | null {
+function rideOffset(
+  model: WarpModel,
+  guides: WarpGuides,
+  baseline: WarpSnapshot,
+  binding: WarpPointBinding,
+): Vec3 | null {
+  if (baseline.grid !== model.grid) return null;
+  const { edgeStart } = model.grid;
   const offset: Vec3 = [0, 0, 0];
-  let total = 0;
-  for (const handle of driving) {
-    const reach = handle.reach!;
-    const edge = warpFadeSpacings * reach.spacing;
-    let w = 0;
-    binding.node.forEach((n, k) => {
-      const i = reachIndex(reach, n);
-      if (i < 0) return;
-      const weight =
-        i < reach.own
-          ? 1
-          : reach.activation * reachWeight(reach.distance[i], handle.radius, handle.falloff, edge);
-      w += binding.weight[k] * weight;
-    });
-    if (!(w > 0)) continue;
-    const d = handleOffset(handle);
-    total += w * motionOf(handle);
-    for (let a = 0; a < 3; a++) offset[a] += w * d[a];
-  }
-  if (!(total > 0) || (!offset[0] && !offset[1] && !offset[2])) return null;
-  const scale = 1 / Math.max(1, total);
-  return [offset[0] * scale, offset[1] * scale, offset[2] * scale];
+  let moved = false;
+  binding.node.forEach((n, k) => {
+    const g = guideIndex(guides, n);
+    if (g < 0) return;
+    const full = warpGuideStiffness * 2 * (edgeStart[n + 1] - edgeStart[n]);
+    const share = binding.weight[k] * Math.min(1, guides.stiffness[g] / full);
+    for (let a = 0; a < 3; a++) {
+      const d = share * (guides.target[g * 3 + a] - baseline.positions[n * 3 + a]);
+      offset[a] += d;
+      moved ||= d !== 0;
+    }
+  });
+  return moved ? offset : null;
 }
 
-/** Where node `n` is in the reach, or -1. */
-function reachIndex(reach: WarpReach, n: number) {
-  for (let i = 0; i < reach.own; i++) if (reach.node[i] === n) return i;
-  let low = reach.own,
-    high = reach.node.length - 1;
+/** Where node `n` is among the guides, or -1. */
+function guideIndex(guides: WarpGuides, n: number) {
+  let low = 0,
+    high = guides.node.length - 1;
   while (low <= high) {
     const mid = (low + high) >> 1;
-    if (reach.node[mid] === n) return mid;
-    if (reach.node[mid] < n) low = mid + 1;
+    if (guides.node[mid] === n) return mid;
+    if (guides.node[mid] < n) low = mid + 1;
     else high = mid - 1;
   }
   return -1;
@@ -473,8 +473,7 @@ export function warpGuides(
     const reach = handle.reach!;
     const motion = motionOf(handle);
     const { radius, falloff } = handle;
-    const edge = warpFadeSpacings * reach.spacing,
-      band = bandWidth(falloff, reach.spacing),
+    const band = bandWidth(falloff, reach.spacing),
       tail = warpTailSpacings * reach.spacing;
     const weight = new Float64Array(reach.node.length),
       profile = new Float64Array(reach.node.length);
@@ -484,7 +483,7 @@ export function warpGuides(
         continue;
       }
       const d = reach.distance[i];
-      const w = reachWeight(d, radius, falloff, edge);
+      const w = handleWeight(d, radius, falloff, reach.spacing);
       const held =
         d <= radius
           ? 1
@@ -552,12 +551,12 @@ export function warpGuides(
 export function reachWeights(handle: WarpHandle) {
   const reach = handle.reach!;
   const weight = new Float64Array(reach.node.length);
-  const edge = warpFadeSpacings * reach.spacing;
   for (let i = 0; i < reach.node.length; i++)
     weight[i] =
       i < reach.own
         ? 1
-        : reach.activation * reachWeight(reach.distance[i], handle.radius, handle.falloff, edge);
+        : reach.activation *
+          handleWeight(reach.distance[i], handle.radius, handle.falloff, reach.spacing);
   return weight;
 }
 
