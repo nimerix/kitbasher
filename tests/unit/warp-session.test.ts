@@ -846,6 +846,40 @@ describe('warp points, close gap and apply', () => {
     }
   });
 
+  it('tells once a session when snap or the seam pass over a part still being prepared', async () => {
+    const message = 'Still preparing Dense scan. Try again when it finishes.';
+    const notices = () =>
+      useActivity.getState().notifications.filter((n) => n.message === message).length;
+    const side = Math.ceil(Math.sqrt(workerIndexTriangles / 12)) + 1;
+    const session = async (snap: boolean) => {
+      const a = plate('a');
+      const dense: Part = {
+        ...solid('dense', new BoxGeometry(10, 10, 10, side, side, side), [0, 0, 7]),
+        name: 'Dense scan',
+        visible: false,
+      };
+      setup([a, dense], ['a']);
+      await warpDisc(a, 0, 0, 8);
+      const p = addAt(a, 0, 0);
+      editor().setWarpOptions({ snap });
+      // Shown now, its index is built by a worker that never finishes here.
+      vi.stubGlobal('Worker', class {});
+      try {
+        editor().patchParts(['dense'], { visible: true });
+        for (let z = 1; z <= 3; z++) move(p.id, [0, 0, z * 0.5], 'drag');
+        move(p.id, [0, 0, 1.5]);
+        move(p.id, [0, 0, 1]);
+      } finally {
+        vi.unstubAllGlobals();
+      }
+    };
+
+    await session(true);
+    expect(notices()).toBe(1);
+    await session(false);
+    expect(notices()).toBe(2);
+  });
+
   it('close gap on a whole part leaves no gap to report', async () => {
     const block = solid('block', new BoxGeometry(20, 20, 20, 12, 12, 12), [0, 0, 0]);
     const wall = solid('wall', new BoxGeometry(20, 20, 20, 12, 12, 12), [21, 0, 0]);

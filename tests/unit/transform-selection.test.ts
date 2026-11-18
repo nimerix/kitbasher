@@ -194,6 +194,7 @@ const points = [point('a', [1, 2, 3]), point('b', [4, 0, 0], [5, 0, 0]), point('
 /** The editor state with a warp session on part `p`, as the session is only read here. */
 const warping = (patch: Partial<WarpSession> = {}, tool: 'warp' | 'select' = 'warp') => {
   const warp: WarpSession = {
+    id: 'session',
     partId: 'p',
     source: state().scene.parts[0].geometry,
     epoch: state().sceneEpoch,
