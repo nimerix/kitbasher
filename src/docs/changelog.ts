@@ -18,7 +18,7 @@ export const releases: Release[] = [
   {
     version: '1.18.0',
     date: '2026-11-17',
-    title: 'What’s new',
+    title: 'Release notes',
     changes: [
       {
         kind: 'new',
