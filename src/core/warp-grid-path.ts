@@ -64,7 +64,7 @@ export const warpGridPathLimits = {
   stray: 3,
   /** Vertices a mesh-edge path may visit. */
   reroute: 32_768,
-  /** A point chosen again that bends the line by less than this share of its edge's length is left out. */
+  /** A point chosen again that bends the line by less than this share of its edge is left out. */
   tolerance: 1e-3,
 };
 

@@ -239,8 +239,7 @@ describe('grid paths on a scan-like part', () => {
       const edges = warpGridChords(m).length.length;
       // Some walks fail on this part, as on real scans, and each finds its way along mesh edges.
       // At density 0 the evenly spaced grid's chords fail 100 of 378 walks, where the
-      // simplifier's failed 95 of 391, and one of its edges runs 26 mm over curved relief, where
-      // 32 points leave the line 0.055 mm off the surface.
+      // simplifier's failed 95 of 391, and one of its edges runs 26 mm over curved relief.
       expect(path.failed, `density ${density}`).toBeGreaterThan(0);
       expect(path.failed / edges, `density ${density}`).toBeLessThan(density ? 0.25 : 0.3);
       expect(path.rerouted).toBe(path.failed);
