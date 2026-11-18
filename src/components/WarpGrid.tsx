@@ -23,12 +23,14 @@ import {
   Vector3,
   type Camera,
 } from 'three';
-import type { WarpSession } from '../core/store';
+import { useEditor, type WarpSession } from '../core/store';
 import { writtenNodePositions } from '../core/warp-evaluate';
 import type { WarpModel } from '../core/warp-model';
 import {
   traceWarpGridPath,
+  typicalLength,
   warpGridChords,
+  warpGridLevels,
   warpGridShiftWidth,
   WarpGridDrawing,
   type WarpGridPath,
@@ -64,6 +66,16 @@ export const warpGridStyle = {
   casingWidth: 4,
   casingFull: 22,
   casingGone: 12,
+  /**
+   * Coarser nets of the grid's own edges, for when its cells are too small to show: each comes in
+   * over an octave of its own cells, from `coarseGone` to `coarseFull` px, as the net below it
+   * goes over the same octave of its cells.
+   */
+  coarseFull: 20,
+  coarseGone: 10,
+  /** The same for their casing, which shows only on dark parts: about a default grid's cells. */
+  coarseCasingFull: 48,
+  coarseCasingGone: 24,
   /** How far a line may sit behind the surface and still show: pixels, and at most mm. */
   tolerance: 1,
   toleranceMax: 0.05,
@@ -75,7 +87,9 @@ const glsl = (value: number) => (Number.isInteger(value) ? `${value}.0` : `${val
 const vertexShader = `
 uniform vec2 resolution;
 uniform float cell;
+uniform bool shifted;
 uniform highp sampler2D shifts;
+attribute float instanceCell;
 attribute vec3 instanceStart;
 attribute vec3 instanceEnd;
 attribute vec4 instanceWeights;
@@ -93,6 +107,26 @@ vec3 shiftOf( float node ) {
   return texelFetch( shifts, ivec2( i % ${warpGridShiftWidth}, i / ${warpGridShiftWidth} ), 0 ).xyz;
 }
 
+// How far a net has come in, by cells of so many px in the grid's own: the grid itself from
+// own.x to own.y px, a coarser net by its own cells from coarse.x to coarse.y.
+float fadeIn( float level, float pixels, vec2 own, vec2 coarse ) {
+  vec2 range = level < 0.5 ? own : coarse;
+  return clamp( ( pixels * exp2( level ) - range.x ) / ( range.y - range.x ), 0.0, 1.0 );
+}
+
+// How strongly this edge shows as part of the coarser nets it is in, each of which comes in as
+// the one below it goes, or, when late, only as the grid's own is nearly gone.
+float coarseStrength( float pixels, vec2 own, vec2 coarse, bool late ) {
+  float strength = 0.0;
+  for ( int level = 1; level <= 3; level++ ) {
+    if ( exp2( float( level ) ) > instanceCell + 0.5 ) break;
+    float below = 1.0 - fadeIn( float( level - 1 ), pixels, own, coarse );
+    if ( late && level == 1 ) below *= below;
+    strength = max( strength, min( below, fadeIn( float( level ), pixels, own, coarse ) ) );
+  }
+  return strength;
+}
+
 // As three's LineMaterial: a segment crossing the camera plane ends at the near plane.
 void trimSegment( const in vec4 start, inout vec4 end ) {
   float nearEstimate = - 0.5 * projectionMatrix[ 3 ][ 2 ] / projectionMatrix[ 2 ][ 2 ];
@@ -102,7 +136,11 @@ void trimSegment( const in vec4 start, inout vec4 end ) {
 
 void main() {
   bool atEnd = position.y > 0.5;
-  vec3 shiftA = shiftOf( instanceWeights.x ), shiftB = shiftOf( instanceWeights.y );
+  vec3 shiftA = vec3( 0.0 ), shiftB = vec3( 0.0 );
+  if ( shifted ) {
+    shiftA = shiftOf( instanceWeights.x );
+    shiftB = shiftOf( instanceWeights.y );
+  }
   vec4 start = modelViewMatrix * vec4( instanceStart + mix( shiftA, shiftB, instanceWeights.z ), 1.0 );
   vec4 end = modelViewMatrix * vec4( instanceEnd + mix( shiftA, shiftB, instanceWeights.w ), 1.0 );
   bool perspective = projectionMatrix[ 2 ][ 3 ] == - 1.0;
@@ -128,15 +166,28 @@ void main() {
     facing = abs( dot( normalize( normal ), perspective ? normalize( - centre ) : vec3( 0.0, 0.0, 1.0 ) ) );
   float cellPixels = cell / pixel * max( facing, 0.04 );
   float openPixels = cell / pixel;
+  // An edge of a coarser net also shows as part of it once the grid's own cells are too small, by
+  // zoom alone: where the surface turns away the coarse nets would crowd as the grid does.
+  bool coarse = instanceCell > 1.5;
 #ifdef CASING
   vHalf = 0.5 * ${glsl(style.casingWidth)};
   // Where the surface turns away, the casing still edges the core: it lifts only dark parts.
-  vAlpha = smoothstep( ${glsl(style.casingGone)}, ${glsl(style.casingFull)}, openPixels );
+  vec2 own = vec2( ${glsl(style.casingGone)}, ${glsl(style.casingFull)} );
+  vAlpha = smoothstep( own.x, own.y, openPixels );
+  if ( coarse )
+    vAlpha = max( vAlpha, smoothstep( 0.0, 1.0, coarseStrength( openPixels, own,
+      vec2( ${glsl(style.coarseCasingGone)}, ${glsl(style.coarseCasingFull)} ), false ) ) );
   float cap = 0.0;
 #else
-  vHalf = 0.5 * mix( ${glsl(style.coreThin)}, ${glsl(style.coreWidth)},
-    clamp( ( cellPixels - ${glsl(style.coreGone)} ) / ${glsl(style.coreFull - style.coreGone)}, 0.0, 1.0 ) );
-  vAlpha = smoothstep( ${glsl(style.coreGone)}, ${glsl(style.coreFull)}, cellPixels );
+  // The first coarse net's core comes in late, so on a light part the grid covers no more than
+  // at its default density.
+  vec2 own = vec2( ${glsl(style.coreGone)}, ${glsl(style.coreFull)} );
+  float strength = fadeIn( 0.0, cellPixels, own, own );
+  if ( coarse )
+    strength = max( strength, coarseStrength( openPixels, own,
+      vec2( ${glsl(style.coarseGone)}, ${glsl(style.coarseFull)} ), true ) );
+  vHalf = 0.5 * mix( ${glsl(style.coreThin)}, ${glsl(style.coreWidth)}, strength );
+  vAlpha = smoothstep( 0.0, 1.0, strength );
   float cap = vHalf;
 #endif
   // A pixel beyond the line's edge, for antialiasing.
@@ -160,8 +211,11 @@ void main() {
       - 1.0 );
     float toward = dot( normal, ray );
     float t = abs( toward ) > facingLimit * length( ray ) ? dot( normal, centre ) / toward : depth;
-    corner = ray * clamp( t, depth - limit, depth + 16.0 * limit );
-    corner -= normalize( corner ) * lift;
+    t = clamp( t, depth - limit, depth + 16.0 * limit );
+    corner = ray * t;
+    // Never pulled past halfway to the near plane, where it would be clipped.
+    float near = projectionMatrix[ 3 ][ 2 ] / ( projectionMatrix[ 2 ][ 2 ] - 1.0 );
+    corner -= normalize( corner ) * min( lift, max( 0.0, 0.5 * ( t - near ) ) * length( corner ) / t );
   } else {
     vec2 xy = vec2(
       ( ndc.x - projectionMatrix[ 3 ][ 0 ] ) / projectionMatrix[ 0 ][ 0 ],
@@ -169,7 +223,9 @@ void main() {
     float z = abs( normal.z ) > facingLimit
       ? centre.z - dot( normal.xy, xy - centre.xy ) / normal.z
       : centre.z;
-    corner = vec3( xy, clamp( z, centre.z - 16.0 * limit, centre.z + limit ) + lift );
+    z = clamp( z, centre.z - 16.0 * limit, centre.z + limit );
+    float near = ( projectionMatrix[ 3 ][ 2 ] + 1.0 ) / projectionMatrix[ 2 ][ 2 ];
+    corner = vec3( xy, z + min( lift, max( 0.0, 0.5 * ( - near - z ) ) ) );
   }
   gl_Position = projectionMatrix * vec4( corner, 1.0 );
 #ifdef GRID_ID
@@ -217,20 +273,15 @@ function gridMaterial(pass: 'casing' | 'core', uniforms: Record<string, { value:
     transparent: true,
     depthWrite: false,
     toneMapped: false,
-    // A mirrored part's matrix flips the winding of the screen-facing quads.
+    // A mirrored part's matrix flips the winding of the screen-facing quads. One pass draws both.
     side: DoubleSide,
+    forceSinglePass: true,
     blending: CustomBlending,
     // The casing only lifts what is darker than it; the core covers by its coverage.
     ...(pass === 'casing'
       ? { blendEquation: MaxEquation }
       : { blendSrc: OneFactor, blendDst: OneMinusSrcAlphaFactor }),
   });
-}
-
-/** The middle of a grid's edge lengths. */
-function typicalLength(lengths: Float32Array) {
-  const sorted = lengths.slice().sort();
-  return sorted[sorted.length >> 1] || 1;
 }
 
 /** Runs a trace in slices of a few milliseconds, so a large region never stalls a frame. */
@@ -318,6 +369,16 @@ function largestCell(
   return nearest > 0 ? (cell * scale) / nearest : Infinity;
 }
 
+/** How long the written surface stays as it is before the drawn points are chosen on it again. */
+const refineDelay = 80;
+
+/** Uploads the first `count` floats of a buffer that changed. */
+function upload(buffer: InstancedInterleavedBuffer | InstancedBufferAttribute, count: number) {
+  buffer.clearUpdateRanges();
+  buffer.addUpdateRange(0, count);
+  buffer.needsUpdate = true;
+}
+
 function SurfaceWarpGrid({ warp }: { warp: WarpSession }) {
   const model = warp.model!;
   const latest = useRef(warp);
@@ -325,9 +386,11 @@ function SurfaceWarpGrid({ warp }: { warp: WarpSession }) {
   const invalidate = useThree((s) => s.invalidate);
   const size = useThree((s) => s.size);
   const path = useTracedPath(model);
+  // Inspection draws the part see-through without depth, so its far side's lines would show.
+  const inspecting = useEditor((s) => s.view.inspection.enabled);
   const grid = useMemo(() => {
     const nodeCount = model.restNodes.length / 3;
-    const drawing = new WarpGridDrawing(path, nodeCount);
+    const drawing = new WarpGridDrawing(path, nodeCount, warpGridLevels(path, nodeCount));
     const geometry = new InstancedBufferGeometry();
     geometry.setAttribute(
       'position',
@@ -340,7 +403,10 @@ function SurfaceWarpGrid({ warp }: { warp: WarpSession }) {
     const normals = new InstancedInterleavedBuffer(drawing.normals, 6, 1);
     geometry.setAttribute('instanceNormalStart', new InterleavedBufferAttribute(normals, 3, 0));
     geometry.setAttribute('instanceNormalEnd', new InterleavedBufferAttribute(normals, 3, 3));
-    geometry.setAttribute('instanceWeights', new InstancedBufferAttribute(drawing.weights, 4));
+    const weights = new InstancedBufferAttribute(drawing.weights, 4);
+    geometry.setAttribute('instanceWeights', weights);
+    const cells = new InstancedBufferAttribute(drawing.cells, 1);
+    geometry.setAttribute('instanceCell', cells);
     geometry.instanceCount = drawing.segments;
     const shifts = new DataTexture(
       drawing.shifts,
@@ -353,6 +419,7 @@ function SurfaceWarpGrid({ warp }: { warp: WarpSession }) {
     const uniforms = {
       resolution: { value: new Vector2(1, 1) },
       cell: { value: typicalLength(path.length) },
+      shifted: { value: false },
       shifts: { value: shifts },
     };
     const casing = new Mesh(geometry, gridMaterial('casing', uniforms)),
@@ -361,6 +428,10 @@ function SurfaceWarpGrid({ warp }: { warp: WarpSession }) {
     core.name = 'warp-grid:core';
     casing.renderOrder = 6;
     core.renderOrder = 7;
+    // Each pass draws only the levels whose cells can show it, the coarsest first.
+    const counts = { casing: 0, core: 0 };
+    casing.onBeforeRender = () => (geometry.instanceCount = counts.casing);
+    core.onBeforeRender = () => (geometry.instanceCount = counts.core);
     for (const line of [casing, core]) {
       line.frustumCulled = false;
       line.raycast = noRaycast;
@@ -374,34 +445,42 @@ function SurfaceWarpGrid({ warp }: { warp: WarpSession }) {
     // Until the trace is done, edges are chords.
     space.userData = { model, traced: path.traced, drawing };
     space.add(casing, core);
-    // Where the grid lies, for whether any cell is large enough to show the casing.
-    const rest = model.restNodes,
-      node = new Vector3(),
-      centre = new Vector3();
-    for (let i = 0; i < rest.length; i += 3) centre.add(node.fromArray(rest, i));
-    centre.divideScalar(Math.max(1, nodeCount));
-    let radius = 0;
-    for (let i = 0; i < rest.length; i += 3)
-      radius = Math.max(radius, centre.distanceTo(node.fromArray(rest, i)));
+    // How far a line can stand off the sphere through its nodes.
+    let reach = 0;
+    for (let e = 0; e < path.length.length; e++) reach = Math.max(reach, path.length[e]);
     return {
       drawing,
       base,
       normals,
+      weights,
+      cells,
       shifts,
       geometry,
       casing,
       core,
+      counts,
       space,
       uniforms,
-      centre,
-      radius,
+      reach: reach * 1.5,
+      // The most the part's matrix stretches it, for sizes in its own space.
+      scale:
+        Math.max(
+          Math.hypot(model.matrix[0], model.matrix[1], model.matrix[2]),
+          Math.hypot(model.matrix[4], model.matrix[5], model.matrix[6]),
+          Math.hypot(model.matrix[8], model.matrix[9], model.matrix[10]),
+        ) || 1,
+      // Where the grid lies, for which levels have cells large enough to show.
+      centre: new Vector3(),
+      radius: Infinity,
       local: new Float32Array(nodeCount * 3),
       drawn: new Float64Array(nodeCount * 3).fill(Number.NaN),
       version: -1,
+      refine: undefined as ReturnType<typeof setTimeout> | undefined,
     };
   }, [path, model]);
   useEffect(
     () => () => {
+      clearTimeout(grid.refine);
       grid.geometry.dispose();
       grid.casing.material.dispose();
       grid.core.material.dispose();
@@ -414,39 +493,146 @@ function SurfaceWarpGrid({ warp }: { warp: WarpSession }) {
     invalidate();
   }, [grid, size, invalidate]);
   useLayoutEffect(() => invalidate(), [grid, invalidate]);
+
+  /** Once the written surface has stayed put a moment, chooses the drawn points on it again. */
+  const refineLater = (version: number) => {
+    clearTimeout(grid.refine);
+    if (!path.crossings) return;
+    const current = () => {
+      const warp = latest.current;
+      const position = warp.preview?.getAttribute('position') as BufferAttribute | undefined;
+      return warp.model === model && warp.output && (position?.version ?? 0) === version
+        ? warp.output
+        : null;
+    };
+    grid.refine = setTimeout(() => {
+      const output = current();
+      if (!output || grid.drawing.written !== version) return;
+      const job = grid.drawing.refining(output.positions);
+      const slice = () => {
+        if (!current()) return;
+        const deadline = performance.now() + 4;
+        do {
+          if (job.next().done) {
+            const output = current();
+            if (!output || grid.drawing.written !== version) return;
+            const changed = grid.drawing.adopt(output.positions, output.normals);
+            const segments = grid.drawing.segments;
+            if (changed.base) upload(grid.base, segments * 6);
+            if (changed.normals) upload(grid.normals, segments * 6);
+            if (changed.layout) {
+              upload(grid.weights, segments * 4);
+              upload(grid.cells, segments);
+            }
+            invalidate();
+            return;
+          }
+        } while (performance.now() < deadline);
+        grid.refine = setTimeout(slice, 0);
+      };
+      slice();
+    }, refineDelay);
+  };
+
   useFrame(({ camera }) => {
-    const { casing, uniforms, centre, radius } = grid;
-    // No casing work once every cell is too small to show it.
-    casing.visible =
-      largestCell(camera, size.height, uniforms.cell.value, centre, radius) > style.casingGone;
+    const { casing, core, counts, drawing, uniforms, centre } = grid;
     const warp = latest.current;
-    if (warp.model !== model || !warp.output) return;
-    const nodes = gridNodePositions(warp);
-    const position = warp.preview?.getAttribute('position') as BufferAttribute | undefined;
-    const version = position?.version ?? 0;
-    const { drawn, local } = grid;
-    let moved = false;
-    for (let i = 0; i < nodes.length; i++)
-      if (nodes[i] !== drawn[i]) {
-        moved = true;
-        break;
+    if (warp.model === model && warp.output) {
+      const nodes = gridNodePositions(warp);
+      const position = warp.preview?.getAttribute('position') as BufferAttribute | undefined;
+      const version = position?.version ?? 0;
+      const { drawn, local } = grid;
+      let moved = false;
+      for (let i = 0; i < nodes.length; i++)
+        if (nodes[i] !== drawn[i]) {
+          moved = true;
+          break;
+        }
+      if (moved || version !== grid.version) {
+        drawn.set(nodes);
+        grid.version = version;
+        const m = model.inverse;
+        let x = 0,
+          y = 0,
+          z = 0;
+        for (let i = 0; i < nodes.length; i += 3) {
+          x += nodes[i];
+          y += nodes[i + 1];
+          z += nodes[i + 2];
+        }
+        centre.set(x, y, z).divideScalar(Math.max(1, nodes.length / 3));
+        let far = 0;
+        for (let i = 0; i < nodes.length; i += 3) {
+          const dx = nodes[i] - centre.x,
+            dy = nodes[i + 1] - centre.y,
+            dz = nodes[i + 2] - centre.z;
+          far = Math.max(far, dx * dx + dy * dy + dz * dz);
+          local[i] = m[0] * nodes[i] + m[4] * nodes[i + 1] + m[8] * nodes[i + 2] + m[12];
+          local[i + 1] = m[1] * nodes[i] + m[5] * nodes[i + 1] + m[9] * nodes[i + 2] + m[13];
+          local[i + 2] = m[2] * nodes[i] + m[6] * nodes[i + 1] + m[10] * nodes[i + 2] + m[14];
+        }
+        grid.radius = Math.sqrt(far) + grid.reach;
+        const changed = drawing.update(local, warp.output.positions, warp.output.normals, version);
+        const segments = drawing.segments;
+        if (changed.base) {
+          upload(grid.base, segments * 6);
+          refineLater(version);
+        }
+        if (changed.normals) upload(grid.normals, segments * 6);
+        if (changed.shifts) grid.shifts.needsUpdate = true;
+        uniforms.shifted.value = drawing.shifted;
       }
-    if (!moved && version === grid.version) return;
-    drawn.set(nodes);
-    grid.version = version;
-    const m = model.inverse;
-    for (let i = 0; i < nodes.length; i += 3) {
-      const x = nodes[i],
-        y = nodes[i + 1],
-        z = nodes[i + 2];
-      local[i] = m[0] * x + m[4] * y + m[8] * z + m[12];
-      local[i + 1] = m[1] * x + m[5] * y + m[9] * z + m[13];
-      local[i + 2] = m[2] * x + m[6] * y + m[10] * z + m[14];
     }
-    const changed = grid.drawing.update(local, warp.output.positions, warp.output.normals, version);
-    if (changed.base) grid.base.needsUpdate = true;
-    if (changed.normals) grid.normals.needsUpdate = true;
-    if (changed.shifts) grid.shifts.needsUpdate = true;
+    // Points that bend a line by less than half the smallest pixel on the grid are left out, and
+    // never by more than most of the pull toward the camera, so a chord never dips under.
+    const output = warp.model === model ? warp.output : null;
+    if (output) {
+      const p = camera.projectionMatrix.elements,
+        v = camera.matrixWorldInverse.elements,
+        nodes = grid.drawn;
+      // The nearest node's depth, less a cell, for the nearest any line comes.
+      let nearest = Infinity;
+      if (p[11] === -1)
+        for (let i = 0; i < nodes.length; i += 3)
+          nearest = Math.min(
+            nearest,
+            -(v[2] * nodes[i] + v[6] * nodes[i + 1] + v[10] * nodes[i + 2] + v[14]),
+          );
+      else nearest = 1 + uniforms.cell.value;
+      nearest -= uniforms.cell.value;
+      const pixel = (2 * nearest) / (p[5] * size.height) / grid.scale;
+      const bound = Math.min(
+        0.5 * style.tolerance * pixel,
+        (0.75 * style.toleranceMax) / grid.scale,
+      );
+      // In steps of two, held while the bound stays within one more step, so a drag that
+      // brings the grid a little nearer and back does not lay it out again each frame.
+      const held = drawing.shown;
+      const detail = !(nearest > 0 && bound > 0)
+        ? 0
+        : held > 0 && bound >= held && bound < 4 * held
+          ? held
+          : 2 ** Math.floor(Math.log2(bound));
+      const changed = drawing.detail(detail, output.positions, output.normals);
+      if (changed.layout) {
+        const segments = drawing.segments;
+        upload(grid.base, segments * 6);
+        if (changed.normals) upload(grid.normals, segments * 6);
+        upload(grid.weights, segments * 4);
+        upload(grid.cells, segments);
+      }
+    }
+    // Levels whose largest cell is too small on screen for a pass to show are not drawn by it.
+    const largest = largestCell(camera, size.height, uniforms.cell.value, centre, grid.radius);
+    const shown = (gone: number, coarseGone: number) => {
+      for (let level = 0; level < drawing.levelEnd.length; level++)
+        if (largest * 2 ** level > (level ? coarseGone : gone)) return drawing.levelEnd[level];
+      return 0;
+    };
+    counts.casing = shown(style.casingGone, style.coarseCasingGone);
+    counts.core = shown(style.coreGone, style.coarseGone);
+    casing.visible = counts.casing > 0;
+    core.visible = counts.core > 0;
   });
-  return <primitive object={grid.space} />;
+  return <primitive object={grid.space} visible={!inspecting} />;
 }
