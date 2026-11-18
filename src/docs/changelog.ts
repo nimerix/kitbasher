@@ -24,6 +24,10 @@ export const releases: Release[] = [
         kind: 'new',
         text: 'A What’s new page in the documentation lists the features and changes in every version.',
       },
+      {
+        kind: 'new',
+        text: 'The sparkle button in the workbench header shows the latest releases, with a dot when there is one you haven’t seen.',
+      },
     ],
   },
   {
