@@ -80,8 +80,8 @@ export interface WarpGrowth {
  * Distance spreads only across shared edges: each welded vertex is split into fans of faces that
  * share an edge there, so growth never crosses onto another surface through a single shared
  * vertex. Band vertices on a mesh boundary are pinned, so a rim or hole inside the band stays put.
- * Where the band would leave a connected piece no fixed vertex at all, its farthest ring stays
- * unjoined as an anchor.
+ * Where the band would leave an edge-connected piece no fixed boundary edge, its farthest ring
+ * stays unjoined as an anchor.
  */
 export function growWarpRegion(
   corner: Uint32Array,
@@ -276,8 +276,11 @@ export function growWarpRegion(
 }
 
 /**
- * For each connected piece of the grown region that had a fixed edge before growth and has none
- * after, leaves its farthest band ring unjoined so that ring stays fixed. Returns how many pieces.
+ * For each edge-connected piece of the grown region with no fixed boundary edge, leaves its
+ * farthest band ring unjoined so that ring stays fixed. Returns how many pieces.
+ *
+ * A fixed boundary edge is one region face uses alone, with both ends fixed. Grid simplification
+ * locks such edges, so they survive into the grid; a lone fixed vertex may not.
  */
 function anchorSwallowed(
   corner: Uint32Array,
@@ -307,7 +310,6 @@ function anchorSwallowed(
   let anchored = 0;
   for (let seed = 0; seed < faceCount; seed++) {
     if (!join[seed] || piece[seed] >= 0) continue;
-    // Region faces connected through welded vertices, as the solve sees them.
     const members: number[] = [];
     let hasFixed = false;
     piece[seed] = seed;
@@ -316,15 +318,25 @@ function anchorSwallowed(
       const f = stack.pop()!;
       members.push(f);
       for (let k = 0; k < 3; k++) {
-        const v = corner[f * 3 + k];
-        if (fixed[v]) hasFixed = true;
-        for (let e = start[v]; e < start[v + 1]; e++) {
+        const a = corner[f * 3 + k],
+          b = corner[f * 3 + ((k + 1) % 3)];
+        if (a === b) continue;
+        // Region faces across edge ab, this one included.
+        let uses = 0;
+        for (let e = start[a]; e < start[a + 1]; e++) {
           const g = (incident[e] - (incident[e] % 3)) / 3;
-          if (piece[g] < 0 && inRegion(g)) {
+          if (
+            !inRegion(g) ||
+            (corner[g * 3] !== b && corner[g * 3 + 1] !== b && corner[g * 3 + 2] !== b)
+          )
+            continue;
+          uses++;
+          if (piece[g] < 0) {
             piece[g] = seed;
             stack.push(g);
           }
         }
+        if (uses === 1 && fixed[a] && fixed[b]) hasFixed = true;
       }
     }
     if (hasFixed) continue;

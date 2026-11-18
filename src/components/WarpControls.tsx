@@ -13,6 +13,7 @@ import {
 } from '../core/store';
 import type { Part } from '../core/types';
 import { warpDensityNodes } from '../core/warp-grid';
+import { featherWarning } from '../core/warp-model';
 import { SurfaceBrushControls } from './SurfaceBrushControls';
 import { TransformAdjustments } from './TransformAdjustments';
 import { LogRangeInput, NumericInput, RadioGroup, Section } from './ui';
@@ -210,6 +211,8 @@ export function WarpControls() {
     s.warp ? s.scene.parts.find((p) => p.id === s.warp!.partId) : undefined,
   );
   const feathered = useEditor((s) => s.warpFeather.enabled);
+  const featherNote = featherWarning(warp?.model?.feather);
+  const featherWidth = warp?.model?.feather?.width;
   if (!warp)
     return (
       <Section title="Warp">
@@ -337,19 +340,27 @@ export function WarpControls() {
           <span>Fine</span>
         </div>
         <p className="anchor-help">Coarser grids bend broadly. Finer grids bend locally.</p>
-        {warp.model?.feather?.joined === 0 && warp.model.feather.edge > 0 ? (
+        {featherNote === 'unanchored' ? (
           <p className="warp-warning" role="status">
             <TriangleAlert size={13} aria-hidden="true" />
-            The mesh beside the paint is too coarse for a {warp.model.feather.width} mm feather, so
-            the painted edge stays fixed. Edit the region to widen it.
+            The {featherWidth} mm feather would leave part of the area with nothing fixed to hold
+            it, so the painted edge stays fixed. Edit the region to narrow the feather or paint
+            less.
           </p>
         ) : null}
-        {warp.model?.feather?.anchored ? (
+        {featherNote === 'coarse' ? (
           <p className="warp-warning" role="status">
             <TriangleAlert size={13} aria-hidden="true" />
-            The {warp.model.feather.width} mm feather reaches all the way around, so the area
-            farthest from the paint stays fixed to hold the part in place. Edit the region to narrow
-            the feather or paint less.
+            The mesh beside the paint is too coarse for a {featherWidth} mm feather, so the painted
+            edge stays fixed. Edit the region to widen it.
+          </p>
+        ) : null}
+        {featherNote === 'anchored' ? (
+          <p className="warp-warning" role="status">
+            <TriangleAlert size={13} aria-hidden="true" />
+            The {featherWidth} mm feather reaches all the way around, so the area farthest from the
+            paint stays fixed to hold the part in place. Edit the region to narrow the feather or
+            paint less.
           </p>
         ) : null}
         {building ? (
