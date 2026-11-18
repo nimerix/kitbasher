@@ -29,6 +29,27 @@ as `#pick-a-method`. Query links need no per-article server routing. Native brow
 history, modified-click, and full-page deep links work independently of the
 client-side navigation enhancement.
 
+## What's new
+
+`src/docs/changelog.ts` lists every version, newest first, and renders at
+`?guide=whats-new`. The sidebar and the overview link to the newest release.
+
+Every pull request adds one release at the top of the list:
+
+1. Run `npm version minor --no-git-tag-version` for a new feature, or `patch` for
+   a fix or small improvement. This updates `package.json` and `package-lock.json`.
+2. Add a release with the same `version`, today's `date`, a short `title`, and one
+   entry per user-visible change. Mark each `new`, `improved`, or `fixed`, and set
+   `guide` to an article ID to link to it.
+
+Write for people using Kitbasher, not for reviewers: what they can now do, or what
+works differently. The Changelog workflow runs `scripts/check-changelog.mjs`, which
+fails a pull request that leaves the changelog untouched, does not raise the
+version above `main`, or lets `package.json`, `package-lock.json`, and the newest
+release disagree. `tests/unit/changelog.test.ts` checks ordering, dates, and guide
+links. If two open pull requests take the same version, the one merged second must
+move to the next version.
+
 ## Images
 
 Screenshots and explanatory SVG diagrams are in `public/docs/images/`. Figures

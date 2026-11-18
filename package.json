@@ -1,6 +1,6 @@
 {
   "name": "kitbasher",
-  "version": "1.0.0",
+  "version": "1.18.0",
   "description": "A local-first 3D assembly workbench for multipart models",
   "scripts": {
     "dev": "vite",
