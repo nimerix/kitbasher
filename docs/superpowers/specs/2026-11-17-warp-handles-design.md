@@ -44,7 +44,10 @@ grid over a part, control points on it, an as-rigid-as-possible solve, a bake on
   the painted faces. Its adjacency covers region triangles only. `warp-grid.ts` simplifies
   the region to roughly 60–4000 nodes (real scan vertices; `LockBorder` can exceed the
   target); border nodes are `fixed`.
-- `warp-solve.ts` runs ARAP on the grid. A `WarpConstraint` ties a weighted set of nodes to
+- `warp-solve.ts` runs ARAP on the grid, its edges weighted by their cotangents at rest (clamped
+  to 0.5–10, an equilateral grid's being 1), so an uneven grid bends as smoothly as an even one
+  and a node close to the fixed border follows it. Each iteration refines its warm-started
+  rotations three steps. A `WarpConstraint` ties a weighted set of nodes to
   a world target at strength 1000; weights are normalised, so they cannot carry stiffness.
   Fixed nodes are left out of the system. A control point is the barycentric sum of three
   skinned triangle corners (up to 12 nodes, plus a part held by fixed corners), and the
@@ -190,7 +193,8 @@ Radius adds soft per-node **guides** around them.
   `κ w diag` and holds it at its baseline for the rest of the profile, so alone it targets
   `baseline + w × offset`, never more than the offset. A holding term, and all of an unmoved
   handle's profile, gives way by the largest driving weight any other moved handle has there.
-  Unmoved becomes moved over the first quarter spacing of travel, so nothing jumps. `κ = 4`.
+  Unmoved becomes moved over the first quarter spacing of travel, so nothing jumps. `κ = 4`,
+  of the node's diagonal from its weighted edges.
 - **Accumulation.** Stiffnesses add and the target is their stiffness-weighted mean; nothing
   depends on the order of handles. Gap-target nodes get no guides.
 - **Solver.** `solveWarp` takes the per-node guide set. Guide nodes and stiffnesses are part of

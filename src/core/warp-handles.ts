@@ -4,7 +4,12 @@ import type { WarpGrid } from './warp-grid';
 import { isPaintedNode, type WarpModel } from './warp-model';
 import { regionTriangleOf, WarpRole } from './warp-region';
 import { deformPoint } from './warp-evaluate';
-import type { WarpConstraint, WarpGuides, WarpState } from './warp-solve';
+import {
+  warpNodeStiffness,
+  type WarpConstraint,
+  type WarpGuides,
+  type WarpState,
+} from './warp-solve';
 
 /** A surface point a handle holds. Immutable: moving a handle moves every sample by its offset. */
 export interface WarpSample {
@@ -227,7 +232,8 @@ export function handleConstraints(
             weight[k] *
             Math.min(
               1,
-              guides.stiffness[g] / (warpGuideStiffness * 2 * (edgeStart[n + 1] - edgeStart[n])),
+              guides.stiffness[g] /
+                (warpGuideStiffness * warpNodeStiffness(model.grid, model.restNodes, n)),
             );
       }
     }
@@ -287,13 +293,12 @@ function rideOffset(
   binding: WarpPointBinding,
 ): Vec3 | null {
   if (baseline.grid !== model.grid) return null;
-  const { edgeStart } = model.grid;
   const offset: Vec3 = [0, 0, 0];
   let moved = false;
   binding.node.forEach((n, k) => {
     const g = guideIndex(guides, n);
     if (g < 0) return;
-    const full = warpGuideStiffness * 2 * (edgeStart[n + 1] - edgeStart[n]);
+    const full = warpGuideStiffness * warpNodeStiffness(model.grid, model.restNodes, n);
     const share = binding.weight[k] * Math.min(1, guides.stiffness[g] / full);
     for (let a = 0; a < 3; a++) {
       const d = share * (guides.target[g * 3 + a] - baseline.positions[n * 3 + a]);
@@ -662,7 +667,6 @@ export function warpGuides(
       } else if (m > second[n]) second[n] = m;
     }
   });
-  const { edgeStart } = grid;
   const stiffness = new Float64Array(count),
     target = new Float64Array(count * 3);
   const touched: number[] = [];
@@ -671,7 +675,7 @@ export function warpGuides(
     for (let i = 0; i < reach.node.length; i++) {
       const n = reach.node[i];
       if (blocked[n]) continue;
-      const full = warpGuideStiffness * 2 * (edgeStart[n + 1] - edgeStart[n]);
+      const full = warpGuideStiffness * warpNodeStiffness(grid, model.restNodes, n);
       const others = leader[n] === h ? second[n] : first[n];
       const drive = full * weight[i] * (1 - (1 - motion) * others);
       const hold = full * (profile[i] - weight[i]) * (1 - others);

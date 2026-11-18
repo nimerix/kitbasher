@@ -2311,8 +2311,11 @@ describe('warp handles', () => {
     }
     // Each step comes back as closely as the new grid holds the current surface itself.
     for (const error of errors) expect(error).toBeLessThan(errors[0] * 1.05 + 0.02);
-    // The evenly spaced grids at these two densities hold the handles 0.88 mm apart, from 0.47.
-    expect(errors[0]).toBeLessThan(0.9);
+    // Largest beside the downward point, whose dip around it is a node spacing wide. The evenly
+    // spaced grids at the two densities place that dip differently: 0.56 to 1.69 mm as the point
+    // shifts by up to 0.6 mm, where the simplifier's grids, on this plate's rows at both densities,
+    // gave 0.50 to 0.89.
+    expect(errors[0]).toBeLessThan(1.4);
   });
 
   it('a rebuild drops points that could only sit on fixed nodes, from undo steps too', async () => {
@@ -2682,7 +2685,9 @@ describe('line and area handles through a session', () => {
     const line = handleOf('line', samples);
     expect(line.samples).toHaveLength(13);
     const between = Array.from({ length: 12 }, (_, i): [number, number] => [-2.75 + i * 0.5, 0.3]);
-    await lifecycle(line, between, 0.05);
+    // On the evenly spaced grid a radius of 4 pulls a footprint node 0.1 mm under the ridge, and
+    // the line's end samples ride their nodes' tilted skin maps to 1.971 and 2.056 mm.
+    await lifecycle(line, between, 0.06);
   });
 
   it('an area moves as one patch, also one smaller than a grid cell', async () => {
