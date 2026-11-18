@@ -115,7 +115,10 @@ export function bindRegion(
       weight[v * K + j] = w;
       sum += w;
     }
-    for (let j = 0; j < used; j++) weight[v * K + j] /= sum;
+    // Nodes all as far as the radius weigh nothing, so they share the vertex equally.
+    if (!(sum > 0) || !Number.isFinite(sum))
+      for (let j = 0; j < used; j++) weight[v * K + j] = 1 / used;
+    else for (let j = 0; j < used; j++) weight[v * K + j] /= sum;
   }
   return { node, weight };
 }
