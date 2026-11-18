@@ -164,17 +164,14 @@ describe('a new point’s first drag at the default settings', () => {
       for (const { active, pulls } of results) {
         expect(active).toBe(true);
         const [outward, ...moderate] = pulls;
-        // A 2 mm pull: the grid never lifts past the point, and skinning between nodes adds a
-        // little on a coarse curved patch.
-        expect(outward.lift).toBeLessThan(1.2);
-        expect(outward.nearTenth).toBeGreaterThanOrEqual(0.85);
-        expect(outward.tip).toBeLessThan(0.025);
+        // A 2 mm pull: the grid never lifts past the point, and skin maps that stretch with it
+        // keep the surface between nodes within a few percent.
+        expect(outward.lift).toBeLessThan(1.05);
+        expect(outward.nearTenth).toBeGreaterThanOrEqual(0.93);
+        expect(outward.tip).toBeLessThan(0.01);
         // A tangential and an inward pull of 1.5 % of the part.
-        for (const pull of moderate) expect(pull.lift).toBeLessThan(1.25);
+        for (const pull of moderate) expect(pull.lift).toBeLessThan(1.05);
       }
-      // Where a wide bump wraps a tight edge of the part a few small triangles still turn over.
-      const folding = results.flatMap(({ pulls }) => pulls.filter(({ folds }) => folds > 0));
-      expect(folding.length).toBeLessThanOrEqual(2);
-      for (const { folds } of folding) expect(folds).toBeLessThan(50);
+      for (const { pulls } of results) for (const { folds } of pulls) expect(folds).toBe(0);
     }, 300_000);
 });
