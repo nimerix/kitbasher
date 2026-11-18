@@ -1,7 +1,8 @@
 import type { Vec3 } from './types';
-import { bindTrianglePoint, type WarpPointBinding } from './warp-bind';
+import { bindTrianglePoint, warpBindingNodes, type WarpPointBinding } from './warp-bind';
 import type { WarpGrid } from './warp-grid';
-import type { WarpModel } from './warp-model';
+import { isPaintedNode, type WarpModel } from './warp-model';
+import { WarpRole } from './warp-region';
 import type { WarpConstraint, WarpGuides } from './warp-solve';
 
 /** A surface point a handle holds. Immutable: moving a handle moves every sample by its offset. */
@@ -14,34 +15,47 @@ export interface WarpSample {
   pin: Vec3;
 }
 
-export type WarpHandleKind = 'point';
+/** Only points are made today. A line or an area is a handle with many samples. */
+export type WarpHandleKind = 'point' | 'line' | 'area';
 
 /**
- * The free nodes a handle guides on one grid, and where each guide starts from. Its footprint, the
- * free nodes its samples are bound to, comes first.
+ * Node positions and rotations on one grid, as a solve settled them. Never mutated once made, so
+ * handles and undo steps share it by reference.
  */
+export interface WarpSnapshot {
+  grid: WarpGrid;
+  positions: Float64Array;
+  rotations: Float64Array;
+  /** False when carried over from another grid: a close starting point rather than a solve. */
+  settled: boolean;
+}
+
+/** Where a handle's reach is measured from. */
+export interface WarpFootprint {
+  /** Free nodes that move with the handle as one, at full weight whatever the radius. */
+  nodes: readonly number[];
+  /** Rest world points straight-line distance is measured from. */
+  sources: readonly Vec3[];
+  /** Free nodes paths along the grid start from, at their straight-line distance. */
+  seeds: readonly number[];
+}
+
+/** The free nodes a handle's radius and holding band cover on one grid. */
 export interface WarpReach {
   grid: WarpGrid;
+  radius: number;
+  /** What the reach was measured from, to tell when it must be measured again. */
+  key: unknown;
+  /** Mean rest length of the grid edges at the footprint, mm. */
+  spacing: number;
+  /** 0 up to one spacing of radius, rising smoothly to 1 at two: what share of the guides apply. */
+  activation: number;
+  /** Footprint nodes first, then the others in node order. */
   node: Uint32Array;
-  /** How many of `node`, from the start, are the handle's footprint. */
+  /** How many of `node`, from the start, are the footprint's own. */
   own: number;
-  /** Straight-line rest distance from the nearest sample, mm. */
+  /** Intrinsic rest distance from the footprint, mm. */
   distance: Float64Array;
-  /** Whether the radius reaches any node beyond the footprint. */
-  effective: boolean;
-  /** Width of the band beyond the radius where guides hold the surface, mm. */
-  skirt: number;
-  /** Narrowest fade the grid holds here, mm. */
-  edge: number;
-  /**
-   * Share of the offset each footprint node carries: the radius's weight, scaled so the samples
-   * move by the whole offset; 1 when the radius has no effect.
-   */
-  carried: Float64Array;
-  /** World position per node the guide holds while the handle is unmoved. */
-  base: Float64Array;
-  /** Per footprint node, the target of the earlier handles' guides it took over. */
-  held: Float64Array;
 }
 
 export interface WarpHandle {
@@ -58,40 +72,57 @@ export interface WarpHandle {
   falloff: number;
   /** Placed by Distribute points or automatically, and not moved or edited since. */
   auto: boolean;
-  /** Null until the handle is bound to a model. */
+  /** The settled surface the handle's guides start from. */
+  baseline: WarpSnapshot;
+  /** Null until measured on a model. */
   reach: WarpReach | null;
 }
 
 /** Guide stiffness relative to a node's diagonal in the ARAP system. */
 export const warpGuideStiffness = 4;
-// First-order ARAP bends like a plate, so a bump whose guides fade out at the radius carries its
-// slope on past it. Guides also hold a band beyond the radius at zero weight, fading over it.
-const skirtShare = 0.5,
-  skirtSpacings = 2.5;
-// A cliff sharper than the grid turns the nodes on it on edge, and the bend carries on past it.
-const edgeSpacings = 1;
-// Distance is measured in a straight line, which grid paths overstate unevenly, among nodes the
-// grid connects within this multiple of the reach, so it does not jump across thin walls.
-const reachSlack = 1.5;
-// A footprint's own guides only stop its nodes sagging around the samples, which hold it exactly.
-const footprintShare = 0.25;
+/** Grid paths overstate straight-line distance on a flat triangulation by about this much. */
+export const warpPathStretch = 1.16;
+/**
+ * Width of the band past a moved handle's radius that holds the surface, in node spacings, at
+ * falloff 100 %. A sharper fade carries its slope farther, so the band grows to one spacing
+ * wider at falloff 0.
+ */
+export const warpBandSpacings = 2.5;
+const sharpBandSpacings = 1;
+/** The holding band's width for a handle, mm. */
+export const bandWidth = (falloff: number, spacing: number) =>
+  (warpBandSpacings + sharpBandSpacings * (1 - falloff)) * spacing;
+/**
+ * Past the band, a moved handle goes on holding at this share of full stiffness, fading to 0
+ * over this many node spacings. It keeps the far surface steady, so a drag frame converges as
+ * fast as it did with a wider band.
+ */
+export const warpTailShare = 0.25;
+export const warpTailSpacings = 10;
+/** The narrowest fade the grid holds, in node spacings: falloff 0. */
+export const warpFadeSpacings = 1.5;
+/** How far a handle moves, in node spacings, before it drives rather than holds. */
+const motionSpacings = 0.25;
+
+const smoothstep = (t: number) => (t <= 0 ? 0 : t >= 1 ? 1 : t * t * (3 - 2 * t));
 
 /**
- * 1 out to radius × (1 − falloff), then a smoothstep down to 0 at the radius. The fade is at least
- * `edge` wide, where the grid could not hold a sharper one.
+ * 1 out to radius − fade, then a smoothstep down to 0 at the radius. The fade runs from `edge`,
+ * the narrowest the grid holds, at falloff 0 to the whole radius at falloff 1.
  */
 export function reachWeight(distance: number, radius: number, falloff: number, edge = 0) {
   if (!(distance <= radius)) return 0;
-  const inner = radius - Math.min(radius, Math.max(radius * falloff, edge));
+  const fade = radius <= edge ? radius : edge + falloff * (radius - edge);
+  const inner = radius - fade;
   if (distance <= inner) return 1;
-  const t = (distance - inner) / (radius - inner);
-  return 1 - t * t * (3 - 2 * t);
+  return 1 - smoothstep((distance - inner) / fade);
 }
 
-/** Share of the guide stiffness at `distance`: full inside the radius, fading across the band. */
-export function reachStiffness(distance: number, radius: number, skirt: number) {
-  return distance <= radius ? 1 : reachWeight(distance - radius, skirt, 1);
-}
+/** Fade width the grid gives a handle at this falloff, mm. */
+export const fadeWidth = (handle: Pick<WarpHandle, 'radius' | 'falloff' | 'reach'>) => {
+  const edge = warpFadeSpacings * (handle.reach?.spacing ?? 0);
+  return handle.radius <= edge ? handle.radius : edge + handle.falloff * (handle.radius - edge);
+};
 
 /** How far the handle has moved from its pin. */
 export function handleOffset(handle: Pick<WarpHandle, 'pin' | 'target'>): Vec3 {
@@ -101,40 +132,117 @@ export function handleOffset(handle: Pick<WarpHandle, 'pin' | 'target'>): Vec3 {
 
 const samePosition = (a: Vec3, b: Vec3) => a[0] === b[0] && a[1] === b[1] && a[2] === b[2];
 
-/** One exact constraint per sample, moved by the handle's offset. */
-export function handleConstraints(handles: readonly WarpHandle[]): WarpConstraint[] {
+/**
+ * One exact constraint per sample, moved by the handle's offset. On `model`, an untouched
+ * automatic point inside the radius of a moved handle rides with it by that handle's weight
+ * there, so a bump rises smoothly over it; it holds its pin wherever nothing drives the
+ * surface. Where several handles reach it, their weights share it out, so it never moves farther
+ * than the farthest of them.
+ */
+export function handleConstraints(
+  handles: readonly WarpHandle[],
+  model?: WarpModel,
+): WarpConstraint[] {
+  const guiding = model
+    ? handles.filter((handle) => handle.reach?.grid === model.grid && handleGuides(handle))
+    : [];
+  const driving = guiding.some((handle) => handle.target !== null) ? guiding : [];
   const constraints: WarpConstraint[] = [];
   for (const handle of handles) {
     const offset = handleOffset(handle);
-    for (const sample of handle.samples)
+    const riding = driving.length && handle.auto && handle.target === null;
+    for (const sample of handle.samples) {
+      const ride = riding ? rideOffset(driving, sample.binding) : null;
       constraints.push({
         ...sample.binding,
         rest: sample.restWorld,
         target:
           handle.target === null
-            ? sample.pin
+            ? ride
+              ? [sample.pin[0] + ride[0], sample.pin[1] + ride[1], sample.pin[2] + ride[2]]
+              : sample.pin
             : samePosition(sample.pin, handle.pin)
               ? handle.target
               : [sample.pin[0] + offset[0], sample.pin[1] + offset[1], sample.pin[2] + offset[2]],
       });
+    }
   }
   return constraints;
 }
 
-/** Nodes the handle covers before its radius, at their distance from the nearest sample. */
-export function handleFootprint(model: WarpModel, handle: Pick<WarpHandle, 'samples'>) {
-  const { restNodes } = model;
-  const footprint = new Map<number, number>();
-  for (const { binding, restWorld } of handle.samples)
-    for (const n of binding.node) {
-      const d = Math.hypot(
-        restWorld[0] - restNodes[n * 3],
-        restWorld[1] - restNodes[n * 3 + 1],
-        restWorld[2] - restNodes[n * 3 + 2],
-      );
-      if (!(footprint.get(n)! <= d)) footprint.set(n, d);
-    }
-  return footprint;
+/**
+ * Each handle's offset by its weight at the nodes a sample is bound to, shared out by how much
+ * each drives there; unmoved handles take no share.
+ */
+function rideOffset(driving: readonly WarpHandle[], binding: WarpPointBinding): Vec3 | null {
+  const offset: Vec3 = [0, 0, 0];
+  let total = 0;
+  for (const handle of driving) {
+    const reach = handle.reach!;
+    const edge = warpFadeSpacings * reach.spacing;
+    let w = 0;
+    binding.node.forEach((n, k) => {
+      const i = reachIndex(reach, n);
+      if (i < 0) return;
+      const weight =
+        i < reach.own
+          ? 1
+          : reach.activation * reachWeight(reach.distance[i], handle.radius, handle.falloff, edge);
+      w += binding.weight[k] * weight;
+    });
+    if (!(w > 0)) continue;
+    const d = handleOffset(handle);
+    total += w * motionOf(handle);
+    for (let a = 0; a < 3; a++) offset[a] += w * d[a];
+  }
+  if (!(total > 0) || (!offset[0] && !offset[1] && !offset[2])) return null;
+  const scale = 1 / Math.max(1, total);
+  return [offset[0] * scale, offset[1] * scale, offset[2] * scale];
+}
+
+/** Where node `n` is in the reach, or -1. */
+function reachIndex(reach: WarpReach, n: number) {
+  for (let i = 0; i < reach.own; i++) if (reach.node[i] === n) return i;
+  let low = reach.own,
+    high = reach.node.length - 1;
+  while (low <= high) {
+    const mid = (low + high) >> 1;
+    if (reach.node[mid] === n) return mid;
+    if (reach.node[mid] < n) low = mid + 1;
+    else high = mid - 1;
+  }
+  return -1;
+}
+
+const eligibleNodes = new WeakMap<WarpModel, Uint8Array>();
+
+/** 1 per node a handle can guide or sit on: free, and painted when the region is feathered. */
+export function warpEligibleNodes(model: WarpModel) {
+  let eligible = eligibleNodes.get(model);
+  if (!eligible) {
+    const { fixed } = model.grid;
+    eligible = new Uint8Array(fixed.length);
+    for (let n = 0; n < fixed.length; n++)
+      eligible[n] = !fixed[n] && isPaintedNode(model, n) ? 1 : 0;
+    eligibleNodes.set(model, eligible);
+  }
+  return eligible;
+}
+
+/** A point's footprint: its samples, with paths starting at the free nodes they are bound to. */
+export function handleFootprint(
+  model: WarpModel,
+  handle: Pick<WarpHandle, 'samples'>,
+): WarpFootprint {
+  const eligible = warpEligibleNodes(model);
+  const seeds = new Set<number>();
+  for (const { binding } of handle.samples)
+    for (const n of binding.node) if (eligible[n]) seeds.add(n);
+  return {
+    nodes: [],
+    sources: handle.samples.map(({ restWorld }) => restWorld),
+    seeds: [...seeds].sort((a, b) => a - b),
+  };
 }
 
 class Heap {
@@ -183,13 +291,14 @@ class Heap {
 }
 
 /**
- * Multi-source Dijkstra over grid edges at world rest lengths, lowering `distance` in place and
- * stopping at `limit`. Returns the nodes it reached, in the order they settled.
+ * Multi-source Dijkstra over grid edges at world rest lengths, through the nodes `through`
+ * allows, lowering `distance` in place and stopping at `limit`. Returns the nodes it settled.
  */
 function relax(
   model: WarpModel,
-  seeds: Iterable<[number, number]>,
+  seeds: Iterable<readonly [number, number]>,
   distance: Float64Array,
+  through: Uint8Array,
   limit = Infinity,
 ) {
   const { grid, restNodes } = model;
@@ -209,6 +318,7 @@ function relax(
     settled.push(i);
     for (let e = edgeStart[i]; e < edgeStart[i + 1]; e++) {
       const j = edges[e];
+      if (!through[j]) continue;
       const next =
         d +
         Math.hypot(
@@ -226,7 +336,7 @@ function relax(
 }
 
 /** Mean rest length of the grid edges at these nodes. */
-function spacingAt(model: WarpModel, nodes: Iterable<number>) {
+export function spacingAt(model: WarpModel, nodes: Iterable<number>) {
   const { grid, restNodes } = model;
   const { edgeStart, edges } = grid;
   let sum = 0,
@@ -244,163 +354,106 @@ function spacingAt(model: WarpModel, nodes: Iterable<number>) {
   return count ? sum / count : 0;
 }
 
+/** Share of a handle's guides that apply at this radius: none within one spacing, all at two. */
+export const reachActivation = (radius: number, spacing: number) =>
+  spacing > 0 ? smoothstep(radius / spacing - 1) : 0;
+
 /**
- * The free nodes the handle guides: its footprint, then those within its radius and the band
- * beyond it. Only the footprint when the radius reaches no node beyond it.
+ * The free nodes within `radius` of the footprint and the widest holding band and tail past it.
+ * Distance
+ * is the larger of the straight-line distance and the grid path over `warpPathStretch`, so it is
+ * round on a flat area and cannot cross a fold to a surface the grid does not join nearby.
  */
-export function handleReachNodes(model: WarpModel, handle: Pick<WarpHandle, 'samples' | 'radius'>) {
-  const { radius, samples } = handle;
-  const { fixed } = model.grid;
-  const { restNodes } = model;
-  const footprint = handleFootprint(model, handle);
-  const nearest = (n: number) => {
+export function footprintReach(
+  model: WarpModel,
+  footprint: WarpFootprint,
+  radius: number,
+  key: unknown = footprint,
+): WarpReach {
+  const { grid, restNodes } = model;
+  const eligible = warpEligibleNodes(model);
+  const own = [...new Set(footprint.nodes)].filter((n) => eligible[n]).sort((a, b) => a - b);
+  const sources: number[] = [];
+  for (const p of footprint.sources) sources.push(p[0], p[1], p[2]);
+  for (const n of own) sources.push(restNodes[n * 3], restNodes[n * 3 + 1], restNodes[n * 3 + 2]);
+  const straight = (n: number) => {
     let d = Infinity;
-    for (const { restWorld: p } of samples)
-      d = Math.min(
-        d,
-        Math.hypot(
-          p[0] - restNodes[n * 3],
-          p[1] - restNodes[n * 3 + 1],
-          p[2] - restNodes[n * 3 + 2],
-        ),
-      );
+    const x = restNodes[n * 3],
+      y = restNodes[n * 3 + 1],
+      z = restNodes[n * 3 + 2];
+    for (let s = 0; s < sources.length; s += 3)
+      d = Math.min(d, Math.hypot(x - sources[s], y - sources[s + 1], z - sources[s + 2]));
     return d;
   };
-  const node = [...footprint.keys()].filter((n) => !fixed[n]).sort((a, b) => a - b);
-  const own = node.length;
-  const distance = node.map(nearest);
-  let skirt = 0,
-    edge = 0,
-    effective = false;
-  if (radius > 0) {
-    const spacing = spacingAt(model, footprint.keys());
-    skirt = Math.max(radius * skirtShare, skirtSpacings * spacing);
-    edge = edgeSpacings * spacing;
-    const path = new Float64Array(fixed.length).fill(Infinity);
-    const settled = relax(model, footprint, path, (radius + skirt) * reachSlack);
+  const seeds = new Map<number, number>();
+  for (const n of footprint.seeds) if (eligible[n]) seeds.set(n, straight(n));
+  for (const n of own) seeds.set(n, 0);
+  const spacing = spacingAt(model, seeds.keys());
+  const activation = reachActivation(radius, spacing);
+  const node = own.slice(),
+    distance = own.map(() => 0);
+  if (activation > 0) {
+    const band = bandWidth(0, spacing) + warpTailSpacings * spacing;
+    const path = new Float64Array(grid.nodes.length).fill(Infinity);
+    const settled = relax(model, seeds, path, eligible, (radius + band) * warpPathStretch);
+    const ownSet = new Set(own);
     for (const n of settled.sort((a, b) => a - b)) {
-      if (fixed[n] || footprint.has(n)) continue;
-      const d = nearest(n);
-      if (d > radius + skirt) continue;
-      effective ||= d <= radius;
+      if (ownSet.has(n)) continue;
+      const d = Math.max(straight(n), path[n] / warpPathStretch);
+      if (d >= radius + band) continue;
       node.push(n);
       distance.push(d);
     }
-    if (!effective) node.length = distance.length = own;
   }
   return {
+    grid,
+    radius,
+    key,
+    spacing,
+    activation,
     node: Uint32Array.from(node),
-    own,
+    own: own.length,
     distance: Float64Array.from(distance),
-    skirt: effective ? skirt : 0,
-    edge: effective ? edge : 0,
-    effective,
   };
 }
 
-/** Each footprint node's share of the offset, so that every sample moves by the whole offset. */
-function carriedShares(
-  handle: Pick<WarpHandle, 'samples' | 'radius' | 'falloff'>,
-  reach: Pick<WarpReach, 'node' | 'own' | 'distance' | 'effective' | 'edge'>,
-  model: WarpModel,
-) {
-  const carried = new Float64Array(reach.own);
-  if (!reach.effective) return carried.fill(1);
-  const { restNodes } = model;
-  const index = new Map<number, number>();
-  for (let i = 0; i < reach.own; i++) index.set(reach.node[i], i);
-  for (const { binding, restWorld: p } of handle.samples) {
-    let total = 0,
-      weighted = 0;
-    const shares: [number, number][] = [];
-    binding.node.forEach((n, k) => {
-      const i = index.get(n);
-      if (i === undefined) return;
-      const d = Math.hypot(
-        p[0] - restNodes[n * 3],
-        p[1] - restNodes[n * 3 + 1],
-        p[2] - restNodes[n * 3 + 2],
-      );
-      const w = reachWeight(d, handle.radius, handle.falloff, reach.edge);
-      total += binding.weight[k];
-      weighted += binding.weight[k] * w;
-      shares.push([i, w]);
-    });
-    const scale = weighted > 0 ? total / weighted : 1;
-    for (const [i, w] of shares) carried[i] = Math.max(carried[i], weighted > 0 ? w * scale : 1);
-  }
-  return carried;
-}
-
-/**
- * The handle with its reach on `model`. Each guide starts from where `surface` (world, per node)
- * puts its node, less the share of `before`'s offset that node carried. Nodes `before` already had
- * on this grid keep their start, so changing the radius or falloff only reshapes the handle's own
- * bump. A new handle's footprint also takes over the targets of `guides`, the guides of the
- * handles before it, so adding it changes nothing.
- */
-export function reachHandle(
-  model: WarpModel,
-  handle: WarpHandle,
-  surface: ArrayLike<number>,
-  before: WarpHandle | null = null,
-  guides?: WarpGuides,
-): WarpHandle {
-  const kept = before?.reach?.grid === model.grid ? before.reach : null;
-  const nodes =
-    kept && before!.radius === handle.radius && before!.samples === handle.samples
-      ? kept
-      : handleReachNodes(model, handle);
-  const { node, own, distance, skirt, edge, effective } = nodes;
-  const carried = carriedShares(handle, nodes, model);
-  const keptAt = new Map<number, number>();
-  if (kept) kept.node.forEach((n, i) => keptAt.set(n, i));
-  // On another grid, a node's share of the old offset is its share under the old settings.
-  const offset = before && !kept ? handleOffset(before) : null;
-  const was = offset
-    ? carriedShares(
-        { samples: handle.samples, radius: before!.radius, falloff: before!.falloff },
-        { node, own, distance, edge, effective: before!.radius > 0 && effective },
-        model,
-      )
-    : null;
-  const guided = new Map<number, number>();
-  if (guides && !before) for (let g = 0; g < guides.node.length; g++) guided.set(guides.node[g], g);
-  const base = new Float64Array(node.length * 3),
-    held = new Float64Array(own * 3);
-  for (let i = 0; i < node.length; i++) {
-    const n = node[i],
-      k = keptAt.get(n);
-    if (k !== undefined) {
-      base.set(kept!.base.subarray(k * 3, k * 3 + 3), i * 3);
-      if (i < own && k < kept!.own) held.set(kept!.held.subarray(k * 3, k * 3 + 3), i * 3);
-      else if (i < own) held.set(base.subarray(i * 3, i * 3 + 3), i * 3);
-      continue;
-    }
-    const w = !offset
-      ? 0
-      : i < own
-        ? was![i]
-        : reachWeight(distance[i], before!.radius, before!.falloff, edge);
-    for (let a = 0; a < 3; a++) base[i * 3 + a] = surface[n * 3 + a] - (offset ? w * offset[a] : 0);
-    if (i >= own) continue;
-    const g = guided.get(n);
-    if (g === undefined) held.set(base.subarray(i * 3, i * 3 + 3), i * 3);
-    else for (let a = 0; a < 3; a++) held[i * 3 + a] = guides!.target[g * 3 + a];
-  }
+/** The handle with its reach measured on `model`, reusing the one it has when still current. */
+export function reachHandle(model: WarpModel, handle: WarpHandle): WarpHandle {
+  const { reach } = handle;
+  if (reach?.grid === model.grid && reach.radius === handle.radius && reach.key === handle.samples)
+    return handle;
   return {
     ...handle,
-    reach: { grid: model.grid, node, own, distance, effective, skirt, edge, carried, base, held },
+    reach: footprintReach(model, handleFootprint(model, handle), handle.radius, handle.samples),
   };
 }
 
+/** Whether the handle guides any node beyond its samples' exact constraints. */
+export const handleGuides = (handle: Pick<WarpHandle, 'reach'>) =>
+  !!handle.reach && (handle.reach.own > 0 || handle.reach.activation > 0);
+
 /**
- * Soft targets for the nodes the handles reach: `base + w × D` at stiffness
- * `warpGuideStiffness × reachStiffness × diagonal`. Where handles overlap, stiffnesses add and the
- * target is their stiffness-weighted mean. A handle guides its own footprint with the share of
- * its offset that agrees with its exact samples, and no other handle guides it. Where earlier
- * handles' guides would have, it takes them over at their stiffness. The `exact` nodes, such as
- * gap targets, get no guide. Undefined when no handle reaches a node.
+ * How far the handle has gone from holding to driving: 0 while it sits on its pin, rising to 1
+ * over a quarter of a node spacing of travel.
+ */
+function motionOf(handle: WarpHandle) {
+  const offset = handleOffset(handle);
+  const travel = Math.hypot(offset[0], offset[1], offset[2]);
+  const scale = motionSpacings * (handle.reach?.spacing ?? 0);
+  return travel === 0 ? 0 : scale > 0 ? Math.min(1, travel / scale) : 1;
+}
+
+/**
+ * Soft per-node targets from the handles' radii. At each node it reaches, a handle with guides
+ * has a profile: unmoved, its weight `w`, holding the surface softly over its radius; moved, 1
+ * out to its radius and fading to 0 across the band past it. It drives the node toward its
+ * baseline plus its whole offset at stiffness `w`, and holds it at its baseline for the rest of
+ * the profile, so alone it targets `baseline + w × offset`. A holding term gives way by the
+ * largest driving weight any other moved handle has there, and so does all of an unmoved
+ * handle's profile.
+ * Stiffnesses add and the target is their stiffness-weighted mean, so nothing depends on the
+ * order of the handles. The `exact` nodes, such as gap targets, get no guide. Undefined when no
+ * handle guides a node.
  */
 export function warpGuides(
   model: WarpModel,
@@ -408,45 +461,77 @@ export function warpGuides(
   exact: Iterable<number> = [],
 ): WarpGuides | undefined {
   const { grid } = model;
-  if (!handles.some(({ reach }) => reach?.grid === grid && reach.effective)) return undefined;
-  const { edgeStart } = grid;
+  const guiding = handles.filter(
+    (handle) =>
+      handle.reach?.grid === grid && handle.baseline.grid === grid && handleGuides(handle),
+  );
+  if (!guiding.length) return undefined;
   const count = grid.nodes.length;
   const blocked = new Uint8Array(count);
-  for (const n of exact) blocked[n] = 2;
-  for (const { samples } of handles)
-    for (const { binding } of samples) for (const n of binding.node) blocked[n] ||= 1;
-  // Stiffness the guides of the handles so far would have at each node.
-  const earlier = new Float64Array(count);
+  for (const n of exact) blocked[n] = 1;
+  const profiles = guiding.map((handle) => {
+    const reach = handle.reach!;
+    const motion = motionOf(handle);
+    const { radius, falloff } = handle;
+    const edge = warpFadeSpacings * reach.spacing,
+      band = bandWidth(falloff, reach.spacing),
+      tail = warpTailSpacings * reach.spacing;
+    const weight = new Float64Array(reach.node.length),
+      profile = new Float64Array(reach.node.length);
+    for (let i = 0; i < reach.node.length; i++) {
+      if (i < reach.own) {
+        weight[i] = profile[i] = 1;
+        continue;
+      }
+      const d = reach.distance[i];
+      const w = reachWeight(d, radius, falloff, edge);
+      const held =
+        d <= radius
+          ? 1
+          : d <= radius + band
+            ? 1 - (1 - warpTailShare) * smoothstep((d - radius) / band)
+            : warpTailShare * (1 - smoothstep((d - radius - band) / tail));
+      weight[i] = reach.activation * w;
+      profile[i] = reach.activation * ((1 - motion) * w + motion * held);
+    }
+    return { handle, reach, weight, profile, motion, offset: handleOffset(handle) };
+  });
+  // The two largest driving weights at each node, and whose the largest is.
+  const first = new Float64Array(count),
+    second = new Float64Array(count),
+    leader = new Int32Array(count).fill(-1);
+  profiles.forEach(({ reach, weight, motion }, h) => {
+    if (!motion) return;
+    for (let i = 0; i < reach.node.length; i++) {
+      const n = reach.node[i],
+        m = weight[i] * motion;
+      if (m > first[n]) {
+        second[n] = first[n];
+        first[n] = m;
+        leader[n] = h;
+      } else if (m > second[n]) second[n] = m;
+    }
+  });
+  const { edgeStart } = grid;
   const stiffness = new Float64Array(count),
     target = new Float64Array(count * 3);
   const touched: number[] = [];
-  const add = (n: number, s: number, from: Float64Array, i: number, w: number, offset: Vec3) => {
-    if (stiffness[n] === 0) touched.push(n);
-    stiffness[n] += s;
-    for (let a = 0; a < 3; a++) target[n * 3 + a] += s * (from[i * 3 + a] + w * offset[a]);
-  };
-  const full = (n: number) => warpGuideStiffness * 2 * (edgeStart[n + 1] - edgeStart[n]);
-  for (const handle of handles) {
-    const { reach } = handle;
-    if (!reach || reach.grid !== grid) continue;
-    const offset = handleOffset(handle);
-    for (let i = 0; i < reach.own; i++) {
+  profiles.forEach(({ handle, reach, weight, profile, motion, offset }, h) => {
+    const base = handle.baseline.positions;
+    for (let i = 0; i < reach.node.length; i++) {
       const n = reach.node[i];
-      if (blocked[n] === 2) continue;
-      if (reach.effective)
-        add(n, full(n) * footprintShare, reach.base, i, reach.carried[i], offset);
-      if (earlier[n] > 0) add(n, earlier[n], reach.held, i, reach.carried[i], offset);
-    }
-    for (let i = reach.own; i < reach.node.length; i++) {
-      const n = reach.node[i],
-        d = reach.distance[i];
-      const s = full(n) * reachStiffness(d, handle.radius, reach.skirt);
+      if (blocked[n]) continue;
+      const full = warpGuideStiffness * 2 * (edgeStart[n + 1] - edgeStart[n]);
+      const others = leader[n] === h ? second[n] : first[n];
+      const drive = full * weight[i] * (1 - (1 - motion) * others);
+      const hold = full * (profile[i] - weight[i]) * (1 - others);
+      const s = drive + hold;
       if (!(s > 0)) continue;
-      earlier[n] += s;
-      if (!blocked[n])
-        add(n, s, reach.base, i, reachWeight(d, handle.radius, handle.falloff, reach.edge), offset);
+      if (stiffness[n] === 0) touched.push(n);
+      stiffness[n] += s;
+      for (let a = 0; a < 3; a++) target[n * 3 + a] += s * base[n * 3 + a] + drive * offset[a];
     }
-  }
+  });
   if (!touched.length) return undefined;
   touched.sort((a, b) => a - b);
   const guides = {
@@ -461,6 +546,110 @@ export function warpGuides(
     for (let a = 0; a < 3; a++) guides.target[g * 3 + a] = target[n * 3 + a] / s;
   }
   return guides;
+}
+
+/** Each node's weight from the handle's radius and falloff, for drawing its reach. */
+export function reachWeights(handle: WarpHandle) {
+  const reach = handle.reach!;
+  const weight = new Float64Array(reach.node.length);
+  const edge = warpFadeSpacings * reach.spacing;
+  for (let i = 0; i < reach.node.length; i++)
+    weight[i] =
+      i < reach.own
+        ? 1
+        : reach.activation * reachWeight(reach.distance[i], handle.radius, handle.falloff, edge);
+  return weight;
+}
+
+/** A copy of the state as a snapshot to share. */
+export const snapshotOf = (
+  grid: WarpGrid,
+  state: { positions: Float64Array; rotations: Float64Array },
+): WarpSnapshot => ({
+  grid,
+  positions: state.positions.slice(),
+  rotations: state.rotations.slice(),
+  settled: true,
+});
+
+/**
+ * A snapshot carried from one grid to another: each node of `to` sits where `from`'s binding of
+ * its scan vertex puts it under the snapshot, turned by the blend of its bound nodes' rotations.
+ * Vertices `from` did not move stay at rest.
+ */
+export function transferSnapshot(
+  from: WarpModel,
+  snapshot: WarpSnapshot,
+  to: WarpModel,
+): WarpSnapshot {
+  const K = warpBindingNodes;
+  const { binding, region, restNodes, restWorld } = from;
+  const { positions: P, rotations: Q } = snapshot;
+  const count = to.grid.nodes.length;
+  const positions = to.restNodes.slice(),
+    rotations = new Float64Array(count * 4);
+  const r = new Float64Array(9);
+  for (let n = 0; n < count; n++) {
+    rotations[n * 4 + 3] = 1;
+    const v = to.grid.nodes[n];
+    if (v >= region.weldedCount || region.role[v] !== WarpRole.Interior) continue;
+    const x = restWorld[v * 3],
+      y = restWorld[v * 3 + 1],
+      z = restWorld[v * 3 + 2];
+    let px = 0,
+      py = 0,
+      pz = 0,
+      qx = 0,
+      qy = 0,
+      qz = 0,
+      qw = 0,
+      total = 0;
+    for (let k = 0; k < K; k++) {
+      const j = binding.node[v * K + k],
+        w = binding.weight[v * K + k];
+      if (j === 0xffffffff || !(w > 0)) continue;
+      const a = Q[j * 4],
+        b = Q[j * 4 + 1],
+        c = Q[j * 4 + 2],
+        d = Q[j * 4 + 3];
+      rotationOf(r, a, b, c, d);
+      const ox = x - restNodes[j * 3],
+        oy = y - restNodes[j * 3 + 1],
+        oz = z - restNodes[j * 3 + 2];
+      px += w * (r[0] * ox + r[1] * oy + r[2] * oz + P[j * 3]);
+      py += w * (r[3] * ox + r[4] * oy + r[5] * oz + P[j * 3 + 1]);
+      pz += w * (r[6] * ox + r[7] * oy + r[8] * oz + P[j * 3 + 2]);
+      // Quaternions q and −q turn alike, so each joins the blend on the side of the first.
+      const sign = total > 0 && a * qx + b * qy + c * qz + d * qw < 0 ? -w : w;
+      qx += sign * a;
+      qy += sign * b;
+      qz += sign * c;
+      qw += sign * d;
+      total += w;
+    }
+    if (!(total > 0)) continue;
+    positions[n * 3] = px / total;
+    positions[n * 3 + 1] = py / total;
+    positions[n * 3 + 2] = pz / total;
+    const length = Math.hypot(qx, qy, qz, qw) || 1;
+    rotations[n * 4] = qx / length;
+    rotations[n * 4 + 1] = qy / length;
+    rotations[n * 4 + 2] = qz / length;
+    rotations[n * 4 + 3] = qw / length;
+  }
+  return { grid: to.grid, positions, rotations, settled: false };
+}
+
+function rotationOf(out: Float64Array, x: number, y: number, z: number, w: number) {
+  out[0] = 1 - 2 * (y * y + z * z);
+  out[1] = 2 * (x * y - z * w);
+  out[2] = 2 * (x * z + y * w);
+  out[3] = 2 * (x * y + z * w);
+  out[4] = 1 - 2 * (x * x + z * z);
+  out[5] = 2 * (y * z - x * w);
+  out[6] = 2 * (x * z - y * w);
+  out[7] = 2 * (y * z + x * w);
+  out[8] = 1 - 2 * (x * x + y * y);
 }
 
 const cornerTriangles = new WeakMap<WarpModel, Int32Array>();
@@ -498,31 +687,97 @@ export function nodeSample(
   };
 }
 
+/** Connected pieces of the nodes `through` allows, as a piece number per node, -1 elsewhere. */
+function piecesOf(model: WarpModel, through: Uint8Array) {
+  const { edgeStart, edges } = model.grid;
+  const piece = new Int32Array(through.length).fill(-1);
+  let pieces = 0;
+  const stack: number[] = [];
+  for (let start = 0; start < through.length; start++) {
+    if (!through[start] || piece[start] >= 0) continue;
+    piece[start] = pieces;
+    stack.push(start);
+    while (stack.length) {
+      const i = stack.pop()!;
+      for (let e = edgeStart[i]; e < edgeStart[i + 1]; e++) {
+        const j = edges[e];
+        if (through[j] && piece[j] < 0) {
+          piece[j] = pieces;
+          stack.push(j);
+        }
+      }
+    }
+    pieces++;
+  }
+  return { piece, pieces };
+}
+
 /**
- * Up to `count` free nodes spread by farthest-point sampling along grid edges, away from the
- * handles already present and the fixed border. Each disconnected piece of the region gets a node
- * before any piece gets a second; ties go to the lowest node. No node is chosen twice, and no
- * node a handle already sits on.
+ * Up to `count` free nodes for new points. First, each connected piece of the region without a
+ * handle gets one, larger pieces first, at its node farthest along the grid from its edge (or
+ * from its lowest node when it has none). Then farthest-point sampling along grid edges, away
+ * from the handles, the nodes chosen and the region's edge. Deterministic, lowest node first
+ * among ties; no node is chosen twice, nor one a handle already sits on.
  */
 export function distributionNodes(
   model: WarpModel,
   count: number,
   handles: readonly Pick<WarpHandle, 'samples'>[] = [],
 ) {
-  const { fixed } = model.grid;
-  const distance = new Float64Array(fixed.length).fill(Infinity);
-  const seeds: [number, number][] = [];
-  for (let n = 0; n < fixed.length; n++) if (fixed[n]) seeds.push([n, 0]);
-  for (const handle of handles) seeds.push(...handleFootprint(model, handle));
-  relax(model, seeds, distance);
+  const eligible = warpEligibleNodes(model);
+  const { edgeStart, edges } = model.grid;
+  const size = eligible.length;
+  // The region's edge: fixed or unpainted nodes beside an eligible one.
+  const edge: [number, number][] = [];
+  for (let n = 0; n < size; n++) {
+    if (eligible[n]) continue;
+    for (let e = edgeStart[n]; e < edgeStart[n + 1]; e++)
+      if (eligible[edges[e]]) {
+        edge.push([n, 0]);
+        break;
+      }
+  }
+  const taken = new Set<number>();
+  for (const handle of handles) for (const n of handleFootprint(model, handle).seeds) taken.add(n);
+  const { piece, pieces } = piecesOf(model, eligible);
+  const sizes = new Uint32Array(pieces),
+    held = new Uint8Array(pieces);
+  for (let n = 0; n < size; n++) if (piece[n] >= 0) sizes[piece[n]]++;
+  for (const n of taken) held[piece[n]] = 1;
+  const fromEdge = new Float64Array(size).fill(Infinity);
+  relax(model, edge, fromEdge, eligible);
   const chosen: number[] = [];
+  const empty = Array.from({ length: pieces }, (_, p) => p)
+    .filter((p) => !held[p])
+    .sort((a, b) => sizes[b] - sizes[a] || a - b);
+  for (const p of empty) {
+    if (chosen.length >= count) break;
+    let best = -1,
+      lowest = -1;
+    for (let n = 0; n < size; n++) {
+      if (piece[n] !== p) continue;
+      if (lowest < 0) lowest = n;
+      if (Number.isFinite(fromEdge[n]) && (best < 0 || fromEdge[n] > fromEdge[best])) best = n;
+    }
+    if (best < 0) {
+      // No edge: the far end of the piece from its lowest node.
+      const from = new Float64Array(size).fill(Infinity);
+      relax(model, [[lowest, 0]], from, eligible);
+      for (let n = 0; n < size; n++)
+        if (piece[n] === p && (best < 0 || from[n] > from[best])) best = n;
+    }
+    chosen.push(best);
+  }
+  const distance = fromEdge;
+  const seeds: [number, number][] = [...taken, ...chosen].map((n) => [n, 0]);
+  relax(model, seeds, distance, eligible);
   while (chosen.length < count) {
     let best = -1;
-    for (let n = 0; n < fixed.length; n++)
-      if (!fixed[n] && distance[n] > 0 && (best < 0 || distance[n] > distance[best])) best = n;
+    for (let n = 0; n < size; n++)
+      if (eligible[n] && distance[n] > 0 && (best < 0 || distance[n] > distance[best])) best = n;
     if (best < 0) break;
     chosen.push(best);
-    relax(model, [[best, 0]], distance);
+    relax(model, [[best, 0]], distance, eligible);
   }
   return chosen;
 }

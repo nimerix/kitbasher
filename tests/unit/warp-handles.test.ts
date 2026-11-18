@@ -18,12 +18,19 @@ import { createWarpOutput, deformPoint, evaluateWarp } from '../../src/core/warp
 import {
   distributionNodes,
   handleConstraints,
-  handleReachNodes,
+  handleGuides,
   nodeSample,
+  reachActivation,
   reachHandle,
   reachWeight,
+  snapshotOf,
+  transferSnapshot,
+  bandWidth,
   warpGuides,
+  warpPathStretch,
+  warpTailSpacings,
   type WarpHandle,
+  type WarpSnapshot,
 } from '../../src/core/warp-handles';
 import { buildWarpModel, type WarpModel } from '../../src/core/warp-model';
 import { closeGapTargets, type WarpNeighbour } from '../../src/core/warp-neighbour';
@@ -81,7 +88,19 @@ function sheet(density: number, segments = 200, painted = 40) {
   return sheets.get(key)!;
 }
 
-/** An unmoved point handle at a mesh-local point of a plane, pinned where `state` holds it. */
+/** The face of a mesh containing a mesh-local point. */
+function faceContaining(geometry: BufferGeometry, at: Vec3) {
+  const point = new Vector3(...at),
+    triangle = new Triangle();
+  for (let f = 0; f < triangleCount(geometry); f++)
+    if (readFace(geometry, f, triangle).containsPoint(point)) return f;
+  return nearestFace(geometry, at);
+}
+
+/**
+ * An unmoved point handle at a mesh-local point, pinned where `state` holds it. Its guides start
+ * from `baseline`, by default the state as it is.
+ */
 function pointHandle(
   model: WarpModel,
   geometry: BufferGeometry,
@@ -90,20 +109,16 @@ function pointHandle(
   radius: number,
   falloff = 1,
   id = 'a',
-  present: WarpHandle[] = [],
+  baseline: WarpSnapshot = snapshotOf(model.grid, state),
 ): WarpHandle {
-  const point = new Vector3(...at),
-    triangle = new Triangle();
-  let face = -1;
-  for (let f = 0; f < triangleCount(geometry) && face < 0; f++)
-    if (readFace(geometry, f, triangle).containsPoint(point)) face = f;
-  const barycentric = readFace(geometry, face, triangle)
-    .getBarycoord(point, new Vector3())!
-    .toArray() as Vec3;
+  const face = faceContaining(geometry, at);
+  const triangle = readFace(geometry, face);
+  const point = triangle.closestPointToPoint(new Vector3(...at), new Vector3());
+  const barycentric = triangle.getBarycoord(point, new Vector3())!.toArray() as Vec3;
   const binding = bindPoint(model.region, model.binding, model.restWorld, face, barycentric);
   const restWorld = point.clone().applyMatrix4(new Matrix4().fromArray(model.matrix)).toArray();
   const pin = deformPoint(model, state, binding, restWorld);
-  const handle: WarpHandle = {
+  return reachHandle(model, {
     id,
     kind: 'point',
     samples: [{ face, barycentric, binding, restWorld, pin }],
@@ -112,9 +127,9 @@ function pointHandle(
     radius,
     falloff,
     auto: false,
+    baseline,
     reach: null,
-  };
-  return reachHandle(model, handle, state.positions, null, warpGuides(model, present));
+  });
 }
 
 const moved = (handle: WarpHandle, by: Vec3): WarpHandle => ({
@@ -142,8 +157,27 @@ function solveHandles(
   handles: WarpHandle[],
   iterations?: number,
 ) {
-  return settle(model, state, handleConstraints(handles), warpGuides(model, handles), iterations);
+  return settle(
+    model,
+    state,
+    handleConstraints(handles, model),
+    warpGuides(model, handles),
+    iterations,
+  );
 }
+
+/** Solves until the grid stops moving: the fixed point of the handles' law. */
+function converge(model: WarpModel, state: WarpState, handles: WarpHandle[]) {
+  const constraints = handleConstraints(handles, model),
+    guides = warpGuides(model, handles);
+  for (let i = 0; i < 4000; i++)
+    if (solveWarp(model.grid, model.restNodes, constraints, state, 1, guides) < 1e-9) return;
+}
+
+const copy = (state: WarpState): WarpState => ({
+  positions: state.positions.slice(),
+  rotations: state.rotations.slice(),
+});
 
 /** World position of every welded region vertex on the written surface, keyed by welded id. */
 function written(model: WarpModel, state: WarpState) {
@@ -215,6 +249,83 @@ function profile(model: WarpModel, state: WarpState, centre: Vec3, radius: numbe
   return { inside: inside / h, beyond: beyond / h, atTenth: atTenth / h, rises: rises / h };
 }
 
+function nearestFace(geometry: BufferGeometry, at: Vec3) {
+  const triangle = new Triangle(),
+    centre = new Vector3(),
+    point = new Vector3(...at);
+  let best = -1,
+    bestDistance = Infinity;
+  for (let face = 0; face < triangleCount(geometry); face++) {
+    const d = readFace(geometry, face, triangle).getMidpoint(centre).distanceTo(point);
+    if (d < bestDistance) [best, bestDistance] = [face, d];
+  }
+  return best;
+}
+
+function nearestNode(model: WarpModel, at: Vec3) {
+  let best = -1,
+    bestDistance = Infinity;
+  for (let n = 0; n < model.grid.nodes.length; n++) {
+    if (model.grid.fixed[n]) continue;
+    const d = distance(model.restNodes.subarray(n * 3, n * 3 + 3), at);
+    if (d < bestDistance) [best, bestDistance] = [n, d];
+  }
+  return best;
+}
+
+/** An unmoved radius-0 handle on a node's own scan vertex. */
+function nodePin(model: WarpModel, node: number, state: WarpState, id = 'pin'): WarpHandle {
+  const sample = nodeSample(model, node, state.positions);
+  return {
+    id,
+    kind: 'point',
+    samples: [sample],
+    pin: sample.pin,
+    target: null,
+    radius: 0,
+    falloff: 1,
+    auto: false,
+    baseline: snapshotOf(model.grid, state),
+    reach: null,
+  };
+}
+
+/** Largest change of the written surface between two states, mm. */
+const surfaceChange = (model: WarpModel, a: WarpState, b: WarpState) => change(model, a, b).surface;
+
+/**
+ * A strip folded into a U, faces 1 mm apart with the fold at x = 0, painted all but a margin at
+ * its far ends and sides so its border is fixed.
+ */
+async function foldedSheet() {
+  const L = 20,
+    W = 16,
+    gap = 1;
+  const arc = Math.PI * (gap / 2);
+  const total = 2 * L + arc;
+  const geometry = new PlaneGeometry(total, W, Math.round(total / 0.2), Math.round(W / 0.2));
+  const p = geometry.getAttribute('position');
+  for (let i = 0; i < p.count; i++) {
+    const s = p.getX(i) + total / 2,
+      z = p.getY(i);
+    let x: number, y: number;
+    if (s <= L) [x, y] = [L - s, gap / 2];
+    else if (s <= L + arc) {
+      const a = (s - L) / (gap / 2);
+      [x, y] = [-(gap / 2) * Math.sin(a), (gap / 2) * Math.cos(a)];
+    } else [x, y] = [s - L - arc, -gap / 2];
+    p.setXYZ(i, x, y, z);
+  }
+  geometry.computeVertexNormals();
+  const centre = new Vector3();
+  const faces: number[] = [];
+  for (let f = 0; f < triangleCount(geometry); f++) {
+    readFace(geometry, f).getMidpoint(centre);
+    if (centre.x < 18 && Math.abs(centre.z) < 7) faces.push(f);
+  }
+  return { geometry, model: await modelOf(geometry, 3, faces), arc };
+}
+
 describe('reach weight', () => {
   it('is 1 inside the plateau, a smoothstep to 0 at the radius, and 0 beyond', () => {
     expect(reachWeight(0, 10, 1)).toBe(1);
@@ -226,6 +337,72 @@ describe('reach weight', () => {
     // Falloff 0 is a hard-edged plateau with no division by a zero width.
     expect(reachWeight(10, 10, 0)).toBe(1);
     expect(reachWeight(10.0001, 10, 0)).toBe(0);
+  });
+
+  it('fades over the narrowest edge the grid holds at falloff 0, and every step of falloff counts', () => {
+    // Falloff 0 fades over the edge width alone.
+    expect(reachWeight(8, 10, 0, 2)).toBe(1);
+    expect(reachWeight(9, 10, 0, 2)).toBeCloseTo(0.5, 12);
+    // The fade grows from the edge to the whole radius, so no part of the slider is inert.
+    let last = -1;
+    for (let falloff = 0; falloff <= 1; falloff += 0.01) {
+      const w = reachWeight(8.5, 10, falloff, 2);
+      expect(w).toBeLessThan(last < 0 ? 2 : last);
+      last = w;
+    }
+    // Never more than 1.
+    for (let d = 0; d < 12; d += 0.1) expect(reachWeight(d, 10, 0.3, 1)).toBeLessThanOrEqual(1);
+  });
+});
+
+describe('reach', () => {
+  it('switches on smoothly between one and two node spacings', () => {
+    expect(reachActivation(1, 1)).toBe(0);
+    expect(reachActivation(0.5, 1)).toBe(0);
+    expect(reachActivation(1.5, 1)).toBeCloseTo(0.5, 12);
+    expect(reachActivation(2, 1)).toBe(1);
+    expect(reachActivation(5, 1)).toBe(1);
+    expect(reachActivation(1 + 1e-6, 1)).toBeLessThan(1e-11);
+  });
+
+  it('is round on a flat sheet, free nodes only, and measured along the surface', async () => {
+    const { geometry, model } = await sheet(4, 120);
+    const state = createWarpState(model.restNodes);
+    const handle = pointHandle(model, geometry, [30, 0.3, 0], state, 9);
+    const reach = handle.reach!;
+    expect(reach.activation).toBe(1);
+    const centre = handle.samples[0].restWorld;
+    const inside = new Set(Array.from(reach.node));
+    for (const n of reach.node) expect(model.grid.fixed[n]).toBe(0);
+    // Every free node well inside the radius in a straight line is reached, near the border too.
+    for (let n = 0; n < model.grid.nodes.length; n++) {
+      if (model.grid.fixed[n]) continue;
+      const d = distance(model.restNodes.subarray(n * 3, n * 3 + 3), centre);
+      if (d < (9 + bandWidth(1, reach.spacing)) / warpPathStretch - reach.spacing)
+        expect(inside.has(n)).toBe(true);
+    }
+    reach.node.forEach((n, i) => {
+      const d = distance(model.restNodes.subarray(n * 3, n * 3 + 3), centre);
+      expect(reach.distance[i]).toBeGreaterThanOrEqual(d - 1e-9);
+      expect(reach.distance[i]).toBeLessThan(d * 1.25 + 1e-9);
+    });
+  });
+
+  it('does not cross a fold to the face behind it', async () => {
+    const { geometry, model, arc } = await foldedSheet();
+    const state = createWarpState(model.restNodes);
+    const handle = pointHandle(model, geometry, [4, 0.5, 0.1], state, 5);
+    const { reach } = handle;
+    expect(reach!.activation).toBe(1);
+    reach!.node.forEach((n, i) => {
+      if (model.restNodes[n * 3 + 1] > -0.4) return;
+      // On the face behind, only nodes near the fold, by way of it.
+      const along = 4 + arc + model.restNodes[n * 3];
+      expect(along).toBeLessThan(
+        (5 + bandWidth(0, reach!.spacing) + warpTailSpacings * reach!.spacing) * warpPathStretch,
+      );
+      if (reach!.distance[i] < 5) expect(model.restNodes[n * 3]).toBeLessThan(1);
+    });
   });
 });
 
@@ -272,25 +449,27 @@ describe('guides in the solver', () => {
 });
 
 describe('point handles', () => {
-  it('radius 0 and a radius below the node spacing solve exactly as a bare point', async () => {
+  it('radius 0 and a radius within one spacing solve exactly as a bare point did', async () => {
     const { geometry, model } = await sheet(1, 60);
     const rest = createWarpState(model.restNodes);
     const bare = pointHandle(model, geometry, [0.7, -0.4, 0], rest, 0);
-    expect(bare.reach!.effective).toBe(false);
-    expect(bare.reach!.node.length).toBe(bare.reach!.own);
+    expect(handleGuides(bare)).toBe(false);
     expect(warpGuides(model, [bare])).toBeUndefined();
     const small = pointHandle(model, geometry, [0.7, -0.4, 0], rest, 0.5);
-    expect(small.reach!.effective).toBe(false);
-    expect(handleReachNodes(model, small).node.length).toBe(small.reach!.own);
+    expect(small.reach!.spacing).toBeGreaterThan(0.5);
+    expect(handleGuides(small)).toBe(false);
+    expect(small.reach!.node.length).toBe(0);
     expect(warpGuides(model, [small])).toBeUndefined();
 
-    // The constraint a point has always made.
+    // The constraint a point has always made, with automatic pins among them.
     const sample = bare.samples[0];
     const target: Vec3 = [0.7, -0.4, 3];
-    expect(handleConstraints([{ ...bare, target }])).toEqual([
+    const pin = { ...nodePin(model, nearestNode(model, [8, 3, 0]), rest), auto: true };
+    expect(handleConstraints([{ ...bare, target }, pin], model)).toEqual([
       { ...sample.binding, rest: sample.restWorld, target },
+      { ...pin.samples[0].binding, rest: pin.samples[0].restWorld, target: pin.samples[0].pin },
     ]);
-    expect(handleConstraints([bare])[0].target).toBe(sample.pin);
+    expect(handleConstraints([bare], model)[0].target).toBe(sample.pin);
 
     const before = createWarpState(model.restNodes),
       after = createWarpState(model.restNodes);
@@ -310,7 +489,7 @@ describe('point handles', () => {
     ]) {
       const state = createWarpState(model.restNodes);
       const handle = moved(pointHandle(model, geometry, centre, state, radius), [0, 0, h]);
-      solveHandles(model, state, [handle]);
+      converge(model, state, [handle]);
       expect(distance(tipOf(model, state, handle), handle.target!)).toBeLessThan(0.01 * h);
       const result = profile(model, state, centre, radius, h);
       expect(result.rises).toBeLessThan(0.005);
@@ -325,7 +504,7 @@ describe('point handles', () => {
     const { geometry, model } = await sheet(6);
     const state = createWarpState(model.restNodes);
     const handle = moved(pointHandle(model, geometry, [0, 0, 0], state, 10, 0), [0, 0, 2]);
-    solveHandles(model, state, [handle], 300);
+    converge(model, state, [handle]);
     const { world } = written(model, state);
     for (const v of model.region.interior) {
       const d = Math.hypot(model.restWorld[v * 3], model.restWorld[v * 3 + 1]);
@@ -334,25 +513,196 @@ describe('point handles', () => {
     }
   });
 
+  it('never targets a node farther from its baseline than the handle moved, alone or together', async () => {
+    const { geometry, model } = await sheet(5, 160);
+    const state = createWarpState(model.restNodes);
+    const up = moved(pointHandle(model, geometry, [-2, 0, 0], state, 9, 0.6), [0, 0, 2]);
+    const side = moved(pointHandle(model, geometry, [2, 0.5, 0], state, 6, 1, 'b'), [1.5, 0, 1]);
+    for (const handles of [[up], [up, side]]) {
+      const guides = warpGuides(model, handles)!;
+      const limit = Math.max(...handles.map((handle) => Math.hypot(...handleOffsetOf(handle))));
+      for (let g = 0; g < guides.node.length; g++) {
+        const n = guides.node[g];
+        const offset = distance(
+          Array.from(guides.target).slice(g * 3, g * 3 + 3),
+          state.positions.subarray(n * 3),
+        );
+        expect(offset).toBeLessThanOrEqual(limit + 1e-9);
+      }
+    }
+    // The grid never rises above the point. Between nodes, skinning lifts a sharp shoulder a
+    // little more.
+    converge(model, state, [up]);
+    let node = 0;
+    for (let n = 0; n < model.grid.nodes.length; n++)
+      node = Math.max(node, state.positions[n * 3 + 2]);
+    expect(node).toBeLessThan(2 * 1.01);
+    const { world } = written(model, state);
+    let top = 0;
+    for (const v of model.region.interior) top = Math.max(top, world[v * 3 + 2]);
+    expect(top).toBeLessThan(2 * 1.15);
+  });
+
+  it('switches on continuously as the radius passes the first node', async () => {
+    const { geometry, model } = await sheet(4, 120);
+    const rest = createWarpState(model.restNodes);
+    const probe = pointHandle(model, geometry, [0.4, 0.3, 0], rest, 0);
+    const { spacing } = probe.reach!;
+    const surfaceAt = (radius: number) => {
+      const state = createWarpState(model.restNodes);
+      converge(model, state, [moved(reachHandle(model, { ...probe, radius }), [0, 0, 1.5])]);
+      return state;
+    };
+    // Across the first node the surface does not jump.
+    expect(surfaceChange(model, surfaceAt(spacing), surfaceAt(spacing + 1e-5))).toBeLessThan(1e-3);
+    // Anywhere in the range, a small change of radius makes a small change of surface.
+    for (const at of [1.05, 1.3, 1.6, 1.95])
+      expect(
+        surfaceChange(model, surfaceAt(at * spacing), surfaceAt(at * spacing + 1e-4 * spacing)),
+      ).toBeLessThan(0.01);
+  });
+
+  it('does not depend on the order handles were made or moved', async () => {
+    const { geometry, model } = await sheet(5, 160);
+    for (const gap of [6, 1.5]) {
+      const surfaces = [0, 1].map((order) => {
+        const state = createWarpState(model.restNodes);
+        const baseline = snapshotOf(model.grid, state);
+        const make = [
+          () => pointHandle(model, geometry, [-gap / 2, 0.1, 0], state, 5, 1, 'a', baseline),
+          () => pointHandle(model, geometry, [gap / 2, -0.1, 0], state, 5, 1, 'b', baseline),
+        ];
+        const made = order ? [make[1](), make[0]()] : [make[0](), make[1]()];
+        const handles = made.map((handle) =>
+          moved(handle, handle.id === 'a' ? [0, 0, 2] : [0, 0, -1]),
+        );
+        // Moved one at a time, settling between, in the same order.
+        const first = handles.map((handle, i) => (i === 0 ? handle : made[i]));
+        converge(model, state, first);
+        converge(model, state, handles);
+        return state;
+      });
+      expect(surfaceChange(model, surfaces[0], surfaces[1])).toBeLessThan(1e-3);
+    }
+  });
+
+  it('a handle added to a settled surface, of any radius, changes no more than settling again', async () => {
+    const { geometry, model } = await sheet(5, 160);
+    const state = createWarpState(model.restNodes);
+    const a = moved(pointHandle(model, geometry, [-1.5, 0.1, 0], state, 6), [0, 0, 2]);
+    const b = moved(pointHandle(model, geometry, [1.5, -0.1, 0], state, 6, 1, 'b'), [0, 0, -1]);
+    solveHandles(model, state, [a, b], 400);
+    const settled = copy(state);
+    const again = copy(state);
+    solveHandles(model, again, [a, b], 400);
+    const resettle = surfaceChange(model, settled, again);
+    for (const radius of [0, 2, 4, 20]) {
+      for (const at of [[0.2, 0.3, 0] as Vec3, [6.2, 1.1, 0] as Vec3]) {
+        const after = copy(settled);
+        const pin = pointHandle(model, geometry, at, after, radius, 1, 'c');
+        solveHandles(model, after, [a, b, pin], 400);
+        expect(surfaceChange(model, settled, after)).toBeLessThanOrEqual(Math.max(resettle, 2e-3));
+      }
+    }
+  });
+
+  it('two overlapping handles moved opposite ways both reach their targets without folds', async () => {
+    const { geometry, model } = await sheet(5, 160);
+    const state = createWarpState(model.restNodes);
+    const up = moved(pointHandle(model, geometry, [-4, 0, 0], state, 9), [0, 0, 2]);
+    const down = moved(pointHandle(model, geometry, [4, 0.5, 0], state, 9, 1, 'b'), [0, 0, -2]);
+    const shared = Array.from(up.reach!.node).filter((n) => down.reach!.node.includes(n));
+    expect(shared.length).toBeGreaterThan(10);
+    solveHandles(model, state, [up, down], 300);
+    expect(distance(tipOf(model, state, up), up.target!)).toBeLessThan(0.02);
+    expect(distance(tipOf(model, state, down), down.target!)).toBeLessThan(0.02);
+    const { world, folds } = written(model, state);
+    expect(folds.length).toBe(0);
+    let high = -Infinity,
+      low = Infinity;
+    for (const v of model.region.interior)
+      if (Math.abs(model.restWorld[v * 3 + 1]) < 1 && Math.abs(model.restWorld[v * 3]) < 1) {
+        high = Math.max(high, world[v * 3 + 2]);
+        low = Math.min(low, world[v * 3 + 2]);
+      }
+    expect(high).toBeLessThan(1.5);
+    expect(low).toBeGreaterThan(-1.5);
+  });
+
+  it('an unmoved handle inside a moved one holds its spot and gives way around it', async () => {
+    const { geometry, model } = await sheet(5, 160);
+    const state = createWarpState(model.restNodes);
+    const hold = pointHandle(model, geometry, [6, 0.4, 0], state, 2, 1, 'b');
+    const lift = moved(pointHandle(model, geometry, [0, 0, 0], state, 12), [0, 0, 3]);
+    converge(model, state, [lift, hold]);
+    expect(distance(tipOf(model, state, lift), lift.target!)).toBeLessThan(0.02);
+    // Its exact constraint shares its nodes with the lift's guides, which pull it a little.
+    expect(distance(tipOf(model, state, hold), hold.pin)).toBeLessThan(0.1);
+    // Its holding gives way to the lift: over its radius the bump still mostly rises.
+    const free = createWarpState(model.restNodes);
+    converge(model, free, [lift]);
+    const { world } = written(model, state);
+    const { world: bare } = written(model, free);
+    let held = 0,
+      unheld = 0;
+    for (const v of model.region.interior) {
+      const d = Math.hypot(model.restWorld[v * 3] - 6, model.restWorld[v * 3 + 1] - 0.4);
+      if (d < 1 || d > 2) continue;
+      held += world[v * 3 + 2];
+      unheld += bare[v * 3 + 2];
+    }
+    expect(held / unheld).toBeGreaterThan(0.6);
+  });
+
+  it('a pull near a fold leaves the face behind it', async () => {
+    const { geometry, model, arc } = await foldedSheet();
+    const state = createWarpState(model.restNodes);
+    const handle = moved(pointHandle(model, geometry, [4, 0.5, 0.1], state, 5), [0, 1, 0]);
+    solveHandles(model, state, [handle], 300);
+    expect(distance(tipOf(model, state, handle), handle.target!)).toBeLessThan(0.02);
+    const { world } = written(model, state);
+    let far = 0;
+    for (const v of model.region.interior) {
+      const x = model.restWorld[v * 3],
+        y = model.restWorld[v * 3 + 1];
+      if (y > -0.4 || 4 + arc + x <= 8) continue;
+      far = Math.max(
+        far,
+        distance(world.subarray(v * 3, v * 3 + 3), model.restWorld.subarray(v * 3)),
+      );
+    }
+    expect(far).toBeLessThan(0.03);
+  });
+
+  it('an untouched automatic pin rides with a bump over it, and holds elsewhere', async () => {
+    const { geometry, model } = await sheet(5, 160);
+    const state = createWarpState(model.restNodes);
+    const near = { ...nodePin(model, nearestNode(model, [2, 0, 0]), state, 'near'), auto: true };
+    const far = { ...nodePin(model, nearestNode(model, [25, 0, 0]), state, 'far'), auto: true };
+    const lift = moved(pointHandle(model, geometry, [0, 0, 0], state, 10), [0, 0, 2]);
+    const [, ride, hold] = handleConstraints([lift, near, far], model);
+    const weight = reachWeight(
+      distance(near.samples[0].restWorld, lift.samples[0].restWorld),
+      10,
+      1,
+      lift.reach!.spacing,
+    );
+    expect(ride.target[2]).toBeGreaterThan(0.5 * 2 * weight);
+    expect(ride.target[2]).toBeLessThanOrEqual(2);
+    expect(hold.target).toBe(far.samples[0].pin);
+    solveHandles(model, state, [lift, near, far], 300);
+    expect(written(model, state).folds.length).toBe(0);
+    // A pin the user has placed holds.
+    const placed = { ...near, auto: false };
+    expect(handleConstraints([lift, placed], model)[1].target).toBe(placed.samples[0].pin);
+  });
+
   it('on a coarse 60-node grid an off-grid point reaches its target and bends a broad area', async () => {
-    // A whole closed part, so no border adds nodes; a pin on the far side holds it.
     const geometry = new SphereGeometry(16, 48, 32);
     const model = await modelOf(geometry, 0, null);
     expect(model.grid.nodes.length).toBeLessThan(80);
     const state = createWarpState(model.restNodes);
-    const far = nodeSample(model, nearestNode(model, [0, -16, 0]), state.positions);
-    const pin: WarpHandle = {
-      id: 'pin',
-      kind: 'point',
-      samples: [far],
-      pin: far.pin,
-      target: null,
-      radius: 0,
-      falloff: 1,
-      auto: false,
-      reach: null,
-    };
-    // Off the grid: the centre of a scan triangle near the top.
+    const pin = nodePin(model, nearestNode(model, [0, -16, 0]), state);
     const face = nearestFace(geometry, [3, 15.5, 2]);
     const triangle = readFace(geometry, face);
     const barycentric: Vec3 = [1 / 3, 1 / 3, 1 / 3];
@@ -366,18 +716,18 @@ describe('point handles', () => {
       restWorld: rest,
       pin: deformPoint(model, state, binding, rest),
     };
-    const free: WarpHandle = { ...pin, id: 'a', samples: [sample], pin: sample.pin, radius: 12 };
     const handle = moved(
-      reachHandle(model, free, state.positions, null, warpGuides(model, [pin])),
+      reachHandle(model, { ...pin, id: 'a', samples: [sample], pin: sample.pin, radius: 16 }),
       [0, 3, 0],
     );
-    expect(handle.reach!.effective).toBe(true);
-    solveHandles(model, state, [pin, handle], 200);
-    expect(distance(tipOf(model, state, handle), handle.target!)).toBeLessThan(0.03);
+    expect(handle.reach!.activation).toBeGreaterThan(0.5);
+    converge(model, state, [pin, handle]);
+    // Its nodes lie up to 7 mm from it, where the guides lift the surface less than the point, so
+    // on this coarsest grid it lands about 2.5 % short.
+    expect(distance(tipOf(model, state, handle), handle.target!)).toBeLessThan(0.1);
     expect(distance(tipOf(model, state, pin), pin.pin)).toBeLessThan(0.01);
     const { world, folds } = written(model, state);
     expect(folds.length).toBe(0);
-    // Around the point, the cap rises with it rather than in a spike.
     let lifted = 0,
       near = 0;
     for (const v of model.region.interior) {
@@ -394,8 +744,10 @@ describe('point handles', () => {
     const state = createWarpState(model.restNodes);
     const handle = moved(pointHandle(model, geometry, [36, 0.3, 0], state, 8), [0, 0, 1.5]);
     expect(Array.from(handle.reach!.node).some((n) => model.grid.fixed[n])).toBe(false);
-    solveHandles(model, state, [handle]);
-    expect(distance(tipOf(model, state, handle), handle.target!)).toBeLessThan(0.02);
+    converge(model, state, [handle]);
+    // The fixed border 4 mm away steepens the bump and turns the point's nodes, which pulls it
+    // about 1.7 % short; a bare point lands within 0.5 %.
+    expect(distance(tipOf(model, state, handle), handle.target!)).toBeLessThan(0.03);
     for (let n = 0; n < model.grid.nodes.length; n++)
       if (model.grid.fixed[n])
         expect(Array.from(state.positions.subarray(n * 3, n * 3 + 3))).toEqual(
@@ -408,96 +760,10 @@ describe('point handles', () => {
       for (let a = 0; a < 3; a++) expect(output.positions[g * 3 + a]).toBe(source[g * 3 + a]);
     });
   });
-
-  it('a handle added after a deformation, pinned where the surface is, changes nothing', async () => {
-    const { geometry, model } = await sheet(5, 160);
-    const state = createWarpState(model.restNodes);
-    const lift = moved(pointHandle(model, geometry, [0, 0, 0], state, 12), [0, 0, 3]);
-    solveHandles(model, state, [lift], 200);
-    const before = { positions: state.positions.slice(), rotations: state.rotations.slice() };
-    // On the slope of the bump, wider than the bump itself.
-    for (const radius of [0, 4, 20]) {
-      const after = { positions: before.positions.slice(), rotations: before.rotations.slice() };
-      const pin = pointHandle(model, geometry, [6.2, 1.1, 0], after, radius, 1, 'b', [lift]);
-      expect(pin.pin[2]).toBeGreaterThan(0.5);
-      solveHandles(model, after, [lift, pin], 200);
-      const { nodes, surface } = change(model, before, after);
-      expect(nodes).toBeLessThan(0.001);
-      expect(surface).toBeLessThan(0.001);
-    }
-  });
-
-  it('two overlapping handles moved opposite ways both reach their targets without folds', async () => {
-    const { geometry, model } = await sheet(5, 160);
-    const state = createWarpState(model.restNodes);
-    const up = moved(pointHandle(model, geometry, [-4, 0, 0], state, 9), [0, 0, 2]);
-    const down = moved(pointHandle(model, geometry, [4, 0.5, 0], state, 9, 1, 'b'), [0, 0, -2]);
-    const shared = Array.from(up.reach!.node).filter((n) => down.reach!.node.includes(n));
-    expect(shared.length).toBeGreaterThan(10);
-    solveHandles(model, state, [up, down], 200);
-    expect(distance(tipOf(model, state, up), up.target!)).toBeLessThan(0.02);
-    expect(distance(tipOf(model, state, down), down.target!)).toBeLessThan(0.02);
-    const { world, folds } = written(model, state);
-    expect(folds.length).toBe(0);
-    // Between them the surface passes from one to the other.
-    let high = -Infinity,
-      low = Infinity;
-    for (const v of model.region.interior)
-      if (Math.abs(model.restWorld[v * 3 + 1]) < 1 && Math.abs(model.restWorld[v * 3]) < 1) {
-        high = Math.max(high, world[v * 3 + 2]);
-        low = Math.min(low, world[v * 3 + 2]);
-      }
-    expect(high).toBeLessThan(1.5);
-    expect(low).toBeGreaterThan(-1.5);
-  });
-
-  it('an unmoved handle inside a moved handle’s reach holds its spot and its own area', async () => {
-    const { geometry, model } = await sheet(5, 160);
-    const state = createWarpState(model.restNodes);
-    const lift = pointHandle(model, geometry, [0, 0, 0], state, 12);
-    const hold = pointHandle(model, geometry, [6, 0.4, 0], state, 2, 1, 'b');
-    const lifted = moved(lift, [0, 0, 3]);
-    solveHandles(model, state, [lifted, hold], 200);
-    expect(distance(tipOf(model, state, lifted), lifted.target!)).toBeLessThan(0.02);
-    expect(distance(tipOf(model, state, hold), hold.pin)).toBeLessThan(0.01);
-    const { world } = written(model, state);
-    for (const v of model.region.interior) {
-      const d = Math.hypot(model.restWorld[v * 3] - 6, model.restWorld[v * 3 + 1] - 0.4);
-      if (d < 1) expect(Math.abs(world[v * 3 + 2])).toBeLessThan(0.25);
-    }
-    // Without it, that spot rises with the bump.
-    const free = createWarpState(model.restNodes);
-    solveHandles(model, free, [lifted], 200);
-    expect(tipOf(model, free, hold)[2]).toBeGreaterThan(1);
-  });
 });
 
-describe('rebuilding a reach', () => {
-  it('a radius or falloff change keeps the guides of nodes still in reach', async () => {
-    const { geometry, model } = await sheet(4, 120);
-    const state = createWarpState(model.restNodes);
-    const handle = moved(pointHandle(model, geometry, [0, 0, 0], state, 8), [0, 0, 2]);
-    solveHandles(model, state, [handle]);
-    const wider = reachHandle(model, { ...handle, radius: 12 }, state.positions, handle);
-    const index = new Map(Array.from(wider.reach!.node, (n, i) => [n, i]));
-    let kept = 0;
-    handle.reach!.node.forEach((n, i) => {
-      const j = index.get(n)!;
-      kept++;
-      expect(Array.from(wider.reach!.base.subarray(j * 3, j * 3 + 3))).toEqual(
-        Array.from(handle.reach!.base.subarray(i * 3, i * 3 + 3)),
-      );
-    });
-    expect(kept).toBe(handle.reach!.node.length);
-    expect(wider.reach!.node.length).toBeGreaterThan(kept);
-    solveHandles(model, state, [wider], 200);
-    expect(distance(tipOf(model, state, wider), wider.target!)).toBeLessThan(0.02);
-    const result = profile(model, state, [0, 0, 0], 12, 2);
-    expect(result.inside).toBeLessThan(0.15);
-    expect(result.beyond).toBeLessThan(0.06);
-  });
-
-  it('on a new grid, the current surface less each node’s share of the offset keeps the shape', async () => {
+describe('snapshots across grids', () => {
+  it('carry a settled surface to a new grid closely enough to keep its shape', async () => {
     const geometry = new PlaneGeometry(100, 100, 160, 160);
     const faces = disc(geometry, 40);
     const coarse = await modelOf(geometry, 4, faces),
@@ -505,38 +771,42 @@ describe('rebuilding a reach', () => {
     const state = createWarpState(coarse.restNodes);
     const pin = pointHandle(coarse, geometry, [8, 0, 0], state, 6, 1, 'b');
     const lift = moved(pointHandle(coarse, geometry, [0, 0, 0], state, 10), [0, 0, 2]);
-    solveHandles(coarse, state, [lift, pin], 200);
+    solveHandles(coarse, state, [lift, pin], 300);
     const before = written(coarse, state).world;
-    const surface = new Float64Array(fine.grid.nodes.length * 3);
-    fine.grid.nodes.forEach((v, n) => surface.set(before.subarray(v * 3, v * 3 + 3), n * 3));
-
-    const rebind = (handle: WarpHandle) => {
-      const samples = handle.samples.map((sample) => ({
-        ...sample,
-        binding: bindPoint(
-          fine.region,
-          fine.binding,
-          fine.restWorld,
-          sample.face,
-          sample.barycentric,
-        ),
-      }));
-      return reachHandle(fine, { ...handle, samples, reach: null }, surface, handle);
-    };
-    const next = createWarpState(fine.restNodes);
-    solveHandles(fine, next, [rebind(lift), rebind(pin)], 200);
+    const settled = snapshotOf(coarse.grid, state);
+    const carried = transferSnapshot(coarse, settled, fine);
+    expect(carried.grid).toBe(fine.grid);
+    expect(carried.settled).toBe(false);
+    const baseline = transferSnapshot(coarse, lift.baseline, fine);
+    const rebind = (handle: WarpHandle) =>
+      reachHandle(fine, {
+        ...handle,
+        samples: handle.samples.map((sample) => ({
+          ...sample,
+          binding: bindPoint(
+            fine.region,
+            fine.binding,
+            fine.restWorld,
+            sample.face,
+            sample.barycentric,
+          ),
+        })),
+        baseline,
+        reach: null,
+      });
+    const next = { positions: carried.positions.slice(), rotations: carried.rotations.slice() };
+    solveHandles(fine, next, [rebind(lift), rebind(pin)], 300);
     const after = written(fine, next).world;
     const errors = Array.from(fine.region.interior, (v) =>
       Math.abs(after[v * 3 + 2] - before[v * 3 + 2]),
     ).sort((a, b) => a - b);
-    // The shape comes back everywhere but right beside the point, where the old grid was coarse.
     expect(errors[Math.floor(errors.length * 0.99)]).toBeLessThan(0.05 * 2);
     expect(errors.at(-1)).toBeLessThan(0.2 * 2);
   });
 });
 
 describe('close gap under a guide', () => {
-  it('still pulls the seam nodes onto the neighbour under a handle’s weak outer guides', async () => {
+  it('still pulls the seam nodes onto the neighbour under a handle’s guides', async () => {
     const box = new BoxGeometry(20, 20, 20, 12, 12, 12);
     const model = await modelOf(box, 3, null);
     const part = (id: string, geometry: BufferGeometry, position: Vec3): Part => ({
@@ -557,31 +827,21 @@ describe('close gap under a guide', () => {
       { part: wall, tree: treeOf(wall.geometry)!, matrix, inverse: matrix.clone().invert() },
     ];
     const state = createWarpState(model.restNodes);
-    // A pin on the far face, and a handle on the top face whose radius ends short of the seam.
-    const far = nodeSample(model, nearestNode(model, [-10, 0, 0]), state.positions);
-    const pin: WarpHandle = {
-      id: 'pin',
-      kind: 'point',
-      samples: [far],
-      pin: far.pin,
-      target: null,
-      radius: 0,
-      falloff: 1,
-      auto: false,
-      reach: null,
-    };
+    const pin = nodePin(model, nearestNode(model, [-10, 0, 0]), state);
     const top = nodeSample(model, nearestNode(model, [2, 10, 0]), state.positions);
-    const guide = reachHandle(
-      model,
-      { ...pin, id: 'top', samples: [top], pin: top.pin, radius: 6 },
-      state.positions,
-    );
+    const guide = reachHandle(model, {
+      ...pin,
+      id: 'top',
+      samples: [top],
+      pin: top.pin,
+      radius: 6,
+    });
     const handles = [pin, guide];
     const gapTargets = closeGapTargets(model, state, neighbours, 0.1);
     const covered = gapTargets.filter(({ node }) => guide.reach!.node.includes(node));
     expect(covered.length).toBeGreaterThan(0);
     const constraints = [
-      ...handleConstraints(handles),
+      ...handleConstraints(handles, model),
       ...gapTargets.map(({ node, target }) => ({
         node: [node],
         weight: [1],
@@ -589,45 +849,17 @@ describe('close gap under a guide', () => {
         target,
       })),
     ];
-    settle(
+    const guides = warpGuides(
       model,
-      state,
-      constraints,
-      warpGuides(
-        model,
-        handles,
-        gapTargets.map(({ node }) => node),
-      ),
-      200,
-    );
+      handles,
+      gapTargets.map(({ node }) => node),
+    )!;
+    for (const { node } of gapTargets) expect(Array.from(guides.node)).not.toContain(node);
+    settle(model, state, constraints, guides, 200);
     for (const { node, target } of gapTargets)
       expect(distance(state.positions.subarray(node * 3, node * 3 + 3), target)).toBeLessThan(0.01);
   });
 });
-
-function nearestFace(geometry: BufferGeometry, at: Vec3) {
-  const triangle = new Triangle(),
-    centre = new Vector3(),
-    point = new Vector3(...at);
-  let best = -1,
-    bestDistance = Infinity;
-  for (let face = 0; face < triangleCount(geometry); face++) {
-    const d = readFace(geometry, face, triangle).getMidpoint(centre).distanceTo(point);
-    if (d < bestDistance) [best, bestDistance] = [face, d];
-  }
-  return best;
-}
-
-function nearestNode(model: WarpModel, at: Vec3) {
-  let best = -1,
-    bestDistance = Infinity;
-  for (let n = 0; n < model.grid.nodes.length; n++) {
-    if (model.grid.fixed[n]) continue;
-    const d = distance(model.restNodes.subarray(n * 3, n * 3 + 3), at);
-    if (d < bestDistance) [best, bestDistance] = [n, d];
-  }
-  return best;
-}
 
 describe('distribution', () => {
   it('spreads distinct free nodes evenly and deterministically, away from the border', async () => {
@@ -636,7 +868,6 @@ describe('distribution', () => {
     expect(nodes).toEqual(distributionNodes(model, 8));
     expect(new Set(nodes).size).toBe(8);
     for (const n of nodes) expect(model.grid.fixed[n]).toBe(0);
-    // Farthest-point sampling keeps every pair apart.
     let closest = Infinity;
     for (let i = 0; i < nodes.length; i++)
       for (let j = i + 1; j < nodes.length; j++)
@@ -681,4 +912,33 @@ describe('distribution', () => {
     const piece = (n: number) => Math.round(model.restNodes[n * 3] / 20);
     expect(new Set(nodes.map(piece)).size).toBe(3);
   });
+
+  it('puts points on a small painted piece as well as a large one', async () => {
+    const geometry = new PlaneGeometry(100, 40, 200, 80);
+    const centre = new Vector3();
+    const faces: number[] = [];
+    for (let f = 0; f < triangleCount(geometry); f++) {
+      readFace(geometry, f).getMidpoint(centre);
+      if (Math.hypot(centre.x + 25, centre.y) < 18 || Math.hypot(centre.x - 25, centre.y) < 6)
+        faces.push(f);
+    }
+    const model = await modelOf(geometry, 3, faces);
+    const nodes = distributionNodes(model, 8);
+    expect(nodes).toHaveLength(8);
+    const small = nodes.filter((n) => model.restNodes[n * 3] > 0);
+    expect(small.length).toBeGreaterThanOrEqual(1);
+    // Its first point sits in its middle.
+    expect(
+      Math.hypot(model.restNodes[small[0] * 3] - 25, model.restNodes[small[0] * 3 + 1]),
+    ).toBeLessThan(2.5);
+  });
 });
+
+const handleOffsetOf = (handle: WarpHandle): Vec3 =>
+  handle.target
+    ? [
+        handle.target[0] - handle.pin[0],
+        handle.target[1] - handle.pin[1],
+        handle.target[2] - handle.pin[2],
+      ]
+    : [0, 0, 0];

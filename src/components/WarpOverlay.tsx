@@ -28,7 +28,7 @@ import {
   type WarpTransformSelection,
 } from '../core/transform-selection';
 import type { Part, Vec3 } from '../core/types';
-import { reachWeight } from '../core/warp-handles';
+import { handleGuides, reachWeights } from '../core/warp-handles';
 import { CombinedTransform } from './CombinedTransform';
 import { ManagedTransformControls } from './ManagedTransformControls';
 import { warpRegionColor } from './SurfacePainter';
@@ -373,42 +373,71 @@ function GridLines({ warp }: { warp: WarpSession }) {
   );
 }
 
+/** The reach of each selected handle with guides: what decides which dots show and their colour. */
+function reachKey(warp: WarpSession) {
+  return warp.points.flatMap((point) =>
+    warp.selectedPoints.includes(point.id) && handleGuides(point)
+      ? [point.reach, point.radius, point.falloff]
+      : [],
+  );
+}
+
 /**
  * The grid nodes the selected points move, lighter where they carry more of the move, each on a
- * dark dot so it shows on light and dark parts alike.
+ * dark dot so it shows on light and dark parts alike. The dots are laid out when the reach
+ * changes; moving a point only rewrites their positions.
  */
 function Reach({ warp }: { warp: WarpSession }) {
-  const geometry = useMemo(() => {
-    const positions: number[] = [],
+  const invalidate = useThree((s) => s.invalidate);
+  const keyRef = useRef<unknown[]>([]);
+  const next = reachKey(warp);
+  if (next.length !== keyRef.current.length || next.some((value, i) => value !== keyRef.current[i]))
+    keyRef.current = next;
+  const key = keyRef.current;
+  const dots = useMemo(() => {
+    const nodes: number[] = [],
       colors: number[] = [];
     const color = new Color(),
       faint = new Color('#6b7178'),
       full = new Color('#ffd9b0');
-    const { positions: nodes } = warp.state!;
     for (const point of warp.points) {
-      const { reach } = point;
-      if (!warp.selectedPoints.includes(point.id) || !reach?.effective) continue;
-      for (let i = reach.own; i < reach.node.length; i++) {
-        const w = reachWeight(reach.distance[i], point.radius, point.falloff, reach.edge);
-        if (!(w > 0)) continue;
-        const n = reach.node[i];
-        positions.push(nodes[n * 3], nodes[n * 3 + 1], nodes[n * 3 + 2]);
-        color.lerpColors(faint, full, w).toArray(colors, colors.length);
-      }
+      if (!warp.selectedPoints.includes(point.id) || !handleGuides(point)) continue;
+      const weights = reachWeights(point);
+      point.reach!.node.forEach((n, i) => {
+        if (!(weights[i] > 0)) return;
+        nodes.push(n);
+        color.lerpColors(faint, full, weights[i]).toArray(colors, colors.length);
+      });
     }
-    if (!positions.length) return null;
-    return new BufferGeometry()
-      .setAttribute('position', new BufferAttribute(new Float32Array(positions), 3))
+    if (!nodes.length) return null;
+    const geometry = new BufferGeometry()
+      .setAttribute('position', new BufferAttribute(new Float32Array(nodes.length * 3), 3))
       .setAttribute('color', new BufferAttribute(new Float32Array(colors), 3));
-  }, [warp.points, warp.selectedPoints, warp.state]);
-  useEffect(() => () => geometry?.dispose(), [geometry]);
-  if (!geometry) return null;
+    return { nodes: Uint32Array.from(nodes), geometry };
+    // The key stands for the selected handles' reach and settings.
+  }, [key]);
+  useEffect(() => () => dots?.geometry.dispose(), [dots]);
+  useLayoutEffect(() => {
+    if (!dots) return;
+    const position = dots.geometry.getAttribute('position') as BufferAttribute;
+    const array = position.array as Float32Array;
+    const nodes = warp.state!.positions;
+    dots.nodes.forEach((n, i) => {
+      array[i * 3] = nodes[n * 3];
+      array[i * 3 + 1] = nodes[n * 3 + 1];
+      array[i * 3 + 2] = nodes[n * 3 + 2];
+    });
+    position.needsUpdate = true;
+    dots.geometry.computeBoundingSphere();
+    invalidate();
+  }, [dots, warp, invalidate]);
+  if (!dots) return null;
   return (
     <>
-      <points geometry={geometry} raycast={noRaycast} renderOrder={7}>
+      <points geometry={dots.geometry} raycast={noRaycast} renderOrder={7}>
         <pointsMaterial color="#1b1e22" size={7} sizeAttenuation={false} depthWrite={false} />
       </points>
-      <points geometry={geometry} raycast={noRaycast} renderOrder={8}>
+      <points geometry={dots.geometry} raycast={noRaycast} renderOrder={8}>
         <pointsMaterial vertexColors size={4} sizeAttenuation={false} depthWrite={false} />
       </points>
     </>
