@@ -709,6 +709,34 @@ describe('warp points, close gap and apply', () => {
     expect(warp.seam).not.toBeNull();
   });
 
+  it('a drag frame uploads only the region and leaves folds to the end', async () => {
+    const a = plate('a');
+    setup([a], ['a']);
+    await warpDisc(a, 0, 0, 8);
+    const p = addAt(a, 0, 0);
+    const preview = session().preview!;
+    const position = preview.getAttribute('position') as BufferAttribute;
+    const normal = preview.getAttribute('normal') as BufferAttribute;
+    const folds = session().folds;
+
+    move(p.id, [0, 0, 2], 'drag');
+    for (const attribute of [position, normal]) {
+      const covered = attribute.updateRanges.reduce((sum, range) => sum + range.count, 0);
+      expect(covered).toBeGreaterThan(0);
+      expect(covered).toBeLessThan(attribute.array.length);
+    }
+    expect(session().folds).toBe(folds);
+    const box = preview.boundingBox!,
+      corner = new Vector3();
+    for (let g = 0; g < position.count; g++)
+      expect(box.containsPoint(corner.fromBufferAttribute(position, g))).toBe(true);
+    expect(box.max.z).toBeGreaterThan(1.9);
+    expect(preview.boundingSphere!.radius).toBeGreaterThan(0);
+
+    move(p.id, [0, 0, 2]);
+    expect(session().folds).not.toBe(folds);
+  });
+
   it('updates only the grid and points while dragging a large region', async () => {
     const a = plate('a');
     setup([a], ['a']);
@@ -718,7 +746,7 @@ describe('warp points, close gap and apply', () => {
     useEditor.setState({
       warp: {
         ...session(),
-        model: { ...model, region: { ...model.region, interiorCount: 250_001 } },
+        model: { ...model, region: { ...model.region, interiorCount: 50_001 } },
       },
     });
     const position = session().preview!.getAttribute('position') as BufferAttribute;

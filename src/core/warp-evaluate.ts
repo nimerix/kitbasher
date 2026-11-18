@@ -6,16 +6,19 @@ import { writeRotation, type WarpState } from './warp-solve';
 export interface WarpOutput {
   positions: Float32Array;
   normals: Float32Array | null;
+  /** Mesh-local box around the vertices the last evaluation moved: min x, y, z, then max. */
+  moved: Float64Array;
 }
 
 const none = 0xffffffff;
 
 interface Scratch {
   rotation: Float64Array;
-  /** Deformed world position per welded vertex; valid for interior welds. */
+  /** Deformed world position per welded vertex; rest for vertices that do not move. */
   world: Float32Array;
   moved: Uint8Array;
-  pending: Uint8Array | null;
+  /** Unnormalized rest world normal per region triangle, made by the first fold check. */
+  restNormals: Float32Array | null;
 }
 const scratches = new WeakMap<WarpModel, Scratch>();
 
@@ -24,9 +27,9 @@ function scratchFor(model: WarpModel): Scratch {
   if (!s) {
     s = {
       rotation: new Float64Array(model.grid.nodes.length * 9),
-      world: new Float32Array(model.region.weldedCount * 3),
+      world: model.restWorld.slice(),
       moved: new Uint8Array(model.region.weldedCount),
-      pending: model.normals ? new Uint8Array(model.positions.length / 3) : null,
+      restNormals: null,
     };
     scratches.set(model, s);
   }
@@ -34,13 +37,37 @@ function scratchFor(model: WarpModel): Scratch {
 }
 
 export function createWarpOutput(model: WarpModel): WarpOutput {
-  return { positions: model.positions.slice(), normals: model.normals?.slice() ?? null };
+  return {
+    positions: model.positions.slice(),
+    normals: model.normals?.slice() ?? null,
+    moved: new Float64Array([Infinity, Infinity, Infinity, -Infinity, -Infinity, -Infinity]),
+  };
 }
 
-/** Writes interior vertices (and their normals); returns region triangle ids whose world normal flipped. */
-export function evaluateWarp(model: WarpModel, state: WarpState, out: WarpOutput): Uint32Array {
-  const { region, grid, binding, restWorld, restNodes, inverse: inv } = model;
-  const { weldOf, weldedCount, role, triangles, faces } = region;
+/**
+ * Writes interior vertices and their normals, touching only the region. Returns the region
+ * triangles whose world normal flipped, or null when `folds` is false, as for a drag frame.
+ */
+export function evaluateWarp(
+  model: WarpModel,
+  state: WarpState,
+  out: WarpOutput,
+  folds?: true,
+): Uint32Array;
+export function evaluateWarp(
+  model: WarpModel,
+  state: WarpState,
+  out: WarpOutput,
+  folds: boolean,
+): Uint32Array | null;
+export function evaluateWarp(
+  model: WarpModel,
+  state: WarpState,
+  out: WarpOutput,
+  folds = true,
+): Uint32Array | null {
+  const { region, grid, binding, restNodes, inverse: inv } = model;
+  const { weldOf, weldedCount, interior, interiorVertices } = region;
   const { rotation, world, moved } = scratchFor(model);
   const { positions: nodePos, rotations } = state;
   const K = binding.node.length / weldedCount;
@@ -55,9 +82,10 @@ export function evaluateWarp(model: WarpModel, state: WarpState, out: WarpOutput
       rotations[n * 4 + 3],
     );
 
-  for (let v = 0; v < weldedCount; v++) {
+  const restWorld = model.restWorld;
+  for (let i = 0; i < interior.length; i++) {
+    const v = interior[i];
     moved[v] = 0;
-    if (role[v] !== WarpRole.Interior) continue;
     const px = restWorld[v * 3],
       py = restWorld[v * 3 + 1],
       pz = restWorld[v * 3 + 2];
@@ -94,163 +122,212 @@ export function evaluateWarp(model: WarpModel, state: WarpState, out: WarpOutput
     world[v * 3 + 2] = z;
   }
 
-  const { positions } = out;
-  for (let g = 0; g < weldOf.length; g++) {
-    const v = weldOf[g];
-    if (v === none || !moved[v]) continue;
+  const { positions, moved: box } = out;
+  let minX = Infinity,
+    minY = Infinity,
+    minZ = Infinity,
+    maxX = -Infinity,
+    maxY = -Infinity,
+    maxZ = -Infinity;
+  for (let i = 0; i < interiorVertices.length; i++) {
+    const g = interiorVertices[i],
+      v = weldOf[g];
+    if (!moved[v]) continue;
     const x = world[v * 3],
       y = world[v * 3 + 1],
       z = world[v * 3 + 2];
-    positions[g * 3] = inv[0] * x + inv[4] * y + inv[8] * z + inv[12];
-    positions[g * 3 + 1] = inv[1] * x + inv[5] * y + inv[9] * z + inv[13];
-    positions[g * 3 + 2] = inv[2] * x + inv[6] * y + inv[10] * z + inv[14];
+    const lx = Math.fround(inv[0] * x + inv[4] * y + inv[8] * z + inv[12]),
+      ly = Math.fround(inv[1] * x + inv[5] * y + inv[9] * z + inv[13]),
+      lz = Math.fround(inv[2] * x + inv[6] * y + inv[10] * z + inv[14]);
+    positions[g * 3] = lx;
+    positions[g * 3 + 1] = ly;
+    positions[g * 3 + 2] = lz;
+    if (lx < minX) minX = lx;
+    if (lx > maxX) maxX = lx;
+    if (ly < minY) minY = ly;
+    if (ly > maxY) maxY = ly;
+    if (lz < minZ) minZ = lz;
+    if (lz > maxZ) maxZ = lz;
   }
+  box[0] = minX;
+  box[1] = minY;
+  box[2] = minZ;
+  box[3] = maxX;
+  box[4] = maxY;
+  box[5] = maxZ;
 
-  if (out.normals && model.normals) writeNormals(model, out, out.normals);
+  if (out.normals && model.normals) writeNormals(model, positions, out.normals);
+  return folds ? foldedTriangles(model) : null;
+}
 
+function foldedTriangles(model: WarpModel): Uint32Array {
+  const scratch = scratchFor(model);
+  const { world } = scratch;
+  const { triangles } = model.region;
+  const rest = (scratch.restNormals ??= triangleNormals(triangles, model.restWorld));
   const folds: number[] = [];
-  const at = (v: number, c: number) =>
-    role[v] === WarpRole.Interior ? world[v * 3 + c] : restWorld[v * 3 + c];
-  for (let t = 0; t < faces.length; t++) {
-    const a = triangles[t * 3],
-      b = triangles[t * 3 + 1],
-      c = triangles[t * 3 + 2];
-    let dot = 0;
-    const deformed = faceNormal(
-      at(a, 0),
-      at(a, 1),
-      at(a, 2),
-      at(b, 0),
-      at(b, 1),
-      at(b, 2),
-      at(c, 0),
-      at(c, 1),
-      at(c, 2),
-    );
-    const rest = faceNormal(
-      restWorld[a * 3],
-      restWorld[a * 3 + 1],
-      restWorld[a * 3 + 2],
-      restWorld[b * 3],
-      restWorld[b * 3 + 1],
-      restWorld[b * 3 + 2],
-      restWorld[c * 3],
-      restWorld[c * 3 + 1],
-      restWorld[c * 3 + 2],
-    );
-    dot = deformed[0] * rest[0] + deformed[1] * rest[1] + deformed[2] * rest[2];
+  for (let t = 0, o = 0; o < triangles.length; t++, o += 3) {
+    const a = triangles[o] * 3,
+      b = triangles[o + 1] * 3,
+      c = triangles[o + 2] * 3;
+    const ux = world[b] - world[a],
+      uy = world[b + 1] - world[a + 1],
+      uz = world[b + 2] - world[a + 2];
+    const vx = world[c] - world[a],
+      vy = world[c + 1] - world[a + 1],
+      vz = world[c + 2] - world[a + 2];
+    const dot =
+      (uy * vz - uz * vy) * rest[o] +
+      (uz * vx - ux * vz) * rest[o + 1] +
+      (ux * vy - uy * vx) * rest[o + 2];
     if (dot < 0) folds.push(t);
   }
   return Uint32Array.from(folds);
 }
 
-function faceNormal(
-  ax: number,
-  ay: number,
-  az: number,
-  bx: number,
-  by: number,
-  bz: number,
-  cx: number,
-  cy: number,
-  cz: number,
-): Vec3 {
-  const ux = bx - ax,
-    uy = by - ay,
-    uz = bz - az;
-  const vx = cx - ax,
-    vy = cy - ay,
-    vz = cz - az;
-  return [uy * vz - uz * vy, uz * vx - ux * vz, ux * vy - uy * vx];
+/** Unnormalized normal of each welded triangle. */
+function triangleNormals(triangles: Uint32Array, points: Float32Array) {
+  const normals = new Float32Array(triangles.length);
+  for (let o = 0; o < triangles.length; o += 3) {
+    const a = triangles[o] * 3,
+      b = triangles[o + 1] * 3,
+      c = triangles[o + 2] * 3;
+    const ux = points[b] - points[a],
+      uy = points[b + 1] - points[a + 1],
+      uz = points[b + 2] - points[a + 2];
+    const vx = points[c] - points[a],
+      vy = points[c + 1] - points[a + 1],
+      vz = points[c + 2] - points[a + 2];
+    normals[o] = uy * vz - uz * vy;
+    normals[o + 1] = uz * vx - ux * vz;
+    normals[o + 2] = ux * vy - uy * vx;
+  }
+  return normals;
 }
 
-function writeNormals(model: WarpModel, out: WarpOutput, normals: Float32Array) {
-  const { region, index, indexed } = model;
-  const { weldOf, role, faces } = region;
+function writeNormals(model: WarpModel, positions: Float32Array, normals: Float32Array) {
+  const { region, index } = model;
+  const { weldOf, role, faces, interiorVertices } = region;
   const original = model.normals!;
-  const { positions } = out;
-  const vertexOf = (f: number, c: number) => (index ? index[f * 3 + c] : f * 3 + c);
 
-  if (!indexed) {
+  if (!index) {
     for (let t = 0; t < faces.length; t++) {
-      const f = faces[t];
-      const a = f * 3 * 3;
-      const [nx, ny, nz] = faceNormal(
-        positions[a],
-        positions[a + 1],
-        positions[a + 2],
-        positions[a + 3],
-        positions[a + 4],
-        positions[a + 5],
-        positions[a + 6],
-        positions[a + 7],
-        positions[a + 8],
-      );
-      const length = Math.hypot(nx, ny, nz);
-      for (let c = 0; c < 3; c++) {
-        const o = (f * 3 + c) * 3;
+      const o = faces[t] * 9;
+      const ux = positions[o + 3] - positions[o],
+        uy = positions[o + 4] - positions[o + 1],
+        uz = positions[o + 5] - positions[o + 2];
+      const vx = positions[o + 6] - positions[o],
+        vy = positions[o + 7] - positions[o + 1],
+        vz = positions[o + 8] - positions[o + 2];
+      const nx = uy * vz - uz * vy,
+        ny = uz * vx - ux * vz,
+        nz = ux * vy - uy * vx;
+      const length = Math.sqrt(nx * nx + ny * ny + nz * nz);
+      for (let c = o; c < o + 9; c += 3)
         if (length > 0) {
-          normals[o] = nx / length;
-          normals[o + 1] = ny / length;
-          normals[o + 2] = nz / length;
+          normals[c] = nx / length;
+          normals[c + 1] = ny / length;
+          normals[c + 2] = nz / length;
         } else {
-          normals[o] = original[o];
-          normals[o + 1] = original[o + 1];
-          normals[o + 2] = original[o + 2];
+          normals[c] = original[c];
+          normals[c + 1] = original[c + 1];
+          normals[c + 2] = original[c + 2];
         }
-      }
     }
     return;
   }
 
-  const pending = scratchFor(model).pending!;
-  const interior = (g: number) => role[weldOf[g]] === WarpRole.Interior;
-  for (let t = 0; t < faces.length; t++)
-    for (let c = 0; c < 3; c++) {
-      const g = vertexOf(faces[t], c);
-      if (!interior(g) || pending[g]) continue;
-      pending[g] = 1;
-      normals[g * 3] = normals[g * 3 + 1] = normals[g * 3 + 2] = 0;
-    }
+  // Interior vertices take the area-weighted normal of their faces, which are all in the region.
+  for (let i = 0; i < interiorVertices.length; i++) {
+    const o = interiorVertices[i] * 3;
+    normals[o] = normals[o + 1] = normals[o + 2] = 0;
+  }
   for (let t = 0; t < faces.length; t++) {
-    const a = vertexOf(faces[t], 0) * 3,
-      b = vertexOf(faces[t], 1) * 3,
-      c = vertexOf(faces[t], 2) * 3;
-    const n = faceNormal(
-      positions[a],
-      positions[a + 1],
-      positions[a + 2],
-      positions[b],
-      positions[b + 1],
-      positions[b + 2],
-      positions[c],
-      positions[c + 1],
-      positions[c + 2],
-    );
-    for (const o of [a, b, c]) {
-      if (!pending[o / 3]) continue;
-      normals[o] += n[0];
-      normals[o + 1] += n[1];
-      normals[o + 2] += n[2];
+    const f = faces[t] * 3;
+    const a = index[f] * 3,
+      b = index[f + 1] * 3,
+      c = index[f + 2] * 3;
+    const ux = positions[b] - positions[a],
+      uy = positions[b + 1] - positions[a + 1],
+      uz = positions[b + 2] - positions[a + 2];
+    const vx = positions[c] - positions[a],
+      vy = positions[c + 1] - positions[a + 1],
+      vz = positions[c + 2] - positions[a + 2];
+    const nx = uy * vz - uz * vy,
+      ny = uz * vx - ux * vz,
+      nz = ux * vy - uy * vx;
+    for (let k = 0; k < 3; k++) {
+      const g = index[f + k];
+      if (role[weldOf[g]] !== WarpRole.Interior) continue;
+      normals[g * 3] += nx;
+      normals[g * 3 + 1] += ny;
+      normals[g * 3 + 2] += nz;
     }
   }
-  for (let t = 0; t < faces.length; t++)
-    for (let c = 0; c < 3; c++) {
-      const g = vertexOf(faces[t], c);
-      if (!pending[g]) continue;
-      pending[g] = 0;
-      const o = g * 3;
-      const length = Math.hypot(normals[o], normals[o + 1], normals[o + 2]);
-      if (length > 0) {
-        normals[o] /= length;
-        normals[o + 1] /= length;
-        normals[o + 2] /= length;
-      } else {
-        normals[o] = original[o];
-        normals[o + 1] = original[o + 1];
-        normals[o + 2] = original[o + 2];
-      }
+  for (let i = 0; i < interiorVertices.length; i++) {
+    const o = interiorVertices[i] * 3;
+    const length = Math.sqrt(normals[o] ** 2 + normals[o + 1] ** 2 + normals[o + 2] ** 2);
+    if (length > 0) {
+      normals[o] /= length;
+      normals[o + 1] /= length;
+      normals[o + 2] /= length;
+    } else {
+      normals[o] = original[o];
+      normals[o + 1] = original[o + 1];
+      normals[o + 2] = original[o + 2];
     }
+  }
+}
+
+// Each range is one GPU upload call. Ranges closer than this many values join, and then the
+// narrowest gaps join until no more than the cap remain.
+const joinGap = 1024;
+export const warpRangeCap = 512;
+const updateRanges = new WeakMap<WarpModel, { positions: Uint32Array; normals: Uint32Array }>();
+
+/**
+ * The parts of the position and normal arrays an evaluation can change, as start and count pairs
+ * in array elements.
+ */
+export function warpUpdateRanges(model: WarpModel) {
+  let ranges = updateRanges.get(model);
+  if (!ranges) {
+    const positions = joinedRanges(model.region.interiorVertices, 3);
+    // Unindexed, every corner of a region face takes the face normal.
+    const normals = model.index ? positions : joinedRanges(model.region.faces, 9);
+    updateRanges.set(model, (ranges = { positions, normals }));
+  }
+  return ranges;
+}
+
+/** Start and count pairs covering ascending items of `size` values each. */
+export function joinedRanges(items: ArrayLike<number>, size: number) {
+  const starts: number[] = [],
+    ends: number[] = [];
+  for (let i = 0; i < items.length; i++) {
+    const start = items[i] * size;
+    if (ends.length && start - ends[ends.length - 1] < joinGap)
+      ends[ends.length - 1] = start + size;
+    else {
+      starts.push(start);
+      ends.push(start + size);
+    }
+  }
+  // Gap i lies after range i.
+  const joined = new Uint8Array(starts.length);
+  if (starts.length > warpRangeCap) {
+    const order = Array.from({ length: starts.length - 1 }, (_, i) => i).sort(
+      (a, b) => starts[a + 1] - ends[a] - (starts[b + 1] - ends[b]) || a - b,
+    );
+    for (let k = 0; k < starts.length - warpRangeCap; k++) joined[order[k]] = 1;
+  }
+  const ranges: number[] = [];
+  for (let i = 0; i < starts.length; i++) {
+    const last = ranges.length - 2;
+    if (i > 0 && joined[i - 1]) ranges[last + 1] = ends[i] - ranges[last];
+    else ranges.push(starts[i], ends[i] - starts[i]);
+  }
+  return Uint32Array.from(ranges);
 }
 
 export function deformPoint(

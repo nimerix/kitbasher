@@ -79,7 +79,13 @@ import { captureComponents, instantiateComponents } from './clipboard';
 import type { ComponentClipboard } from './clipboard';
 import { referencePlanes, resolvePart } from './references';
 import { bindTrianglePoint } from './warp-bind';
-import { createWarpOutput, deformPoint, evaluateWarp, type WarpOutput } from './warp-evaluate';
+import {
+  createWarpOutput,
+  deformPoint,
+  evaluateWarp,
+  warpUpdateRanges,
+  type WarpOutput,
+} from './warp-evaluate';
 import { defaultWarpDensity, warpDensityNodes } from './warp-grid';
 import { buildWarpModelJob } from './warp-job';
 import type { WarpModel, WarpModelInput } from './warp-model';
@@ -547,8 +553,9 @@ function bindWarpPoint(model: WarpModel, point: WarpPoint): WarpPoint | null {
 }
 
 const warpUndoLimit = 100;
-// Larger regions follow a drag on the grid alone, and the surface catches up when it ends.
-const warpDragVertices = 250_000;
+// Larger regions follow a drag on the grid alone, and the surface catches up when it ends. A drag
+// frame at this size takes about 4 ms on a 3M-triangle unindexed scan.
+const warpDragVertices = 50_000;
 
 // The points before the drag in progress, which its end records as one undo step.
 let warpDrag: { model: WarpModel; before: WarpEdit } | null = null;
@@ -609,16 +616,34 @@ function warpSeam(scene: SceneDocument, warp: WarpSession) {
 }
 
 /** Deforms the preview from the solved grid, and returns the region triangles that folded. */
-function deformWarpPreview({ model, state, output, preview }: WarpSession) {
-  const folds = evaluateWarp(model!, state!, output!);
-  preview!.getAttribute('position').needsUpdate = true;
-  const normal = preview!.getAttribute('normal');
-  if (normal) normal.needsUpdate = true;
-  // One pass over the vertices: the sphere encloses the box rather than fitting the points.
-  const box = (preview!.boundingBox ?? new Box3()).setFromArray(output!.positions);
-  preview!.boundingBox = box;
+function deformWarpPreview(
+  { model, state, output, preview, source }: WarpSession,
+  gesture: 'drag' | 'end',
+) {
+  // A drag frame leaves folds to the end of the gesture.
+  const folds = evaluateWarp(model!, state!, output!, gesture === 'end');
+  const ranges = warpUpdateRanges(model!);
+  uploadRanges(preview!.getAttribute('position') as BufferAttribute, ranges.positions);
+  const normal = preview!.getAttribute('normal') as BufferAttribute | undefined;
+  if (normal) uploadRanges(normal, ranges.normals);
+  // The source's box grown by the moved vertices holds the surface without a pass over the rest.
+  // The sphere encloses the box rather than fitting the points.
+  if (!source.boundingBox) source.computeBoundingBox();
+  const box = (preview!.boundingBox ??= new Box3()).copy(source.boundingBox!);
+  const moved = output!.moved;
+  if (moved[0] <= moved[3])
+    box.expandByPoint(movedCorner.fromArray(moved)).expandByPoint(movedCorner.fromArray(moved, 3));
   preview!.boundingSphere = box.getBoundingSphere(preview!.boundingSphere ?? new Sphere());
   return folds;
+}
+const movedCorner = new Vector3();
+
+/** Sends only the given parts of an attribute to the GPU on its next upload. */
+function uploadRanges(attribute: BufferAttribute, ranges: Uint32Array) {
+  if (!ranges.length) return;
+  attribute.clearUpdateRanges();
+  for (let i = 0; i < ranges.length; i += 2) attribute.addUpdateRange(ranges[i], ranges[i + 1]);
+  attribute.needsUpdate = true;
 }
 
 /** Solves `state` until it settles, warm-started from it. */
@@ -648,10 +673,10 @@ function solveWarpSession(
   if (gesture === 'end')
     return {
       ...warp,
-      folds: deformWarpPreview(warp),
+      folds: deformWarpPreview(warp, 'end')!,
       seam: measure ? warpSeam(scene, warp) : warp.seam,
     };
-  if (model.region.interiorCount <= warpDragVertices) deformWarpPreview(warp);
+  if (model.region.interiorCount <= warpDragVertices) deformWarpPreview(warp, 'drag');
   return warp;
 }
 

@@ -28,6 +28,27 @@ describe('buildWarpRegion', () => {
   });
 });
 
+describe('buildWarpRegion interior lists', () => {
+  it('lists the interior welded vertices and every geometry vertex of them, ascending', () => {
+    for (const g of [
+      new SphereGeometry(10, 16, 12, 0, Math.PI),
+      new SphereGeometry(10, 16, 12, 0, Math.PI).toNonIndexed(),
+    ]) {
+      const r = buildWarpRegion(g, [...Array(120).keys()]);
+      const interior = [...Array(r.weldedCount).keys()].filter(
+        (v) => r.role[v] === WarpRole.Interior,
+      );
+      const vertices = [...r.weldOf.keys()].filter(
+        (i) => r.weldOf[i] !== 0xffffffff && r.role[r.weldOf[i]] === WarpRole.Interior,
+      );
+      expect(interior.length).toBeGreaterThan(0);
+      expect([...r.interior]).toEqual(interior);
+      expect([...r.interiorVertices]).toEqual(vertices);
+      expect(r.interiorCount).toBe(interior.length);
+    }
+  });
+});
+
 describe('buildWarpRegion outputs', () => {
   const painted = [10, 11, 12, 13, 18, 19, 20, 21];
   const plane = () => new PlaneGeometry(10, 10, 4, 4);

@@ -4,7 +4,14 @@ import { bindPoint } from '../../src/core/warp-bind';
 import { weldedPositionIndex, hasClosedEdges } from '../../src/core/mesh-topology';
 import { buildWarpModelJob } from '../../src/core/warp-job';
 import { buildWarpModel, type WarpModel, type WarpModelInput } from '../../src/core/warp-model';
-import { createWarpOutput, deformPoint, evaluateWarp } from '../../src/core/warp-evaluate';
+import {
+  createWarpOutput,
+  deformPoint,
+  evaluateWarp,
+  joinedRanges,
+  warpRangeCap,
+  warpUpdateRanges,
+} from '../../src/core/warp-evaluate';
 import { WarpRole } from '../../src/core/warp-region';
 import {
   createWarpState,
@@ -225,6 +232,94 @@ describe('evaluateWarp', () => {
     evaluateWarp(model, createWarpState(model.restNodes), out);
     for (let i = 0; i < out.positions.length; i++)
       expect(out.positions[i]).toBeCloseTo(model.positions[i], 3);
+  });
+});
+
+describe('drag frames', () => {
+  const sources = () => [
+    new SphereGeometry(10, 64, 48),
+    new SphereGeometry(10, 64, 48).toNonIndexed(),
+  ];
+
+  it('skip fold detection and write the same surface', async () => {
+    for (const source of sources()) {
+      const model = await buildWarpModel(inputOf(source, cap));
+      const state = warp(model, [5, 0, 0]);
+      const full = createWarpOutput(model),
+        drag = createWarpOutput(model);
+      expect(evaluateWarp(model, state, full)!.length).toBeGreaterThan(0);
+      expect(evaluateWarp(model, state, drag, false)).toBeNull();
+      expect(drag.positions).toEqual(full.positions);
+      expect(drag.normals).toEqual(full.normals);
+    }
+  });
+
+  it('report the box around the moved vertices', async () => {
+    const model = await buildWarpModel(inputOf(new SphereGeometry(10, 64, 48), cap));
+    const out = createWarpOutput(model);
+    evaluateWarp(model, warp(model, [0, 0, 2]), out, false);
+    const min = [Infinity, Infinity, Infinity],
+      max = [-Infinity, -Infinity, -Infinity];
+    for (const g of model.region.interiorVertices)
+      for (let a = 0; a < 3; a++) {
+        min[a] = Math.min(min[a], out.positions[g * 3 + a]);
+        max[a] = Math.max(max[a], out.positions[g * 3 + a]);
+      }
+    expect([...out.moved]).toEqual([...min, ...max]);
+  });
+
+  it('upload only ranges that cover every changed value, in few calls', async () => {
+    for (const source of sources()) {
+      const model = await buildWarpModel(inputOf(source, cap));
+      const out = createWarpOutput(model);
+      evaluateWarp(model, warp(model, [0, 0, 2]), out, false);
+      const ranges = warpUpdateRanges(model);
+      for (const [name, changed, original] of [
+        ['positions', out.positions, model.positions],
+        ['normals', out.normals!, model.normals!],
+      ] as const) {
+        const list = ranges[name];
+        expect(list.length / 2).toBeLessThanOrEqual(warpRangeCap);
+        const covered = new Uint8Array(changed.length);
+        let total = 0;
+        for (let i = 0; i < list.length; i += 2) {
+          if (i) expect(list[i]).toBeGreaterThan(list[i - 2] + list[i - 1]);
+          covered.fill(1, list[i], list[i] + list[i + 1]);
+          total += list[i + 1];
+        }
+        let differing = 0;
+        for (let i = 0; i < changed.length; i++)
+          if (changed[i] !== original[i]) {
+            differing++;
+            expect(covered[i]).toBe(1);
+          }
+        expect(differing).toBeGreaterThan(0);
+        expect(total).toBeLessThan(changed.length);
+      }
+    }
+  });
+});
+
+describe('joinedRanges', () => {
+  it('joins neighbouring items and small gaps', () => {
+    expect([...joinedRanges([3, 4, 5], 3)]).toEqual([9, 9]);
+    expect([...joinedRanges([0, 100], 3)]).toEqual([0, 303]);
+    expect([...joinedRanges([0, 1000], 3)]).toEqual([0, 3, 3000, 3]);
+    expect([...joinedRanges([], 3)]).toEqual([]);
+  });
+
+  it('joins the narrowest gaps until the cap is met', () => {
+    // Every item is far from the next, the odd gaps wider than the even ones.
+    const items = Array.from({ length: warpRangeCap * 2 }, (_, i) => i * 1000 + (i % 2) * 500);
+    const ranges = joinedRanges(items, 3);
+    expect(ranges.length / 2).toBeLessThanOrEqual(warpRangeCap);
+    const covered = new Set<number>();
+    for (let i = 0; i < ranges.length; i += 2)
+      for (let v = ranges[i]; v < ranges[i] + ranges[i + 1]; v++) covered.add(v);
+    for (const item of items)
+      for (let a = 0; a < 3; a++) expect(covered.has(item * 3 + a)).toBe(true);
+    // Only the narrow gaps were joined.
+    expect(covered.size).toBeLessThan(items.length * 3 * 400);
   });
 });
 
