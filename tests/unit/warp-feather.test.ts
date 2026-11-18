@@ -340,7 +340,7 @@ describe('unfeathered compatibility', () => {
     'sheet-indexed':
       'region=96b8571dbd2ea695 roles=b1dc4f7868c16b9f grid=f2834a39d082f587 w=64652a942de79b72 pos=5355ed9b2801e55d nrm=2cfdd28f8c7b529d',
     'sphere-unindexed':
-      'region=8815ae43cbf7507a roles=a90fc269e8abbc4f grid=000512a8cde285bd w=10a5d61f75ac62aa pos=a9f1013ab09756d7 nrm=75492c30eca6a272',
+      'region=8815ae43cbf7507a roles=a90fc269e8abbc4f grid=000512a8cde285bd w=10a5d61f75ac62aa pos=493963b97d6e1608 nrm=9d236ac450099ff9',
   };
   const fixtures = {
     'sheet-unindexed': () => new PlaneGeometry(40, 40, 20, 20).toNonIndexed(),

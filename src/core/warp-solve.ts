@@ -82,15 +82,89 @@ interface WarpSystem {
 const systems = new WeakMap<WarpGrid, WarpSystem>();
 
 /**
- * What each valid constraint adds to the system. A skinned point is linear in the node positions
- * for given rotations: Σ_k a_k p_k + Σ_n R_n r_n. The coefficients `a_k`, over the bound nodes and
- * their grid neighbours, shape the matrix; `rotated` holds the r_n, and `rest` is Σ a_k g_k.
+ * What a constraint adds to the system. A skinned point is linear in the node positions for given
+ * rotations: Σ_k a_k p_k + Σ_n R_n r_n. The coefficients `a_k`, over the bound nodes and their grid
+ * neighbours, shape the matrix; `rotated` holds the r_n, and `rest` is Σ_k a_k g_k.
  */
 interface ConstraintTerm {
-  index: number;
+  grid: WarpGrid;
+  restNodes: Float64Array;
+  weight: ArrayLike<number>;
+  restByNode: Vec3[] | undefined;
+  rest: Vec3;
+  node: number[];
+  coefficient: number[];
   rotatedNode: number[];
   rotated: number[];
-  rest: Vec3;
+  restSum: Vec3;
+}
+
+/** Terms per constraint binding, which handles keep across frames while their targets change. */
+const termCache = new WeakMap<object, ConstraintTerm>();
+
+function termOf(constraint: WarpConstraint, grid: WarpGrid, restNodes: Float64Array, sum: number) {
+  const { node, weight, rest, restByNode } = constraint;
+  const cached = typeof node === 'object' ? termCache.get(node) : undefined;
+  if (
+    cached?.grid === grid &&
+    cached.restNodes === restNodes &&
+    cached.weight === weight &&
+    cached.restByNode === restByNode &&
+    cached.rest === rest
+  )
+    return cached;
+  const { edgeStart, edges } = grid;
+  const frame = stretchFrame(grid, restNodes);
+  const { inverse, edge } = frame;
+  const coefficient = new Map<number, number>();
+  const add = (n: number, a: number) => coefficient.set(n, (coefficient.get(n) ?? 0) + a);
+  const rotatedNode: number[] = [],
+    rotated: number[] = [];
+  for (let k = 0; k < node.length; k++) {
+    const n = node[k],
+      w = restByNode ? weight[k] : weight[k] / sum;
+    const p = restByNode?.[k] ?? rest;
+    const ox = p[0] - restNodes[n * 3],
+      oy = p[1] - restNodes[n * 3 + 1],
+      oz = p[2] - restNodes[n * 3 + 2];
+    add(n, w);
+    rotatedNode.push(n);
+    if (!stretches(grid, frame, n)) {
+      rotated.push(w * ox, w * oy, w * oz);
+      continue;
+    }
+    // S_n o = Σ_j (p_n − p_j)(e_j · B o) + μ R_n B o, with B = (E + μI)⁻¹.
+    const i = n * 9;
+    const bx = inverse[i] * ox + inverse[i + 1] * oy + inverse[i + 2] * oz,
+      by = inverse[i + 3] * ox + inverse[i + 4] * oy + inverse[i + 5] * oz,
+      bz = inverse[i + 6] * ox + inverse[i + 7] * oy + inverse[i + 8] * oz;
+    for (let e = edgeStart[n]; e < edgeStart[n + 1]; e++) {
+      // A point on the node itself has no offset to stretch, so its row stays on the node.
+      const a = w * (edge[e * 3] * bx + edge[e * 3 + 1] * by + edge[e * 3 + 2] * bz);
+      if (a === 0) continue;
+      add(n, a);
+      add(edges[e], -a);
+    }
+    const mu = frame.ridge[n] * w;
+    rotated.push(mu * bx, mu * by, mu * bz);
+  }
+  const restSum: Vec3 = [0, 0, 0];
+  for (const [n, a] of coefficient)
+    for (let d = 0; d < 3; d++) restSum[d] += a * restNodes[n * 3 + d];
+  const term: ConstraintTerm = {
+    grid,
+    restNodes,
+    weight,
+    restByNode,
+    rest,
+    node: [...coefficient.keys()],
+    coefficient: [...coefficient.values()],
+    rotatedNode,
+    rotated,
+    restSum,
+  };
+  if (typeof node === 'object') termCache.set(node, term);
+  return term;
 }
 
 /** The key of the system's constraint rows: per valid constraint, its index, count, nodes, a_k. */
@@ -101,54 +175,15 @@ function constraintTerms(
 ): { key: number[]; terms: ConstraintTerm[] } {
   const key: number[] = [],
     terms: ConstraintTerm[] = [];
-  const { edgeStart, edges } = grid;
-  const inverse = stretchInverse(grid, restNodes);
   for (let c = 0; c < constraints.length; c++) {
-    const { node, weight, rest, restByNode } = constraints[c];
+    const { node, weight } = constraints[c];
     let sum = 0;
     for (let k = 0; k < node.length; k++) sum += weight[k];
     if (!Number.isFinite(sum) || sum === 0) continue;
-    const coefficient = new Map<number, number>();
-    const add = (n: number, a: number) => coefficient.set(n, (coefficient.get(n) ?? 0) + a);
-    const term: ConstraintTerm = { index: c, rotatedNode: [], rotated: [], rest: [0, 0, 0] };
-    for (let k = 0; k < node.length; k++) {
-      const n = node[k],
-        w = restByNode ? weight[k] : weight[k] / sum;
-      const p = restByNode?.[k] ?? rest;
-      const ox = p[0] - restNodes[n * 3],
-        oy = p[1] - restNodes[n * 3 + 1],
-        oz = p[2] - restNodes[n * 3 + 2];
-      add(n, w);
-      term.rotatedNode.push(n);
-      const i = n * 9;
-      if (!stretches(grid, inverse, n)) {
-        term.rotated.push(w * ox, w * oy, w * oz);
-        continue;
-      }
-      // S_n o = Σ_j (p_n − p_j)(e_j · B o) + μ R_n B o, with B = (E + μI)⁻¹.
-      const bx = inverse[i] * ox + inverse[i + 1] * oy + inverse[i + 2] * oz,
-        by = inverse[i + 3] * ox + inverse[i + 4] * oy + inverse[i + 5] * oz,
-        bz = inverse[i + 6] * ox + inverse[i + 7] * oy + inverse[i + 8] * oz;
-      let mu = 0;
-      for (let e = edgeStart[n]; e < edgeStart[n + 1]; e++) {
-        const j = edges[e];
-        const ex = restNodes[n * 3] - restNodes[j * 3],
-          ey = restNodes[n * 3 + 1] - restNodes[j * 3 + 1],
-          ez = restNodes[n * 3 + 2] - restNodes[j * 3 + 2];
-        mu += ex * ex + ey * ey + ez * ez;
-        const a = w * (ex * bx + ey * by + ez * bz);
-        add(n, a);
-        add(j, -a);
-      }
-      mu *= warpStretchRidge * w;
-      term.rotated.push(mu * bx, mu * by, mu * bz);
-    }
-    key.push(c, coefficient.size);
-    for (const n of coefficient.keys()) key.push(n);
-    for (const [n, a] of coefficient) {
-      key.push(a);
-      for (let d = 0; d < 3; d++) term.rest[d] += a * restNodes[n * 3 + d];
-    }
+    const term = termOf(constraints[c], grid, restNodes, sum);
+    key.push(c, term.node.length);
+    for (const n of term.node) key.push(n);
+    for (const a of term.coefficient) key.push(a);
     terms.push(term);
   }
   return { key, terms };
@@ -317,14 +352,14 @@ function assemble(
 
   // Constraints: λ a_k (t − Σ_k a_k g_k − Σ_n R_n r_n), the skinned point at rest displacement.
   for (let i = 0, c = 0; i < key.length; c++) {
-    const { rotatedNode, rotated, rest } = terms[c];
-    const { target, fixed } = constraints[terms[c].index];
+    const { rotatedNode, rotated, restSum } = terms[c];
+    const { target, fixed } = constraints[key[i]];
     const length = key[i + 1];
     const nodes = i + 2,
       weights = nodes + length;
-    let dx = target[0] - (fixed?.[0] ?? 0) - rest[0],
-      dy = target[1] - (fixed?.[1] ?? 0) - rest[1],
-      dz = target[2] - (fixed?.[2] ?? 0) - rest[2];
+    let dx = target[0] - (fixed?.[0] ?? 0) - restSum[0],
+      dy = target[1] - (fixed?.[1] ?? 0) - restSum[1],
+      dz = target[2] - (fixed?.[2] ?? 0) - restSum[2];
     for (let s = 0; s < rotatedNode.length; s++) {
       const m = rotatedNode[s] * 9;
       const ox = rotated[s * 3],
@@ -470,15 +505,25 @@ function conjugateGradient(system: WarpSystem) {
   }
 }
 
-const stretchFrames = new WeakMap<WarpGrid, { rest: Float64Array; inverse: Float64Array }>();
+interface StretchFrame {
+  rest: Float64Array;
+  /** Per node, (E + μI)⁻¹ with E = Σ e eᵀ over its grid edges at rest and μ the ridge. */
+  inverse: Float64Array;
+  /** Per node, μ. */
+  ridge: Float64Array;
+  /** Per directed grid edge, its rest vector from the far node to the near one. */
+  edge: Float64Array;
+}
+const stretchFrames = new WeakMap<WarpGrid, StretchFrame>();
 
-/** Per node, (E + μI)⁻¹ with E = Σ e eᵀ over its grid edges at rest and μ the ridge. */
-function stretchInverse(grid: WarpGrid, restNodes: Float64Array) {
+function stretchFrame(grid: WarpGrid, restNodes: Float64Array): StretchFrame {
   let frame = stretchFrames.get(grid);
-  if (frame?.rest === restNodes) return frame.inverse;
+  if (frame?.rest === restNodes) return frame;
   const { edgeStart, edges } = grid;
   const count = edgeStart.length - 1;
-  const inverse = new Float64Array(count * 9);
+  const inverse = new Float64Array(count * 9),
+    ridge = new Float64Array(count),
+    edge = new Float64Array(edges.length * 3);
   for (let i = 0; i < count; i++) {
     let e00 = 0,
       e01 = 0,
@@ -491,6 +536,9 @@ function stretchInverse(grid: WarpGrid, restNodes: Float64Array) {
       const x = restNodes[i * 3] - restNodes[j * 3],
         y = restNodes[i * 3 + 1] - restNodes[j * 3 + 1],
         z = restNodes[i * 3 + 2] - restNodes[j * 3 + 2];
+      edge[e * 3] = x;
+      edge[e * 3 + 1] = y;
+      edge[e * 3 + 2] = z;
       e00 += x * x;
       e01 += x * y;
       e02 += x * z;
@@ -500,6 +548,7 @@ function stretchInverse(grid: WarpGrid, restNodes: Float64Array) {
     }
     const mu = warpStretchRidge * (e00 + e11 + e22);
     if (!(mu > 0)) continue;
+    ridge[i] = mu;
     e00 += mu;
     e11 += mu;
     e22 += mu;
@@ -518,13 +567,13 @@ function stretchInverse(grid: WarpGrid, restNodes: Float64Array) {
     inverse[o + 5] = inverse[o + 7] = c12 / det;
     inverse[o + 8] = c22 / det;
   }
-  stretchFrames.set(grid, (frame = { rest: restNodes, inverse }));
-  return inverse;
+  stretchFrames.set(grid, (frame = { rest: restNodes, inverse, ridge, edge }));
+  return frame;
 }
 
 /** Whether node n's skin map stretches with its edges; otherwise it is its rotation. */
-const stretches = (grid: WarpGrid, inverse: Float64Array, n: number) =>
-  !grid.fixed[n] && grid.edgeStart[n] !== grid.edgeStart[n + 1] && inverse[n * 9] !== 0;
+const stretches = (grid: WarpGrid, frame: StretchFrame, n: number) =>
+  !grid.fixed[n] && grid.edgeStart[n] !== grid.edgeStart[n + 1] && frame.ridge[n] > 0;
 
 /**
  * Node n's skin map into `out` at `o`: the linear map that best carries its grid edges from rest
@@ -535,41 +584,39 @@ const stretches = (grid: WarpGrid, inverse: Float64Array, n: number) =>
  */
 function writeSkinMap(
   grid: WarpGrid,
-  restNodes: Float64Array,
   positions: ArrayLike<number>,
   rotation: Float64Array,
   r: number,
-  inverse: Float64Array,
+  frame: StretchFrame,
   n: number,
   out: Float64Array,
   o: number,
 ) {
-  const { edgeStart, edges } = grid;
-  const i = n * 9;
-  if (!stretches(grid, inverse, n)) {
+  if (!stretches(grid, frame, n)) {
     for (let k = 0; k < 9; k++) out[o + k] = rotation[r + k];
     return;
   }
-  let mu = 0,
-    a00 = 0,
-    a01 = 0,
-    a02 = 0,
-    a10 = 0,
-    a11 = 0,
-    a12 = 0,
-    a20 = 0,
-    a21 = 0,
-    a22 = 0;
+  const { edgeStart, edges } = grid;
+  const { edge, inverse: b } = frame;
+  const mu = frame.ridge[n];
+  let a00 = mu * rotation[r],
+    a01 = mu * rotation[r + 1],
+    a02 = mu * rotation[r + 2],
+    a10 = mu * rotation[r + 3],
+    a11 = mu * rotation[r + 4],
+    a12 = mu * rotation[r + 5],
+    a20 = mu * rotation[r + 6],
+    a21 = mu * rotation[r + 7],
+    a22 = mu * rotation[r + 8];
   const n3 = n * 3;
   for (let e = edgeStart[n]; e < edgeStart[n + 1]; e++) {
     const j3 = edges[e] * 3;
-    const ex = restNodes[n3] - restNodes[j3],
-      ey = restNodes[n3 + 1] - restNodes[j3 + 1],
-      ez = restNodes[n3 + 2] - restNodes[j3 + 2];
+    const ex = edge[e * 3],
+      ey = edge[e * 3 + 1],
+      ez = edge[e * 3 + 2];
     const fx = positions[n3] - positions[j3],
       fy = positions[n3 + 1] - positions[j3 + 1],
       fz = positions[n3 + 2] - positions[j3 + 2];
-    mu += ex * ex + ey * ey + ez * ez;
     a00 += fx * ex;
     a01 += fx * ey;
     a02 += fx * ez;
@@ -580,17 +627,7 @@ function writeSkinMap(
     a21 += fz * ey;
     a22 += fz * ez;
   }
-  mu *= warpStretchRidge;
-  a00 += mu * rotation[r];
-  a01 += mu * rotation[r + 1];
-  a02 += mu * rotation[r + 2];
-  a10 += mu * rotation[r + 3];
-  a11 += mu * rotation[r + 4];
-  a12 += mu * rotation[r + 5];
-  a20 += mu * rotation[r + 6];
-  a21 += mu * rotation[r + 7];
-  a22 += mu * rotation[r + 8];
-  const b = inverse;
+  const i = n * 9;
   out[o] = a00 * b[i] + a01 * b[i + 3] + a02 * b[i + 6];
   out[o + 1] = a00 * b[i + 1] + a01 * b[i + 4] + a02 * b[i + 7];
   out[o + 2] = a00 * b[i + 2] + a01 * b[i + 5] + a02 * b[i + 8];
@@ -613,9 +650,9 @@ export function writeSkinMaps(
   rotation: Float64Array,
   out: Float64Array,
 ) {
-  const inverse = stretchInverse(grid, restNodes);
+  const frame = stretchFrame(grid, restNodes);
   for (let n = 0; n < grid.fixed.length; n++)
-    writeSkinMap(grid, restNodes, positions, rotation, n * 9, inverse, n, out, n * 9);
+    writeSkinMap(grid, positions, rotation, n * 9, frame, n, out, n * 9);
 }
 
 /** One node's skin map, as `writeSkinMaps` gives it, from the state's quaternions. */
@@ -629,7 +666,7 @@ export function skinMapOf(
   const { rotations: q, positions } = state;
   const rotation = new Float64Array(9);
   writeRotation(rotation, 0, q[n * 4], q[n * 4 + 1], q[n * 4 + 2], q[n * 4 + 3]);
-  writeSkinMap(grid, restNodes, positions, rotation, 0, stretchInverse(grid, restNodes), n, out, 0);
+  writeSkinMap(grid, positions, rotation, 0, stretchFrame(grid, restNodes), n, out, 0);
   return out;
 }
 
@@ -646,6 +683,7 @@ function fitRotations(
   const { edgeStart, edges } = grid;
   const { freeNodes, rotation } = system;
   const { positions: P, rotations: Q } = state;
+  const { edge } = stretchFrame(grid, restNodes);
   for (let k = 0; k < freeNodes.length; k++) {
     const i = freeNodes[k];
     if (edgeStart[i] === edgeStart[i + 1]) continue;
@@ -661,9 +699,9 @@ function fitRotations(
       a22 = 0;
     for (let e = edgeStart[i]; e < edgeStart[i + 1]; e++) {
       const j3 = edges[e] * 3;
-      const ex = restNodes[i3] - restNodes[j3],
-        ey = restNodes[i3 + 1] - restNodes[j3 + 1],
-        ez = restNodes[i3 + 2] - restNodes[j3 + 2];
+      const ex = edge[e * 3],
+        ey = edge[e * 3 + 1],
+        ez = edge[e * 3 + 2];
       const fx = P[i3] - P[j3],
         fy = P[i3 + 1] - P[j3 + 1],
         fz = P[i3 + 2] - P[j3 + 2];
@@ -711,11 +749,14 @@ function fitRotations(
         oz = (r00 * a10 - r10 * a00 + r01 * a11 - r11 * a01 + r02 * a12 - r12 * a02) * scale;
       const angle = Math.sqrt(ox * ox + oy * oy + oz * oz);
       if (angle < 1e-9) break;
-      const sine = Math.sin(angle / 2) / angle,
+      // A warm start turns by little, where the series is exact to rounding.
+      const square = angle * angle;
+      const small = angle < 1e-3;
+      const sine = small ? 0.5 - square / 48 : Math.sin(angle / 2) / angle,
         px = ox * sine,
         py = oy * sine,
         pz = oz * sine,
-        pw = Math.cos(angle / 2);
+        pw = small ? 1 - square / 8 : Math.cos(angle / 2);
       const nx = pw * qx + px * qw + py * qz - pz * qy,
         ny = pw * qy - px * qz + py * qw + pz * qx,
         nz = pw * qz + px * qy - py * qx + pz * qw,
