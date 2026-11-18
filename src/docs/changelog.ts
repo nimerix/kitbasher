@@ -16,6 +16,17 @@ export interface Release {
 // Newest first. Every pull request adds a release here and sets the same version in package.json.
 export const releases: Release[] = [
   {
+    version: '1.18.1',
+    date: '2026-11-17',
+    title: 'Build check',
+    changes: [
+      {
+        kind: 'improved',
+        text: 'Every change is checked to compile and build before it is merged.',
+      },
+    ],
+  },
+  {
     version: '1.18.0',
     date: '2026-11-17',
     title: 'Release notes',
