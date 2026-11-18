@@ -1351,10 +1351,98 @@ describe('warp commands', () => {
     expect(editor().past).toHaveLength(1);
     expect(editor().scene.parts[0].color).toBe('#112233');
 
-    // With nothing left in the session, Undo steps back through the scene, which ends it.
+    // The grid and region are still the session's work, so Undo stops short of the scene.
+    expect(editorCommands().undo.enabled).toBe(false);
+    executeEditorCommand('undo');
+    expect(editor().past).toHaveLength(1);
+    expect(editor().scene.parts[0].color).toBe('#112233');
+    expect(session().stage).toBe('warp');
+
+    // A session with nothing done in it, such as the one after Apply, lets Undo reach the scene.
+    editor().cancelWarp();
+    editor().setTool('warp');
+    expect(editorCommands().undo.enabled).toBe(true);
     executeEditorCommand('undo');
     expect(editor().past).toHaveLength(0);
     expect(editor().scene.parts[0].color).toBe('#aabbcc');
+    expect(editor().warp).toBeNull();
+  });
+
+  it('Mod+Z in the region and building stages stays in the session', async () => {
+    const a = plate('a');
+    setup([a], ['a']);
+    editor().patchParts(['a'], { color: '#112233' });
+    editor().setTool('warp');
+    editor().setBrush({ radius: 3, erase: false });
+    editor().paintWarpRegion(hit('a', 0, 0), faceAt(a.geometry, 0, 0), false, true);
+    editor().endPaintStroke();
+    const painted = session().faces;
+    await editor().layWarpGrid();
+    const laid = session().model;
+    const p = addAt(a, 0, 0);
+    move(p.id, [0, 0, 2]);
+
+    // Edit region keeps the points, and Undo steps back through them.
+    editor().setWarpRegion('painted');
+    expect(editorCommands().undo.enabled).toBe(true);
+    executeEditorCommand('undo');
+    expect(session()).toMatchObject({ stage: 'region' });
+    expect(session().points[0].target).toBeNull();
+    executeEditorCommand('undo');
+    expect(session().points).toEqual([]);
+    // The painted region is left, which scene undo would discard.
+    expect(editorCommands().undo.enabled).toBe(false);
+    executeEditorCommand('undo');
+    expect(editor().tool).toBe('warp');
+    expect(session().faces).toBe(painted);
+    expect(editor().past).toHaveLength(1);
+    expect(editor().scene.parts[0].color).toBe('#112233');
+
+    // During a build, Undo takes back the last stroke and stops the build.
+    editor().paintWarpRegion(hit('a', 8, 0), faceAt(a.geometry, 8, 0), false, true);
+    editor().endPaintStroke();
+    const pending = editor().layWarpGrid();
+    expect(session().stage).toBe('building');
+    expect(editorCommands().undo.enabled).toBe(true);
+    executeEditorCommand('undo');
+    await pending;
+    expect(session().stage).toBe('region');
+    expect(session().model).toBe(laid);
+    expect(session().faces).toBe(painted);
+    expect(editor().paintHistory).toEqual([]);
+    expect(failures()).toEqual([]);
+
+    // With no stroke left, a build in flight blocks scene undo too.
+    const again = editor().layWarpGrid();
+    expect(session().stage).toBe('building');
+    expect(editorCommands().undo.enabled).toBe(false);
+    executeEditorCommand('undo');
+    await again;
+    expect(session().stage).toBe('warp');
+    expect(editor().past).toHaveLength(1);
+  });
+
+  it('scene Redo waits while a warp session has edits', async () => {
+    const a = plate('a');
+    setup([a], ['a']);
+    editor().patchParts(['a'], { color: '#112233' });
+    editor().undo();
+    editor().setTool('warp');
+    expect(editorCommands().redo.enabled).toBe(true);
+    editor().setBrush({ radius: 3, erase: false });
+    editor().paintWarpRegion(hit('a', 0, 0), faceAt(a.geometry, 0, 0), false, true);
+    editor().endPaintStroke();
+    expect(editorCommands().redo.enabled).toBe(false);
+    executeEditorCommand('redo');
+    expect(editor().scene.parts[0].color).toBe('#aabbcc');
+    expect(editor().future).toHaveLength(1);
+    expect(editor().warp).not.toBeNull();
+
+    executeEditorCommand('undo');
+    expect(session().faces).toEqual([]);
+    expect(editorCommands().redo.enabled).toBe(true);
+    executeEditorCommand('redo');
+    expect(editor().scene.parts[0].color).toBe('#112233');
     expect(editor().warp).toBeNull();
   });
 
@@ -1371,9 +1459,9 @@ describe('warp commands', () => {
     expect(editorCommands().undo.enabled).toBe(false);
     addAt(a, 0, 0);
     expect(editorCommands().undo.enabled).toBe(true);
-    // A session left in the region stage keeps its steps for the next grid, not for Undo.
+    // Back in the region stage, Undo still steps through the points.
     editor().setWarpRegion('painted');
-    expect(editorCommands().undo.enabled).toBe(false);
+    expect(editorCommands().undo.enabled).toBe(true);
   });
 
   it('transform tool choices set the warp gizmo only while warping', async () => {
