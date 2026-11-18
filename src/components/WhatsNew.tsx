@@ -1,27 +1,29 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { ExternalLink, Sparkles, X } from 'lucide-react';
-import { latestRelease, releases } from '../docs/changelog';
+import { buildCommit } from '../core/build';
+import { latestRelease, releaseCommit, releaseId, releases } from '../docs/changelog';
 import type { ChangeKind } from '../docs/changelog';
 import { useDismiss } from './ui';
 
 const seenKey = 'kitbasher.seen-release';
 const shownReleases = 3;
+const latestId = releaseId(latestRelease);
 const kindLabels: Record<ChangeKind, string> = { new: 'New', improved: 'Improved', fixed: 'Fixed' };
 
 function readSeen() {
   try {
     const seen = localStorage.getItem(seenKey);
     // First visits start current; only releases shipped after that are announced.
-    if (seen === null) localStorage.setItem(seenKey, latestRelease.version);
-    return seen ?? latestRelease.version;
+    if (seen === null) localStorage.setItem(seenKey, latestId);
+    return seen ?? latestId;
   } catch {
-    return latestRelease.version;
+    return latestId;
   }
 }
 
 function markSeen() {
   try {
-    localStorage.setItem(seenKey, latestRelease.version);
+    localStorage.setItem(seenKey, latestId);
   } catch {
     // Storage can be unavailable; the dot then just clears for this session.
   }
@@ -36,7 +38,7 @@ const formatDate = (date: string) =>
 
 export function WhatsNew() {
   const [open, setOpen] = useState(false);
-  const [unseen, setUnseen] = useState(() => readSeen() !== latestRelease.version);
+  const [unseen, setUnseen] = useState(() => readSeen() !== latestId);
   const container = useRef<HTMLDivElement>(null);
   const trigger = useRef<HTMLButtonElement>(null);
   const heading = useRef<HTMLHeadingElement>(null);
@@ -56,7 +58,7 @@ export function WhatsNew() {
       <button
         ref={trigger}
         className="activity-trigger"
-        aria-label={unseen ? `What’s new: version ${latestRelease.version} is new` : 'What’s new'}
+        aria-label={unseen ? `What’s new: ${latestRelease.title}` : 'What’s new'}
         title="What’s new"
         aria-expanded={open}
         aria-controls="whats-new-panel"
@@ -76,7 +78,7 @@ export function WhatsNew() {
               <h2 ref={heading} tabIndex={-1}>
                 What’s new
               </h2>
-              <p>You’re on version {latestRelease.version}</p>
+              <p>You’re on version {buildCommit}</p>
             </div>
             <button className="icon-button" aria-label="Close what’s new" onClick={close}>
               <X size={16} />
@@ -84,11 +86,11 @@ export function WhatsNew() {
           </div>
           <div className="activity-panel-content">
             {releases.slice(0, shownReleases).map((release) => (
-              <article className="whats-new-release" key={release.version}>
+              <article className="whats-new-release" key={release.title}>
                 <header>
                   <strong>{release.title}</strong>
                   <span>
-                    {release.version} ·{' '}
+                    {releaseCommit(release) ? `${releaseCommit(release)} · ` : null}
                     <time dateTime={release.date}>{formatDate(release.date)}</time>
                   </span>
                 </header>
@@ -107,7 +109,7 @@ export function WhatsNew() {
           </div>
           <a
             className="whats-new-all"
-            href={`./docs/?guide=whats-new#v${latestRelease.version.replaceAll('.', '-')}`}
+            href={`./docs/?guide=whats-new#${latestId}`}
             target="_blank"
             rel="noopener noreferrer"
           >
