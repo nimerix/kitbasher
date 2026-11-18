@@ -2,8 +2,8 @@ import type { Vec3 } from './types';
 import { bindTrianglePoint, warpBindingNodes, type WarpPointBinding } from './warp-bind';
 import type { WarpGrid } from './warp-grid';
 import { isPaintedNode, type WarpModel } from './warp-model';
-import { regionTriangleOf, WarpRole } from './warp-region';
-import { deformPoint } from './warp-evaluate';
+import { regionTriangleOf } from './warp-region';
+import { deformPoint, skinnedWorldPositions } from './warp-evaluate';
 import {
   warpNodeStiffness,
   type WarpConstraint,
@@ -762,8 +762,8 @@ export const snapshotOf = (
 });
 
 /**
- * A snapshot carried from one grid to another: each node of `to` sits where `from`'s binding of
- * its scan vertex puts it under the snapshot, turned by the blend of its bound nodes' rotations.
+ * A snapshot carried from one grid to another: each node of `to` sits where the preview writes its
+ * scan vertex under the snapshot on `from`, turned by the blend of its bound nodes' rotations.
  * Vertices `from` did not move stay at rest. A vertex `from` feathered and `to` paints sits where
  * it was written.
  */
@@ -773,23 +773,23 @@ export function transferSnapshot(
   to: WarpModel,
 ): WarpSnapshot {
   const K = warpBindingNodes;
-  const { binding, region, restNodes, restWorld } = from;
-  const { positions: P, rotations: Q } = snapshot;
+  const { binding, restWorld } = from;
+  const { rotations: Q } = snapshot;
   const count = to.grid.nodes.length;
   const positions = to.restNodes.slice(),
     rotations = new Float64Array(count * 4);
-  const r = new Float64Array(9);
+  const skinned = skinnedWorldPositions(from, snapshot, to.grid.nodes);
   for (let n = 0; n < count; n++) {
     rotations[n * 4 + 3] = 1;
     const v = to.grid.nodes[n];
-    if (v >= region.weldedCount || region.role[v] !== WarpRole.Interior) continue;
+    const px = skinned[n * 3],
+      py = skinned[n * 3 + 1],
+      pz = skinned[n * 3 + 2];
+    if (Number.isNaN(px)) continue;
     const x = restWorld[v * 3],
       y = restWorld[v * 3 + 1],
       z = restWorld[v * 3 + 2];
-    let px = 0,
-      py = 0,
-      pz = 0,
-      qx = 0,
+    let qx = 0,
       qy = 0,
       qz = 0,
       qw = 0,
@@ -802,13 +802,6 @@ export function transferSnapshot(
         b = Q[j * 4 + 1],
         c = Q[j * 4 + 2],
         d = Q[j * 4 + 3];
-      rotationOf(r, a, b, c, d);
-      const ox = x - restNodes[j * 3],
-        oy = y - restNodes[j * 3 + 1],
-        oz = z - restNodes[j * 3 + 2];
-      px += w * (r[0] * ox + r[1] * oy + r[2] * oz + P[j * 3]);
-      py += w * (r[3] * ox + r[4] * oy + r[5] * oz + P[j * 3 + 1]);
-      pz += w * (r[6] * ox + r[7] * oy + r[8] * oz + P[j * 3 + 2]);
       // Quaternions q and −q turn alike, so each joins the blend on the side of the first.
       const sign = total > 0 && a * qx + b * qy + c * qz + d * qw < 0 ? -w : w;
       qx += sign * a;
@@ -821,9 +814,9 @@ export function transferSnapshot(
     // A vertex in the old feather band that the new region paints takes the position it was
     // written at. Where a feather still applies the blend comes later, so it stays unblended.
     const b = from.blend && isPaintedNode(to, n) ? from.blend[v] : 1;
-    positions[n * 3] = b === 1 ? px / total : x + b * (px / total - x);
-    positions[n * 3 + 1] = b === 1 ? py / total : y + b * (py / total - y);
-    positions[n * 3 + 2] = b === 1 ? pz / total : z + b * (pz / total - z);
+    positions[n * 3] = b === 1 ? px : x + b * (px - x);
+    positions[n * 3 + 1] = b === 1 ? py : y + b * (py - y);
+    positions[n * 3 + 2] = b === 1 ? pz : z + b * (pz - z);
     if (b < 1) {
       // Turned as far as it was written: part way from no turn.
       const side = qw < 0 ? -b : b;
@@ -839,18 +832,6 @@ export function transferSnapshot(
     rotations[n * 4 + 3] = qw / length;
   }
   return { grid: to.grid, positions, rotations, settled: false, converged: false };
-}
-
-function rotationOf(out: Float64Array, x: number, y: number, z: number, w: number) {
-  out[0] = 1 - 2 * (y * y + z * z);
-  out[1] = 2 * (x * y - z * w);
-  out[2] = 2 * (x * z + y * w);
-  out[3] = 2 * (x * y + z * w);
-  out[4] = 1 - 2 * (x * x + z * z);
-  out[5] = 2 * (y * z - x * w);
-  out[6] = 2 * (x * z - y * w);
-  out[7] = 2 * (y * z + x * w);
-  out[8] = 1 - 2 * (x * x + y * y);
 }
 
 const cornerTriangles = new WeakMap<WarpModel, Int32Array>();
