@@ -1,7 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import { PlaneGeometry, SphereGeometry } from 'three';
+import { BoxGeometry, PlaneGeometry, SphereGeometry } from 'three';
 import { mergeGeometries, mergeVertices } from 'three/addons/utils/BufferGeometryUtils.js';
-import { bindPoint, bindRegion, warpBindingNodes } from '../../src/core/warp-bind';
+import {
+  bindPoint,
+  bindRegion,
+  bindTrianglePoint,
+  warpBindingNodes,
+} from '../../src/core/warp-bind';
 import { buildWarpGrid } from '../../src/core/warp-grid';
 import { buildWarpRegion, WarpRole } from '../../src/core/warp-region';
 
@@ -104,5 +109,35 @@ describe('bindPoint', () => {
     expect(() => bindPoint(region, grid, binding, 3000, [1, 0, 0])).toThrow(
       'Face is not in the warp region.',
     );
+  });
+});
+
+describe('equidistant nodes', () => {
+  // A regular box puts some vertices exactly as far from all of their nearest nodes.
+  async function box() {
+    const region = buildWarpRegion(new BoxGeometry(20, 20, 20, 20, 20, 20), null);
+    const grid = await buildWarpGrid(region, 3);
+    return { region, grid, binding: bindRegion(region, grid, region.rest) };
+  }
+
+  it('gives every bound vertex finite weights summing to 1', async () => {
+    const { region, binding } = await box();
+    for (let v = 0; v < region.weldedCount; v++) {
+      let sum = 0;
+      for (let j = 0; j < K; j++) {
+        expect(Number.isFinite(binding.weight[v * K + j])).toBe(true);
+        sum += binding.weight[v * K + j];
+      }
+      expect(Math.abs(sum - 1)).toBeLessThan(1e-6);
+    }
+  });
+
+  it('never binds a triangle point to non-finite weights', async () => {
+    const { region, binding } = await box();
+    for (let t = 0; t < region.faces.length; t++) {
+      const point = bindTrianglePoint(region, binding, t, [1 / 3, 1 / 3, 1 / 3]);
+      expect(point.node.length).toBeGreaterThan(0);
+      for (const w of point.weight) expect(Number.isFinite(w)).toBe(true);
+    }
   });
 });

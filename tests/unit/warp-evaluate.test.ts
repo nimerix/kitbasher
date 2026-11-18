@@ -200,6 +200,22 @@ describe('evaluateWarp', () => {
     expect(plainOut.normals).toBeNull();
   });
 
+  it('moves every interior vertex when all nodes translate, even equidistant ones', async () => {
+    const box = new BoxGeometry(20, 20, 20, 20, 20, 20);
+    const model = await buildWarpModel(inputOf(box, null, new Matrix4(), 3));
+    const state = createWarpState(model.restNodes);
+    for (let i = 0; i < state.positions.length; i += 3) state.positions[i + 1] += 1;
+    const out = createWarpOutput(model);
+    evaluateWarp(model, state, out);
+    const { weldOf, role } = model.region;
+    let stuck = 0;
+    for (let g = 0; g < weldOf.length; g++) {
+      if (role[weldOf[g]] !== WarpRole.Interior) continue;
+      if (Math.abs(out.positions[g * 3 + 1] - model.positions[g * 3 + 1] - 1) > 1e-4) stuck++;
+    }
+    expect(stuck).toBe(0);
+  });
+
   it('writes world-space results through the part matrix', async () => {
     const matrix = new Matrix4()
       .makeTranslation(5, 6, 7)
