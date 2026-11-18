@@ -5,12 +5,12 @@ the description, and the release notes.
 
 ## Title
 
-Start the title with a type, then a colon and a sentence-case summary with no
-period:
+Start the title with a type in parentheses, then a space and a sentence-case summary
+with no period:
 
 ```text
-feat: Add the Warp tool for closing gaps in scanned parts
-fix(drive): Keep Drive connected after a reload
+(feat) Add the Warp tool for closing gaps in scanned parts
+(fix) Keep Drive connected after a reload
 ```
 
 | Type       | Use for                             | Version |
@@ -25,8 +25,8 @@ fix(drive): Keep Drive connected after a reload
 | `ci`       | Continuous integration              | patch   |
 | `chore`    | Other maintenance                   | patch   |
 
-An optional scope in parentheses, such as `fix(drive):`, narrows the area. Add `!`
-after the type, as in `feat!:`, for a breaking change; that is a major version.
+Add `!` after the type, as in `(feat!)`, for a breaking change; that is a major
+version.
 
 ## Description
 
@@ -58,6 +58,6 @@ for the release fields.
 
 ```sh
 npm test
-PR_TITLE="feat: Add pins" PR_BODY_FILE=body.md node scripts/check-pull-request.mjs
-PR_TITLE="feat: Add pins" node scripts/check-changelog.mjs origin/main
+PR_TITLE="(feat) Add pins" PR_BODY_FILE=body.md node scripts/check-pull-request.mjs
+PR_TITLE="(feat) Add pins" node scripts/check-changelog.mjs origin/main
 ```

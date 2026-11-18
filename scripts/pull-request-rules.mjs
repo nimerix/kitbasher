@@ -12,20 +12,18 @@ export const pullRequestTypes = {
 
 export const requiredSections = ['Summary', 'Testing', 'Release notes'];
 
-const titlePattern = new RegExp(
-  `^(${Object.keys(pullRequestTypes).join('|')})(\\([a-z0-9-]+\\))?(!)?: (.+)$`,
-);
+const titlePattern = new RegExp(`^\\((${Object.keys(pullRequestTypes).join('|')})(!)?\\) (.+)$`);
 
 export function parseTitle(title) {
   const match = title.trim().match(titlePattern);
-  return match ? { type: match[1], breaking: !!match[3], subject: match[4] } : undefined;
+  return match ? { type: match[1], breaking: !!match[2], subject: match[3] } : undefined;
 }
 
 export function checkTitle(title) {
   const parsed = parseTitle(title);
   if (!parsed)
     return [
-      `Start the title with a type, such as "feat: Add the Warp tool". Types: ${Object.keys(pullRequestTypes).join(', ')}.`,
+      `Start the title with a type in parentheses, such as "(feat) Add the Warp tool". Types: ${Object.keys(pullRequestTypes).join(', ')}.`,
     ];
   const failures = [];
   if (!/^[A-Z]/.test(parsed.subject))

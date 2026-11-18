@@ -27,36 +27,40 @@ Approved.
 `;
 
 describe('pull request titles', () => {
-  it('accepts a type, optional scope or breaking marker, and a sentence-case subject', () => {
+  it('accepts a type in parentheses, an optional breaking marker, and a sentence-case subject', () => {
     for (const title of [
-      'feat: Add the Warp tool for closing gaps in scanned parts',
-      'fix(drive): Keep Drive connected after a reload',
-      'perf: Speed up remeshing',
-      'docs: Add editor screenshots to guides',
-      'feat!: Replace the scene format',
+      '(feat) Add the Warp tool for closing gaps in scanned parts',
+      '(fix) Keep Drive connected after a reload',
+      '(perf) Speed up remeshing',
+      '(docs) Add editor screenshots to guides',
+      '(feat!) Replace the scene format',
     ])
       expect(checkTitle(title), title).toEqual([]);
   });
 
-  it('rejects titles without a known type or with a malformed subject', () => {
+  it('rejects titles without a known type in parentheses or with a malformed subject', () => {
     expect(checkTitle('Add the Warp tool')).toHaveLength(1);
-    expect(checkTitle('feature: Add the Warp tool')).toHaveLength(1);
-    expect(checkTitle('feat: add the Warp tool')).toEqual([
+    expect(checkTitle('feat: Add the Warp tool')).toHaveLength(1);
+    expect(checkTitle('(feat): Add the Warp tool')).toHaveLength(1);
+    expect(checkTitle('(fix/drive) Keep Drive connected')).toHaveLength(1);
+    expect(checkTitle('(feature) Add the Warp tool')).toHaveLength(1);
+    expect(checkTitle('(feat) add the Warp tool')).toEqual([
       'Start the title after the type with a capital letter.',
     ]);
-    expect(checkTitle('fix: Keep Drive connected.')).toEqual([
+    expect(checkTitle('(fix) Keep Drive connected.')).toEqual([
       'End the title without a period or space.',
     ]);
-    expect(checkTitle(`feat: ${'A'.repeat(80)}`)).toContain(
+    expect(checkTitle(`(feat) ${'A'.repeat(80)}`)).toContain(
       'Keep the title to 80 characters or fewer.',
     );
   });
 
   it('maps the type to a version bump', () => {
-    expect(expectedBump('feat: Add pins')).toBe('minor');
-    expect(expectedBump('fix: Keep pins')).toBe('patch');
-    expect(expectedBump('docs: Explain pins')).toBe('patch');
-    expect(expectedBump('feat!: Replace pins')).toBe('major');
+    expect(expectedBump('(feat) Add pins')).toBe('minor');
+    expect(expectedBump('(fix) Keep pins')).toBe('patch');
+    expect(expectedBump('(docs) Explain pins')).toBe('patch');
+    expect(expectedBump('(feat!) Replace pins')).toBe('major');
+    expect(expectedBump('feat: Add pins')).toBeUndefined();
     expect(expectedBump('Add pins')).toBeUndefined();
     expect(bumpVersion('1.18.3', 'minor')).toBe('1.19.0');
     expect(bumpVersion('1.18.3', 'patch')).toBe('1.18.4');

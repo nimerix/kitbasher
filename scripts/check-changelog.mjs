@@ -1,6 +1,6 @@
 import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
-import { bumpVersion, expectedBump, isNewer } from './pull-request-rules.mjs';
+import { bumpVersion, expectedBump, isNewer, parseTitle } from './pull-request-rules.mjs';
 
 const changelogPath = 'src/docs/changelog.ts';
 const base = process.argv[2] ?? process.env.CHANGELOG_BASE ?? 'origin/main';
@@ -45,7 +45,7 @@ if (level) {
   const expected = bumpVersion(baseVersion, level);
   if (version !== expected)
     failures.push(
-      `A "${title.split(':')[0]}" pull request is a ${level} release: set the version to ${expected}, not ${version}.`,
+      `A "(${parseTitle(title).type})" pull request is a ${level} release: set the version to ${expected}, not ${version}.`,
     );
 } else if (!isNewer(version, baseVersion))
   failures.push(`Bump package.json above ${baseVersion}, the version on ${base}.`);

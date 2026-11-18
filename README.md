@@ -951,7 +951,7 @@ See [design specification](docs/design.md) and [verification notes](docs/verific
 
 ## Contributing
 
-Pull request titles start with a type such as `feat:`, `fix:`, `perf:`, or `docs:`,
+Pull request titles start with a type in parentheses, such as `(feat)` or `(fix)`,
 descriptions follow the template's Summary, Testing, and Release notes sections, and
 every pull request adds a release to the documentation's **What's new** page with a
 matching version bump. Checks on pull requests enforce all three. See
