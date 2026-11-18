@@ -337,11 +337,19 @@ export function WarpControls() {
           <span>Fine</span>
         </div>
         <p className="anchor-help">Coarser grids bend broadly. Finer grids bend locally.</p>
-        {warp.model?.feather?.joined === 0 ? (
+        {warp.model?.feather?.joined === 0 && warp.model.feather.edge > 0 ? (
           <p className="warp-warning" role="status">
             <TriangleAlert size={13} aria-hidden="true" />
             The mesh beside the paint is too coarse for a {warp.model.feather.width} mm feather, so
             the painted edge stays fixed. Edit the region to widen it.
+          </p>
+        ) : null}
+        {warp.model?.feather?.anchored ? (
+          <p className="warp-warning" role="status">
+            <TriangleAlert size={13} aria-hidden="true" />
+            The {warp.model.feather.width} mm feather reaches all the way around, so the area
+            farthest from the paint stays fixed to hold the part in place. Edit the region to narrow
+            the feather or paint less.
           </p>
         ) : null}
         {building ? (

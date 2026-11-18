@@ -29,10 +29,12 @@ export interface WarpRegion {
   interiorVertices: Uint32Array;
 }
 
+/** `pinned` welded vertices are border wherever the region uses them, even with no outside face. */
 export function buildWarpRegion(
   geometry: BufferGeometry,
   faces: ArrayLike<number> | null,
   weld: { indices: Uint32Array; vertices: number } = weldedPositionIndex(geometry),
+  pinned?: Uint8Array,
 ): WarpRegion {
   const position = geometry.getAttribute('position');
   const index = geometry.index;
@@ -84,7 +86,7 @@ export function buildWarpRegion(
   let interiorCount = 0;
   for (let v = 0; v < weldedCount; v++) {
     if (!used[v]) continue;
-    if (outside[v]) role[v] = WarpRole.Border;
+    if (outside[v] || pinned?.[v]) role[v] = WarpRole.Border;
     else {
       role[v] = WarpRole.Interior;
       interiorCount++;

@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { createHash } from 'node:crypto';
 import {
   BoxGeometry,
   BufferAttribute,
@@ -10,6 +11,7 @@ import {
   SphereGeometry,
   Vector3,
 } from 'three';
+import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import { treeOf } from '../../src/core/clipping';
 import { partMatrix } from '../../src/core/geometry';
 import { hasClosedEdges, weldedPositionIndex } from '../../src/core/mesh-topology';
@@ -283,10 +285,111 @@ describe('feathered region growth', () => {
     expect(faces.length).toBeGreaterThan(0);
     const model = await buildWarpModel(inputOf(g, faces, 1));
     const plain = await buildWarpModel(inputOf(g, faces));
-    expect(model.feather).toEqual({ width: 1, joined: 0, fixedEdge: expect.any(Number) });
+    expect(model.feather).toEqual({
+      width: 1,
+      joined: 0,
+      edge: expect.any(Number),
+      fixedEdge: expect.any(Number),
+      anchored: 0,
+    });
+    expect(model.feather!.edge).toBeGreaterThan(0);
     expect(model.feather!.fixedEdge).toBeGreaterThan(0);
     expect(model.blend).toBeNull();
     expect(model.region).toEqual(plain.region);
+  });
+});
+
+const digest = (a: ArrayBufferView) =>
+  createHash('sha256')
+    .update(new Uint8Array(a.buffer, a.byteOffset, a.byteLength))
+    .digest('hex')
+    .slice(0, 16);
+
+describe('unfeathered compatibility', () => {
+  // Digests of what the code before feathering (546ba27) built and wrote for these fixtures.
+  const before = {
+    'sheet-unindexed':
+      'region=96b8571dbd2ea695 roles=b1dc4f7868c16b9f grid=f2834a39d082f587 w=64652a942de79b72 pos=93788da80c737447 nrm=37c8f785f3306fc2',
+    'sheet-indexed':
+      'region=96b8571dbd2ea695 roles=b1dc4f7868c16b9f grid=f2834a39d082f587 w=64652a942de79b72 pos=5355ed9b2801e55d nrm=2cfdd28f8c7b529d',
+    'sphere-unindexed':
+      'region=8815ae43cbf7507a roles=a90fc269e8abbc4f grid=000512a8cde285bd w=10a5d61f75ac62aa pos=fac839ef4ae1d70e nrm=6ae738973e47a580',
+  };
+  const fixtures = {
+    'sheet-unindexed': () => new PlaneGeometry(40, 40, 20, 20).toNonIndexed(),
+    'sheet-indexed': () => new PlaneGeometry(40, 40, 20, 20),
+    'sphere-unindexed': () => new SphereGeometry(10, 32, 24).toNonIndexed(),
+  };
+
+  it('writes the bytes it wrote before feathering, when absent, 0 or joining nothing', async () => {
+    for (const [name, make] of Object.entries(fixtures)) {
+      const g = make();
+      const faces: number[] = [];
+      for (let f = 0; f < faceCount(g); f++) {
+        const c = centroid(g, f);
+        if (name.startsWith('sphere') ? c.y > 4 : c.length() < 10) faces.push(f);
+      }
+      // 0.1 mm is far below the 2 mm spacing, so nothing joins.
+      for (const feather of [undefined, 0, 0.1]) {
+        const input = {
+          ...inputOf(g, faces, feather, new Matrix4().makeTranslation(1, 2, 3)),
+          feather,
+        };
+        const model = await buildWarpModel(input);
+        expect(model.blend).toBeNull();
+        if (feather) expect(model.feather).toMatchObject({ joined: 0, edge: expect.any(Number) });
+        const face = faces[Math.floor(faces.length / 2)];
+        const binding = bindPoint(model.region, model.binding, model.restWorld, face, [
+          1 / 3,
+          1 / 3,
+          1 / 3,
+        ]);
+        const triangle = model.region.faces.indexOf(face);
+        const rest: Vec3 = [0, 0, 0];
+        for (let k = 0; k < 3; k++)
+          for (let a = 0; a < 3; a++)
+            rest[a] += model.restWorld[model.region.triangles[triangle * 3 + k] * 3 + a] / 3;
+        const state = createWarpState(model.restNodes);
+        const target: Vec3 = [rest[0] + 0.3, rest[1] - 0.2, rest[2] + 1];
+        solveWarp(
+          model.grid,
+          model.restNodes,
+          [{ ...binding, rest, target }],
+          state,
+          warpSettleIterations,
+        );
+        const out = createWarpOutput(model);
+        evaluateWarp(model, state, out);
+        expect(
+          [
+            `region=${digest(model.region.faces)}`,
+            `roles=${digest(model.region.role)}`,
+            `grid=${digest(model.grid.nodes)}`,
+            `w=${digest(model.binding.weight)}`,
+            `pos=${digest(out.positions)}`,
+            `nrm=${digest(out.normals!)}`,
+          ].join(' '),
+        ).toBe(before[name as keyof typeof before]);
+      }
+    }
+  });
+  it('writes the same bytes between grid nodes when absent, 0 or joining nothing', async () => {
+    const g = new PlaneGeometry(40, 40, 80, 80).toNonIndexed();
+    // A square along the grid lines leaves no unpainted notch for even a tiny width to fill.
+    const faces: number[] = [];
+    for (let f = 0; f < faceCount(g); f++) {
+      const c = centroid(g, f);
+      if (Math.abs(c.x) < 12 && Math.abs(c.y) < 12) faces.push(f);
+    }
+    const written: string[] = [];
+    for (const feather of [undefined, 0, 0.1]) {
+      const model = await buildWarpModel({ ...inputOf(g, faces, 0, undefined, 1), feather });
+      expect(model.grid.nodes.length * 2).toBeLessThan(model.region.interiorCount);
+      if (feather) expect(model.feather).toMatchObject({ joined: 0 });
+      const { out } = lift(model, g, 1, [[2, 1]]);
+      written.push(`${digest(out.positions)} ${digest(out.normals!)}`);
+    }
+    expect(new Set(written).size).toBe(1);
   });
 });
 
@@ -330,15 +433,24 @@ function irregularSheet() {
   return g;
 }
 
+/** The cluster moved 5 mm off centre, so it ends 2.5 mm inside a 10 mm disc: a hard crease. */
+const edgeCluster = cluster.map(([x, y]): [number, number] => [x + 5, y]);
+
 /** The written surface with feathering off and on for the same drag, and their creases. */
-async function compareCreases(g: BufferGeometry, faces: number[], width: number, matrix?: Matrix4) {
+async function compareCreases(
+  g: BufferGeometry,
+  faces: number[],
+  width: number,
+  matrix?: Matrix4,
+  at = edgeCluster,
+) {
   const painted = membership(g, faces);
   const off = await buildWarpModel(inputOf(g, faces, 0, matrix, 6));
   const on = await buildWarpModel(inputOf(g, faces, width, matrix, 6));
   // Every region vertex is a node, so the measurement sees the written surface, not skinning.
   expect(on.grid.nodes.length).toBe(on.region.weldedCount - countOutside(on));
-  const hard = lift(off, g, 1, cluster);
-  const soft = lift(on, g, 1, cluster);
+  const hard = lift(off, g, 1, at);
+  const soft = lift(on, g, 1, at);
   const [offEdge] = creases(g, off, hard.out.positions, [painted]);
   const [onEdge, onOuter] = creases(g, on, soft.out.positions, [
     painted,
@@ -351,11 +463,12 @@ const countOutside = (model: WarpModel) =>
   model.region.role.reduce((n, r) => n + (r === WarpRole.Outside ? 1 : 0), 0);
 
 describe('feathered surface', () => {
-  it('leaves no crease at the painted edge or the outer border of a band over six rings wide', async () => {
+  // Six rings is the narrowest band the design holds to a fifth of the unfeathered crease.
+  it('leaves no crease at the painted edge or the outer border of a six-ring band', async () => {
     const g = sheet();
-    const { on, soft, offEdge, onEdge, onOuter, rings } = await compareCreases(g, disc(g, 10), 7);
-    expect(rings).toBeGreaterThan(6);
-    expect(offEdge).toBeGreaterThan(1);
+    const { on, soft, offEdge, onEdge, onOuter, rings } = await compareCreases(g, disc(g, 10), 4.5);
+    expect(rings).toBe(6);
+    expect(offEdge).toBeGreaterThan(5);
     expect(onEdge).toBeLessThan(offEdge / 5);
     expect(onOuter).toBeLessThan(offEdge / 5);
     expectOutsideKept(on, soft.out);
@@ -363,8 +476,9 @@ describe('feathered surface', () => {
 
   it('does the same on an irregular mesh', async () => {
     const g = irregularSheet();
-    const { on, soft, offEdge, onEdge, onOuter, rings } = await compareCreases(g, disc(g, 10), 7);
-    expect(rings).toBeGreaterThan(6);
+    const { on, soft, offEdge, onEdge, onOuter, rings } = await compareCreases(g, disc(g, 10), 4.5);
+    expect(rings).toBe(6);
+    expect(offEdge).toBeGreaterThan(5);
     expect(onEdge).toBeLessThan(offEdge / 5);
     expect(onOuter).toBeLessThan(offEdge / 5);
     expectOutsideKept(on, soft.out);
@@ -380,13 +494,28 @@ describe('feathered surface', () => {
     const { on, soft, offEdge, onEdge, onOuter, rings } = await compareCreases(
       g,
       disc(g, 9),
-      7,
+      5,
       matrix,
+    );
+    expect(rings).toBe(6);
+    expect(offEdge).toBeGreaterThan(5);
+    expect(onEdge).toBeLessThan(offEdge / 5);
+    expect(onOuter).toBeLessThan(offEdge / 5);
+    expectOutsideKept(on, soft.out);
+  });
+
+  it('keeps a wider band smooth under a drag in the middle of the paint', async () => {
+    const g = sheet();
+    const { offEdge, onEdge, onOuter, rings } = await compareCreases(
+      g,
+      disc(g, 10),
+      7,
+      undefined,
+      cluster,
     );
     expect(rings).toBeGreaterThan(6);
     expect(onEdge).toBeLessThan(offEdge / 5);
     expect(onOuter).toBeLessThan(offEdge / 5);
-    expectOutsideKept(on, soft.out);
   });
 
   it('works with a one-ring band and keeps everything beyond it', async () => {
@@ -405,6 +534,93 @@ describe('feathered surface', () => {
     for (let v = 0; v < g.getAttribute('position').count; v++)
       if (edge[model.region.weldOf[v]] && out.positions[v * 3 + 2] !== 0) moved++;
     expect(moved).toBeGreaterThan(0);
+  });
+});
+
+/** Changes in angle, in degrees, across every edge whose two faces both pass `inside`. */
+function angleChanges(
+  g: BufferGeometry,
+  model: WarpModel,
+  positions: Float32Array,
+  inside: (face: number) => boolean,
+) {
+  const m = new Matrix4().fromArray(model.matrix);
+  const changes: number[] = [];
+  for (const faces of faceAdjacency(g).edges.values()) {
+    if (faces.length !== 2 || !inside(faces[0]) || !inside(faces[1])) continue;
+    const [f, h] = faces;
+    const rest = faceNormal(model.positions, g, f, m).angleTo(faceNormal(model.positions, g, h, m));
+    const now = faceNormal(positions, g, f, m).angleTo(faceNormal(positions, g, h, m));
+    changes.push((Math.abs(now - rest) * 180) / Math.PI);
+  }
+  return changes.sort((a, b) => a - b);
+}
+
+const p95 = (sorted: number[]) => sorted[Math.floor(sorted.length * 0.95)];
+
+describe('feathered surface at the default density', () => {
+  /**
+   * The change in slope across a strip either side of the painted edge, feathering on, set against
+   * the same drag's roughness in the paint just inside it. Away from the dragged points, which
+   * spike whatever the edge does.
+   */
+  async function edgeAgainstInterior(at: [number, number][]) {
+    const g = sheet();
+    const faces = disc(g, 10);
+    const model = await buildWarpModel(inputOf(g, faces, 4.5));
+    expect(model.grid.nodes.length).toBeLessThan(model.region.interiorCount / 2);
+    const { out } = lift(model, g, 1, at);
+    const radius = (f: number) => Math.hypot(centroid(g, f).x, centroid(g, f).y);
+    const away = (f: number) =>
+      at.every(([x, y]) => Math.hypot(centroid(g, f).x - x, centroid(g, f).y - y) > 1.5);
+    const strip = angleChanges(
+      g,
+      model,
+      out.positions,
+      (f) => Math.abs(radius(f) - 10) < 0.75 && away(f),
+    );
+    const interior = angleChanges(
+      g,
+      model,
+      out.positions,
+      (f) => radius(f) < 9.25 && radius(f) > 7 && away(f),
+    );
+    expect(strip.length).toBeGreaterThan(100);
+    expect(interior.length).toBeGreaterThan(100);
+    return { strip, interior };
+  }
+
+  // No rougher than the interior, give or take a quarter, or a tenth of a degree where it is flat.
+  const within = (edge: number, interior: number) =>
+    expect(edge).toBeLessThanOrEqual(1.25 * interior + 0.1);
+
+  it('leaves the painted edge no rougher than the paint inside it', async () => {
+    for (const at of [cluster, edgeCluster]) {
+      const { strip, interior } = await edgeAgainstInterior(at);
+      within(p95(strip), p95(interior));
+      within(strip.at(-1)!, interior.at(-1)!);
+    }
+  });
+
+  it('takes the crease out of a drag beside the painted edge', async () => {
+    const g = sheet();
+    const faces = disc(g, 10);
+    const painted = membership(g, faces);
+    const at: [number, number][] = [[8.5, 0]];
+    const off = await buildWarpModel(inputOf(g, faces));
+    const on = await buildWarpModel(inputOf(g, faces, 4.5));
+    const [hard] = creases(g, off, lift(off, g, 1, at).out.positions, [painted]);
+    const soft = lift(on, g, 1, at).out.positions;
+    const [edge] = creases(g, on, soft, [painted]);
+    expect(hard).toBeGreaterThan(10);
+    expect(edge).toBeLessThan(hard / 5);
+    // As smooth as the paint between the point and the edge.
+    const radius = (f: number) => Math.hypot(centroid(g, f).x, centroid(g, f).y);
+    const near = angleChanges(g, on, soft, (f) => {
+      const c = centroid(g, f);
+      return radius(f) < 9.25 && radius(f) > 7 && Math.hypot(c.x - 8.5, c.y) > 1.5;
+    });
+    within(edge, near.at(-1)!);
   });
 });
 
@@ -537,6 +753,23 @@ describe('feathered written surface', () => {
   });
 });
 
+/** Area-weighted world normal of the written surface at geometry vertex `v`'s welded vertex. */
+function faceNormalAround(model: WarpModel, positions: Float32Array, v: number) {
+  const { region } = model;
+  const w = region.weldOf[v];
+  const first = region.weldOf.indexOf.bind(region.weldOf);
+  const sum = new Vector3();
+  const m = new Matrix4().fromArray(model.matrix);
+  for (let t = 0; t < region.triangles.length; t += 3) {
+    if (![0, 1, 2].some((k) => region.triangles[t + k] === w)) continue;
+    const p = [0, 1, 2].map((k) =>
+      new Vector3().fromArray(positions, first(region.triangles[t + k]) * 3).applyMatrix4(m),
+    );
+    sum.add(new Vector3().subVectors(p[1], p[0]).cross(new Vector3().subVectors(p[2], p[0])));
+  }
+  return sum.normalize();
+}
+
 describe('feathered readouts', () => {
   /** A cube with a disc painted on its +X face, facing a wall 1 mm away. */
   async function seam() {
@@ -582,6 +815,49 @@ describe('feathered readouts', () => {
     expect(report.largestGap).toBeCloseTo(1, 5);
   });
 
+  it('decides which painted nodes face the neighbour as the seam readout does, after a drag', async () => {
+    // A sphere cap facing a wall at x = 4.5, its nodes turned up to 75° from it, all in range.
+    const g = new SphereGeometry(4, 64, 48);
+    const faces: number[] = [];
+    for (let f = 0; f < faceCount(g); f++) if (centroid(g, f).x > 1) faces.push(f);
+    const model = await buildWarpModel(inputOf(g, faces, 0.8));
+    const geometry = new BoxGeometry(20, 40, 40);
+    const wall: Part = {
+      id: 'wall',
+      name: 'wall',
+      geometry,
+      position: [14.5, 0, 0],
+      quaternion: [0, 0, 0, 1],
+      scale: [1, 1, 1],
+      color: '#fff',
+      visible: true,
+      locked: false,
+      source: 'test',
+    };
+    const matrix = partMatrix(wall);
+    const neighbours = [
+      { part: wall, tree: treeOf(geometry)!, matrix, inverse: matrix.clone().invert() },
+    ];
+    const { state, out } = pull(model, g, new Vector3(3, 2, 0), new Vector3(0.3, 1.2, 0));
+    const seam = new Set(measureSeam(model, out, neighbours)!.vertices);
+    const targeted = new Set(closeGapTargets(model, state, neighbours, 0.05).map((t) => t.node));
+    let near = 0,
+      compared = 0;
+    const written = writtenNodePositions(model, state);
+    for (let n = 0; n < model.grid.nodes.length; n++) {
+      if (model.grid.fixed[n] || !isPaintedNode(model, n)) continue;
+      // Well within range, so a rounding difference in position cannot cross it.
+      if (4.5 - written[n * 3] > 4) continue;
+      compared++;
+      expect(targeted.has(n)).toBe(seam.has(model.grid.nodes[n]));
+      const v = model.region.weldOf.indexOf(model.grid.nodes[n]);
+      const normal = faceNormalAround(model, out.positions, v);
+      if (Math.abs(normal.x - 0.5) < 0.05) near++;
+    }
+    expect(compared).toBeGreaterThan(20);
+    expect(near).toBeGreaterThan(0);
+  });
+
   it('closes the gap at painted nodes only', async () => {
     const { model, neighbours } = await seam();
     let facingBand = 0;
@@ -592,5 +868,165 @@ describe('feathered readouts', () => {
     const targets = closeGapTargets(model, createWarpState(model.restNodes), neighbours, 0.1);
     expect(targets.length).toBeGreaterThan(0);
     for (const { node } of targets) expect(isPaintedNode(model, node)).toBe(true);
+  });
+});
+
+/** Moves a control point on the painted face nearest `at` by `by`, settled. */
+function pull(model: WarpModel, g: BufferGeometry, at: Vector3, by: Vector3) {
+  const m = new Matrix4().fromArray(model.matrix);
+  let face = -1,
+    best = Infinity;
+  for (let f = 0; f < faceCount(g); f++) {
+    if (!isPaintedFace(model, f)) continue;
+    const d = centroid(g, f).distanceTo(at);
+    if (d < best) [face, best] = [f, d];
+  }
+  const binding = bindPoint(model.region, model.binding, model.restWorld, face, [
+    1 / 3,
+    1 / 3,
+    1 / 3,
+  ]);
+  const rest = centroid(g, face).applyMatrix4(m).toArray() as Vec3;
+  const target: Vec3 = [rest[0] + by.x, rest[1] + by.y, rest[2] + by.z];
+  const state = createWarpState(model.restNodes);
+  solveWarp(
+    model.grid,
+    model.restNodes,
+    [{ ...binding, rest, target }],
+    state,
+    warpSettleIterations,
+  );
+  const out = createWarpOutput(model);
+  evaluateWarp(model, state, out);
+  return { state, out };
+}
+
+/** Largest distance any geometry vertex matching `select` moved. */
+function largestMove(
+  g: BufferGeometry,
+  before: Float32Array,
+  after: Float32Array,
+  select: (p: Vector3) => boolean,
+) {
+  const p = new Vector3();
+  let largest = 0;
+  for (let v = 0; v < before.length / 3; v++) {
+    if (!select(p.fromArray(before, v * 3))) continue;
+    largest = Math.max(largest, p.distanceTo(new Vector3().fromArray(after, v * 3)));
+  }
+  void g;
+  return largest;
+}
+
+describe('feathered band limits', () => {
+  it('keeps the farthest ring fixed when the band would cover the rest of a closed part', async () => {
+    const g = new SphereGeometry(10, 64, 48);
+    // All but the top four rows: 448 faces stay unpainted, about 2.6 mm across the cap.
+    const faces: number[] = [];
+    for (let f = 0; f < faceCount(g); f++) if (centroid(g, f).y < 9.6) faces.push(f);
+    expect(faceCount(g) - faces.length).toBe(448);
+    const model = await buildWarpModel(inputOf(g, faces, 4));
+    expect(model.feather!.anchored).toBe(1);
+    expect(model.grid.fixed.reduce((n, x) => n + x, 0)).toBeGreaterThan(0);
+    const drag = [new Vector3(10, 0, 0), new Vector3(1, 0, 0)] as const;
+    const { out } = pull(model, g, ...drag);
+    // The pole is in the anchor and keeps its bits. The far side swings about the fixed cap
+    // about as much as it does with the painted edge fixed, rather than translating with the drag.
+    expect(largestMove(g, model.positions, out.positions, (p) => p.y > 9.9)).toBe(0);
+    const plain = await buildWarpModel(inputOf(g, faces));
+    const fixedEdge = pull(plain, g, ...drag).out;
+    const far = (p: Vector3) => p.x < -9;
+    expect(largestMove(g, model.positions, out.positions, far)).toBeLessThan(
+      1.25 * largestMove(g, plain.positions, fixedEdge.positions, far),
+    );
+    expectOutsideKept(model, out);
+  });
+
+  it('keeps an unpainted rim inside the band fixed and feathers toward it', async () => {
+    const g = sheet();
+    // The band reaches the sheet's open edge at x = 30.
+    const faces = disc(g, 4, 25, 0);
+    const model = await buildWarpModel(inputOf(g, faces, 3));
+    expect(model.feather!.joined).toBeGreaterThan(0);
+    const { region, blend } = model;
+    let rim = 0;
+    for (let v = 0; v < region.weldedCount; v++)
+      if (region.role[v] !== WarpRole.Outside && model.restWorld[v * 3] > 29.99 && !blend![v]) {
+        expect(region.role[v]).toBe(WarpRole.Border);
+        rim++;
+      }
+    expect(rim).toBeGreaterThan(0);
+    const { out } = lift(model, g, 1, [[26, 0]]);
+    expect(largestMove(g, model.positions, out.positions, (p) => p.x > 29.99)).toBe(0);
+    expectOutsideKept(model, out);
+  });
+
+  it('keeps a hole rim inside the band fixed', async () => {
+    const plane = sheet();
+    const kept: number[] = [];
+    for (let f = 0; f < faceCount(plane); f++)
+      if (centroid(plane, f).distanceTo(new Vector3(6, 0, 0)) > 2) kept.push(f);
+    const index = plane.index!;
+    const g = new BufferGeometry();
+    g.setAttribute('position', plane.getAttribute('position'));
+    g.setAttribute('normal', plane.getAttribute('normal'));
+    g.setIndex(kept.flatMap((f) => [0, 1, 2].map((k) => index.getX(f * 3 + k))));
+    const faces = disc(g, 3);
+    const model = await buildWarpModel(inputOf(g, faces, 3));
+    expect(model.feather!.joined).toBeGreaterThan(0);
+    // Rim vertices: on a kept face and on a removed one.
+    const removed = new Set<number>();
+    for (let f = 0; f < faceCount(plane); f++)
+      if (!kept.includes(f)) for (let k = 0; k < 3; k++) removed.add(index.getX(f * 3 + k));
+    const rim = new Set([...g.index!.array].filter((v) => removed.has(v)));
+    const inBand = [...rim].filter((v) => model.region.role[model.region.weldOf[v]] !== 0);
+    expect(inBand.length).toBeGreaterThan(0);
+    for (const v of inBand) expect(model.region.role[model.region.weldOf[v]]).toBe(WarpRole.Border);
+    const { out } = lift(model, g, 1, [[1, 0]]);
+    for (const v of rim)
+      for (let a = 0; a < 3; a++) expect(out.positions[v * 3 + a]).toBe(model.positions[v * 3 + a]);
+    expectOutsideKept(model, out);
+  });
+
+  it('does not grow onto another surface through one shared vertex', async () => {
+    const a = new PlaneGeometry(10, 10, 20, 20).toNonIndexed();
+    const b = new PlaneGeometry(10, 10, 20, 20).toNonIndexed().translate(10, 10, 0);
+    const g = mergeGeometries([a, b])!;
+    // Paint the corner of the first sheet that touches the second.
+    const faces: number[] = [];
+    for (let f = 0; f < faceCount(g); f++) {
+      const c = centroid(g, f);
+      if (c.x < 5 && c.y < 5 && Math.hypot(c.x - 5, c.y - 5) < 3) faces.push(f);
+    }
+    const model = await buildWarpModel(inputOf(g, faces, 2));
+    expect(model.feather!.joined).toBeGreaterThan(0);
+    for (const f of model.region.faces) {
+      const c = centroid(g, f);
+      expect(c.x < 5 && c.y < 5).toBe(true);
+    }
+    // The contact vertex is fixed, since the second sheet's fan there stays outside.
+    const contact = [...Array(model.region.weldedCount).keys()].find(
+      (v) => Math.hypot(model.restWorld[v * 3] - 5, model.restWorld[v * 3 + 1] - 5) < 1e-6,
+    )!;
+    expect(model.region.role[contact]).toBe(WarpRole.Border);
+    const { out } = lift(model, g, 1, [[3.5, 3.5]]);
+    expect(largestMove(g, model.positions, out.positions, (p) => p.x >= 5 && p.y >= 5)).toBe(0);
+    expectOutsideKept(model, out);
+  });
+
+  it('reports no edge to feather when the paint borders nothing', async () => {
+    const g = new SphereGeometry(10, 32, 24);
+    const model = await buildWarpModel(inputOf(g, [...Array(faceCount(g)).keys()], 2));
+    expect(model.feather).toMatchObject({ joined: 0, edge: 0, anchored: 0 });
+  });
+
+  it('gives finite blends far from the origin', async () => {
+    const g = sheet();
+    const matrix = new Matrix4().makeTranslation(1e17, -1e17, 1e17);
+    const model = await buildWarpModel(inputOf(g, disc(g, 10), 3, matrix));
+    expect(model.feather!.joined).toBeGreaterThan(0);
+    for (const b of model.blend!) expect(Number.isFinite(b)).toBe(true);
+    const near = await buildWarpModel(inputOf(g, disc(g, 10), 3));
+    expect([...model.blend!]).toEqual([...near.blend!]);
   });
 });

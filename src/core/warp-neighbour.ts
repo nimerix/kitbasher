@@ -4,10 +4,10 @@ import { treeOf } from './clipping';
 import { partMatrix } from './geometry';
 import { readFace } from './surfaces';
 import type { Part, SceneDocument, Vec3 } from './types';
-import type { WarpOutput } from './warp-evaluate';
+import { writtenLocalPositions, type WarpOutput } from './warp-evaluate';
 import { isPaintedNode, type WarpModel } from './warp-model';
 import { WarpRole, type WarpRegion } from './warp-region';
-import { writeRotation, type WarpState } from './warp-solve';
+import type { WarpState } from './warp-solve';
 
 export const warpNeighbourRange = 5;
 /**
@@ -250,50 +250,80 @@ export function snapToNeighbour(
   return hit ? hit.point.addScaledVector(hit.normal, -overlap) : null;
 }
 
-const restNormals = new WeakMap<WarpModel, Float64Array>();
+/** Lowest geometry vertex of each welded vertex, -1 when no face uses it. */
+function firstVertices(region: WarpRegion) {
+  const first = new Int32Array(region.weldedCount).fill(-1);
+  for (let g = 0; g < region.weldOf.length; g++) {
+    const w = region.weldOf[g];
+    if (w !== 0xffffffff && first[w] < 0) first[w] = g;
+  }
+  return first;
+}
 
-function restNormalsOf(model: WarpModel) {
-  let normals = restNormals.get(model);
-  if (normals) return normals;
-  const { region, grid, restWorld } = model;
-  const sums = new Float64Array(region.weldedCount * 3);
+/**
+ * World normal of each grid node's written surface for `state`: the same area-weighted normal of
+ * the deformed mesh, summed in the same order, that the seam readout measures at that vertex.
+ */
+function writtenNodeNormals(model: WarpModel, state: WarpState) {
+  const { region, grid, matrix } = model;
   const { triangles } = region;
+  const first = firstVertices(region);
+  const near = new Uint8Array(region.weldedCount);
+  for (let t = 0; t < triangles.length; t += 3)
+    if (
+      grid.nodeOf[triangles[t]] !== 0xffffffff ||
+      grid.nodeOf[triangles[t + 1]] !== 0xffffffff ||
+      grid.nodeOf[triangles[t + 2]] !== 0xffffffff
+    )
+      near[triangles[t]] = near[triangles[t + 1]] = near[triangles[t + 2]] = 1;
+  const listed: number[] = [];
+  const slot = new Int32Array(region.weldedCount).fill(-1);
+  for (let v = 0; v < region.weldedCount; v++)
+    if (near[v]) {
+      slot[v] = listed.length;
+      listed.push(v);
+    }
+  const positions = writtenLocalPositions(model, state, listed, first);
+  const sums = new Float32Array(grid.nodes.length * 3);
   for (let t = 0; t < triangles.length; t += 3) {
-    const a = triangles[t] * 3,
-      b = triangles[t + 1] * 3,
-      c = triangles[t + 2] * 3;
-    const ux = restWorld[b] - restWorld[a],
-      uy = restWorld[b + 1] - restWorld[a + 1],
-      uz = restWorld[b + 2] - restWorld[a + 2];
-    const vx = restWorld[c] - restWorld[a],
-      vy = restWorld[c + 1] - restWorld[a + 1],
-      vz = restWorld[c + 2] - restWorld[a + 2];
+    if (!near[triangles[t]]) continue;
+    const a = slot[triangles[t]] * 3,
+      b = slot[triangles[t + 1]] * 3,
+      c = slot[triangles[t + 2]] * 3;
+    const ux = positions[b] - positions[a],
+      uy = positions[b + 1] - positions[a + 1],
+      uz = positions[b + 2] - positions[a + 2];
+    const vx = positions[c] - positions[a],
+      vy = positions[c + 1] - positions[a + 1],
+      vz = positions[c + 2] - positions[a + 2];
     const nx = uy * vz - uz * vy,
       ny = uz * vx - ux * vz,
       nz = ux * vy - uy * vx;
-    for (const o of [a, b, c]) {
-      sums[o] += nx;
-      sums[o + 1] += ny;
-      sums[o + 2] += nz;
+    for (let k = 0; k < 3; k++) {
+      const n = grid.nodeOf[triangles[t + k]];
+      if (n === 0xffffffff) continue;
+      sums[n * 3] += nx;
+      sums[n * 3 + 1] += ny;
+      sums[n * 3 + 2] += nz;
     }
   }
-  const m = model.matrix;
-  const det =
-    m[0] * (m[5] * m[10] - m[9] * m[6]) -
-    m[4] * (m[1] * m[10] - m[9] * m[2]) +
-    m[8] * (m[1] * m[6] - m[5] * m[2]);
-  // A mirrored part has reversed world winding, which flips the cross products.
-  const sign = det < 0 ? -1 : 1;
-  normals = new Float64Array(grid.nodes.length * 3);
+  const toWorld = new Matrix3().getNormalMatrix(new Matrix4().fromArray(matrix));
+  const normal = new Vector3();
+  const normals = new Float64Array(grid.nodes.length * 3);
   for (let n = 0; n < grid.nodes.length; n++) {
-    const o = grid.nodes[n] * 3;
-    const length = Math.hypot(sums[o], sums[o + 1], sums[o + 2]) || 1;
-    for (let a = 0; a < 3; a++) normals[n * 3 + a] = (sign * sums[o + a]) / length;
+    normal
+      .fromArray(sums, n * 3)
+      .applyMatrix3(toWorld)
+      .normalize()
+      .toArray(normals, n * 3);
   }
-  restNormals.set(model, normals);
   return normals;
 }
 
+/**
+ * Targets for every free painted node that faces a neighbour in range, on the surface written for
+ * `state`. A node faces the neighbour by the same written normal the seam readout uses.
+ */
 export function closeGapTargets(
   model: WarpModel,
   state: WarpState,
@@ -301,8 +331,7 @@ export function closeGapTargets(
   overlap: number,
 ): { node: number; target: Vec3 }[] {
   const { grid } = model;
-  const normals = restNormalsOf(model);
-  const rotation = new Float64Array(9);
+  const normals = writtenNodeNormals(model, state);
   const point = new Vector3();
   const result: { node: number; target: Vec3 }[] = [];
   for (let n = 0; n < grid.nodes.length; n++) {
@@ -311,21 +340,10 @@ export function closeGapTargets(
     point.fromArray(state.positions, n * 3);
     const hit = closestHit(point, neighbours);
     if (!hit) continue;
-    writeRotation(
-      rotation,
-      0,
-      state.rotations[n * 4],
-      state.rotations[n * 4 + 1],
-      state.rotations[n * 4 + 2],
-      state.rotations[n * 4 + 3],
-    );
-    const x = normals[n * 3],
-      y = normals[n * 3 + 1],
-      z = normals[n * 3 + 2];
     const facing =
-      (rotation[0] * x + rotation[1] * y + rotation[2] * z) * hit.normal.x +
-      (rotation[3] * x + rotation[4] * y + rotation[5] * z) * hit.normal.y +
-      (rotation[6] * x + rotation[7] * y + rotation[8] * z) * hit.normal.z;
+      normals[n * 3] * hit.normal.x +
+      normals[n * 3 + 1] * hit.normal.y +
+      normals[n * 3 + 2] * hit.normal.z;
     if (facing >= -warpFacingCosine || surfaceGap(point, hit) <= -overlap) continue;
     result.push({ node: n, target: hit.point.addScaledVector(hit.normal, -overlap).toArray() });
   }
