@@ -29,6 +29,8 @@ export interface WarpSnapshot {
   rotations: Float64Array;
   /** False when carried over from another grid: a close starting point rather than a solve. */
   settled: boolean;
+  /** False when the solve was still settling: shown as it was, and settled further on restore. */
+  converged: boolean;
 }
 
 /** Where a handle's reach is measured from. */
@@ -656,11 +658,13 @@ export function reachWeights(handle: WarpHandle) {
 export const snapshotOf = (
   grid: WarpGrid,
   state: { positions: Float64Array; rotations: Float64Array },
+  converged = true,
 ): WarpSnapshot => ({
   grid,
   positions: state.positions.slice(),
   rotations: state.rotations.slice(),
   settled: true,
+  converged,
 });
 
 /**
@@ -728,7 +732,7 @@ export function transferSnapshot(
     rotations[n * 4 + 2] = qz / length;
     rotations[n * 4 + 3] = qw / length;
   }
-  return { grid: to.grid, positions, rotations, settled: false };
+  return { grid: to.grid, positions, rotations, settled: false, converged: false };
 }
 
 function rotationOf(out: Float64Array, x: number, y: number, z: number, w: number) {

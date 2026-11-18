@@ -99,13 +99,17 @@ import {
   distributionNodes,
   handleConstraints,
   handleGuides,
+  heldWhereItIs,
   nodeSample,
   reachHandle,
   snapshotOf,
   spacingAt,
   transferSnapshot,
+  untouchedAuto,
   warpEligibleNodes,
   warpGuides,
+  warpPriorityStrength,
+  writtenCentre,
   type WarpHandle,
   type WarpSample,
   type WarpSnapshot,
@@ -262,6 +266,8 @@ export interface WarpSession {
   folds: Uint32Array;
   seam: SeamReport | null;
   undo: WarpEdit[];
+  /** The last edit's solve has not converged yet. It goes on settling in idle frames. */
+  settling: boolean;
 }
 /**
  * A session step: the points and gap targets, the settled grid they held, and the settings new
@@ -570,6 +576,7 @@ const newWarpSession = (part: Part, epoch: number, faces: number[] = []): WarpSe
   folds: new Uint32Array(0),
   seam: null,
   undo: [],
+  settling: false,
 });
 
 export const warpDistributeCounts = [4, 8, 16, 32] as const;
@@ -721,11 +728,11 @@ function rebindHandle(model: WarpModel, handle: WarpPoint): WarpPoint | null {
   return reachHandle(model, { ...handle, samples, reach: null });
 }
 
-/** The session's settled grid as a snapshot. */
+/** The session's settled grid as a snapshot, or the grid as shown while it is still settling. */
 const settledOf = (warp: WarpSession) =>
   warp.surface?.grid === warp.model!.grid && warp.surface.settled
     ? warp.surface
-    : snapshotOf(warp.model!.grid, warp.state!);
+    : snapshotOf(warp.model!.grid, warp.state!, !warp.settling);
 
 /** Unmoved points on free nodes spread over the grid, away from the points there already. */
 function distributedPoints(warp: WarpSession, count: number): WarpPoint[] {
@@ -792,6 +799,27 @@ const holdsWarp = (point: WarpPoint) =>
     ({ pin, restWorld }) => Math.hypot(...pin.map((value, a) => value - restWorld[a])) > 1e-6,
   );
 
+/**
+ * How far the written surface stops from the targets of the selected handles that were moved,
+ * at worst, mm; 0 when none is selected or moved.
+ */
+export function warpShortfall(warp: WarpSession) {
+  const { model, state } = warp;
+  if (!model || !state || warp.stage !== 'warp') return 0;
+  let worst = 0;
+  for (const point of warp.points)
+    if (point.target && warp.selectedPoints.includes(point.id)) {
+      const at = writtenCentre(model, state, point);
+      worst = Math.max(
+        worst,
+        Math.hypot(at[0] - point.target[0], at[1] - point.target[1], at[2] - point.target[2]),
+      );
+    }
+  return worst;
+}
+/** A selected handle whose surface stops farther than this from its target says so, mm. */
+export const warpShortfallShown = 0.02;
+
 /** Whether Apply would change the mesh. */
 export const warpChanges = (warp: WarpSession) =>
   warp.gapTargets.length > 0 || warp.points.some(holdsWarp);
@@ -812,12 +840,19 @@ function warpConstraints(
 ): WarpConstraint[] {
   const rest = model!.restNodes;
   return [
-    ...handleConstraints(points, model!, guides),
+    ...handleConstraints(
+      points,
+      model!,
+      guides,
+      gapTargets.map(({ node }) => node),
+    ),
+    // A seam closes as exactly as a point the user moved lands.
     ...gapTargets.map(({ node, target }) => ({
       node: [node],
       weight: [1],
       rest: [rest[node * 3], rest[node * 3 + 1], rest[node * 3 + 2]] as Vec3,
       target,
+      strength: warpPriorityStrength,
     })),
   ];
 }
@@ -926,22 +961,35 @@ function uploadRanges(attribute: BufferAttribute, ranges: Uint32Array) {
   attribute.needsUpdate = true;
 }
 
-/** Solves `state` until it settles, warm-started from it. */
+/** Solves `state` until it settles, warm-started from it. Returns the last iteration's largest move. */
 function settleGrid(
   model: WarpModel,
   constraints: WarpConstraint[],
   state: WarpState,
   guides?: WarpGuides,
 ) {
-  for (let i = 0; i < warpSettleIterations; i++)
-    if (solveWarp(model.grid, model.restNodes, constraints, state, 1, guides) < warpSettleTolerance)
-      break;
+  let move = Infinity;
+  for (let i = 0; i < warpSettleIterations; i++) {
+    move = solveWarp(model.grid, model.restNodes, constraints, state, 1, guides);
+    if (move < warpSettleTolerance) break;
+  }
+  return move;
 }
+
+// A solve has converged once an iteration moves no node by more than this, mm. Grids with few pins
+// approach it slowly, so after the first settle the rest happens in idle frames.
+const warpConvergedMove = 1e-6;
+// The most iterations one edit settles for, after which it stops where it is.
+const warpSettleLimit = 20_000;
+// Time each idle step settles for, and how often it redraws the surface while settling, ms.
+const warpSettleBudget = 8;
+const warpSettleRedraw = 200;
 
 /**
  * Solves the grid for the session's points and gap targets. A drag takes a few iterations and
  * deforms the surface only for regions small enough to follow the pointer. The end of an edit
- * settles fully and refreshes folds and, unless `measure` is false, the seam.
+ * settles, refreshes folds and, unless `measure` is false, the seam; when it has not converged it
+ * goes on settling in idle frames.
  */
 function solveWarpSession(
   scene: SceneDocument,
@@ -952,28 +1000,117 @@ function solveWarpSession(
   const model = warp.model!;
   const guides = sessionGuides(warp);
   const constraints = warpConstraints(warp, guides);
+  let move = 0;
   // With nothing holding it, the grid rests rather than staying where the last points left it.
   if (!constraints.length) warp = { ...warp, state: createWarpState(model.restNodes) };
   else if (gesture === 'drag')
     solveWarp(model.grid, model.restNodes, constraints, warp.state!, warpDragIterations, guides);
-  else settleGrid(model, constraints, warp.state!, guides);
-  if (gesture === 'end') return showWarp(scene, { ...warp, surface: null }, measure);
+  else move = settleGrid(model, constraints, warp.state!, guides);
+  if (gesture === 'end')
+    return showWarp(
+      scene,
+      { ...warp, surface: null, settling: move >= warpConvergedMove },
+      measure,
+    );
   if (model.region.interiorCount <= warpDragVertices) deformWarpPreview(warp, 'drag');
-  return warp;
+  return warp.settling ? { ...warp, settling: false } : warp;
 }
 
 /**
  * Draws a settled grid: the preview, its folds and, unless `measure` is false, the seam. With
- * nothing holding the surface away from rest, the preview takes back the source's own bits.
+ * nothing holding the surface away from rest, the preview takes back the source's own bits. A grid
+ * still settling has no settled surface yet and goes on settling.
  */
 function showWarp(scene: SceneDocument, warp: WarpSession, measure = true): WarpSession {
   const resting = !warp.gapTargets.length && !warp.points.some(holdsWarp);
+  if (warp.settling) scheduleWarpSettle();
   return {
     ...warp,
-    surface: warp.surface ?? snapshotOf(warp.model!.grid, warp.state!),
+    surface: warp.settling ? null : (warp.surface ?? snapshotOf(warp.model!.grid, warp.state!)),
     folds: resting ? (restWarpPreview(warp), new Uint32Array(0)) : deformWarpPreview(warp, 'end')!,
     seam: measure && warp.stage === 'warp' ? warpSeam(scene, warp) : warp.seam,
   };
+}
+
+// The session the idle steps are settling, the constraints they solve, and how far they are.
+let warpSettled: {
+  warp: WarpSession | null;
+  guides?: WarpGuides;
+  constraints?: WarpConstraint[];
+  iterations: number;
+  drawn: number;
+} = { warp: null, iterations: 0, drawn: 0 };
+let settleTimer: ReturnType<typeof setTimeout> | undefined;
+
+function scheduleWarpSettle() {
+  if (typeof window === 'undefined' || settleTimer !== undefined) return;
+  settleTimer = setTimeout(() => {
+    settleTimer = undefined;
+    stepWarpSettle(warpSettleBudget);
+  }, 0);
+}
+
+/**
+ * Settles the session's grid further for about `budget` ms, or until it converges. It redraws
+ * the surface now and then, and fully once it has converged. Returns whether there is more to do.
+ */
+function stepWarpSettle(budget: number) {
+  const { warp, scene } = useEditor.getState();
+  if (!warp?.settling || warp.stage !== 'warp' || !warp.model || isWarpDragging()) return false;
+  const model = warp.model;
+  // Any edit makes a new session object with new points, gap targets or state.
+  const progress = warpSettled;
+  if (
+    !progress.warp ||
+    progress.warp.points !== warp.points ||
+    progress.warp.gapTargets !== warp.gapTargets ||
+    progress.warp.state !== warp.state ||
+    progress.warp.model !== model
+  ) {
+    progress.warp = warp;
+    progress.iterations = 0;
+    progress.guides = sessionGuides(warp);
+    progress.constraints = warpConstraints(warp, progress.guides);
+  }
+  const deadline = performance.now() + budget;
+  let move = Infinity;
+  do {
+    move = solveWarp(
+      model.grid,
+      model.restNodes,
+      progress.constraints!,
+      warp.state!,
+      1,
+      progress.guides,
+    );
+    progress.iterations++;
+  } while (
+    move >= warpConvergedMove &&
+    progress.iterations < warpSettleLimit &&
+    performance.now() < deadline
+  );
+  if (move < warpConvergedMove || progress.iterations >= warpSettleLimit) {
+    const next = showWarp(scene, { ...warp, settling: false, surface: null });
+    progress.warp = null;
+    useEditor.setState({ warp: next });
+    return false;
+  }
+  const now = performance.now();
+  let next = warp;
+  if (now - progress.drawn >= warpSettleRedraw) {
+    progress.drawn = now;
+    deformWarpPreview(warp, 'drag');
+    next = { ...warp };
+    progress.warp = next;
+  }
+  if (next !== warp) useEditor.setState({ warp: next });
+  scheduleWarpSettle();
+  return true;
+}
+
+/** Settles the session's grid until it converges, without waiting for idle frames. */
+export function finishWarpSettling() {
+  while (stepWarpSettle(Infinity));
 }
 
 /** Puts the source's positions and normals back into the preview. */
@@ -995,7 +1132,7 @@ function restWarpPreview({ model, output, preview, source }: WarpSession) {
 }
 
 /**
- * The session as `step` left it. Its settled grid is restored exactly when it was solved on
+ * The session as `step` left it. Its grid is restored exactly as it was shown when it was solved on
  * this grid, and settled again from it when it was carried over from another one.
  */
 function restoreWarp(scene: SceneDocument, warp: WarpSession, step: WarpEdit): WarpSession {
@@ -1012,7 +1149,8 @@ function restoreWarp(scene: SceneDocument, warp: WarpSession, step: WarpEdit): W
   if (surface?.grid !== model.grid) return solveWarpSession(scene, next, 'end');
   const state = { positions: surface.positions.slice(), rotations: surface.rotations.slice() };
   if (!surface.settled) return solveWarpSession(scene, { ...next, state }, 'end');
-  return showWarp(scene, { ...next, state, surface });
+  // Shown as it was; one that was still settling goes on settling from there.
+  return showWarp(scene, { ...next, state, surface, settling: !surface.converged });
 }
 
 /**
@@ -1960,6 +2098,8 @@ export const useEditor = create<EditorState>((set, get) => ({
     abortWarpBuild();
     clearTimeout(seamTimer);
     warpDrag = null;
+    clearTimeout(settleTimer);
+    settleTimer = undefined;
     disposeWarpPreview(warp.preview);
     set({ warp: null, painting: false, paintHistory: [] });
     if (notice) get().notify(notice, 'info');
@@ -2069,16 +2209,56 @@ export const useEditor = create<EditorState>((set, get) => ({
         (move) => [move.id, move.target],
       ),
     );
-    const before = warpDrag?.model === model ? warpDrag.before : warpEdit(warp);
-    // A point with no guides of its own starts its first move from the surface as it is.
-    const points = warp.points.map((point) => {
+    const continuing = warpDrag?.model === model;
+    const before = continuing ? warpDrag!.before : warpEdit(warp);
+    const surface = before.surface!;
+    // An untouched automatic point bound to a node a moved handle's samples are bound to would hold
+    // the grab back, so it goes in the same step.
+    const { fixed } = model.grid;
+    const grabbed = new Set<number>();
+    for (const point of warp.points)
+      if (targets.has(point.id))
+        for (const { binding } of point.samples)
+          for (const node of binding.node) if (!fixed[node]) grabbed.add(node);
+    const released = (point: WarpPoint) =>
+      !targets.has(point.id) &&
+      untouchedAuto(point) &&
+      point.samples.some(({ binding }) => binding.node.some((node) => grabbed.has(node)));
+    if (
+      !continuing &&
+      !warp.points.some(released) &&
+      warp.points.every((point) => {
+        const target = targets.get(point.id);
+        return !target || (point.target !== null && same(point.target, target));
+      })
+    )
+      return;
+    const points = warp.points.flatMap((point) => {
       const target = targets.get(point.id);
-      if (!target) return point;
-      const fresh = point.target === null && !handleGuides(point) && before.surface;
-      return { ...point, target, auto: false, ...(fresh ? { baseline: before.surface! } : {}) };
+      if (!target) return released(point) ? [] : [point];
+      // An automatic point the guides have carried is taken where it is now. A point with no
+      // guides of its own starts its first move from the surface as it is.
+      const from = untouchedAuto(point)
+        ? heldWhereItIs(model, surface, point, surface)
+        : point.target === null && !handleGuides(point)
+          ? { ...point, baseline: surface }
+          : point;
+      return [{ ...from, target, auto: false }];
     });
+    const kept = new Set(points.map((point) => point.id));
     warpDrag = gesture === 'drag' ? { model, before } : null;
-    const next = solveWarpSession(state.scene, { ...warp, points }, gesture);
+    const next = solveWarpSession(
+      state.scene,
+      {
+        ...warp,
+        points,
+        selectedPoints:
+          points.length < warp.points.length
+            ? warp.selectedPoints.filter((id) => kept.has(id))
+            : warp.selectedPoints,
+      },
+      gesture,
+    );
     set({
       warp:
         gesture === 'end' && !sameEdit(before, next)
@@ -2124,6 +2304,7 @@ export const useEditor = create<EditorState>((set, get) => ({
     }
     const continuing = warpDrag?.model === model && warpDrag.settings ? warpDrag : null;
     const before = continuing?.before ?? warpEdit(warp);
+    const surface = before.surface!;
     const start =
       continuing?.settings ??
       new Map(warp.points.filter((point) => selected.has(point.id)).map((p) => [p.id, p]));
@@ -2134,12 +2315,25 @@ export const useEditor = create<EditorState>((set, get) => ({
       const radius = settings.pointRadius ?? from.radius,
         falloff = settings.pointFalloff ?? from.falloff;
       if (radius === from.radius && falloff === from.falloff) return from;
-      const next = reachHandle(model, { ...from, radius, falloff, auto: false });
+      // An automatic point the guides have carried is taken where it is now.
+      const held = untouchedAuto(from) ? heldWhereItIs(model, surface, from, surface) : from;
+      const next = reachHandle(model, { ...held, radius, falloff, auto: false });
       // An unmoved point first given a radius holds the surface as it is.
-      return from.target === null && !handleGuides(from) && handleGuides(next) && before.surface
-        ? { ...next, baseline: before.surface }
+      return from.target === null && !handleGuides(from) && handleGuides(next)
+        ? { ...next, baseline: surface }
         : next;
     });
+    // Settings that leave every point as it was settle nothing.
+    if (!continuing && points.every((point, i) => point === warp.points[i])) {
+      const next = { ...warp, ...settings };
+      set({
+        warp:
+          gesture === 'end' && !sameEdit(before, warpEdit(next))
+            ? { ...next, undo: withUndo(warp, before) }
+            : next,
+      });
+      return;
+    }
     warpDrag = gesture === 'drag' ? { model, before, settings: start } : null;
     const next = solveWarpSession(state.scene, { ...warp, ...settings, points }, gesture);
     set({
@@ -2281,7 +2475,8 @@ export const useEditor = create<EditorState>((set, get) => ({
     const keep =
       !state.warpPending &&
       (state.liveStatus === 'connected' || state.liveStatus === 'disconnected');
-    const settled = solveWarpSession(state.scene, warp, 'end', false);
+    // Exactly the surface shown. A grid still settling stops where it is.
+    const settled = { ...warp, settling: false };
     const geometry = appliedWarpGeometry(warp.source, settled.output!);
     const warped: Part = { ...part, geometry, source: `Warp · ${part.source}` };
     if (!keep) disposeWarpPreview(settled.preview);
