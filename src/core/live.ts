@@ -132,7 +132,7 @@ export function joinLiveSession() {
     useEditor.setState({ liveStatus: 'connected', sharedHistory: { undo, redo } });
     const before = new Set(local.parts.map((part) => part.id));
     show(next);
-    if (!replace && replaced) useEditor.getState().settleWarp(true);
+    if (!replace && (first || replaced)) useEditor.getState().settleWarp(true);
     const shown = useEditor.getState().scene;
     if (first) useEditor.getState().markSaved(useEditor.getState().revision);
     // Keep a growing model in view, until the person watching takes over the camera.
@@ -196,12 +196,12 @@ export function joinLiveSession() {
 
   const sendEdit = async () => {
     const scene = committedScene(useEditor.getState());
-    // A warp applied before this edit was captured is settled by its answer.
-    const pending = useEditor.getState().warpPending;
+    // Keep the submitted draft separate from any warp applied while this edit is in flight.
     const base = confirmed!;
     const flags = { checkpoint, replace };
     dirty = checkpoint = replace = false;
     sending = true;
+    useEditor.getState().submitWarp();
     try {
       for (const { geometry } of scene.parts) {
         const key = geometry.uuid;
@@ -219,8 +219,7 @@ export function joinLiveSession() {
       });
       if (response.ok) {
         awaited = ((await response.json()) as { version: number }).version;
-        if (pending && pending === useEditor.getState().warpPending)
-          useEditor.getState().settleWarp(true);
+        useEditor.getState().settleWarp(true, true);
       } else refused(await errorOf(response));
     } catch (error) {
       if (error instanceof Refusal) refused(error.message);
@@ -229,6 +228,7 @@ export function joinLiveSession() {
         dirty = true;
         checkpoint ||= flags.checkpoint;
         replace ||= flags.replace;
+        useEditor.getState().retryWarp();
         lost();
       }
     } finally {

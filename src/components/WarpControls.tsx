@@ -15,7 +15,6 @@ function cancel() {
 
 export function WarpControls() {
   const warp = useEditor((s) => s.warp);
-  const awaitingApply = useEditor((s) => !!s.warpPending);
   const part = useEditor((s) =>
     s.warp ? s.scene.parts.find((p) => p.id === s.warp!.partId) : undefined,
   );
@@ -182,14 +181,8 @@ export function WarpControls() {
         </button>
         <button
           className="button primary"
-          disabled={building || awaitingApply || !warpChanges(warp)}
-          title={
-            awaitingApply
-              ? 'Waiting for the shared scene to confirm the previous warp.'
-              : warpChanges(warp)
-                ? undefined
-                : 'Move a control point or close the gap first.'
-          }
+          disabled={building || !warpChanges(warp)}
+          title={warpChanges(warp) ? undefined : 'Move a control point or close the gap first.'}
           onClick={() => useEditor.getState().applyWarp()}
         >
           Apply

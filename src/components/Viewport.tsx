@@ -54,6 +54,7 @@ import {
   worldPoint,
 } from '../core/geometry';
 import {
+  isWarpDragging,
   measureDistance,
   paintingWarpRegion,
   sceneLighting,
@@ -206,7 +207,7 @@ const PartMesh = memo(function PartMesh({
     if (!warpPreview) return source;
     let indexedVersion = -1;
     return function (this: Mesh, ...args: Parameters<Mesh['raycast']>) {
-      if (gizmoPressed || useEditor.getState().freeTransform) return;
+      if (isWarpDragging() || useEditor.getState().freeTransform) return;
       const version = (warpPreview.getAttribute('position') as BufferAttribute).version;
       if (version !== indexedVersion && part.geometry.boundsTree) {
         refitWarpTree(part.geometry, warpPreview);

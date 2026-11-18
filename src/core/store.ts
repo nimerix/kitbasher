@@ -232,6 +232,12 @@ export interface WarpSession {
 }
 type WarpEdit = Pick<WarpSession, 'points' | 'gapTargets'>;
 
+interface WarpRecovery {
+  partId: string;
+  source: BufferGeometry;
+  session: WarpSession;
+}
+
 interface EditorState {
   scene: SceneDocument;
   selected: string[];
@@ -263,13 +269,9 @@ interface EditorState {
   paintHistory: (SurfacePair[] | Pick<WarpSession, 'faces' | 'seed'>)[];
   operation: AssemblyOperation;
   warp: WarpSession | null;
-  /** A warp applied in a live session, kept until the server takes it so a refusal can reopen it. */
-  warpPending: {
-    partId: string;
-    source: BufferGeometry;
-    applied: BufferGeometry;
-    session: WarpSession;
-  } | null;
+  /** First warp in the queued or submitted edit, available to reopen if that batch is refused. */
+  warpPending: WarpRecovery | null;
+  warpInFlight: WarpRecovery | null;
   view: ViewSettings;
   /** Lighting for scenes that have none of their own. Kept in this browser. */
   defaultLighting: SceneLighting;
@@ -369,7 +371,9 @@ interface EditorState {
   /** Bakes the warp into the part as one undo step, then starts again on the result. */
   applyWarp: () => boolean;
   /** The live server took the applied warp, or refused it. */
-  settleWarp: (accepted: boolean) => void;
+  submitWarp: () => void;
+  retryWarp: () => void;
+  settleWarp: (accepted: boolean, submittedOnly?: boolean) => void;
   setOperation: (patch: Partial<AssemblyOperation>) => void;
   resetPicks: () => void;
   pick: (point: SurfacePoint) => void;
@@ -575,6 +579,8 @@ const warpDragVertices = 50_000;
 
 // The points before the drag in progress, which its end records as one undo step.
 let warpDrag: { model: WarpModel; before: WarpEdit } | null = null;
+export const isWarpDragging = () =>
+  warpDrag?.model === useEditor.getState().warp?.model && !!warpDrag;
 
 const warpEdit = (warp: WarpSession): WarpEdit => ({
   points: warp.points,
@@ -653,12 +659,16 @@ function warpSeam(scene: SceneDocument, warp: WarpSession) {
   const advance = () => {
     const current = useEditor.getState();
     if (
-      current.scene !== scene ||
       current.warp?.stage !== 'warp' ||
       current.warp.preview !== preview ||
       position.version !== version
     )
       return;
+    if (current.scene.parts !== scene.parts) {
+      const seam = warpSeam(current.scene, current.warp);
+      useEditor.setState({ warp: { ...current.warp, seam } });
+      return;
+    }
     const deadline = performance.now() + 8;
     do {
       const result = measurement.next();
@@ -874,6 +884,7 @@ export const useEditor = create<EditorState>((set, get) => ({
   operation: blankOperation(),
   warp: null,
   warpPending: null,
+  warpInFlight: null,
   view: {
     inspection: {
       enabled: false,
@@ -976,16 +987,19 @@ export const useEditor = create<EditorState>((set, get) => ({
       clipboard,
       ...(cut
         ? {
-            ...changed(state, {
-              ...state.scene,
-              parts: state.scene.parts.filter((part) => !ids.has(part.id)),
-              joints: state.scene.joints.filter(
-                (joint) => !ids.has(joint.parentId) && !ids.has(joint.childId),
-              ),
-              constraints: state.scene.constraints?.filter(
-                (c) => !ids.has(c.sourceId) && !ids.has(c.targetId),
-              ),
-            }),
+            ...changed(
+              { ...state, clipboard },
+              {
+                ...state.scene,
+                parts: state.scene.parts.filter((part) => !ids.has(part.id)),
+                joints: state.scene.joints.filter(
+                  (joint) => !ids.has(joint.parentId) && !ids.has(joint.childId),
+                ),
+                constraints: state.scene.constraints?.filter(
+                  (c) => !ids.has(c.sourceId) && !ids.has(c.targetId),
+                ),
+              },
+            ),
             selected: state.selected.filter((id) => !ids.has(id)),
             operation: blankOperation(),
             paintHistory: [],
@@ -1605,6 +1619,10 @@ export const useEditor = create<EditorState>((set, get) => ({
     const sum = weights[0] + weights[1] + weights[2];
     const barycentric = weights.map((w) => w / sum) as Vec3;
     const { binding, restWorld } = warpBinding(model, triangle, barycentric);
+    if (binding.node.every((node) => model.grid.fixed[node])) {
+      state.notify('This spot is fixed. Click farther inside the warp region.', 'info');
+      return;
+    }
     const added: WarpPoint = {
       id: uid(),
       face,
@@ -1739,7 +1757,7 @@ export const useEditor = create<EditorState>((set, get) => ({
   applyWarp: () => {
     const state = get(),
       warp = state.warp;
-    if (!warp?.model || warp.stage !== 'warp' || state.warpPending) return false;
+    if (!warp?.model || warp.stage !== 'warp') return false;
     // Nothing to bake, so the mesh keeps its exact bits.
     if (!warpChanges(warp)) return false;
     const part = state.scene.parts.find((p) => p.id === warp.partId);
@@ -1755,11 +1773,13 @@ export const useEditor = create<EditorState>((set, get) => ({
     // The session starts again on the result, keeping the region and options.
     const { region, faces, seed, density, snap, overlap, gizmo } = warp;
     // In a live session the server may still refuse it, so the session is kept to reopen.
-    const live = state.liveStatus !== null;
+    const keep =
+      !state.warpPending &&
+      (state.liveStatus === 'connected' || state.liveStatus === 'disconnected');
     const settled = solveWarpSession(state.scene, warp, 'end', false);
     const geometry = appliedWarpGeometry(warp.source, settled.output!);
     const warped: Part = { ...part, geometry, source: `Warp · ${part.source}` };
-    if (!live) disposeWarpPreview(settled.preview);
+    if (!keep) disposeWarpPreview(settled.preview);
     set({
       ...changed(state, {
         ...state.scene,
@@ -1774,37 +1794,60 @@ export const useEditor = create<EditorState>((set, get) => ({
         overlap,
         gizmo,
       },
-      warpPending: live
-        ? { partId: part.id, source: warp.source, applied: geometry, session: settled }
-        : null,
+      warpPending: keep
+        ? { partId: part.id, source: warp.source, session: settled }
+        : state.warpPending,
     });
     return true;
   },
-  settleWarp: (accepted) => {
-    const state = get(),
-      pending = state.warpPending;
-    if (!pending) return;
-    const { session } = pending;
-    const part = state.scene.parts.find((p) => p.id === pending.partId);
+  submitWarp: () => {
+    const { warpPending } = get();
+    if (warpPending) set({ warpPending: null, warpInFlight: warpPending });
+  },
+  retryWarp: () => {
+    const { warpInFlight, warpPending } = get();
+    if (!warpInFlight) return;
+    disposeWarpPreview(warpPending?.session.preview ?? null);
+    set({ warpPending: warpInFlight, warpInFlight: null });
+  },
+  settleWarp: (accepted, submittedOnly = false) => {
+    const state = get();
+    if (!state.warpPending && !state.warpInFlight) return;
+    const retained = submittedOnly ? state.warpPending : null;
+    const settled = [state.warpInFlight, submittedOnly ? null : state.warpPending];
+    // A coalesced edit rolls the scene all the way back. Only a draft on the restored mesh can
+    // reopen, which is usually the first warp applied in the submitted batch.
     const reopen =
-      !accepted &&
-      part?.geometry === pending.source &&
-      part.visible &&
-      !part.locked &&
-      state.sceneEpoch === session.epoch &&
-      same(partMatrix(part).elements, session.model!.matrix) &&
-      // Warp is desktop only.
-      !useXR.getState().session;
+      !accepted && !useXR.getState().session
+        ? settled.find((pending) => {
+            if (!pending) return false;
+            const { session } = pending;
+            const part = state.scene.parts.find((p) => p.id === pending.partId);
+            return (
+              part?.geometry === pending.source &&
+              part.visible &&
+              !part.locked &&
+              state.sceneEpoch === session.epoch &&
+              same(partMatrix(part).elements, session.model!.matrix)
+            );
+          })
+        : null;
+    const released = settled.flatMap((pending) =>
+      pending !== reopen && pending?.session.preview ? [pending.session.preview] : [],
+    );
+    if (released.length) releaseGeometries(released, state);
     if (!reopen) {
-      releaseWarpPending();
+      set({ warpPending: retained, warpInFlight: null });
       return;
     }
+    const { session } = reopen;
     state.cancelWarp();
     set({
       ...(state.tool === 'warp' ? {} : toolChange(state, 'warp')),
-      selected: [pending.partId],
+      selected: [reopen.partId],
       warp: { ...session, seam: warpSeam(state.scene, session) },
-      warpPending: null,
+      warpPending: retained,
+      warpInFlight: null,
     });
     state.notify(
       'Your warp could not be combined with another edit. It is open again so you can apply it once more.',
@@ -2682,7 +2725,12 @@ function releaseGeometries(
 ) {
   const released = new Set(geometries);
   const inUse = new Set<unknown>();
-  for (const geometry of [...reachable, state.warp?.preview, state.warpPending?.session.preview]) {
+  for (const geometry of [
+    ...reachable,
+    state.warp?.preview,
+    state.warpPending?.session.preview,
+    state.warpInFlight?.session.preview,
+  ]) {
     if (!geometry || released.has(geometry)) continue;
     if (geometry.index) inUse.add(geometry.index);
     for (const name in geometry.attributes) inUse.add(geometry.attributes[name]);
@@ -2737,19 +2785,11 @@ useEditor.subscribe((state, previous) => {
   if (moving && !state.freeTransform) restoreWarpPoints(moving);
 });
 
-/** Lets go of a warp kept for the live server's answer. */
-function releaseWarpPending() {
-  const pending = useEditor.getState().warpPending;
-  if (!pending) return;
-  disposeWarpPreview(pending.session.preview);
-  useEditor.setState({ warpPending: null });
-}
-
 // A kept warp waits for one live server's answer about one scene.
 useEditor.subscribe((state) => {
-  const pending = state.warpPending;
+  const pending = state.warpInFlight ?? state.warpPending;
   if (pending && (state.liveStatus === null || state.sceneEpoch !== pending.session.epoch))
-    releaseWarpPending();
+    state.settleWarp(true);
 });
 
 /** Lays the session's grid. A build that stops returns the session to `from`. */
