@@ -1,4 +1,10 @@
-import { useEffect, useMemo, useRef } from 'react';
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  type FocusEvent,
+  type PointerEvent as ReactPointerEvent,
+} from 'react';
 import { LoaderCircle, TriangleAlert } from 'lucide-react';
 import { clipLimits } from '../core/clipping';
 import { fittedSizeRange, partSize } from '../core/geometry';
@@ -13,68 +19,110 @@ import {
 } from '../core/store';
 import type { Part } from '../core/types';
 import { warpDensityNodes } from '../core/warp-grid';
+import { fadeWidth, handleGuides } from '../core/warp-handles';
 import { featherWarning } from '../core/warp-model';
 import { SurfaceBrushControls } from './SurfaceBrushControls';
 import { TransformAdjustments } from './TransformAdjustments';
 import { LogRangeInput, NumericInput, RadioGroup, Section } from './ui';
 
 type PointSettings = { radius?: number; falloff?: number };
+type Slider = 'radius' | 'falloff';
 
 /**
- * Sends a slider's changes to the selected points at most once a frame, and its release as one
- * step. A range input fires a native change when it is let go, by pointer or by key.
+ * A slider gesture on the selected points' settings. It belongs to the slider it began on and,
+ * for a drag, to its pointer. Changes reach the points at most once a frame, and the gesture ends
+ * exactly once, as one step: on release, the slider's own change, pointer cancel, lost capture
+ * or window blur. Blur from any other control ends nothing.
  */
 function usePointSettingsGesture() {
-  const pending = useRef<PointSettings | null>(null),
-    frame = useRef(0),
-    container = useRef<HTMLDivElement>(null);
-  const end = useMemo(() => {
-    const finish = () => {
-      cancelAnimationFrame(frame.current);
-      frame.current = 0;
-      window.removeEventListener('pointerup', finish);
-      const patch = pending.current;
-      pending.current = null;
-      if (patch) useEditor.getState().setWarpPointSettings(patch, 'end');
+  const current = useRef<{
+    slider: Slider;
+    pointer: number | null;
+    patch: PointSettings | null;
+    frame: number;
+  } | null>(null);
+  const gesture = useMemo(() => {
+    const release = (event: PointerEvent) => {
+      const owner = current.current;
+      if (owner && (owner.pointer === null || owner.pointer === event.pointerId)) end();
     };
-    return finish;
-  }, []);
-  useEffect(() => {
-    const element = container.current!;
-    element.addEventListener('change', end);
-    return () => {
-      element.removeEventListener('change', end);
+    const blur = () => end();
+    const end = (slider?: Slider) => {
+      const owner = current.current;
+      if (!owner || (slider && owner.slider !== slider)) return;
+      current.current = null;
+      cancelAnimationFrame(owner.frame);
+      window.removeEventListener('pointerup', release);
+      window.removeEventListener('pointercancel', release);
+      window.removeEventListener('blur', blur);
+      if (owner.patch) useEditor.getState().setWarpPointSettings(owner.patch, 'end');
+    };
+    const begin = (slider: Slider, pointer: number | null) => {
       end();
+      current.current = { slider, pointer, patch: null, frame: 0 };
+      window.addEventListener('pointerup', release);
+      window.addEventListener('pointercancel', release);
+      window.addEventListener('blur', blur);
     };
-  }, [end]);
-  const drag = (patch: PointSettings) => {
-    if (!pending.current) window.addEventListener('pointerup', end);
-    pending.current = { ...pending.current, ...patch };
-    if (frame.current) return;
-    frame.current = requestAnimationFrame(() => {
-      frame.current = 0;
-      if (pending.current) useEditor.getState().setWarpPointSettings(pending.current, 'drag');
-    });
-  };
-  return { container, drag, end };
+    const change = (slider: Slider, patch: PointSettings) => {
+      if (current.current?.slider !== slider) begin(slider, null);
+      const owner = current.current!;
+      owner.patch = { ...owner.patch, ...patch };
+      if (owner.frame) return;
+      owner.frame = requestAnimationFrame(() => {
+        owner.frame = 0;
+        if (current.current === owner && owner.patch)
+          useEditor.getState().setWarpPointSettings(owner.patch, 'drag');
+      });
+    };
+    return { begin, change, end };
+  }, []);
+  useEffect(() => () => gesture.end(), [gesture]);
+  return gesture;
 }
+
+const isSlider = (target: EventTarget) =>
+  target instanceof HTMLInputElement && target.type === 'range';
 
 /** Radius, falloff and Distribute points, for the selected points or for new ones. */
 function PointSettingsControls({ warp, part }: { warp: WarpSession; part: Part | undefined }) {
-  const { container, drag, end } = usePointSettingsGesture();
+  const gesture = usePointSettingsGesture();
   const selected = warp.points.filter((point) => warp.selectedPoints.includes(point.id));
   const shown = selected[0];
   const radius = shown ? shown.radius : warpPointRadius(warp, part);
   const falloff = shown ? shown.falloff : warp.pointFalloff;
   const { max } = fittedSizeRange(part ? partSize(part) : 40);
-  const coarse = selected.some(
-    (point) => point.radius > 0 && point.reach && !point.reach.effective,
-  );
+  const coarse = selected.some((point) => point.radius > 0 && !handleGuides(point));
+  const fade = shown && handleGuides(shown) ? fadeWidth(shown) : null;
   const commit = (patch: PointSettings) => useEditor.getState().setWarpPointSettings(patch, 'end');
-  const gesture = { onKeyUp: end, onBlur: end };
+  const owned = (slider: Slider) => ({
+    'data-slider': slider,
+    onPointerDown: (event: ReactPointerEvent) => {
+      if (isSlider(event.target)) gesture.begin(slider, event.pointerId);
+    },
+    onBlur: (event: FocusEvent) => {
+      if (isSlider(event.target)) gesture.end(slider);
+    },
+    onLostPointerCapture: (event: ReactPointerEvent) => {
+      if (isSlider(event.target)) gesture.end(slider);
+    },
+  });
+  const container = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const element = container.current!;
+    // A range input fires a native change when it is let go, by pointer or by key.
+    const changed = (event: Event) => {
+      const slider = (event.target as Element)
+        .closest('[data-slider]')
+        ?.getAttribute('data-slider');
+      if (slider && isSlider(event.target!)) gesture.end(slider as Slider);
+    };
+    element.addEventListener('change', changed);
+    return () => element.removeEventListener('change', changed);
+  }, [gesture]);
   return (
     <div className="warp-point-settings" ref={container}>
-      <label className="warp-point-setting" {...gesture}>
+      <label className="warp-point-setting" {...owned('radius')}>
         <span>Radius</span>
         <LogRangeInput
           label="Point radius slider"
@@ -82,7 +130,7 @@ function PointSettingsControls({ warp, part }: { warp: WarpSession; part: Part |
           min={0.1}
           max={max}
           zero
-          onChange={(value) => drag({ radius: value })}
+          onChange={(value) => gesture.change('radius', { radius: value })}
         />
         <NumericInput
           label="Point radius"
@@ -94,7 +142,7 @@ function PointSettingsControls({ warp, part }: { warp: WarpSession; part: Part |
         />
         <small>mm</small>
       </label>
-      <label className="warp-point-setting" {...gesture}>
+      <label className="warp-point-setting" {...owned('falloff')}>
         <span>Falloff</span>
         <input
           type="range"
@@ -103,7 +151,9 @@ function PointSettingsControls({ warp, part }: { warp: WarpSession; part: Part |
           max={100}
           step={1}
           value={Math.round(falloff * 100)}
-          onChange={(event) => drag({ falloff: Number(event.target.value) / 100 })}
+          onChange={(event) =>
+            gesture.change('falloff', { falloff: Number(event.target.value) / 100 })
+          }
         />
         <NumericInput
           label="Point falloff"
@@ -117,9 +167,11 @@ function PointSettingsControls({ warp, part }: { warp: WarpSession; part: Part |
       <p className="anchor-help">
         {selected.length
           ? radius > 0
-            ? `Moves the surface within ${Number(radius.toPrecision(3))} mm of the selected ${selected.length === 1 ? 'point' : 'points'}. New points use the same settings.`
+            ? `Moves the surface within ${Number(radius.toPrecision(3))} mm of the selected ${selected.length === 1 ? 'point' : 'points'}${fade !== null ? `, fading over the outer ${Number(fade.toPrecision(2))} mm` : ''}. New points use the same settings.`
             : `The selected ${selected.length === 1 ? 'point moves' : 'points move'} the surface at the point only.`
-          : 'New points use this radius and falloff.'}
+          : warp.pointRadius === null
+            ? 'New points use this falloff, and reach a few grid spacings where you click until you set a radius.'
+            : 'New points use this radius and falloff.'}
         {coarse
           ? ' This grid is too coarse for that radius here. A finer grid lets it take effect.'
           : ''}

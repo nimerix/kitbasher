@@ -263,6 +263,7 @@ describe('free transform on warp control points', () => {
     state().setTool('warp');
     state().setWarpOptions({ autoPoints: false });
     await state().layWarpGrid();
+    state().setWarpPointSettings({ radius: 0 }, 'end');
     const ids = [add(-4, 0), add(4, 0)];
     state().selectWarpPoints(ids);
     return ids;
