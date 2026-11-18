@@ -1703,8 +1703,12 @@ export const useEditor = create<EditorState>((set, get) => ({
     // Nothing to bake, so the mesh keeps its exact bits.
     if (!warpChanges(warp)) return false;
     const part = state.scene.parts.find((p) => p.id === warp.partId);
-    if (!part || part.locked || part.geometry !== warp.source || state.sceneEpoch !== warp.epoch) {
+    if (!part || part.geometry !== warp.source || state.sceneEpoch !== warp.epoch) {
       state.notify('The part changed, so the warp could not be applied.', 'error');
+      return false;
+    }
+    if (part.locked) {
+      state.notify(`Unlock ${part.name} to apply the warp.`, 'info');
       return false;
     }
     warpDrag = null;
