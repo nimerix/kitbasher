@@ -72,6 +72,8 @@ export interface WarpHandle {
   samples: readonly WarpSample[];
   /** An area's source faces, geometry face ids. Its footprint covers the nodes on them. */
   faces?: readonly number[];
+  /** A line as drawn, on geometry faces: what is shown of it, not what it holds. */
+  path?: readonly { face: number; barycentric: Vec3 }[];
   /** Where the handle's target is measured from: a point's sample pin. */
   pin: Vec3;
   /** Null while unmoved, when the handle acts as a pin. */

@@ -117,6 +117,7 @@ import {
 } from './warp-handles';
 import { buildWarpModelJob } from './warp-job';
 import { isPaintedFace, type WarpModel, type WarpModelInput } from './warp-model';
+import { areaSamples, lineSamples, thinPath, type WarpStrokePoint } from './warp-strokes';
 import {
   closeGapTargets,
   measureSeam,
@@ -220,6 +221,11 @@ export interface WarpBaseline {
 }
 
 export type WarpGizmo = 'translate' | 'rotate' | 'scale' | 'transform';
+export type WarpAddMode = 'point' | 'line' | 'area';
+/** A line as its hits along the surface, or an area as the faces one stroke painted. */
+export type WarpStroke =
+  | { kind: 'line'; points: WarpStrokePoint[] }
+  | { kind: 'area'; faces: number[]; first: WarpStrokePoint };
 /** A control point: a handle with one sample. */
 export type WarpPoint = WarpHandle;
 export interface WarpSession {
@@ -330,6 +336,8 @@ interface EditorState {
   warp: WarpSession | null;
   /** Feathered edge for painted warp regions, remembered for the page session and never saved. */
   warpFeather: WarpFeatherOption;
+  /** What a press on the surface makes in the Warp stage, remembered for the page session. */
+  warpAdd: WarpAddMode;
   /** First warp in the queued or submitted edit, available to reopen if that batch is refused. */
   warpPending: WarpRecovery | null;
   warpInFlight: WarpRecovery | null;
@@ -422,6 +430,9 @@ interface EditorState {
   cancelWarp: (notice?: string) => void;
   /** Adds a control point where the warped surface was clicked, and selects it. */
   addWarpPoint: (point: SurfacePoint, face: number) => void;
+  setWarpAdd: (mode: WarpAddMode) => void;
+  /** Makes one line or area handle from a stroke on the warped surface, and selects it. */
+  addWarpStroke: (stroke: WarpStroke) => boolean;
   /** Removes these points, or the selected ones. */
   removeWarpPoints: (ids?: string[]) => void;
   selectWarpPoints: (ids: string[], additive?: boolean) => void;
@@ -1409,6 +1420,7 @@ export const useEditor = create<EditorState>((set, get) => ({
   operation: blankOperation(),
   warp: null,
   warpFeather: { enabled: false, width: null },
+  warpAdd: 'point',
   warpPending: null,
   warpInFlight: null,
   view: {
@@ -2214,6 +2226,61 @@ export const useEditor = create<EditorState>((set, get) => ({
         undo: withUndo(warp),
       },
     });
+  },
+  setWarpAdd: (warpAdd) => set({ warpAdd }),
+  addWarpStroke: (stroke) => {
+    const state = get(),
+      warp = state.warp,
+      model = warp?.model;
+    if (!warp || !model || !warp.state || state.tool !== 'warp' || warp.stage !== 'warp')
+      return false;
+    const made =
+      stroke.kind === 'line'
+        ? lineSamples(model, warp.state, stroke.points)
+        : areaSamples(model, warp.state, stroke.faces, stroke.first);
+    if (!made || (stroke.kind === 'line' && made.samples.length < 2)) {
+      state.notify(
+        stroke.kind === 'line'
+          ? 'Draw a longer line on the painted area.'
+          : 'Paint on the painted area.',
+        'info',
+      );
+      return false;
+    }
+    const eligible = warpEligibleNodes(model);
+    const nodes = new Set<number>();
+    for (const { binding } of made.samples)
+      for (const node of binding.node) if (eligible[node]) nodes.add(node);
+    const part = state.scene.parts.find((p) => p.id === warp.partId);
+    const faces =
+      stroke.kind === 'area'
+        ? [...new Set(stroke.faces)].filter((f) => isPaintedFace(model, f))
+        : [];
+    // It holds the settled surface where it is, so adding it changes nothing.
+    const added = reachHandle(model, {
+      id: uid(),
+      kind: stroke.kind,
+      samples: made.samples,
+      ...(stroke.kind === 'area'
+        ? { faces: faces.sort((a, b) => a - b) }
+        : { path: thinPath(stroke.points.filter(({ face }) => isPaintedFace(model, face))) }),
+      pin: made.samples[made.centre].pin,
+      target: null,
+      radius: warpPointRadius(warp, part, spacingAt(model, nodes)),
+      falloff: warp.pointFalloff,
+      auto: false,
+      baseline: settledOf(warp),
+      reach: null,
+    });
+    set({
+      warp: {
+        ...warp,
+        points: [...warp.points, added],
+        selectedPoints: [added.id],
+        undo: withUndo(warp),
+      },
+    });
+    return true;
   },
   removeWarpPoints: (ids) => {
     const state = get(),
@@ -3416,6 +3483,14 @@ export const sceneLighting = (state: EditorState) => state.scene.lighting ?? sta
 /** Whether the brush paints a warp region: the region stage of a painted warp. */
 export const paintingWarpRegion = (state: Pick<EditorState, 'tool' | 'warp'>) =>
   state.tool === 'warp' && state.warp?.stage === 'region' && state.warp.region === 'painted';
+
+/** Whether a press on the warped surface draws a line or paints an area rather than adds a point. */
+export const strokingWarp = (state: Pick<EditorState, 'tool' | 'warp' | 'warpAdd'>) =>
+  state.tool === 'warp' && state.warp?.stage === 'warp' && state.warpAdd !== 'point';
+
+/** Whether Warp's brush paints an area handle: the Area mode of the Warp stage. */
+export const paintingWarpArea = (state: Pick<EditorState, 'tool' | 'warp' | 'warpAdd'>) =>
+  strokingWarp(state) && state.warpAdd === 'area';
 
 /** Warp's starting brush radius: 3 % of the part's size. */
 export const fittedWarpBrushRadius = (part: Pick<Part, 'geometry' | 'scale'>) =>
