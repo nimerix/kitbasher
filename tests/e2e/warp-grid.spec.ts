@@ -13,10 +13,12 @@ import { distinctColor } from '../../src/core/appearance';
 import type { Vec3 } from '../../src/core/types';
 import { scanLike } from '../helpers/scan-like';
 import {
+  dotsShown,
   failOnBrowserErrors,
   fixturePart,
   gridContrast,
   gridCoverage,
+  gridTraced,
   gridVisibility,
   layGrid,
   lookFrom,
@@ -222,6 +224,77 @@ test('an opaque plate just in front hides the grid at any tilt, in either projec
   note('covered', results);
 });
 
+test('an opaque sheet just in front hides the grid at overview distance, in either projection', async ({
+  page,
+}) => {
+  test.setTimeout(120_000);
+  // A 100 mm sheet seen from 400 mm, where depth is coarsest.
+  const centre: Vec3 = [0, 50, 0];
+  const results: Record<string, unknown> = {};
+  for (const tilt of [55]) {
+    const turn = new Quaternion().setFromAxisAngle(new Vector3(1, 0, 0), (-tilt * Math.PI) / 180);
+    const quaternion = turn.toArray() as Placement['quaternion'];
+    const cover = fixturePart('cover', new PlaneGeometry(240, 240, 4, 4), {
+      position: [centre[0], centre[1], centre[2] - 5],
+      quaternion,
+      color: '#9a8f86',
+    });
+    await layGrid(page, new PlaneGeometry(100, 100, 100, 100), { position: centre, quaternion }, [
+      cover,
+    ]);
+    for (const projection of ['perspective', 'orthographic'] as const) {
+      await setProjection(page, projection);
+      await lookFrom(page, [0, 0, 1], 400, 3.5, [...centre]);
+      const label = `${tilt}°, ${projection}`;
+      await placePart(page, 'cover', [centre[0], centre[1], centre[2] - 0.2]);
+      // Just behind, the cover hides nothing: whatever the grid draws at this distance shows.
+      const open = await gridVisibility(page, 'covered');
+      const drawn = Math.max(open.shares.core.covered.drawn, open.shares.casing.covered.drawn);
+      expect(open.tally.core.covered.samples * drawn, `${label}, cover behind`).toBeGreaterThan(
+        5000,
+      );
+      for (const gap of [0.2, 0.8]) {
+        await placePart(page, 'cover', [centre[0], centre[1], centre[2] + gap]);
+        const grid = await gridVisibility(page, 'covered');
+        results[`${label}, ${gap} mm`] = grid.shares;
+        for (const pass of ['core', 'casing'] as const)
+          for (const name of Object.keys(grid.tally[pass])) {
+            expect(grid.shares[pass][name].drawn, `${label}, ${gap} mm, ${pass} ${name}`).toBe(0);
+            expect(grid.shares[pass][name].stray, `${label}, ${gap} mm, ${pass} ${name}`).toBe(0);
+          }
+      }
+    }
+    await setProjection(page, 'perspective');
+  }
+  note('covered', results);
+});
+
+test('a line just beyond the near plane is not pulled in front of it', async ({ page }) => {
+  // A plate facing the camera, its surface 0.103 mm in front of the orthographic camera, whose
+  // near plane is 0.1 mm away: half the usual pull would put the line nearer than that.
+  await layGrid(page, new PlaneGeometry(24, 24, 24, 24));
+  await setProjection(page, 'orthographic');
+  await page.evaluate(async () => {
+    const urls = performance.getEntriesByType('resource').map((entry) => entry.name);
+    const root = (await import(urls.find((url) => url.includes('/@react-three_fiber.js'))!))._roots
+      .get(document.querySelector('canvas'))
+      .store.getState();
+    const { camera, controls } = root;
+    controls.enabled = false;
+    camera.position.set(0, 15, 0.103);
+    camera.lookAt(0, 15, 0);
+    camera.zoom = 30;
+    camera.updateProjectionMatrix();
+    camera.updateMatrixWorld();
+    root.invalidate();
+    await new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
+  });
+  const grid = await gridVisibility(page, 'plate');
+  note('near plane', grid.shares);
+  expect(grid.tally.core.front.samples).toBeGreaterThan(1000);
+  expect(grid.shares.core.front.shown).toBeGreaterThan(0.9);
+});
+
 test('a mirrored part and a turned, unevenly scaled plate draw their grids whole', async ({
   page,
 }) => {
@@ -285,11 +358,12 @@ function gapFromSurface(page: Page) {
   });
 }
 
-test('the grid stays on a flat plate once it bends, and in view', async ({ page }) => {
-  const geometry = new PlaneGeometry(40, 40, 16, 16);
-  await layGrid(page, geometry, { quaternion: [-Math.SQRT1_2, 0, 0, Math.SQRT1_2] });
-  // Four points held at the corners and the middle pulled 2 mm up.
-  await page.evaluate(async () => {
+/**
+ * On a plate laid flat, holds points at its corners and pulls one near its middle 2 mm up, and
+ * returns how many points it holds and how far the surface under the pulled one rose.
+ */
+function pullPlate(page: Page) {
+  return page.evaluate(async () => {
     const urls = performance.getEntriesByType('resource').map((entry) => entry.name);
     const THREE = await import(urls.find((url) => /\/deps\/three\.js/.test(url))!);
     const { useEditor } = await import(
@@ -314,6 +388,8 @@ test('the grid stays on a flat plate once it bends, and in view', async ({ page 
       }
       return -1;
     };
+    // Only these points, placed in the part's own space, where the plate lies at z = 0.
+    editor().removeWarpPoints(editor().warp.points.map((point: { id: string }) => point.id));
     for (const [x, y] of [
       [-15, -15],
       [15, -15],
@@ -321,14 +397,28 @@ test('the grid stays on a flat plate once it bends, and in view', async ({ page 
       [15, 15],
       [0.3, 0.2],
     ])
-      editor().addWarpPoint(
-        { partId: 'ball', point: [x, 15, -y], normal: [0, 1, 0] },
-        faceAt(x, y),
-      );
-    const id = editor().warp.points.at(-1).id;
-    editor().moveWarpPoints([{ id, target: [0.3, 17, -0.2] }], 'end');
+      editor().addWarpPoint({ partId: 'ball', point: [x, y, 0], normal: [0, 0, 1] }, faceAt(x, y));
+    const { points } = editor().warp;
+    // Targets are in the world, where the plate's local z is up.
+    editor().moveWarpPoints([{ id: points.at(-1).id, target: [0.3, 17, -0.2] }], 'end');
+    const written = editor().warp.output.positions;
+    let rise = -Infinity;
+    for (let v = 0; v < written.length; v += 3)
+      if (Math.hypot(written[v] - 0.3, written[v + 1] - 0.2) < 0.5)
+        rise = Math.max(rise, written[v + 2]);
+    return { points: points.length, rise };
   });
-  await page.waitForTimeout(200);
+}
+
+const flat: Placement = { quaternion: [-Math.SQRT1_2, 0, 0, Math.SQRT1_2] };
+
+test('the grid stays on a flat plate once it bends, and in view', async ({ page }) => {
+  await layGrid(page, new PlaneGeometry(40, 40, 16, 16), flat);
+  const pulled = await pullPlate(page);
+  note('pulled', pulled);
+  expect(pulled.points).toBe(5);
+  expect(pulled.rise).toBeGreaterThan(1.8);
+  await gridTraced(page);
   const gap = await gapFromSurface(page);
   note('gap', gap);
   expect(gap.failed).toBe(0);
@@ -339,6 +429,124 @@ test('the grid stays on a flat plate once it bends, and in view', async ({ page 
   const facing = grid.tally.core.front ? 'front' : 'back';
   expect(grid.tally.core[facing].samples).toBeGreaterThan(1000);
   expect(grid.shares.core[facing].shown).toBeGreaterThan(0.9);
+});
+
+test('a coarse grid on a finely meshed plate follows it between the points that bend it', async ({
+  page,
+}) => {
+  // Each coarse grid edge crosses dozens of mesh edges, chosen first on the flat plate.
+  await layGrid(page, new PlaneGeometry(40, 40, 80, 80), flat);
+  await setDensity(page, 1);
+  const pulled = await pullPlate(page);
+  note('pulled', pulled);
+  expect(pulled.points).toBe(5);
+  expect(pulled.rise).toBeGreaterThan(1.8);
+  await gridTraced(page);
+  const gap = await gapFromSurface(page);
+  note('gap', gap);
+  expect(gap.failed).toBe(0);
+  expect(gap.worst).toBeLessThan(0.1);
+});
+
+/** A plate turned 55° away from the camera about x, and a part of its own shape and turn. */
+const slope = () => {
+  const turn = new Quaternion().setFromAxisAngle(new Vector3(1, 0, 0), (-55 * Math.PI) / 180);
+  const normal = new Vector3(0, 0, 1).applyQuaternion(turn);
+  return { quaternion: turn.toArray() as Placement['quaternion'], normal };
+};
+
+test('reach dots show whole on a slope over the grid, and a nearer part hides them', async ({
+  page,
+}) => {
+  const { quaternion, normal } = slope();
+  const centre: Vec3 = [0, radius, 0];
+  const cover = fixturePart('cover', new PlaneGeometry(60, 60, 4, 4), {
+    position: [0, radius, -20],
+    quaternion,
+    // A colour no dot has.
+    color: '#2040ff',
+  });
+  await layGrid(page, new PlaneGeometry(40, 40, 60, 60), { position: centre, quaternion }, [cover]);
+  // A handle with a radius, pulled off the surface and still selected.
+  await page.evaluate(async (normal) => {
+    const urls = performance.getEntriesByType('resource').map((entry) => entry.name);
+    const { useEditor } = await import(
+      urls.find((url) => /\/src\/core\/store\.ts(?:\?.*)?$/.test(url))!
+    );
+    const editor = () => useEditor.getState();
+    editor().setWarpPointSettings({ radius: 8 }, 'end');
+    const part = editor().scene.parts[0];
+    const position = part.geometry.getAttribute('position');
+    const index = part.geometry.index;
+    // A face at the plate's middle.
+    let face = -1;
+    for (let f = 0; f < index.count / 3 && face < 0; f++) {
+      const v = index.getX(f * 3);
+      if (Math.hypot(position.getX(v), position.getY(v)) < 0.5) face = f;
+    }
+    const v = index.getX(face * 3);
+    editor().addWarpPoint(
+      { partId: 'ball', point: [position.getX(v), position.getY(v), 0], normal: [0, 0, 1] },
+      face,
+    );
+    const point = editor().warp.points.at(-1);
+    const target = point.pin.map((value: number, axis: number) => value + 1.5 * normal[axis]);
+    editor().moveWarpPoints([{ id: point.id, target }], 'end');
+  }, normal.toArray());
+  await gridTraced(page);
+  await lookFrom(page, [0, 0, 1]);
+  const open = await dotsShown(page, ['warp-reach:dot', 'warp-reach']);
+  note('open', open);
+  for (const name of ['warp-reach:dot', 'warp-reach']) {
+    expect(open[name].clear.pixels, name).toBeGreaterThan(250);
+    expect(open[name].clear.shown / open[name].clear.pixels, name).toBeGreaterThan(0.9);
+  }
+  // In front of the plate's middle and of the bump the handle raised, along the camera's axis.
+  await placePart(page, 'cover', [0, radius, 5]);
+  const covered = await dotsShown(page, ['warp-reach'], 'cover');
+  note('covered', covered);
+  expect(covered['warp-reach'].covered.pixels).toBeGreaterThan(500);
+  expect(covered['warp-reach'].covered.shown / covered['warp-reach'].covered.pixels).toBeLessThan(
+    0.02,
+  );
+});
+
+test('seam points beside a neighbouring part show whole on a slope, and the part hides its own', async ({
+  page,
+}) => {
+  const { quaternion, normal } = slope();
+  const centre = new Vector3(0, radius, 0);
+  // A rod 4 mm wide lying 1 mm off the plate, across its middle.
+  const rod = fixturePart('rod', new BoxGeometry(40, 4, 1), {
+    position: centre.clone().addScaledVector(normal, 1.5).toArray() as Vec3,
+    quaternion,
+    color: '#2040ff',
+  });
+  await layGrid(
+    page,
+    new PlaneGeometry(40, 40, 60, 60),
+    { position: centre.toArray() as Vec3, quaternion },
+    [rod],
+  );
+  await expect
+    .poll(() =>
+      page.evaluate(async () => {
+        const urls = performance.getEntriesByType('resource').map((entry) => entry.name);
+        const { useEditor } = await import(
+          urls.find((url) => /\/src\/core\/store\.ts(?:\?.*)?$/.test(url))!
+        );
+        return useEditor.getState().warp.seam?.vertices.length ?? 0;
+      }),
+    )
+    .toBeGreaterThan(50);
+  await lookFrom(page, [0, 0, 1]);
+  const seam = await dotsShown(page, ['warp-seam'], 'rod');
+  note('seam', seam);
+  const { clear, covered } = seam['warp-seam'];
+  expect(clear.pixels).toBeGreaterThan(200);
+  expect(clear.shown / clear.pixels).toBeGreaterThan(0.9);
+  expect(covered.pixels).toBeGreaterThan(50);
+  expect(covered.shown / covered.pixels).toBeLessThan(0.02);
 });
 
 test('on a scan-like part, failed walks are drawn along the surface, never across a gap', async ({
@@ -380,6 +588,40 @@ test('at default density the grid leaves most of the part as it is, and the fine
       // The grid is still there.
       expect(cover.noticeable, `density ${level}, ${view}`).toBeGreaterThan(0.1);
     }
+  }
+});
+
+test('at the highest density a coarser net of the grid stays readable as you zoom out', async ({
+  page,
+}) => {
+  test.setTimeout(180_000);
+  await layGrid(page, ball());
+  const purple = distinct.find((color) => {
+    const [r, g, b] = [1, 3, 5].map((i) => parseInt(color.slice(i, i + 2), 16));
+    return b > r && r > g;
+  })!;
+  // What the grid covers at its default density, about 300 px across: the bar for the finest.
+  await lookFrom(page, [0, 0.2, 1], 125);
+  const bar: Record<string, number> = {};
+  for (const color of [purple, nearBlack])
+    bar[color] = Math.max(0.34, (await gridCoverage(page, 'ball', color)).noticeable);
+  await setDensity(page, 6);
+  // From about 400 px across to 150, where the finest grid's own cells are too small to show.
+  const steps: Record<string, number[]> = { [purple]: [], [nearBlack]: [] };
+  for (let distance = 100; distance <= 260; distance *= 1.1) {
+    await lookFrom(page, [0, 0.2, 1], distance);
+    for (const color of [purple, nearBlack])
+      steps[color].push((await gridCoverage(page, 'ball', color)).noticeable);
+  }
+  note('bar', bar);
+  note('noticeable', steps);
+  for (const [color, shares] of Object.entries(steps)) {
+    for (const share of shares) expect(share, `${color}: still a grid`).toBeGreaterThan(0.1);
+    // About 300 px across it covers no more than the default grid does.
+    expect(shares[3], color).toBeLessThan(bar[color]);
+    // No step of the zoom changes much of what it covers at once.
+    for (let i = 1; i < shares.length; i++)
+      expect(Math.abs(shares[i] - shares[i - 1]), `${color}, step ${i}`).toBeLessThan(0.12);
   }
 });
 
