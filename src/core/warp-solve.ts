@@ -9,6 +9,8 @@ export interface WarpConstraint {
   target: Vec3;
   restByNode?: Vec3[];
   fixed?: Vec3;
+  /** Multiplies `warpConstraintStrength`, so a handle being moved outranks what shares its nodes. */
+  strength?: number;
 }
 
 /**
@@ -49,7 +51,7 @@ export function createWarpState(restNodes: Float64Array): WarpState {
  * weights. The unknowns are displacements from rest, so fixed nodes contribute nothing.
  */
 interface WarpSystem {
-  /** Per valid constraint: its index, entry count, nodes, then their weights. */
+  /** Per valid constraint: its index, entry count, strength, nodes, then their weights. */
   key: Float64Array;
   /** Guide nodes, then their stiffnesses. */
   guideKey: Float64Array;
@@ -78,11 +80,11 @@ const systems = new WeakMap<WarpGrid, WarpSystem>();
 function constraintKey(constraints: WarpConstraint[]) {
   const key: number[] = [];
   for (let c = 0; c < constraints.length; c++) {
-    const { node, weight, restByNode } = constraints[c];
+    const { node, weight, restByNode, strength = 1 } = constraints[c];
     let sum = 0;
     for (let k = 0; k < node.length; k++) sum += weight[k];
     if (!Number.isFinite(sum) || sum === 0) continue;
-    key.push(c, node.length);
+    key.push(c, node.length, warpConstraintStrength * strength);
     for (let k = 0; k < node.length; k++) key.push(node[k]);
     for (let k = 0; k < node.length; k++) key.push(restByNode ? weight[k] : weight[k] / sum);
   }
@@ -120,8 +122,9 @@ function buildSystem(grid: WarpGrid, key: number[], guides: number[]): WarpSyste
 
   const coupled = new Map<number, Map<number, number>>();
   for (let i = 0; i < key.length;) {
-    const length = key[i + 1];
-    const nodes = i + 2,
+    const length = key[i + 1],
+      strength = key[i + 2];
+    const nodes = i + 3,
       weights = nodes + length;
     for (let a = 0; a < length; a++) {
       const ra = row[key[nodes + a]];
@@ -129,7 +132,7 @@ function buildSystem(grid: WarpGrid, key: number[], guides: number[]): WarpSyste
       for (let b = 0; b < length; b++) {
         const rb = row[key[nodes + b]];
         if (rb < 0) continue;
-        const value = warpConstraintStrength * key[weights + a] * key[weights + b];
+        const value = strength * key[weights + a] * key[weights + b];
         if (ra === rb) diagonal[ra] += value;
         else {
           let entries = coupled.get(ra);
@@ -252,8 +255,9 @@ function assemble(
   // Constraints: λ w_k (t − Σ_j w_j (R_j (p − g_j) + g_j)).
   for (let i = 0; i < key.length;) {
     const { rest, target, restByNode, fixed } = constraints[key[i]];
-    const length = key[i + 1];
-    const nodes = i + 2,
+    const length = key[i + 1],
+      strength = key[i + 2];
+    const nodes = i + 3,
       weights = nodes + length;
     let dx = target[0] - (fixed?.[0] ?? 0),
       dy = target[1] - (fixed?.[1] ?? 0),
@@ -276,7 +280,7 @@ function assemble(
     for (let s = 0; s < length; s++) {
       const k = row[key[nodes + s]];
       if (k < 0) continue;
-      const f = warpConstraintStrength * key[weights + s];
+      const f = strength * key[weights + s];
       rhs[k * 3] += f * dx;
       rhs[k * 3 + 1] += f * dy;
       rhs[k * 3 + 2] += f * dz;
