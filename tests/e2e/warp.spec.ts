@@ -41,7 +41,7 @@ test.afterEach(async ({ page }) => {
 async function editorState(page: Page) {
   return page.evaluate(async () => {
     const urls = performance.getEntriesByType('resource').map((entry) => entry.name);
-    const { useEditor } = await import(
+    const { useEditor, warpBrushRadius } = await import(
       urls.find((url) => /\/src\/core\/store\.ts(?:\?.*)?$/.test(url))!
     );
     const fiber = await import(urls.find((url) => url.includes('/@react-three_fiber.js'))!);
@@ -54,6 +54,7 @@ async function editorState(page: Page) {
       stage: (warp?.stage ?? null) as string | null,
       faces: (warp?.faces.length ?? 0) as number,
       brushRadius: state.brushRadius as number,
+      warpBrushRadius: warpBrushRadius(state) as number,
       points: (warp?.points ?? []).map((point: any) => ({
         at: point.target ?? point.pin,
         moved: point.target !== null,
@@ -235,8 +236,12 @@ test('closes a seam, moves a control point, applies, undoes and cancels', async 
   await expect(page.locator('.statusbar')).toContainText(
     'Paint the area to warp, or choose Whole part · Alt erases',
   );
+  // Warp's brush starts at 3 % of the 20 mm block, and ] sizes it without touching Align's.
+  expect((await editorState(page)).warpBrushRadius).toBe(0.6);
   await page.keyboard.press(']');
-  expect((await editorState(page)).brushRadius).toBeCloseTo(3.75, 5);
+  const sized = await editorState(page);
+  expect(sized.warpBrushRadius).toBeCloseTo(0.75, 5);
+  expect(sized.brushRadius).toBe(original.brushRadius);
   const [start, end] = [await screen(page, [-4, 10, 10]), await screen(page, [2, 10, 10])];
   await page.mouse.move(start.x, start.y);
   await page.mouse.down();

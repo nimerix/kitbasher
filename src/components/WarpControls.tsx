@@ -1,6 +1,7 @@
 import { LoaderCircle, TriangleAlert } from 'lucide-react';
 import { clipLimits } from '../core/clipping';
-import { useEditor, warpChanges } from '../core/store';
+import { fittedSizeRange, partSize } from '../core/geometry';
+import { useEditor, warpBrushRadius, warpChanges } from '../core/store';
 import { warpDensityNodes } from '../core/warp-grid';
 import { SurfaceBrushControls } from './SurfaceBrushControls';
 import { TransformAdjustments } from './TransformAdjustments';
@@ -35,6 +36,13 @@ export function WarpControls() {
     );
   if (warp.stage === 'region') {
     const painted = warp.region === 'painted';
+    const brush = part
+      ? {
+          radius: warpBrushRadius,
+          range: fittedSizeRange(partSize(part)),
+          set: useEditor.getState().setWarpBrushRadius,
+        }
+      : undefined;
     return (
       <div className="warp-controls">
         <Section title="Region">
@@ -56,7 +64,7 @@ export function WarpControls() {
           />
           {painted ? (
             <>
-              <SurfaceBrushControls />
+              <SurfaceBrushControls fitted={brush} />
               <p className="anchor-help" role="status">
                 {warp.faces.length
                   ? `${warp.faces.length.toLocaleString()} triangles painted.`

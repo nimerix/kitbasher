@@ -1,6 +1,12 @@
 import { useEffect, useRef } from 'react';
 import { joinLiveSession } from '../core/live';
-import { committedScene, liveSession, paintingWarpRegion, useEditor } from '../core/store';
+import {
+  committedScene,
+  liveSession,
+  paintingWarpRegion,
+  useEditor,
+  warpBrushRadius,
+} from '../core/store';
 import { readRecovery, saveRecovery } from '../core/recovery';
 import { driveAutosave, useDrive } from '../core/drive-sync';
 import { chooseTransformTool, executeEditorCommand, shortcutCommand } from '../core/commands';
@@ -173,15 +179,20 @@ export function useKeyboard(openScene: () => void, searchParts: () => void) {
           state.setOperation({ mode: 'surface' });
           return;
         case 'brushSmaller':
-        case 'brushLarger':
-          if (!paintingSurface && !paintingWarpRegion(state)) return;
+        case 'brushLarger': {
+          const warping = paintingWarpRegion(state);
+          if (!paintingSurface && !warping) return;
           event.preventDefault();
-          state.setBrush({
-            radius: Number(
-              (state.brushRadius * (action === 'brushSmaller' ? 0.8 : 1.25)).toFixed(2),
-            ),
-          });
+          const radius = Number(
+            (
+              (warping ? warpBrushRadius(state) : state.brushRadius) *
+              (action === 'brushSmaller' ? 0.8 : 1.25)
+            ).toFixed(2),
+          );
+          if (warping) state.setWarpBrushRadius(radius);
+          else state.setBrush({ radius });
           return;
+        }
         case 'orbitTool':
         case 'panTool': {
           event.preventDefault();
