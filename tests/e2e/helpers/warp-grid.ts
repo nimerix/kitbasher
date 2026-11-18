@@ -51,12 +51,17 @@ export function failOnBrowserErrors() {
   });
 }
 
-/** Opens a scene of the warped part and any others, and lays a grid over the whole of it. */
+/**
+ * Opens a scene of the warped part and any others, and lays a grid over the whole of it at
+ * `density`: by default 3, the default for a painted region, which a whole part's grid had too
+ * when these tests were written.
+ */
 export async function layGrid(
   page: Page,
   geometry: BufferGeometry,
   placement: Placement = {},
   others: ReturnType<typeof fixturePart>[] = [],
+  density = 3,
 ) {
   await page.goto('/');
   await expect(page.locator('canvas')).toBeVisible();
@@ -81,10 +86,13 @@ export async function layGrid(
   await page.getByRole('radio', { name: 'Whole part', exact: true }).click();
   await page.getByRole('button', { name: 'Lay grid', exact: true }).click();
   await expect(page.getByRole('button', { name: 'Close gap', exact: true })).toBeEnabled();
-  await gridTraced(page);
+  await setDensity(page, density);
 }
 
-/** Waits until the grid's edges are laid along the surface rather than drawn as chords. */
+/**
+ * Waits until the grid's edges are laid along the surface rather than drawn as chords, its buffers
+ * hold the surface as last written, and the points drawn along each edge were chosen on it.
+ */
 export async function gridTraced(page: Page) {
   await expect
     .poll(
@@ -101,8 +109,14 @@ export async function gridTraced(page: Page) {
           );
           const { warp } = useEditor.getState();
           const space = root.scene.getObjectByName('warp-grid');
+          const drawing = space?.userData.drawing;
+          const version = warp?.preview?.getAttribute('position').version ?? 0;
           return (
-            warp?.stage === 'warp' && space?.userData.model === warp.model && space.userData.traced
+            warp?.stage === 'warp' &&
+            space?.userData.model === warp.model &&
+            space.userData.traced &&
+            drawing.written === version &&
+            drawing.refined === version
           );
         }),
       { timeout: 30_000 },
@@ -302,7 +316,6 @@ export async function gridVisibility(
         casing: viewport.getObjectByName('warp-grid:casing'),
       };
       const drawing = space.userData.drawing;
-      const path = drawing.path;
       const count: number = drawing.segments;
       const drawn: Float32Array = drawing.drawn();
       const toWorld = lines.core.matrixWorld;
@@ -314,9 +327,7 @@ export async function gridVisibility(
       let nonFinite = 0;
       for (let i = 0; i < count * 6; i++) if (!Number.isFinite(drawn[i])) nonFinite++;
       // The grid edge of each segment.
-      const edgeOf = new Uint32Array(count);
-      for (let e = 0, s = 0; e < path.ends.length / 2; e++)
-        for (let k = path.start[e]; k <= path.start[e + 1]; k++) edgeOf[s++] = e;
+      const edgeOf: Uint32Array = drawing.edgeOf;
 
       const parts = viewport.children
         .flatMap((child: any) => {
@@ -381,6 +392,8 @@ export async function gridVisibility(
           blending: THREE.NoBlending,
         });
         const line = new THREE.Mesh(lines.core.geometry, material);
+        // Every segment, though the viewport leaves out those too small on screen to show.
+        line.onBeforeRender = () => (lines.core.geometry.instanceCount = count);
         line.frustumCulled = false;
         line.renderOrder = 1;
         line.matrixAutoUpdate = false;
@@ -803,11 +816,12 @@ export async function gridContrast(page: Page, colors: string[], partId = 'ball'
 /**
  * Over every pixel of the warped part: the share the grid touches at all (any channel differs by
  * more than 12 levels) and the share it changes noticeably (luminance contrast above 1.5:1),
- * between the drawn image and the same view with the grid hidden.
+ * between the drawn image and the same view with the grid hidden. `color`, when given, is the
+ * part's colour while measuring.
  */
-export async function gridCoverage(page: Page, partId = 'ball') {
+export async function gridCoverage(page: Page, partId = 'ball', color?: string) {
   return page.evaluate(
-    async ({ luminanceSource, partId }) => {
+    async ({ luminanceSource, partId, color }) => {
       const luminance = new Function(luminanceSource)() as (p: Uint8Array, i: number) => number;
       const urls = performance.getEntriesByType('resource').map((entry) => entry.name);
       const THREE = await import(urls.find((url) => /\/deps\/three\.js/.test(url))!);
@@ -830,9 +844,12 @@ export async function gridCoverage(page: Page, partId = 'ball') {
         context.readPixels(0, 0, width, height, context.RGBA, context.UNSIGNED_BYTE, pixels);
         return pixels;
       };
+      const original = part.material.color.getHex();
+      if (color) part.material.color.set(color);
       const shown = read();
       space.visible = false;
       const bare = read();
+      part.material.color.setHex(original);
       // The part's pixels: where it is drawn in white over black.
       const mask = new THREE.Mesh(part.geometry, new THREE.MeshBasicMaterial({ color: 0xffffff }));
       mask.matrixAutoUpdate = false;
@@ -874,6 +891,103 @@ export async function gridCoverage(page: Page, partId = 'ball') {
         noticeable: noticeable / pixels,
       };
     },
-    { luminanceSource, partId },
+    { luminanceSource, partId, color },
+  );
+}
+
+/**
+ * How much of each set of points shows, named by the start of their objects' names. A dot's pixels
+ * are where its set draws with everything else hidden, away from its antialiased edges; one shows
+ * where the viewport's own image holds the same colour there. Pixels under
+ * part `cover`, where it is drawn alone, are tallied apart as `covered`.
+ */
+export async function dotsShown(page: Page, names: string[], cover?: string) {
+  return page.evaluate(
+    async ({ names, cover }) => {
+      const urls = performance.getEntriesByType('resource').map((entry) => entry.name);
+      const THREE = await import(urls.find((url) => /\/deps\/three\.js/.test(url))!);
+      const root = (
+        await import(urls.find((url) => url.includes('/@react-three_fiber.js'))!)
+      )._roots
+        .get(document.querySelector('canvas'))
+        .store.getState();
+      const { gl, camera, scene } = root;
+      const context = gl.getContext() as WebGL2RenderingContext;
+      const buffer = gl.getDrawingBufferSize(new THREE.Vector2());
+      const width = buffer.x,
+        height = buffer.y;
+      const read = () => {
+        gl.setRenderTarget(null);
+        gl.render(scene, camera);
+        const pixels = new Uint8Array(width * height * 4);
+        context.readPixels(0, 0, width, height, context.RGBA, context.UNSIGNED_BYTE, pixels);
+        return pixels;
+      };
+      const shown = read();
+      // Everything drawn but the given objects hidden, over a colour nothing else has.
+      const alone = (keep: (object: any) => boolean) => {
+        const hidden: any[] = [];
+        scene.traverse((object: any) => {
+          if (
+            (object.isMesh || object.isLine || object.isPoints) &&
+            object.visible &&
+            !keep(object)
+          ) {
+            hidden.push(object);
+            object.visible = false;
+          }
+        });
+        const background = scene.background;
+        scene.background = new THREE.Color(1, 0, 1);
+        const pixels = read();
+        scene.background = background;
+        for (const object of hidden) object.visible = true;
+        return pixels;
+      };
+      const magenta = (p: Uint8Array, i: number) => p[i] > 250 && p[i + 1] < 5 && p[i + 2] > 250;
+      // What shows itself however it is hidden, such as a gizmo, is left out.
+      const always = alone(() => false);
+      const covering = cover ? alone((object) => object.name === `part:${cover}`) : null;
+      const result: Record<string, Record<string, { pixels: number; shown: number }>> = {};
+      for (const name of names) {
+        let found = false;
+        scene.traverse((object: any) => {
+          if (object.isPoints && object.visible && object.name.startsWith(name)) found = true;
+        });
+        if (!found) continue;
+        const dots = alone((object) => object.isPoints && object.name.startsWith(name));
+        const tally = { clear: { pixels: 0, shown: 0 }, covered: { pixels: 0, shown: 0 } };
+        // Inside a dot: neither the pixel nor any beside it is background.
+        const inside = (i: number) => {
+          const x = (i / 4) % width,
+            y = Math.floor(i / 4 / width);
+          for (let dy = -1; dy <= 1; dy++)
+            for (let dx = -1; dx <= 1; dx++) {
+              const px = x + dx,
+                py = y + dy;
+              if (px < 0 || py < 0 || px >= width || py >= height) return false;
+              if (magenta(dots, (py * width + px) * 4)) return false;
+            }
+          return true;
+        };
+        for (let i = 0; i < dots.length; i += 4) {
+          if (!inside(i) || !magenta(always, i)) continue;
+          const entry = covering && !magenta(covering, i) ? tally.covered : tally.clear;
+          entry.pixels++;
+          if (
+            Math.max(
+              Math.abs(dots[i] - shown[i]),
+              Math.abs(dots[i + 1] - shown[i + 1]),
+              Math.abs(dots[i + 2] - shown[i + 2]),
+            ) <= 12
+          )
+            entry.shown++;
+        }
+        result[name] = tally;
+      }
+      root.invalidate();
+      return result;
+    },
+    { names, cover },
   );
 }
