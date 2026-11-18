@@ -357,8 +357,8 @@ const PartMesh = memo(function PartMesh({
             wireframe={!inspecting && !ghost && wireframe}
             emissive={selected && !inspecting && !ghost ? '#c77c39' : '#000000'}
             emissiveIntensity={selected && !ghost ? 0.12 : 0}
+            // A constant, not slope-scaled, offset: a steep surface must still hide what it covers.
             polygonOffset={warping}
-            polygonOffsetFactor={warping ? 1 : 0}
             polygonOffsetUnits={warping ? 1 : 0}
           />
           {selected &&
