@@ -183,12 +183,22 @@ describe('precise transform adjustments', () => {
 
 const point = (id: string, pin: Vec3, target: Vec3 | null = null): WarpPoint => ({
   id,
-  face: 0,
-  barycentric: [1, 0, 0],
-  binding: { node: [], weight: [], restByNode: [], fixed: pin },
-  restWorld: pin,
+  kind: 'point',
+  samples: [
+    {
+      face: 0,
+      barycentric: [1, 0, 0],
+      binding: { node: [], weight: [], restByNode: [], fixed: pin },
+      restWorld: pin,
+      pin,
+    },
+  ],
   pin,
   target,
+  radius: 0,
+  falloff: 1,
+  auto: false,
+  reach: null,
 });
 const points = [point('a', [1, 2, 3]), point('b', [4, 0, 0], [5, 0, 0]), point('c', [9, 9, 9])];
 /** The editor state with a warp session on part `p`, as the session is only read here. */
@@ -213,6 +223,11 @@ const warping = (patch: Partial<WarpSession> = {}, tool: 'warp' | 'select' = 'wa
     snap: false,
     overlap: 0.1,
     gizmo: 'translate',
+    pointRadius: null,
+    pointFalloff: 1,
+    distributeCount: 8,
+    autoPoints: false,
+    firstLay: false,
     folds: new Uint32Array(0),
     seam: null,
     undo: [],

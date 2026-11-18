@@ -167,7 +167,7 @@ describe('handles on a feathered region', () => {
     const model = session().model!;
     expect(model.region.faces).toContain(faceAt(part.geometry, 9, 0.1));
     expect(session().points).toHaveLength(1);
-    expect(isPaintedFace(model, session().points[0].face)).toBe(true);
+    expect(isPaintedFace(model, session().points[0].samples[0].face)).toBe(true);
     expect(toast()).toBe('Some control points were outside the new region and were removed.');
   });
 });

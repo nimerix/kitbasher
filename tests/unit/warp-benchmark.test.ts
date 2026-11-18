@@ -62,6 +62,8 @@ it.skipIf(!process.env.KITBASHER_WARP_BENCH)(
         (a) =>
           (position[face * 9 + a] + position[face * 9 + 3 + a] + position[face * 9 + 6 + a]) / 3,
       ) as Vec3;
+      // A bare point, as before handles had a radius.
+      editor().setWarpPointSettings({ radius: 0 }, 'end');
       editor().addWarpPoint({ partId: 'scan', point, normal: [1, 0, 0] }, face);
       const id = editor().warp!.points[0].id;
 
@@ -102,16 +104,16 @@ it.skipIf(!process.env.KITBASHER_WARP_BENCH)(
         deformPoint(
           model,
           dragged.state!,
-          dragged.points[0].binding,
-          dragged.points[0].restWorld,
+          dragged.points[0].samples[0].binding,
+          dragged.points[0].samples[0].restWorld,
         )[0];
       const evaluations: number[] = [],
         solves: number[] = [];
       const { state, output } = editor().warp!;
       const constraints = [
         {
-          ...editor().warp!.points[0].binding,
-          rest: editor().warp!.points[0].restWorld,
+          ...editor().warp!.points[0].samples[0].binding,
+          rest: editor().warp!.points[0].samples[0].restWorld,
           target: [point[0] + 3, point[1], point[2]] as Vec3,
         },
       ];
@@ -155,6 +157,90 @@ it.skipIf(!process.env.KITBASHER_WARP_BENCH)(
       JSON.stringify(result, null, 2),
     );
     console.log(JSON.stringify(result));
+  },
+  600_000,
+);
+
+it.skipIf(!process.env.KITBASHER_WARP_BENCH)(
+  'benchmarks dragging one wide handle on a 4000-node grid against a bare point',
+  async () => {
+    const geometry = new SphereGeometry(16, 220, 160);
+    geometry.deleteAttribute('uv');
+    const part: Part = {
+      id: 'scan',
+      name: 'Scan',
+      geometry,
+      position: [0, 0, 0],
+      quaternion: [0, 0, 0, 1],
+      scale: [1, 1, 1],
+      color: '#ffffff',
+      visible: true,
+      locked: false,
+      source: 'benchmark',
+    };
+    const position = geometry.getAttribute('position'),
+      index = geometry.index!;
+    const centreY = (f: number) =>
+      (position.getY(index.getX(f * 3)) +
+        position.getY(index.getX(f * 3 + 1)) +
+        position.getY(index.getX(f * 3 + 2))) /
+      3;
+    const faces: number[] = [];
+    let top = 0;
+    for (let f = 0; f < index.count / 3; f++) {
+      if (centreY(f) > -4) faces.push(f);
+      if (centreY(f) > centreY(top)) top = f;
+    }
+    const point = [0, 1, 2].map(
+      (a) =>
+        (position.getComponent(index.getX(top * 3), a) +
+          position.getComponent(index.getX(top * 3 + 1), a) +
+          position.getComponent(index.getX(top * 3 + 2), a)) /
+        3,
+    ) as Vec3;
+    const result: Record<string, unknown> = {};
+    for (const radius of [0, 4, 8]) {
+      const editor = () => useEditor.getState();
+      editor().setScene({ name: 'Bench', parts: [part], joints: [] });
+      useEditor.setState({ selected: ['scan'] });
+      editor().setTool('warp');
+      useEditor.setState({ warp: { ...editor().warp!, faces, density: 6 } });
+      await editor().layWarpGrid();
+      editor().setWarpPointSettings({ radius }, 'end');
+      editor().addWarpPoint({ partId: 'scan', point, normal: [0, 1, 0] }, top);
+      const handle = editor().warp!.points[0];
+      const id = handle.id;
+      const frames: number[] = [];
+      for (let frame = 0; frame < 60; frame++) {
+        const target: Vec3 = [point[0], point[1] + 0.05 * (frame + 1), point[2]];
+        const start = performance.now();
+        editor().moveWarpPoints([{ id, target }], 'drag');
+        if (frame >= 10) frames.push(performance.now() - start);
+      }
+      const endStart = performance.now();
+      editor().moveWarpPoints([{ id, target: [point[0], point[1] + 3, point[2]] }], 'end');
+      const endMs = performance.now() - endStart;
+      frames.sort((a, b) => a - b);
+      result[`radius-${radius}`] = {
+        gridNodes: editor().warp!.model!.grid.nodes.length,
+        interiorVertices: editor().warp!.model!.region.interiorCount,
+        guidedNodes: handle.reach?.effective ? handle.reach.node.length : 0,
+        frameMedianMs: frames[frames.length >> 1],
+        frameP95Ms: frames[Math.floor(frames.length * 0.95)],
+        endMs,
+      };
+      console.log(radius, JSON.stringify(result[`radius-${radius}`]));
+      editor().cancelWarp();
+    }
+    const output = join(tmpdir(), 'kitbasher-performance');
+    mkdirSync(output, { recursive: true });
+    writeFileSync(
+      join(
+        output,
+        `warp-handle-${process.env.KITBASHER_WARP_BENCH!.replace(/[^a-z0-9-]/gi, '_')}.json`,
+      ),
+      JSON.stringify(result, null, 2),
+    );
   },
   600_000,
 );

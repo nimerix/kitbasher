@@ -402,6 +402,7 @@ test('routes transform keys, Delete and Undo to warp control points while warpin
       urls.find((url) => /\/src\/core\/store\.ts(?:\?.*)?$/.test(url))!
     );
     useEditor.getState().setWarpRegion('whole');
+    useEditor.getState().setWarpOptions({ autoPoints: false });
     await useEditor.getState().layWarpGrid();
     const part = useEditor.getState().scene.parts.find((p: any) => p.id === 'a');
     const position = part.geometry.getAttribute('position'),
