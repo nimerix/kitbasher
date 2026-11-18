@@ -1009,7 +1009,15 @@ function solveWarpSession(
   // With nothing holding it, the grid rests rather than staying where the last points left it.
   if (!constraints.length) warp = { ...warp, state: createWarpState(model.restNodes) };
   else if (gesture === 'drag')
-    solveWarp(model.grid, model.restNodes, constraints, warp.state!, warpDragIterations, guides);
+    // A drag frame costs what it did before priority: the end of the gesture lands the handle.
+    solveWarp(
+      model.grid,
+      model.restNodes,
+      constraints.map(({ strength, ...constraint }) => (void strength, constraint)),
+      warp.state!,
+      warpDragIterations,
+      guides,
+    );
   else move = settleGrid(model, constraints, warp.state!, guides);
   if (gesture === 'end')
     return showWarp(
@@ -3551,6 +3559,7 @@ async function layWarp(from: WarpSettled, fromRegion = false) {
   const laid: WarpLaid = { faces, density, feather };
   // The same region at the same density keeps its grid, so nothing moves.
   if (warp.model && warp.laid && sameLaid(warp.laid, laid)) {
+    if (warp.settling) scheduleWarpSettle();
     useEditor.setState({
       painting: false,
       paintHistory: [],
@@ -3590,6 +3599,7 @@ async function layWarp(from: WarpSettled, fromRegion = false) {
       failTask(taskId, error instanceof Error ? error.message : String(error));
     const current = useEditor.getState().warp;
     if (current) useEditor.setState({ warp: { ...current, ...from } });
+    if (current?.settling) scheduleWarpSettle();
     return;
   }
   const current = useEditor.getState().warp;
@@ -3642,6 +3652,7 @@ async function layWarp(from: WarpSettled, fromRegion = false) {
     firstLay: false,
     folds: new Uint32Array(0),
     seam: null,
+    settling: false,
     // Steps must bind to the same grid as the session; gap targets name old nodes.
     undo: current.undo.map((step) => ({
       ...step,
