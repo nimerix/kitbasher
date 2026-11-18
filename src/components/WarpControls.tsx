@@ -14,6 +14,8 @@ import {
   warpChanges,
   warpDistributeCounts,
   warpPointRadius,
+  warpShortfall,
+  warpShortfallShown,
   warpWholePart,
   type WarpSession,
 } from '../core/store';
@@ -94,6 +96,7 @@ function PointSettingsControls({ warp, part }: { warp: WarpSession; part: Part |
   const { max } = fittedSizeRange(part ? partSize(part) : 40);
   const coarse = selected.some((point) => point.radius > 0 && !handleGuides(point));
   const fade = shown && handleGuides(shown) ? fadeWidth(shown) : null;
+  const shortfall = warpShortfall(warp);
   const commit = (patch: PointSettings) => useEditor.getState().setWarpPointSettings(patch, 'end');
   const owned = (slider: Slider) => ({
     'data-slider': slider,
@@ -176,6 +179,14 @@ function PointSettingsControls({ warp, part }: { warp: WarpSession; part: Part |
           ? ' This grid is too coarse for that radius here. A finer grid lets it take effect.'
           : ''}
       </p>
+      {shortfall > warpShortfallShown ? (
+        <p className="warp-warning" role="status">
+          <TriangleAlert size={13} aria-hidden="true" />
+          The surface stops {shortfall.toFixed(2)} mm short of the{' '}
+          {selected.length === 1 ? "point's target" : "selected points' targets"}. A point on the
+          same spot or the fixed edge holds it back.
+        </p>
+      ) : null}
       <div className="warp-distribute-row">
         <button
           className="button secondary"

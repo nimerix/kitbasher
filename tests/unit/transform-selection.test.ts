@@ -204,6 +204,7 @@ const point = (id: string, pin: Vec3, target: Vec3 | null = null): WarpPoint => 
     positions: new Float64Array(0),
     rotations: new Float64Array(0),
     settled: true,
+    converged: true,
   },
   reach: null,
 });
@@ -241,6 +242,7 @@ const warping = (patch: Partial<WarpSession> = {}, tool: 'warp' | 'select' = 'wa
     folds: new Uint32Array(0),
     seam: null,
     undo: [],
+    settling: false,
     ...patch,
   };
   return { ...state(), tool, warp };

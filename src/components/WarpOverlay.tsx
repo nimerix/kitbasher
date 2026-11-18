@@ -15,7 +15,7 @@ import {
   type WarpTransformSelection,
 } from '../core/transform-selection';
 import type { Part, Vec3 } from '../core/types';
-import { handleGuides, reachWeights } from '../core/warp-handles';
+import { handleGuides, reachWeights, writtenCentre } from '../core/warp-handles';
 import { CombinedTransform } from './CombinedTransform';
 import { ManagedTransformControls } from './ManagedTransformControls';
 import { warpRegionColor } from './SurfacePainter';
@@ -69,7 +69,7 @@ export function WarpOverlay({ onPress, pressed }: { onPress: () => void; pressed
             <PointMarker
               key={point.id}
               id={point.id}
-              position={point.target ?? point.pin}
+              position={writtenCentre(warp.model!, warp.state!, point)}
               selected={warp.selectedPoints.includes(point.id)}
               auto={point.auto}
               pressed={pressed}

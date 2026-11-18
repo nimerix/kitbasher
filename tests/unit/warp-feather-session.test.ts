@@ -1,10 +1,10 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { BufferGeometry, PlaneGeometry, Triangle, Vector3 } from 'three';
 import { triangleCount } from '../../src/core/geometry';
-import { useEditor } from '../../src/core/store';
+import { finishWarpSettling, useEditor } from '../../src/core/store';
 import { readFace } from '../../src/core/surfaces';
 import type { Part, SurfacePoint } from '../../src/core/types';
-import { isPaintedFace } from '../../src/core/warp-model';
+import { isPaintedFace, isPaintedNode } from '../../src/core/warp-model';
 
 const editor = () => useEditor.getState();
 const session = () => useEditor.getState().warp!;
@@ -208,5 +208,52 @@ describe('a session’s own feather', () => {
     editor().setWarpRegion('painted');
     await editor().layWarpGrid();
     expect(session().model!.feather).toBeNull();
+  });
+});
+
+describe('a feathered region painted wider', () => {
+  it('carries the band the new paint covers at the surface the user saw', async () => {
+    editor().setWarpFeather({ enabled: true, width: 7 });
+    const part = plate();
+    await layOn(part, disc(part.geometry, 8));
+    const old = session().model!;
+    editor().setWarpPointSettings({ radius: 20 }, 'end');
+    editor().addWarpPoint(hit(0.3, 0.2), faceAt(part.geometry, 0.3, 0.2));
+    editor().moveWarpPoints([{ id: session().points[0].id, target: [0.3, 0.2, 2.5] }], 'end');
+    finishWarpSettling();
+    // A point added on the bent surface takes it as its baseline.
+    editor().selectWarpPoints([]);
+    editor().setWarpPointSettings({ radius: 6 }, 'end');
+    editor().addWarpPoint(hit(3.1, 1.2), faceAt(part.geometry, 3.1, 1.2));
+    const written = Float64Array.from(session().output!.positions);
+
+    editor().setWarpRegion('painted');
+    useEditor.setState({ warp: { ...session(), faces: disc(part.geometry, 14) } });
+    await editor().layWarpGrid();
+    const model = session().model!;
+    const handle = session().points[1];
+    const first = new Int32Array(old.region.weldedCount).fill(-1);
+    old.region.weldOf.forEach((v, g) => {
+      if (v !== 0xffffffff && first[v] < 0) first[v] = g;
+    });
+    const reached = new Set(handle.reach!.node);
+    let band = 0,
+      worst = 0,
+      skin = 0;
+    for (let n = 0; n < model.grid.nodes.length; n++) {
+      const v = model.grid.nodes[n],
+        b = old.blend![v];
+      if (!(b > 0 && b < 0.9) || !isPaintedNode(model, n) || !reached.has(n)) continue;
+      band++;
+      const z = written[first[v] * 3 + 2];
+      worst = Math.max(worst, Math.abs(handle.baseline.positions[n * 3 + 2] - z));
+      // Where the old solve put it before the blend, well above what was written.
+      const solved = old.restWorld[v * 3 + 2] + (z - old.restWorld[v * 3 + 2]) / b;
+      skin = Math.max(skin, Math.abs(solved - z));
+    }
+    expect(band).toBeGreaterThan(20);
+    expect(skin).toBeGreaterThan(0.1);
+    // As close as the carried grid holds painted vertices, rather than the unblended solve.
+    expect(worst).toBeLessThan(0.03);
   });
 });
