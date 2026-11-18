@@ -18,11 +18,11 @@ export const releases: Release[] = [
   {
     version: '1.18.1',
     date: '2026-11-17',
-    title: 'Version numbers',
+    title: 'Painting a warp region',
     changes: [
       {
-        kind: 'improved',
-        text: 'Version numbers follow the kind of change in each release: new features raise the middle number, and fixes and smaller changes raise the last one.',
+        kind: 'fixed',
+        text: 'Dragging the brush while painting a warp region paints a stroke instead of orbiting the camera.',
       },
     ],
   },
