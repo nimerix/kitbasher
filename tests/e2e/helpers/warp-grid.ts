@@ -90,8 +90,9 @@ export async function layGrid(
 }
 
 /**
- * Waits until the grid's edges are laid along the surface rather than drawn as chords, its buffers
- * hold the surface as last written, and the points drawn along each edge were chosen on it.
+ * Waits until the grid's edges are laid along the surface rather than drawn as chords, the solve
+ * has settled, its buffers hold the surface as last written, and the drawn line was checked
+ * against it, its points chosen again if it strayed.
  */
 export async function gridTraced(page: Page) {
   await expect
@@ -113,6 +114,7 @@ export async function gridTraced(page: Page) {
           const version = warp?.preview?.getAttribute('position').version ?? 0;
           return (
             warp?.stage === 'warp' &&
+            !warp.settling &&
             space?.userData.model === warp.model &&
             space.userData.traced &&
             drawing.written === version &&
