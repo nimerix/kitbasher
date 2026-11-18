@@ -630,9 +630,11 @@ describe('point handles', () => {
     const hold = pointHandle(model, geometry, [6, 0.4, 0], state, 2, 1, 'b');
     const lift = moved(pointHandle(model, geometry, [0, 0, 0], state, 12), [0, 0, 3]);
     converge(model, state, [lift, hold]);
-    expect(distance(tipOf(model, state, lift), lift.target!)).toBeLessThan(0.02);
+    // The evenly spaced grid binds both points more evenly than the simplifier's did, so their
+    // soft constraints give a little more: 0.023 and 0.107 mm, from 0.014 and 0.100.
+    expect(distance(tipOf(model, state, lift), lift.target!)).toBeLessThan(0.025);
     // Its exact constraint shares its nodes with the lift's guides, which pull it a little.
-    expect(distance(tipOf(model, state, hold), hold.pin)).toBeLessThan(0.1);
+    expect(distance(tipOf(model, state, hold), hold.pin)).toBeLessThan(0.11);
     // Its holding gives way to the lift: over its radius the bump still mostly rises.
     const free = createWarpState(model.restNodes);
     converge(model, free, [lift]);
@@ -746,9 +748,9 @@ describe('point handles', () => {
     const handle = moved(pointHandle(model, geometry, [36, 0.3, 0], state, 8), [0, 0, 1.5]);
     expect(Array.from(handle.reach!.node).some((n) => model.grid.fixed[n])).toBe(false);
     converge(model, state, [handle]);
-    // The fixed border 4 mm away steepens the bump and turns the point's nodes, which pulls it
-    // about 1.7 % short; a bare point lands within 0.5 %.
-    expect(distance(tipOf(model, state, handle), handle.target!)).toBeLessThan(0.03);
+    // The fixed border 4 mm away steepens the bump; skin maps that stretch with the grid land the
+    // point within 0.2 %.
+    expect(distance(tipOf(model, state, handle), handle.target!)).toBeLessThan(0.02);
     for (let n = 0; n < model.grid.nodes.length; n++)
       if (model.grid.fixed[n])
         expect(Array.from(state.positions.subarray(n * 3, n * 3 + 3))).toEqual(

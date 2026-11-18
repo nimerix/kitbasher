@@ -1,7 +1,13 @@
 import type { Vec3 } from './types';
 import type { WarpModel } from './warp-model';
 import { WarpRole } from './warp-region';
-import { writeRotation, type WarpConstraint, type WarpState } from './warp-solve';
+import {
+  skinMapOf,
+  writeRotation,
+  writeSkinMaps,
+  type WarpConstraint,
+  type WarpState,
+} from './warp-solve';
 
 export interface WarpOutput {
   positions: Float32Array;
@@ -14,6 +20,7 @@ const none = 0xffffffff;
 
 interface Scratch {
   rotation: Float64Array;
+  skin: Float64Array;
   /** Deformed world position per welded vertex; rest for vertices that do not move. */
   world: Float64Array;
   moved: Uint8Array;
@@ -27,6 +34,7 @@ function scratchFor(model: WarpModel): Scratch {
   if (!s) {
     s = {
       rotation: new Float64Array(model.grid.nodes.length * 9),
+      skin: new Float64Array(model.grid.nodes.length * 9),
       world: model.restWorld.slice(),
       moved: new Uint8Array(model.region.weldedCount),
       restNormals: null,
@@ -44,8 +52,15 @@ export function createWarpOutput(model: WarpModel): WarpOutput {
   };
 }
 
-function writeNodeRotations(state: WarpState, count: number, rotation: Float64Array) {
+/** Each node's skin map for `state` into `skin`, by way of its rotation in `rotation`. */
+function writeNodeMaps(
+  model: WarpModel,
+  state: WarpState,
+  rotation: Float64Array,
+  skin: Float64Array,
+) {
   const { rotations } = state;
+  const count = model.grid.nodes.length;
   for (let n = 0; n < count; n++)
     writeRotation(
       rotation,
@@ -55,6 +70,7 @@ function writeNodeRotations(state: WarpState, count: number, rotation: Float64Ar
       rotations[n * 4 + 2],
       rotations[n * 4 + 3],
     );
+  writeSkinMaps(model.grid, model.restNodes, state.positions, rotation, skin);
 }
 
 /** What skinning reads, gathered once per model. */
@@ -85,7 +101,7 @@ function skinOf(model: WarpModel): Skin {
 function skinVertex(
   skin: Skin,
   nodePos: Float64Array,
-  rotation: Float64Array,
+  map: Float64Array,
   v: number,
   world: Float64Array,
   o: number,
@@ -107,9 +123,9 @@ function skinVertex(
     const dx = px - half[h],
       dy = py - half[h + 1],
       dz = pz - half[h + 2];
-    x += w * (rotation[r] * dx + rotation[r + 1] * dy + rotation[r + 2] * dz + nodePos[h]);
-    y += w * (rotation[r + 3] * dx + rotation[r + 4] * dy + rotation[r + 5] * dz + nodePos[h + 1]);
-    z += w * (rotation[r + 6] * dx + rotation[r + 7] * dy + rotation[r + 8] * dz + nodePos[h + 2]);
+    x += w * (map[r] * dx + map[r + 1] * dy + map[r + 2] * dz + nodePos[h]);
+    y += w * (map[r + 3] * dx + map[r + 4] * dy + map[r + 5] * dz + nodePos[h + 1]);
+    z += w * (map[r + 6] * dx + map[r + 7] * dy + map[r + 8] * dz + nodePos[h + 2]);
     sum += w;
   }
   if (!(sum > 0) || !Number.isFinite(x + y + z + sum)) {
@@ -137,15 +153,16 @@ export function writtenLocalPositions(
   first: ArrayLike<number>,
 ): Float32Array {
   const { region, restWorld, blend, inverse: inv } = model;
-  const rotation = new Float64Array(model.grid.nodes.length * 9);
-  writeNodeRotations(state, model.grid.nodes.length, rotation);
+  const rotation = new Float64Array(model.grid.nodes.length * 9),
+    skin = new Float64Array(model.grid.nodes.length * 9);
+  writeNodeMaps(model, state, rotation, skin);
   const world = new Float64Array(3);
   const out = new Float32Array(vertices.length * 3);
   for (let i = 0; i < vertices.length; i++) {
     const v = vertices[i];
     const moved =
       region.role[v] === WarpRole.Interior &&
-      skinVertex(skinOf(model), state.positions, rotation, v, world, 0);
+      skinVertex(skinOf(model), state.positions, skin, v, world, 0);
     if (!moved) {
       out.set(model.positions.subarray(first[v] * 3, first[v] * 3 + 3), i * 3);
       continue;
@@ -189,17 +206,17 @@ export function evaluateWarp(
   out: WarpOutput,
   folds = true,
 ): Uint32Array | null {
-  const { region, grid } = model;
+  const { region } = model;
   const { weldOf, interior, interiorVertices } = region;
-  const { rotation, world, moved } = scratchFor(model);
-  writeNodeRotations(state, grid.nodes.length, rotation);
+  const { rotation, skin: maps, world, moved } = scratchFor(model);
+  writeNodeMaps(model, state, rotation, maps);
 
   const { restWorld, blend } = model;
   const skin = skinOf(model),
     nodePos = state.positions;
   for (let i = 0; i < interior.length; i++) {
     const v = interior[i];
-    moved[v] = skinVertex(skin, nodePos, rotation, v, world, v * 3) ? 1 : 0;
+    moved[v] = skinVertex(skin, nodePos, maps, v, world, v * 3) ? 1 : 0;
   }
   // The feather band writes part of the displacement: rest + b × (skinned − rest).
   if (blend) {
@@ -486,14 +503,7 @@ export function deformPoint(
   for (let j = 0; j < binding.node.length; j++) {
     const n = binding.node[j],
       w = binding.weight[j];
-    writeRotation(
-      r,
-      0,
-      state.rotations[n * 4],
-      state.rotations[n * 4 + 1],
-      state.rotations[n * 4 + 2],
-      state.rotations[n * 4 + 3],
-    );
+    skinMapOf(model.grid, model.restNodes, state, n, r);
     const rest = binding.restByNode?.[j] ?? restWorld;
     const dx = rest[0] - model.restNodes[n * 3],
       dy = rest[1] - model.restNodes[n * 3 + 1],
