@@ -102,16 +102,16 @@ it.skipIf(!process.env.KITBASHER_WARP_BENCH)(
         deformPoint(
           model,
           dragged.state!,
-          dragged.points[0].binding,
-          dragged.points[0].restWorld,
+          dragged.points[0].samples[0].binding,
+          dragged.points[0].samples[0].restWorld,
         )[0];
       const evaluations: number[] = [],
         solves: number[] = [];
       const { state, output } = editor().warp!;
       const constraints = [
         {
-          ...editor().warp!.points[0].binding,
-          rest: editor().warp!.points[0].restWorld,
+          ...editor().warp!.points[0].samples[0].binding,
+          rest: editor().warp!.points[0].samples[0].restWorld,
           target: [point[0] + 3, point[1], point[2]] as Vec3,
         },
       ];

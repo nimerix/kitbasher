@@ -243,7 +243,7 @@ describe('free transform on warp control points', () => {
   const distance = (a: ArrayLike<number>, b: ArrayLike<number>) =>
     Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]);
   const deformed = (point: WarpPoint) =>
-    deformPoint(warp().model!, warp().state!, point.binding, point.restWorld);
+    deformPoint(warp().model!, warp().state!, point.samples[0].binding, point.samples[0].restWorld);
   const targets = () => warp().points.map((point) => point.target);
 
   const add = (x: number, y: number) => {
@@ -261,6 +261,7 @@ describe('free transform on warp control points', () => {
     state().setScene({ name: 'Warp', parts: [plate], joints: [] });
     state().select('plate');
     state().setTool('warp');
+    state().setWarpOptions({ autoPoints: false });
     await state().layWarpGrid();
     const ids = [add(-4, 0), add(4, 0)];
     state().selectWarpPoints(ids);
