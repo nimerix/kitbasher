@@ -23,8 +23,12 @@ export interface WarpFeather {
   width: number;
   /** Unpainted faces that joined the region. 0 when the mesh beside the paint is too coarse. */
   joined: number;
+  /** Painted vertices where the paint meets unpainted surface. 0 when nothing borders the paint. */
+  edge: number;
   /** Painted vertices left on the outer border, where nothing could join. */
   fixedEdge: number;
+  /** Connected pieces the band would have covered entirely, where its farthest ring stays fixed. */
+  anchored: number;
 }
 
 export interface WarpModel {
@@ -67,7 +71,12 @@ export async function buildWarpModel(input: WarpModelInput): Promise<WarpModel> 
       ? growWarpRegion(weld.indices, weld.vertices, positions, index, matrix, faces, width)
       : null;
   const grown = growth && growth.joined > 0 ? growth : null;
-  const region = buildWarpRegion(geometry, grown ? grown.faces : faces, weld);
+  const region = buildWarpRegion(
+    geometry,
+    grown ? grown.faces : faces,
+    weld,
+    grown ? grown.pinned : undefined,
+  );
   const grid = await buildWarpGrid(region, density);
 
   const m = matrix;
@@ -94,10 +103,16 @@ export async function buildWarpModel(input: WarpModelInput): Promise<WarpModel> 
     let fixedEdge = 0;
     for (let v = 0; v < region.weldedCount; v++)
       if (growth.paintedVertex[v] && region.role[v] === WarpRole.Border) fixedEdge++;
-    feather = { width, joined: growth.joined, fixedEdge };
+    feather = {
+      width,
+      joined: growth.joined,
+      edge: growth.edge,
+      fixedEdge,
+      anchored: growth.anchored,
+    };
   }
   if (grown) {
-    blend = featherBlend(region, restWorld, grown.paintedVertex);
+    blend = featherBlend(region, matrix, grown.paintedVertex);
     painted = new Uint8Array(region.faces.length);
     for (let t = 0; t < painted.length; t++) painted[t] = grown.paintedFace[region.faces[t]];
   }

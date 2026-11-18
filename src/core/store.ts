@@ -224,6 +224,8 @@ export interface WarpSession {
   /** The first painted hit; like a contact patch's seed, it fixes the brush plane. */
   seed?: SurfacePatch['seed'];
   density: number;
+  /** Feather width in mm the grid was laid with, 0 or absent for none. Density changes keep it. */
+  feather?: number;
   model: WarpModel | null;
   state: WarpState | null;
   output: WarpOutput | null;
@@ -526,6 +528,7 @@ const newWarpSession = (part: Part, epoch: number, faces: number[] = []): WarpSe
   faces,
   startFaces: faces,
   density: defaultWarpDensity,
+  feather: 0,
   model: null,
   state: null,
   output: null,
@@ -1772,7 +1775,7 @@ export const useEditor = create<EditorState>((set, get) => ({
   },
   layWarpGrid: async () => {
     const { warp } = get();
-    if (warp) await layWarp(settledWarp(warp));
+    if (warp) await layWarp(settledWarp(warp), true);
   },
   setWarpDensity: async (density) => {
     const { warp } = get();
@@ -3122,8 +3125,11 @@ useEditor.subscribe((state) => {
     state.settleWarp(true);
 });
 
-/** Lays the session's grid. A build that stops returns the session to `from`. */
-async function layWarp(from: WarpSettled) {
+/**
+ * Lays the session's grid. A build that stops returns the session to `from`. Laying from the region
+ * stage takes the page's feather option; a rebuild keeps the feather the session was laid with.
+ */
+async function layWarp(from: WarpSettled, fromRegion = false) {
   const state = useEditor.getState(),
     warp = state.warp;
   const part = warp && state.scene.parts.find((p) => p.id === warp.partId);
@@ -3133,8 +3139,13 @@ async function layWarp(from: WarpSettled) {
   const build = (warpBuild = { controller, from });
   // An empty painted region would leave the grid nothing to simplify, so it means the whole part.
   const faces = warp.region === 'painted' && warp.faces.length ? warp.faces : null;
-  const feather =
-    faces && state.warpFeather.enabled ? (state.warpFeather.width ?? warpBrushRadius(state)) : 0;
+  const feather = !faces
+    ? 0
+    : !fromRegion
+      ? (warp.feather ?? 0)
+      : state.warpFeather.enabled
+        ? (state.warpFeather.width ?? warpBrushRadius(state))
+        : 0;
   const taskId = startTask({
     title: 'Preparing warp',
     detail: `${(faces?.length ?? triangleCount(part.geometry)).toLocaleString()} triangles`,
@@ -3147,7 +3158,7 @@ async function layWarp(from: WarpSettled) {
     () => cancelTask(taskId, 'Warp preparation cancelled.'),
     { once: true },
   );
-  useEditor.setState({ painting: false, warp: { ...warp, stage: 'building' } });
+  useEditor.setState({ painting: false, warp: { ...warp, stage: 'building', feather } });
   let model: WarpModel;
   try {
     model = await buildWarpModelJob(
