@@ -267,10 +267,10 @@ function linearPrecision(
     sut += w * u[j] * t[j];
     stt += w * t[j] * t[j];
   }
-  // A ridge as large as the spread keeps the correction gentle. Full linear precision moves the
-  // weights between nodes within a few fine triangles, which folds them where neighbouring nodes'
-  // rigid transforms disagree, as near a sharp pull on a dense scan.
-  const ridge = suu + stt;
+  // A ridge of a quarter of the spread keeps the correction gentle. Full linear precision moves
+  // the weights between nodes within a few fine triangles, which folds them where neighbouring
+  // nodes' skin maps disagree, as near a sharp pull on a dense scan.
+  const ridge = 0.25 * (suu + stt);
   suu += ridge;
   stt += ridge;
   // Solve [s su st; su suu sut; st sut stt] (a b c) = (1 0 0) by its first column of cofactors.
@@ -289,7 +289,17 @@ function linearPrecision(
     sum += w;
   }
   if (!(sum > 0) || !Number.isFinite(sum)) return;
-  for (let j = 0; j < used; j++) weight[v * K + j] = u[j] / sum;
+  // Nodes clipped to nothing leave the binding, the rest keeping their order.
+  let kept = 0;
+  for (let j = 0; j < used; j++) {
+    if (!(u[j] > 0)) continue;
+    node[v * K + kept] = node[v * K + j];
+    weight[v * K + kept++] = u[j] / sum;
+  }
+  for (let j = kept; j < used; j++) {
+    node[v * K + j] = none;
+    weight[v * K + j] = 0;
+  }
 }
 
 export interface WarpPointBinding {
