@@ -472,3 +472,86 @@ test.describe('with clipping on, as by default', () => {
     await expect(page.getByTitle(/^Create joint/)).toBeVisible();
   });
 });
+
+/** The session's undo depth, whether a warp gesture is open, and the selected point's settings. */
+async function sliderState(page: Page) {
+  return page.evaluate(async () => {
+    const urls = performance.getEntriesByType('resource').map((entry) => entry.name);
+    const { useEditor, isWarpDragging } = await import(
+      urls.find((url) => /\/src\/core\/store\.ts(?:\?.*)?$/.test(url))!
+    );
+    const warp = useEditor.getState().warp;
+    const point = warp.points.find((point: any) => warp.selectedPoints.includes(point.id));
+    return {
+      undo: warp.undo.length as number,
+      dragging: isWarpDragging() as boolean,
+      radius: point.radius as number,
+      falloff: point.falloff as number,
+    };
+  });
+}
+
+/** Presses on a slider at a share of its width and drags it to another, leaving the button down. */
+async function pressSlider(page: Page, name: string, from: number, to: number) {
+  const box = (await page.getByRole('slider', { name, exact: true }).boundingBox())!;
+  const y = box.y + box.height / 2;
+  await page.mouse.move(box.x + from * box.width, y);
+  await page.mouse.down();
+  await page.mouse.move(box.x + to * box.width, y, { steps: 6 });
+}
+
+test('each radius or falloff gesture is one undo step and ends exactly once', async ({ page }) => {
+  await open(page);
+  await page.keyboard.press('w');
+  await page.getByRole('radio', { name: 'Whole part', exact: true }).click();
+  await page.getByRole('button', { name: 'Lay grid', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'Close gap', exact: true })).toBeEnabled();
+  const front = await screen(page, [-4.5, 10.5, 10]);
+  await page.mouse.click(front.x, front.y);
+  for (let step = 0; step < 3; step++)
+    await page.getByRole('button', { name: 'Move Z positive', exact: true }).click();
+  const start = await sliderState(page);
+  expect(start.dragging).toBe(false);
+
+  // A drag and release.
+  await pressSlider(page, 'Point radius slider', 0.3, 0.6);
+  expect((await sliderState(page)).dragging).toBe(true);
+  await page.mouse.up();
+  const dragged = await sliderState(page);
+  expect(dragged).toMatchObject({ undo: start.undo + 1, dragging: false });
+  expect(dragged.radius).not.toBe(start.radius);
+
+  // Straight from one slider to the other: one step each, and nothing from the first's blur.
+  await pressSlider(page, 'Point radius slider', 0.6, 0.5);
+  await page.mouse.up();
+  await pressSlider(page, 'Point falloff slider', 0.9, 0.4);
+  await page.mouse.up();
+  const switched = await sliderState(page);
+  expect(switched).toMatchObject({ undo: dragged.undo + 2, dragging: false });
+  expect(switched.falloff).toBeLessThan(0.6);
+
+  // Arrow keys: a step per press.
+  await page.keyboard.press('ArrowLeft');
+  await page.keyboard.press('ArrowLeft');
+  const keyed = await sliderState(page);
+  expect(keyed).toMatchObject({ undo: switched.undo + 2, dragging: false });
+  expect(keyed.falloff).toBeCloseTo(switched.falloff - 0.02, 6);
+
+  // The window losing focus mid-drag ends the gesture once; the release adds nothing.
+  await pressSlider(page, 'Point radius slider', 0.5, 0.7);
+  await page.evaluate(() => window.dispatchEvent(new Event('blur')));
+  const blurred = await sliderState(page);
+  expect(blurred).toMatchObject({ undo: keyed.undo + 1, dragging: false });
+  await page.mouse.up();
+  expect(await sliderState(page)).toMatchObject({ undo: blurred.undo, dragging: false });
+
+  // So does a cancelled pointer.
+  await pressSlider(page, 'Point falloff slider', 0.4, 0.7);
+  await page.evaluate(() =>
+    window.dispatchEvent(new PointerEvent('pointercancel', { pointerId: 1, bubbles: true })),
+  );
+  const cancelled = await sliderState(page);
+  expect(cancelled).toMatchObject({ undo: blurred.undo + 1, dragging: false });
+  await page.mouse.up();
+  expect((await sliderState(page)).undo).toBe(cancelled.undo);
+});
