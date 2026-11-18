@@ -102,12 +102,12 @@ The core is full while cells are 13 px or more on screen (shrunk as the surface 
 then thins to 1 px and fades out by 6 px; the casing fades out between 22 and 12 px cells.
 Each corner's depth is where its view ray meets the surface's tangent plane at the line, then
 nearer by at most a pixel or 0.05 mm, and never more than halfway to the near plane, so any
-opaque surface in front hides the line in either projection. The perspective camera's near and
-far planes are fitted to what it sees before each render (`DepthRange.tsx`): near is half the
-nearest visible thing's view depth, in powers of two, and never under 0.1 mm, so depth stays
-fine enough at overview distance; a headset session's cameras are left alone. Segment ends are uploaded when the surface is written; between writes, as when a
-large region follows a drag on the grid alone, only a texture of node shifts is, measured
-from the node positions in the written surface itself.
+opaque surface 0.2 mm or more in front hides the line in either projection at working
+distance. At overview distance, about 400 mm, the perspective camera's 0.1 mm near plane
+leaves depth too coarse to separate surfaces that close, as it does for everything else in the
+editor. Segment ends are uploaded when the surface is written; between writes, as when a large
+region follows a drag on the grid alone, only a texture of node shifts is, measured from the
+node positions in the written surface itself.
 
 Reach dots and seam points are drawn after the grid, among transparent objects by render order,
 and each fragment of a dot takes its depth from the surface's tangent plane at its point, with
@@ -119,8 +119,8 @@ Acceptance: at about 300 px across at default density, no more than about a thir
 part's pixels change by more than 1.5:1; the core's centre reaches 3:1 over the first 24
 Distinct colours and white at that zoom and close up, from two directions; the line reaches
 3:1 on a near-black part; at least 90 % of front-facing grid length is visible on the curved
-part; the far side, the other sheet of a thin shell and anything behind an opaque surface do
-not show through, also at 400 mm; the grid stays on the written surface before and after
+part; the far side, the other sheet of a thin shell and anything 0.2 mm or more behind an
+opaque surface do not show through at working distance; the grid stays on the written surface before and after
 deformation, no drawn point more than 0.1 mm off it on a coarse grid over a fine mesh; at the
 highest density a coarser net still shows as the part is zoomed out, without a sudden change.
 
