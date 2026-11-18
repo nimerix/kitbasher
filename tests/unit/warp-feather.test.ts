@@ -373,6 +373,24 @@ describe('unfeathered compatibility', () => {
       }
     }
   });
+  it('writes the same bytes between grid nodes when absent, 0 or joining nothing', async () => {
+    const g = new PlaneGeometry(40, 40, 80, 80).toNonIndexed();
+    // A square along the grid lines leaves no unpainted notch for even a tiny width to fill.
+    const faces: number[] = [];
+    for (let f = 0; f < faceCount(g); f++) {
+      const c = centroid(g, f);
+      if (Math.abs(c.x) < 12 && Math.abs(c.y) < 12) faces.push(f);
+    }
+    const written: string[] = [];
+    for (const feather of [undefined, 0, 0.1]) {
+      const model = await buildWarpModel({ ...inputOf(g, faces, 0, undefined, 1), feather });
+      expect(model.grid.nodes.length * 2).toBeLessThan(model.region.interiorCount);
+      if (feather) expect(model.feather).toMatchObject({ joined: 0 });
+      const { out } = lift(model, g, 1, [[2, 1]]);
+      written.push(`${digest(out.positions)} ${digest(out.normals!)}`);
+    }
+    expect(new Set(written).size).toBe(1);
+  });
 });
 
 /** The fewest edges from the painted edge to the outer border across the band. */
@@ -415,15 +433,24 @@ function irregularSheet() {
   return g;
 }
 
+/** The cluster moved 5 mm off centre, so it ends 2.5 mm inside a 10 mm disc: a hard crease. */
+const edgeCluster = cluster.map(([x, y]): [number, number] => [x + 5, y]);
+
 /** The written surface with feathering off and on for the same drag, and their creases. */
-async function compareCreases(g: BufferGeometry, faces: number[], width: number, matrix?: Matrix4) {
+async function compareCreases(
+  g: BufferGeometry,
+  faces: number[],
+  width: number,
+  matrix?: Matrix4,
+  at = edgeCluster,
+) {
   const painted = membership(g, faces);
   const off = await buildWarpModel(inputOf(g, faces, 0, matrix, 6));
   const on = await buildWarpModel(inputOf(g, faces, width, matrix, 6));
   // Every region vertex is a node, so the measurement sees the written surface, not skinning.
   expect(on.grid.nodes.length).toBe(on.region.weldedCount - countOutside(on));
-  const hard = lift(off, g, 1, cluster);
-  const soft = lift(on, g, 1, cluster);
+  const hard = lift(off, g, 1, at);
+  const soft = lift(on, g, 1, at);
   const [offEdge] = creases(g, off, hard.out.positions, [painted]);
   const [onEdge, onOuter] = creases(g, on, soft.out.positions, [
     painted,
@@ -436,11 +463,12 @@ const countOutside = (model: WarpModel) =>
   model.region.role.reduce((n, r) => n + (r === WarpRole.Outside ? 1 : 0), 0);
 
 describe('feathered surface', () => {
-  it('leaves no crease at the painted edge or the outer border of a band over six rings wide', async () => {
+  // Six rings is the narrowest band the design holds to a fifth of the unfeathered crease.
+  it('leaves no crease at the painted edge or the outer border of a six-ring band', async () => {
     const g = sheet();
-    const { on, soft, offEdge, onEdge, onOuter, rings } = await compareCreases(g, disc(g, 10), 7);
-    expect(rings).toBeGreaterThan(6);
-    expect(offEdge).toBeGreaterThan(1);
+    const { on, soft, offEdge, onEdge, onOuter, rings } = await compareCreases(g, disc(g, 10), 4.5);
+    expect(rings).toBe(6);
+    expect(offEdge).toBeGreaterThan(5);
     expect(onEdge).toBeLessThan(offEdge / 5);
     expect(onOuter).toBeLessThan(offEdge / 5);
     expectOutsideKept(on, soft.out);
@@ -448,8 +476,9 @@ describe('feathered surface', () => {
 
   it('does the same on an irregular mesh', async () => {
     const g = irregularSheet();
-    const { on, soft, offEdge, onEdge, onOuter, rings } = await compareCreases(g, disc(g, 10), 7);
-    expect(rings).toBeGreaterThan(6);
+    const { on, soft, offEdge, onEdge, onOuter, rings } = await compareCreases(g, disc(g, 10), 4.5);
+    expect(rings).toBe(6);
+    expect(offEdge).toBeGreaterThan(5);
     expect(onEdge).toBeLessThan(offEdge / 5);
     expect(onOuter).toBeLessThan(offEdge / 5);
     expectOutsideKept(on, soft.out);
@@ -465,13 +494,28 @@ describe('feathered surface', () => {
     const { on, soft, offEdge, onEdge, onOuter, rings } = await compareCreases(
       g,
       disc(g, 9),
-      7,
+      5,
       matrix,
+    );
+    expect(rings).toBe(6);
+    expect(offEdge).toBeGreaterThan(5);
+    expect(onEdge).toBeLessThan(offEdge / 5);
+    expect(onOuter).toBeLessThan(offEdge / 5);
+    expectOutsideKept(on, soft.out);
+  });
+
+  it('keeps a wider band smooth under a drag in the middle of the paint', async () => {
+    const g = sheet();
+    const { offEdge, onEdge, onOuter, rings } = await compareCreases(
+      g,
+      disc(g, 10),
+      7,
+      undefined,
+      cluster,
     );
     expect(rings).toBeGreaterThan(6);
     expect(onEdge).toBeLessThan(offEdge / 5);
     expect(onOuter).toBeLessThan(offEdge / 5);
-    expectOutsideKept(on, soft.out);
   });
 
   it('works with a one-ring band and keeps everything beyond it', async () => {
@@ -490,6 +534,93 @@ describe('feathered surface', () => {
     for (let v = 0; v < g.getAttribute('position').count; v++)
       if (edge[model.region.weldOf[v]] && out.positions[v * 3 + 2] !== 0) moved++;
     expect(moved).toBeGreaterThan(0);
+  });
+});
+
+/** Changes in angle, in degrees, across every edge whose two faces both pass `inside`. */
+function angleChanges(
+  g: BufferGeometry,
+  model: WarpModel,
+  positions: Float32Array,
+  inside: (face: number) => boolean,
+) {
+  const m = new Matrix4().fromArray(model.matrix);
+  const changes: number[] = [];
+  for (const faces of faceAdjacency(g).edges.values()) {
+    if (faces.length !== 2 || !inside(faces[0]) || !inside(faces[1])) continue;
+    const [f, h] = faces;
+    const rest = faceNormal(model.positions, g, f, m).angleTo(faceNormal(model.positions, g, h, m));
+    const now = faceNormal(positions, g, f, m).angleTo(faceNormal(positions, g, h, m));
+    changes.push((Math.abs(now - rest) * 180) / Math.PI);
+  }
+  return changes.sort((a, b) => a - b);
+}
+
+const p95 = (sorted: number[]) => sorted[Math.floor(sorted.length * 0.95)];
+
+describe('feathered surface at the default density', () => {
+  /**
+   * The change in slope across a strip either side of the painted edge, feathering on, set against
+   * the same drag's roughness in the paint just inside it. Away from the dragged points, which
+   * spike whatever the edge does.
+   */
+  async function edgeAgainstInterior(at: [number, number][]) {
+    const g = sheet();
+    const faces = disc(g, 10);
+    const model = await buildWarpModel(inputOf(g, faces, 4.5));
+    expect(model.grid.nodes.length).toBeLessThan(model.region.interiorCount / 2);
+    const { out } = lift(model, g, 1, at);
+    const radius = (f: number) => Math.hypot(centroid(g, f).x, centroid(g, f).y);
+    const away = (f: number) =>
+      at.every(([x, y]) => Math.hypot(centroid(g, f).x - x, centroid(g, f).y - y) > 1.5);
+    const strip = angleChanges(
+      g,
+      model,
+      out.positions,
+      (f) => Math.abs(radius(f) - 10) < 0.75 && away(f),
+    );
+    const interior = angleChanges(
+      g,
+      model,
+      out.positions,
+      (f) => radius(f) < 9.25 && radius(f) > 7 && away(f),
+    );
+    expect(strip.length).toBeGreaterThan(100);
+    expect(interior.length).toBeGreaterThan(100);
+    return { strip, interior };
+  }
+
+  // No rougher than the interior, give or take a quarter, or a tenth of a degree where it is flat.
+  const within = (edge: number, interior: number) =>
+    expect(edge).toBeLessThanOrEqual(1.25 * interior + 0.1);
+
+  it('leaves the painted edge no rougher than the paint inside it', async () => {
+    for (const at of [cluster, edgeCluster]) {
+      const { strip, interior } = await edgeAgainstInterior(at);
+      within(p95(strip), p95(interior));
+      within(strip.at(-1)!, interior.at(-1)!);
+    }
+  });
+
+  it('takes the crease out of a drag beside the painted edge', async () => {
+    const g = sheet();
+    const faces = disc(g, 10);
+    const painted = membership(g, faces);
+    const at: [number, number][] = [[8.5, 0]];
+    const off = await buildWarpModel(inputOf(g, faces));
+    const on = await buildWarpModel(inputOf(g, faces, 4.5));
+    const [hard] = creases(g, off, lift(off, g, 1, at).out.positions, [painted]);
+    const soft = lift(on, g, 1, at).out.positions;
+    const [edge] = creases(g, on, soft, [painted]);
+    expect(hard).toBeGreaterThan(10);
+    expect(edge).toBeLessThan(hard / 5);
+    // As smooth as the paint between the point and the edge.
+    const radius = (f: number) => Math.hypot(centroid(g, f).x, centroid(g, f).y);
+    const near = angleChanges(g, on, soft, (f) => {
+      const c = centroid(g, f);
+      return radius(f) < 9.25 && radius(f) > 7 && Math.hypot(c.x - 8.5, c.y) > 1.5;
+    });
+    within(edge, near.at(-1)!);
   });
 });
 
