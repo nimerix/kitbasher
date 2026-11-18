@@ -31,9 +31,12 @@ import {
   Settings2,
   Shield,
   Sparkles,
+  Wrench,
   X,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
+import { latestRelease, releases } from './changelog';
+import type { ChangeKind, Release } from './changelog';
 import { articleById, articles, groups, searchDocs } from './content';
 import type { DocArticle, DocImage, DocSection } from './types';
 import { TutorialAnimation } from './TutorialAnimation';
@@ -92,6 +95,8 @@ function ArticleIcon({ article, size = 16 }: { article: DocArticle; size?: numbe
 }
 const guideHref = (id: string) => `?guide=${encodeURIComponent(id)}`;
 const currentGuide = () => new URLSearchParams(window.location.search).get('guide');
+const whatsNewId = 'whats-new';
+const releaseId = (release: Release) => `v${release.version.replaceAll('.', '-')}`;
 
 function Brand() {
   return (
@@ -295,6 +300,15 @@ function Navigation({ active, onNavigate }: { active: string | null; onNavigate?
       >
         <BookOpen size={16} /> Overview
       </a>
+      <a
+        className={`nav-whats-new ${active === whatsNewId ? 'active' : ''}`}
+        href={guideHref(whatsNewId)}
+        aria-current={active === whatsNewId ? 'page' : undefined}
+        onClick={onNavigate}
+      >
+        <Sparkles size={16} /> What’s new
+        <span className="nav-version">v{latestRelease.version}</span>
+      </a>
       {groups.map((group) => (
         <div className="nav-group" key={group}>
           <h2>{group}</h2>
@@ -353,6 +367,11 @@ function Home() {
   return (
     <div className="docs-home">
       <div className="home-intro">
+        <a className="home-release" href={`${guideHref(whatsNewId)}#${releaseId(latestRelease)}`}>
+          <span>New in {latestRelease.version}</span>
+          {latestRelease.title}
+          <ChevronRight size={14} aria-hidden="true" />
+        </a>
         <h1 tabIndex={-1}>
           Your workbench,
           <br />
@@ -569,6 +588,100 @@ function Article({ article }: { article: DocArticle }) {
   );
 }
 
+const changeKinds: Record<ChangeKind, { label: string; icon: LucideIcon }> = {
+  new: { label: 'New', icon: Sparkles },
+  improved: { label: 'Improved', icon: ArrowRight },
+  fixed: { label: 'Fixed', icon: Wrench },
+};
+const formatDate = (date: string) =>
+  new Date(`${date}T12:00:00`).toLocaleDateString('en-US', {
+    year: 'numeric',
+    month: 'long',
+    day: 'numeric',
+  });
+
+function WhatsNew() {
+  return (
+    <>
+      <article className="docs-article whats-new">
+        <div className="breadcrumbs">
+          <a href="./">Docs</a>
+          <ChevronRight size={12} />
+          <span>Release notes</span>
+        </div>
+        <h1 tabIndex={-1}>What’s new</h1>
+        <p className="article-description">
+          New features, improvements, and fixes in every version of Kitbasher, newest first.
+        </p>
+        <details className="mobile-toc">
+          <summary>Versions</summary>
+          {releases.map((release) => (
+            <a href={`#${releaseId(release)}`} key={release.version}>
+              {release.version} · {release.title}
+            </a>
+          ))}
+        </details>
+        {releases.map((release) => (
+          <section className="release" id={releaseId(release)} key={release.version}>
+            <div className="release-meta">
+              <a href={`#${releaseId(release)}`} className="release-version">
+                {release.version}
+              </a>
+              <time dateTime={release.date}>{formatDate(release.date)}</time>
+            </div>
+            <div className="release-body">
+              <h2>{release.title}</h2>
+              <ul>
+                {release.changes.map((change, i) => {
+                  const { label, icon: Icon } = changeKinds[change.kind];
+                  const guide = change.guide ? articleById.get(change.guide) : undefined;
+                  return (
+                    <li key={i}>
+                      <span className={`change-kind ${change.kind}`}>
+                        <Icon size={11} aria-hidden="true" />
+                        {label}
+                      </span>
+                      <p>
+                        {change.text}
+                        {guide && (
+                          <>
+                            {' '}
+                            <a href={guideHref(guide.id)}>
+                              {guide.title} <ArrowRight size={12} aria-hidden="true" />
+                            </a>
+                          </>
+                        )}
+                      </p>
+                    </li>
+                  );
+                })}
+              </ul>
+            </div>
+          </section>
+        ))}
+      </article>
+      <aside className="docs-toc" aria-label="Versions">
+        <span>Versions</span>
+        <nav>
+          {releases.map((release) => (
+            <a href={`#${releaseId(release)}`} key={release.version}>
+              {release.version}
+            </a>
+          ))}
+        </nav>
+        <a
+          className="toc-source"
+          href="https://github.com/nimerix/kitbasher/pulls?q=is%3Apr+is%3Amerged"
+          target="_blank"
+          rel="noopener noreferrer"
+        >
+          Merged pull requests <ExternalLink size={12} />
+        </a>
+      </aside>
+    </>
+  );
+}
+
 function SearchDialog({
   dialog,
   onNavigate,
@@ -691,7 +804,8 @@ function App() {
   const [guide, setGuide] = useState(currentGuide);
   const search = useRef<HTMLDialogElement>(null),
     mobile = useRef<HTMLDialogElement>(null);
-  const article = guide ? articleById.get(guide) : undefined;
+  const whatsNew = guide === whatsNewId;
+  const article = guide && !whatsNew ? articleById.get(guide) : undefined;
   const closeDialogs = () => {
     search.current?.close();
     mobile.current?.close();
@@ -752,7 +866,7 @@ function App() {
     };
   }, []);
   useEffect(() => {
-    document.title = `${article?.title ?? (guide ? 'Guide not found' : 'Your workbench, explained')} · Kitbasher Docs`;
+    document.title = `${article?.title ?? (whatsNew ? 'What’s new' : guide ? 'Guide not found' : 'Your workbench, explained')} · Kitbasher Docs`;
     const sidebar = document.querySelector<HTMLElement>('.docs-sidebar');
     const active = sidebar?.querySelector<HTMLElement>('[aria-current="page"]');
     if (sidebar && active) {
@@ -765,13 +879,15 @@ function App() {
       ?.setAttribute(
         'content',
         article?.description ??
-          'The illustrated Kitbasher manual. Learn every tool and build your next assembly.',
+          (whatsNew
+            ? 'New features, improvements, and fixes in every version of Kitbasher.'
+            : 'The illustrated Kitbasher manual. Learn every tool and build your next assembly.'),
       );
     if (location.hash)
       requestAnimationFrame(() =>
         document.getElementById(location.hash.slice(1))?.scrollIntoView(),
       );
-  }, [article, guide]);
+  }, [article, guide, whatsNew]);
   return (
     <>
       <a className="skip-link" href="#main-content">
@@ -819,7 +935,9 @@ function App() {
         <Navigation active={guide} />
       </aside>
       <main id="main-content" className={`docs-main ${guide ? 'has-article' : ''}`}>
-        {article ? (
+        {whatsNew ? (
+          <WhatsNew />
+        ) : article ? (
           <Article article={article} />
         ) : guide ? (
           <div className="not-found">
