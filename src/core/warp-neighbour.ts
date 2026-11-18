@@ -81,9 +81,8 @@ function surfaceGap(point: Vector3, hit: Hit) {
     m[1] * x + m[5] * y + m[9] * z,
     m[2] * x + m[6] * y + m[10] * z,
   );
-  const localDistance = outwardRay.direction.length();
-  outwardRay.direction.multiplyScalar(1 / localDistance);
-  const exit = tree.raycastFirst(outwardRay, DoubleSide, 0, warpNeighbourRange * localDistance);
+  outwardRay.direction.normalize();
+  const exit = tree.raycastFirst(outwardRay, DoubleSide);
   return exit?.face && exit.face.normal.dot(outwardRay.direction) > 0 ? -distance : distance;
 }
 
@@ -113,6 +112,20 @@ function worldBoundsDistanceSquared(box: Box3, m: number[], px: number, py: numb
   return dx * dx + dy * dy + dz * dz;
 }
 
+/** Orthogonal transform axes make this exact even for a rotated, non-uniformly scaled box. */
+function scaledBoundsDistanceSquared(
+  box: Box3,
+  point: Vector3,
+  sx: number,
+  sy: number,
+  sz: number,
+) {
+  const dx = sx * Math.max(0, box.min.x - point.x, point.x - box.max.x);
+  const dy = sy * Math.max(0, box.min.y - point.y, point.y - box.max.y);
+  const dz = sz * Math.max(0, box.min.z - point.z, point.z - box.max.z);
+  return dx * dx + dy * dy + dz * dz;
+}
+
 function closestHit(point: Vector3, neighbours: WarpNeighbour[]): Hit | null {
   const closest: { owner: WarpNeighbour | null; face: number } = { owner: null, face: 0 };
   let bestSquared = warpNeighbourRange ** 2;
@@ -121,8 +134,8 @@ function closestHit(point: Vector3, neighbours: WarpNeighbour[]): Hit | null {
     const [sx, sy, sz] = n.part.scale.map(Math.abs);
     const [qx, qy, qz, qw] = n.part.quaternion;
     const unit = Math.abs(qx * qx + qy * qy + qz * qz + qw * qw - 1) < 1e-15;
+    if (unit) local.copy(point).applyMatrix4(n.inverse);
     if (sx === sy && sx === sz && unit) {
-      local.copy(point).applyMatrix4(n.inverse);
       const hit = n.tree.closestPointToPoint(
         local,
         undefined,
@@ -139,15 +152,17 @@ function closestHit(point: Vector3, neighbours: WarpNeighbour[]): Hit | null {
       nearest.copy(world);
       continue;
     }
-    // Evaluate both bounds and candidates in world space. This accounts for anisotropic
-    // scales and the actual linear transform of imported, approximately unit quaternions.
+    // For orthogonal axes, use distances along the scaled axes. For a more general affine
+    // transform, bound with the enclosing world AABB and test exact triangle distances.
     const m = n.matrix.elements;
     const px = point.x - m[12],
       py = point.y - m[13],
       pz = point.z - m[14];
     n.tree.shapecast({
-      boundsTraverseOrder: (box) => worldBoundsDistanceSquared(box, m, px, py, pz),
-      intersectsBounds: (_box, _leaf, score) => score! <= bestSquared,
+      boundsTraverseOrder: unit
+        ? (box) => scaledBoundsDistanceSquared(box, local, sx, sy, sz)
+        : (box) => worldBoundsDistanceSquared(box, m, px, py, pz),
+      intersectsBounds: (_box, _leaf, score) => score! <= bestSquared + 1e-10,
       intersectsTriangle: (tri, index) => {
         worldTriangle.a.copy(tri.a).applyMatrix4(n.matrix);
         worldTriangle.b.copy(tri.b).applyMatrix4(n.matrix);

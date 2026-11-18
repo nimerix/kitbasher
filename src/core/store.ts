@@ -648,11 +648,10 @@ function warpSeam(scene: SceneDocument, warp: WarpSession) {
   noticePreparing(warp, indexing);
   if (!neighbours.length) return null;
   const { model, output, preview } = warp;
-  if (typeof window === 'undefined' || model!.region.weldedCount <= warpDragVertices)
-    return measureSeam(model!, output!, neighbours);
+  if (typeof window === 'undefined') return measureSeam(model!, output!, neighbours);
 
-  // A dense seam can involve hundreds of thousands of queries. Yield between batches so the
-  // viewport stays interactive, and drop work when the preview or neighbouring scene changes.
+  // Neighbour complexity can make even a small region expensive. Budget browser measurements
+  // by time and drop work when the preview changes.
   const position = preview!.getAttribute('position') as BufferAttribute;
   const version = position.version;
   const measurement = seamMeasurement(model!, output!, neighbours);

@@ -5,6 +5,8 @@ import {
   Quaternion,
   BoxGeometry,
   BufferGeometry,
+  ExtrudeGeometry,
+  Shape,
   Matrix4,
   PlaneGeometry,
   SphereGeometry,
@@ -166,6 +168,36 @@ describe('warp neighbours', () => {
     const model = await modelOf(new SphereGeometry(10.1, 40, 30), new Matrix4());
     const report = measureSeam(model, createWarpOutput(model), neighbours)!;
     expect(report.vertices.length).toBeGreaterThan(1000);
+    expect(report.largestGap).toBeLessThan(0);
+  });
+
+  it('reports penetration inside a deep concave corner', async () => {
+    const step = new Shape();
+    step.moveTo(-20, -20);
+    step.lineTo(20, -20);
+    step.lineTo(20, 20);
+    step.lineTo(0, 20);
+    step.lineTo(0, 0);
+    step.lineTo(-20, 0);
+    step.closePath();
+    const neighbour = neighbourOf(
+      partOf(
+        'step',
+        new ExtrudeGeometry(step, {
+          depth: 40,
+          bevelEnabled: false,
+        }),
+        [0, 0, 0],
+      ),
+    );
+    const rotation = new Quaternion().setFromUnitVectors(
+      new Vector3(0, 0, 1),
+      new Vector3(1, -1, 0).normalize(),
+    );
+    const matrix = new Matrix4().makeRotationFromQuaternion(rotation).setPosition(0.3, -0.3, 20);
+    const model = await modelOf(new PlaneGeometry(0.1, 0.1), matrix);
+    const report = measureSeam(model, createWarpOutput(model), [neighbour])!;
+    expect(report.vertices).toHaveLength(4);
     expect(report.largestGap).toBeLessThan(0);
   });
 

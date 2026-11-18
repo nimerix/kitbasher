@@ -892,8 +892,8 @@ describe('warp points, close gap and apply', () => {
     expect(session().seam!.largestGap).toBeLessThanOrEqual(0);
   });
 
-  it('continues dense seam measurement after a rename and refreshes it for a moved neighbour', async () => {
-    const source = solid('a', new PlaneGeometry(10, 10, 225, 225), [0, 0, 0]);
+  it('schedules browser seam measurement for smaller regions, including after a rename or moved neighbour', async () => {
+    const source = solid('a', new PlaneGeometry(10, 10, 220, 220), [0, 0, 0]);
     const neighbour = solid('b', new PlaneGeometry(20, 20).rotateY(Math.PI), [0, 0, 1]);
     setup([source, neighbour], ['a']);
     editor().setTool('warp');
