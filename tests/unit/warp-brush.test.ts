@@ -132,14 +132,15 @@ describe("Warp's brush", () => {
     expect(editor().brushRadius).toBe(12);
   });
 
-  it('keeps what was set across sessions on the same part, not on another', () => {
+  it('keeps what was set across sessions on the same part in one scene, not on another', () => {
     const a = plate('a'),
       b = plate('b');
     warp(a, b);
     editor().setWarpBrushRadius(2.5);
     editor().cancelWarp();
     editor().setTool('select');
-    warp(a, b);
+    useEditor.setState({ selected: ['a'] });
+    editor().setTool('warp');
     expect(warpBrushRadius(editor())).toBe(2.5);
     editor().cancelWarp();
     editor().setTool('select');
@@ -181,6 +182,53 @@ describe("Warp's brush", () => {
     expect(warpBrushRadius(editor())).toBe(2.4);
     edit(b);
     expect(warpBrushRadius(editor())).toBe(4);
+  });
+
+  it('starts empty in a new or opened scene, even for a part that reuses an old id', () => {
+    warp(plate('a', 40));
+    editor().setWarpBrushRadius(5);
+    expect(warpBrushRadius(editor())).toBe(5);
+    editor().cancelWarp();
+    const small = plate('a', 6);
+    warp(small);
+    expect(warpBrushRadius(editor())).toBe(fittedWarpBrushRadius(small));
+    expect(fittedWarpBrushRadius(small)).toBe(0.18);
+  });
+
+  it('reads only radii it was given, never inherited properties', () => {
+    for (const id of ['constructor', 'toString', '__proto__', 'hasOwnProperty']) {
+      const part = plate(id, 32);
+      warp(part);
+      expect(warpBrushRadius(editor()), id).toBe(0.96);
+      editor().setWarpBrushRadius(2);
+      expect(warpBrushRadius(editor()), id).toBe(2);
+      editor().cancelWarp();
+    }
+  });
+
+  it("keeps a deleted part's radius while undo can bring it back, and no longer", () => {
+    const a = plate('a'),
+      b = plate('b');
+    warp(a, b);
+    editor().setWarpBrushRadius(2.5);
+    editor().cancelWarp();
+    editor().setTool('select');
+    useEditor.setState({ selected: ['a'] });
+    editor().deleteSelected();
+    expect(editor().warpBrush.get('a')).toBe(2.5);
+    editor().undo();
+    useEditor.setState({ selected: ['a'] });
+    editor().setTool('warp');
+    expect(warpBrushRadius(editor())).toBe(2.5);
+    editor().cancelWarp();
+    editor().setTool('select');
+    editor().redo();
+    expect(editor().warpBrush.get('a')).toBe(2.5);
+    // Once no history holds the part, a later edit lets its radius go.
+    useEditor.setState({ past: [], future: [] });
+    useEditor.setState({ selected: ['b'] });
+    editor().deleteSelected();
+    expect(editor().warpBrush.has('a')).toBe(false);
   });
 
   it('clamps to the numeric field and ignores values that are not numbers', () => {

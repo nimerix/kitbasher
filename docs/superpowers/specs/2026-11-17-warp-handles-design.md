@@ -64,22 +64,34 @@ grid over a part, control points on it, an as-rigid-as-possible solve, a bake on
 
 ### 1. Grid contrast
 
-Draw grid edges as fat lines (`LineSegments2` and `LineMaterial`): an opaque dark core
-about 1.5 px wide over a light casing about 3.5 px wide at partial opacity, both from one
-shared, preallocated endpoint buffer (two endpoints per edge) updated in place per frame.
-The far side stays hidden.
+A grid edge is a straight chord between two scan vertices, so on a convex surface its middle
+runs under the surface and is hidden however it is coloured. Each edge is therefore laid on
+the surface (`warp-grid-path.ts`): it is traced across the region's triangles along the plane
+through its chord and the nodes' averaged normal, and keeps points where it crosses mesh
+edges. Every edge keeps evenly spaced points first (its middle, quarters and eighths), so an
+edge flat at rest still follows the surface once it bends, then the points that bend it most,
+within 32 per edge and 32,000 in all. A walk that fails is retried from the other node and
+with each node's own normal; if every walk fails, the edge follows the shortest bounded path
+over mesh edges, or is not drawn. The trace runs a few milliseconds at a time; until it is
+done, edges are chords.
 
-A grid edge is a straight chord between two scan vertices, so on a convex surface its
-middle runs under the surface and is hidden however it is coloured. Measure it: on a curved
-convex part at default density, find how much front-facing grid length is actually drawn.
-If more than about a tenth is hidden, pull the lines toward the camera by a small amount
-scaled to each edge's length (a depth bias in the line material). Only if that is not enough,
-lay each edge along the surface instead.
+Edges are drawn as screen-space quads (`WarpGrid.tsx`) in two draws over one instanced
+geometry: an opaque dark core 1.5 px wide, and a light casing 4 px wide drawn first with MAX
+blending, so it lifts only what is darker than itself and leaves light and mid colours alone.
+The core is full while cells are 13 px or more on screen (shrunk as the surface turns away),
+then thins to 1 px and fades out by 6 px; the casing fades out between 22 and 12 px cells.
+Each corner's depth is where its view ray meets the surface's tangent plane at the line, then
+nearer by at most a pixel or 0.05 mm, so any opaque surface in front hides the line in either
+projection. Segment ends are uploaded when the surface is written; between writes, as when a
+large region follows a drag on the grid alone, only a texture of node shifts is, measured
+from the node positions in the written surface itself.
 
-Acceptance: over each of the first 24 Distinct colours, and over white and near-black parts,
-in the light and dark themes, grid pixels reach at least 3:1 contrast against the surface
-beside them; at least 90 % of front-facing grid length is visible on the curved part; the
-far side does not show through; the grid stays readable at the highest density.
+Acceptance: at about 300 px across at default density, no more than about a third of the
+part's pixels change by more than 1.5:1; the core's centre reaches 3:1 over the first 24
+Distinct colours and white at that zoom and close up, from two directions; the line reaches
+3:1 on a near-black part; at least 90 % of front-facing grid length is visible on the curved
+part; the far side, the other sheet of a thin shell and anything behind an opaque surface do
+not show through; the grid stays on the written surface before and after deformation.
 
 ### 2. Brush size fitted to the part
 

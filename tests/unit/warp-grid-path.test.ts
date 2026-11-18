@@ -1,18 +1,28 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 import {
+  BufferAttribute,
   BufferGeometry,
   LatheGeometry,
   Matrix4,
   PlaneGeometry,
   Quaternion,
   SphereGeometry,
+  Triangle,
   Vector2,
   Vector3,
 } from 'three';
 import { MeshBVH } from 'three-mesh-bvh';
+import { triangleCount } from '../../src/core/geometry';
+import { useEditor } from '../../src/core/store';
+import { readFace } from '../../src/core/surfaces';
+import type { Part } from '../../src/core/types';
+import { scanLike } from '../helpers/scan-like';
+import { writtenNodePositions } from '../../src/core/warp-evaluate';
 import { buildWarpModel, type WarpModel } from '../../src/core/warp-model';
 import {
   traceWarpGridPathNow,
+  warpGridChords,
+  WarpGridDrawing,
   warpGridPathLimits,
   warpGridSegments,
   writeWarpGridPath,
@@ -90,11 +100,23 @@ describe('grid paths', () => {
     }
   });
 
-  it('need no points between nodes on a flat part', async () => {
-    const m = await model(new PlaneGeometry(30, 30, 40, 40), 3);
+  it('keep evenly spaced points on a flat part, where no bend needs them', async () => {
+    // Fine enough that each grid edge crosses several mesh edges.
+    const m = await model(new PlaneGeometry(30, 30, 120, 120), 3);
     const path = traceWarpGridPathNow(m);
     expect(path.failed).toBe(0);
-    expect(path.from.length).toBe(0);
+    // Every edge that spans several mesh edges keeps at least three points, spread so that no
+    // piece of the line spans half the edge: it can follow the surface once it bends. Along the
+    // border, where the grid keeps every vertex, edges are single mesh edges.
+    let long = 0;
+    for (let e = 0; e < path.length.length; e++) {
+      if (path.length[e] < 1) continue;
+      long++;
+      expect(path.start[e + 1] - path.start[e]).toBeGreaterThanOrEqual(3);
+      const along = [0, ...path.along.subarray(path.start[e], path.start[e + 1]), 1];
+      for (let k = 1; k < along.length; k++) expect(along[k] - along[k - 1]).toBeLessThan(0.5);
+    }
+    expect(long).toBeGreaterThan(path.length.length / 2);
   });
 
   it('stay on their own side of a thin shell', async () => {
@@ -111,8 +133,9 @@ describe('grid paths', () => {
       const m = await model(geometry, density);
       const path = traceWarpGridPathNow(m);
       const out = segments(m, path);
+      // The flat face along the rim joins the two sheets: a point on it is on neither.
       const sheet = (x: number, y: number, z: number) =>
-        Math.hypot(x, y, z) > radius - 0.4 ? 'outer' : 'inner';
+        y < 1e-4 ? 'rim' : Math.hypot(x, y, z) > radius - 0.4 ? 'outer' : 'inner';
       let s = 0,
         checked = 0;
       for (let e = 0; e < path.length.length; e++) {
@@ -123,10 +146,10 @@ describe('grid paths', () => {
             out[(s + count) * 6 - 2],
             out[(s + count) * 6 - 1],
           );
-        if (first === last)
+        if (first === last && first !== 'rim')
           for (let k = 0; k < count; k++, checked++)
-            expect(sheet(out[(s + k) * 6 + 3], out[(s + k) * 6 + 4], out[(s + k) * 6 + 5])).toBe(
-              first,
+            expect(sheet(out[(s + k) * 6 + 3], out[(s + k) * 6 + 4], out[(s + k) * 6 + 5])).toMatch(
+              new RegExp(`^(${first}|rim)$`),
             );
         s += count;
       }
@@ -180,5 +203,177 @@ describe('grid paths', () => {
       const o = (before + k - path.start[e]) * 6 + 4;
       expect(moved[o] - still[o]).toBeCloseTo(2 + 2 * path.along[k], 5);
     }
+  });
+});
+
+/** The furthest any drawn segment strays from a surface, sampled along each segment. */
+function worstGap(surface: BufferGeometry, drawn: Float32Array) {
+  const bvh = new MeshBVH(surface);
+  const point = new Vector3();
+  let worst = 0;
+  for (let s = 0; s < drawn.length / 6; s++)
+    for (const f of [0.125, 0.25, 0.375, 0.5, 0.625, 0.75, 0.875]) {
+      point.set(
+        drawn[s * 6] + f * (drawn[s * 6 + 3] - drawn[s * 6]),
+        drawn[s * 6 + 1] + f * (drawn[s * 6 + 4] - drawn[s * 6 + 1]),
+        drawn[s * 6 + 2] + f * (drawn[s * 6 + 5] - drawn[s * 6 + 2]),
+      );
+      worst = Math.max(worst, bvh.closestPointToPoint(point)!.distance);
+    }
+  return worst;
+}
+
+describe('grid paths on a scan-like part', () => {
+  it('follow the surface, along mesh edges where a walk fails, never across empty space', async () => {
+    const geometry = scanLike();
+    for (const density of [0, 3]) {
+      const m = await buildWarpModel({
+        positions: new Float32Array(geometry.getAttribute('position').array),
+        index: null,
+        normals: new Float32Array(geometry.getAttribute('normal').array),
+        matrix: new Matrix4().elements.slice(),
+        faces: null,
+        density,
+      });
+      const path = traceWarpGridPathNow(m);
+      const edges = warpGridChords(m).length.length;
+      // Some walks fail on this part, as on real scans, and each finds its way along mesh edges.
+      expect(path.failed, `density ${density}`).toBeGreaterThan(0);
+      expect(path.failed / edges, `density ${density}`).toBeLessThan(0.25);
+      expect(path.rerouted).toBe(path.failed);
+      expect(path.length.length).toBe(edges);
+      expect(worstGap(geometry, segments(m, path)), `density ${density}`).toBeLessThan(0.05);
+    }
+  });
+});
+
+const editor = () => useEditor.getState();
+const initial = useEditor.getState();
+
+/** A 40 mm plate warped over its whole surface, with points held at four corners. */
+async function heldPlate(segments = 64) {
+  const geometry = new PlaneGeometry(40, 40, segments, segments);
+  const part: Part = {
+    id: 'plate',
+    name: 'Plate',
+    geometry,
+    position: [0, 0, 0],
+    quaternion: [0, 0, 0, 1],
+    scale: [1, 1, 1],
+    color: '#aabbcc',
+    visible: true,
+    locked: false,
+    source: 'test',
+  };
+  editor().setScene({ name: 'Plate', parts: [part], joints: [] });
+  useEditor.setState({ selected: ['plate'] });
+  editor().setTool('warp');
+  editor().setWarpRegion('whole');
+  editor().setWarpOptions({ autoPoints: false });
+  await editor().layWarpGrid();
+  const faceAt = (x: number, y: number) => {
+    const triangle = new Triangle(),
+      point = new Vector3(x, y, 0),
+      closest = new Vector3();
+    for (let face = 0; face < triangleCount(geometry); face++) {
+      readFace(geometry, face, triangle);
+      if (triangle.closestPointToPoint(point, closest).distanceTo(point) < 1e-6) return face;
+    }
+    throw new Error('No face under the point.');
+  };
+  for (const [x, y] of [
+    [-15, -15],
+    [15, -15],
+    [-15, 15],
+    [15, 15],
+    [0.3, 0.2],
+  ])
+    editor().addWarpPoint({ partId: 'plate', point: [x, y, 0], normal: [0, 0, 1] }, faceAt(x, y));
+  return editor().warp!.points.at(-1)!.id;
+}
+
+/** The written surface as a mesh, and local node positions as the grid draws them. */
+function written() {
+  const { model, state, output } = editor().warp!;
+  const surface = new BufferGeometry();
+  surface.setAttribute('position', new BufferAttribute(output!.positions.slice(), 3));
+  surface.setIndex(new BufferAttribute(model!.index!, 1));
+  const world = writtenNodePositions(model!, state!);
+  const inverse = new Matrix4().fromArray(model!.inverse),
+    point = new Vector3();
+  const nodes = new Float32Array(world.length);
+  for (let i = 0; i < world.length; i += 3)
+    point.fromArray(world, i).applyMatrix4(inverse).toArray(nodes, i);
+  return { surface, nodes, positions: output!.positions.slice(), normals: output!.normals };
+}
+
+describe('the drawn grid', () => {
+  afterEach(() => {
+    editor().cancelWarp();
+    useEditor.setState(initial);
+  });
+
+  it('stays on a flat plate once its middle is pulled 2 mm', async () => {
+    // Coarse, where most grid edges cross a mesh edge or two, and fine.
+    for (const segments of [16, 64]) {
+      const id = await heldPlate(segments);
+      const model = editor().warp!.model!;
+      const path = traceWarpGridPathNow(model);
+      expect(path.failed).toBe(0);
+      editor().moveWarpPoints([{ id, target: [0.3, 0.2, 2] }], 'end');
+      const after = written();
+      const drawing = new WarpGridDrawing(path, model.restNodes.length / 3);
+      drawing.update(after.nodes, after.positions, after.normals, 1);
+      expect(worstGap(after.surface, drawing.drawn()), `${segments}`).toBeLessThan(0.02);
+      editor().cancelWarp();
+    }
+  });
+
+  it('starts a trace finished part way through a large drag from the surface last written', async () => {
+    const id = await heldPlate();
+    const model = editor().warp!.model!;
+    const nodeCount = model.restNodes.length / 3;
+    const rest = written();
+    // Chords are drawn while the trace runs; then a drag moves the grid alone, as on a region too
+    // large to write each frame, so the surface stays at rest.
+    const chords = new WarpGridDrawing(warpGridChords(model), nodeCount);
+    chords.update(rest.nodes, rest.positions, rest.normals, 1);
+    editor().moveWarpPoints([{ id, target: [0.3, 0.2, 2] }], 'end');
+    const dragged = written();
+    chords.update(dragged.nodes, rest.positions, rest.normals, 1);
+    // The trace finishes before the pointer is released.
+    const path = traceWarpGridPathNow(model);
+    const traced = new WarpGridDrawing(path, nodeCount);
+    traced.update(dragged.nodes, rest.positions, rest.normals, 1);
+    const during = traced.drawn();
+    // On release the surface is written.
+    traced.update(dragged.nodes, dragged.positions, dragged.normals, 2);
+    const after = traced.drawn();
+
+    // The node that moved most, and how far the points beside it moved with it.
+    let moved = 0,
+      node = 0;
+    for (let n = 0; n < nodeCount; n++) {
+      const d = Math.abs(dragged.nodes[n * 3 + 2] - rest.nodes[n * 3 + 2]);
+      if (d > moved) [moved, node] = [d, n];
+    }
+    expect(moved).toBeGreaterThan(1.5);
+    let checked = 0,
+      jump = 0;
+    for (let e = 0, s = 0; e < path.length.length; e++) {
+      const near = path.ends[e * 2] === node || path.ends[e * 2 + 1] === node;
+      for (let k = path.start[e]; k <= path.start[e + 1]; k++, s++) {
+        if (!near) continue;
+        jump = Math.max(jump, Math.abs(after[s * 6 + 2] - during[s * 6 + 2]));
+        if (k < path.start[e + 1]) {
+          // A point between nodes rose with them during the drag.
+          expect(during[s * 6 + 5]).toBeGreaterThan(0.25 * moved);
+          checked++;
+        }
+      }
+    }
+    expect(checked).toBeGreaterThan(4);
+    // Nothing jumps by more than a fraction of the move when the surface catches up.
+    expect(jump).toBeLessThan(0.25 * moved);
   });
 });
