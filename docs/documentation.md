@@ -32,7 +32,9 @@ client-side navigation enhancement.
 ## What's new
 
 `src/docs/changelog.ts` lists every version, newest first, and renders at
-`?guide=whats-new`. The sidebar and the overview link to the newest release.
+`?guide=whats-new`. The sidebar and the overview link to the newest release. The
+workbench header's What's new button shows the three newest releases and marks
+one the visitor hasn't opened yet.
 
 Every pull request adds one release at the top of the list:
 

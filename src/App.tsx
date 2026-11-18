@@ -62,6 +62,7 @@ import {
 import { driveAutosave, flushDriveBeforeReplace, useDrive } from './core/drive-sync';
 import { DriveButton, GoogleDriveDialog } from './components/GoogleDrive';
 import { ActivityCenter, NotificationToasts } from './components/ActivityCenter';
+import { WhatsNew } from './components/WhatsNew';
 import type { CommandId } from './core/commands';
 import { isEditableTarget } from './core/context-menu';
 import { EditorContextMenu } from './components/EditorContextMenu';
@@ -299,6 +300,7 @@ function Header({ openScene }: { openScene: () => void }) {
       </div>
       <div className="header-actions">
         <ActivityCenter />
+        <WhatsNew />
         <a
           className="icon-button"
           href="./docs/"
