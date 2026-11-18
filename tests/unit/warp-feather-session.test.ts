@@ -171,3 +171,42 @@ describe('handles on a feathered region', () => {
     expect(toast()).toBe('Some control points were outside the new region and were removed.');
   });
 });
+
+describe('a session’s own feather', () => {
+  it('keeps the width it was laid with through density changes and a live refusal', async () => {
+    editor().setWarpFeather({ enabled: true, width: 3 });
+    const part = plate();
+    useEditor.setState({ liveStatus: 'connected' });
+    await layOn(part, disc(part.geometry, 8));
+    expect(session().model!.feather).toMatchObject({ width: 3 });
+    // The page option changes; a density change rebuilds with the session's own width.
+    editor().setWarpFeather({ width: 1.5 });
+    await editor().setWarpDensity(2);
+    expect(session().model!.feather).toMatchObject({ width: 3 });
+    editor().addWarpPoint(hit(0.1, 0.1), faceAt(part.geometry, 0.1, 0.1));
+    editor().moveWarpPoints([{ id: session().points[0].id, target: [0.1, 0.1, 1] }], 'end');
+    const confirmed = editor().scene;
+    expect(editor().applyWarp()).toBe(true);
+    expect(editor().warpPending!.session.model!.feather).toMatchObject({ width: 3 });
+
+    editor().setWarpFeather({ enabled: false });
+    editor().receiveScene(confirmed);
+    editor().settleWarp(false);
+    expect(session().model!.feather).toMatchObject({ width: 3 });
+    await editor().setWarpDensity(4);
+    expect(session().stage).toBe('warp');
+    expect(session().model!.feather).toMatchObject({ width: 3 });
+    expect(editor().warpFeather.enabled).toBe(false);
+    useEditor.setState({ liveStatus: null });
+  });
+
+  it('takes the page option when the grid is laid again from the region stage', async () => {
+    editor().setWarpFeather({ enabled: true, width: 3 });
+    const part = plate();
+    await layOn(part, disc(part.geometry, 8));
+    editor().setWarpFeather({ enabled: false });
+    editor().setWarpRegion('painted');
+    await editor().layWarpGrid();
+    expect(session().model!.feather).toBeNull();
+  });
+});
