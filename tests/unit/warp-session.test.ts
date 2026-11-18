@@ -597,6 +597,34 @@ describe('warp session', () => {
     expect(failures()).toHaveLength(1);
   });
 
+  it('keeps the feather of the grid it has when a re-lay fails, and of the grid it reuses', async () => {
+    const a = plate('a', 0, 64);
+    setup([a], ['a']);
+    useEditor.setState({ warpFeather: { enabled: true, width: 3 } });
+    await warpDisc(a, 0, 0, 8);
+    expect(session()).toMatchObject({ feather: 3, laid: { feather: 3 } });
+    const model = session().model!;
+
+    editor().setWarpFeather({ width: 6 });
+    editor().setWarpRegion('painted');
+    job.failure = new Error('The warp worker stopped.');
+    await editor().layWarpGrid();
+    expect(session().model).toBe(model);
+    expect(session().feather).toBe(3);
+
+    // Back to the width it was laid with: the grid is reused, and a density change keeps it.
+    job.failure = null;
+    editor().setWarpFeather({ width: 3 });
+    editor().setWarpRegion('painted');
+    await editor().layWarpGrid();
+    expect(session().model).toBe(model);
+    expect(session().feather).toBe(3);
+    editor().setWarpFeather({ width: 6 });
+    await editor().setWarpDensity(2);
+    expect(session().model!.feather).toMatchObject({ width: 3 });
+    useEditor.setState({ warpFeather: { enabled: false, width: null } });
+  });
+
   it('never writes to the source geometry arrays', async () => {
     const a = plate('a');
     const arrays = ['position', 'normal', 'color'].map(
@@ -1966,6 +1994,59 @@ describe('warp handles', () => {
     expect(session().points.find(({ id }) => id === touched.id)!.auto).toBe(false);
     editor().closeWarpGap();
     expect(session().points.map(({ id }) => id)).toContain(touched.id);
+  });
+
+  it('close gap closes the box seam whatever the number of automatic points', async () => {
+    for (const count of [8, 16, 32]) {
+      const block = solid('block', new BoxGeometry(20, 20, 20, 12, 12, 12), [0, 0, 0]);
+      const wall = solid('wall', new BoxGeometry(20, 20, 20, 12, 12, 12), [21, 0, 0]);
+      setup([block, wall], ['block']);
+      editor().setTool('warp');
+      editor().setWarpRegion('whole');
+      editor().setWarpOptions({ distributeCount: count });
+      await editor().layWarpGrid();
+      const auto = session().points;
+      expect(auto).toHaveLength(count);
+      editor().closeWarpGap();
+      finishWarpSettling();
+      expect(session().points.length).toBeLessThan(count);
+      // Points away from the +X face stay.
+      for (const point of auto)
+        if (point.pin[0] < -9.9)
+          expect(session().points.some(({ id }) => id === point.id)).toBe(true);
+      expect(session().seam!.largestGap).toBeLessThan(0.05);
+
+      editor().cancelWarp();
+    }
+  });
+
+  it('close gap keeps an automatic point that has ridden with a bump when the seam barely moves it', async () => {
+    const a = plate('a', 0, 64);
+    // 1 mm over the plate's +X side only.
+    const wall = solid('wall', new BoxGeometry(14, 30, 4), [13, 0, 3]);
+    setup([a, wall], ['a']);
+    editor().setTool('warp');
+    await editor().layWarpGrid();
+    const rider = session().points.find(
+      (point) => Math.hypot(point.pin[0] + 2.5, point.pin[1] - 3.75) < 0.1,
+    )!;
+    expect(rider.auto).toBe(true);
+    const lift = addAt(a, -1.3, 3.6);
+    move(lift.id, [-1.3, 3.6, 5]);
+    finishWarpSettling();
+    const now = deformed(session().points.find(({ id }) => id === rider.id)!);
+    expect(now[2] - rider.pin[2]).toBeGreaterThan(2);
+    editor().closeWarpGap();
+    finishWarpSettling();
+    expect(session().gapTargets.length).toBeGreaterThan(0);
+    expect(session().points.some(({ id }) => id === rider.id)).toBe(true);
+    expect(
+      distance(deformed(session().points.find(({ id }) => id === rider.id)!), now),
+    ).toBeLessThan(0.05);
+    for (const { node, target } of session().gapTargets)
+      expect(
+        distance(session().state!.positions.subarray(node * 3, node * 3 + 3), target),
+      ).toBeLessThan(0.01);
   });
 
   it('close gap leaves the automatic points on a sheet it does not pull', async () => {

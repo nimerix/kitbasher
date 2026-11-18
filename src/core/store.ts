@@ -633,15 +633,16 @@ export function warpPointRadius(
   return radius > 0 ? Number(radius.toPrecision(2)) : 0;
 }
 
-type WarpSettled = { stage: 'region' | 'warp'; density: number };
-// The grid build in flight, and the stage and density to return to if it is cancelled or fails.
+type WarpSettled = Pick<WarpSession, 'feather'> & { stage: 'region' | 'warp'; density: number };
+// The grid build in flight, and the stage, density and feather to return to if it is cancelled or
+// fails.
 let warpBuild: { controller: AbortController; from: WarpSettled } | null = null;
 
 /** The session before this build, or before the build in flight that it replaces. */
 const settledWarp = (warp: WarpSession): WarpSettled =>
   warp.stage === 'building'
-    ? (warpBuild?.from ?? { stage: 'region', density: warp.density })
-    : { stage: warp.stage, density: warp.density };
+    ? (warpBuild?.from ?? { stage: 'region', density: warp.density, feather: warp.feather })
+    : { stage: warp.stage, density: warp.density, feather: warp.feather };
 
 function abortWarpBuild() {
   const build = warpBuild;
@@ -2396,22 +2397,29 @@ export const useEditor = create<EditorState>((set, get) => ({
         points: warp.points.filter((point) => !candidate(point)),
         gapTargets,
       };
-      const trial = { positions: held.positions.slice(), rotations: held.rotations.slice() };
+      const trial = {
+        positions: warp.state!.positions.slice(),
+        rotations: warp.state!.rotations.slice(),
+      };
       const guides = sessionGuides(free);
       settleGrid(model, warpConstraints(free, guides), trial, guides);
       let pull = 0;
       for (const { node, target } of gapTargets)
         pull = Math.max(pull, distanceTo(held.positions, node, target));
+      // Measured from where each is written now, so a point that has ridden with a bump is
+      // judged by what closing the seam would do to it.
       for (const point of warp.points)
         if (
           candidate(point) &&
-          point.samples.some(
-            ({ binding, restWorld, pin }) =>
+          point.samples.some(({ binding, restWorld }) => {
+            const now = deformPoint(model, warp.state!, binding, restWorld);
+            return (
               Math.hypot(
-                ...deformPoint(model, trial, binding, restWorld).map((value, a) => value - pin[a]),
+                ...deformPoint(model, trial, binding, restWorld).map((value, a) => value - now[a]),
               ) >
-              gapHoldShare * pull,
-          )
+              gapHoldShare * pull
+            );
+          })
         )
           released.add(point.id);
     }
@@ -3542,7 +3550,7 @@ async function layWarp(from: WarpSettled, fromRegion = false) {
     useEditor.setState({
       painting: false,
       paintHistory: [],
-      warp: { ...warp, stage: 'warp', density, seam: warpSeam(state.scene, warp) },
+      warp: { ...warp, stage: 'warp', density, feather, seam: warpSeam(state.scene, warp) },
     });
     return;
   }
