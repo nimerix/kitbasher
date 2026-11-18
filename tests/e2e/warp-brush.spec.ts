@@ -68,3 +68,57 @@ test("Warp's brush is fitted to the part and has its own radius", async ({ page 
   await page.mouse.move(box.x + ((x + 1) / 2) * box.width, box.y + ((1 - y) / 2) * box.height);
   await expect.poll(async () => (await brushes(page)).ring).toBe(2.4);
 });
+
+test("each key press moves Warp's brush slider and radius one step", async ({ page }) => {
+  await page.goto('/');
+  await expect(page.locator('canvas')).toBeVisible();
+  await page.keyboard.press('w');
+  const slider = page.getByRole('slider', { name: 'Brush radius slider' });
+  await slider.focus();
+  await slider.press('Home');
+  await expect(slider).toHaveValue('0');
+  let previous = (await brushes(page)).warp;
+  expect(previous).toBe(0.1);
+  for (let step = 1; step <= 10; step++) {
+    await slider.press('ArrowRight');
+    await expect(slider).toHaveValue(String(step));
+    const { warp } = await brushes(page);
+    expect(warp).toBeGreaterThan(previous);
+    previous = warp;
+  }
+  await slider.press('End');
+  await expect(slider).toHaveValue('200');
+  expect((await brushes(page)).warp).toBe(7.8);
+  await slider.press('ArrowLeft');
+  await expect(slider).toHaveValue('199');
+  expect((await brushes(page)).warp).toBeLessThan(7.8);
+  await slider.press('ArrowRight');
+  await expect(slider).toHaveValue('200');
+  expect((await brushes(page)).warp).toBe(7.8);
+});
+
+test("Warp's radius stays with each part when switching between them", async ({ page }) => {
+  await page.goto('/');
+  await expect(page.locator('canvas')).toBeVisible();
+  const radius = page.getByRole('spinbutton', { name: 'Brush radius', exact: true });
+  const warpOn = async (name: string) => {
+    if (await page.getByRole('button', { name: 'Cancel', exact: true }).isVisible())
+      await page.getByRole('button', { name: 'Cancel', exact: true }).click();
+    await page.keyboard.press('Escape');
+    await page.locator(`.part-select[title="${name}"]`).click();
+    await page.keyboard.press('w');
+    await expect(radius).toBeVisible();
+  };
+  await warpOn('Torso shell');
+  await radius.fill('2.4');
+  await radius.press('Enter');
+  await expect(radius).toHaveValue('2.4');
+  await warpOn('Left foot');
+  await radius.fill('4');
+  await radius.press('Enter');
+  await expect(radius).toHaveValue('4');
+  await warpOn('Torso shell');
+  await expect(radius).toHaveValue('2.4');
+  await warpOn('Left foot');
+  await expect(radius).toHaveValue('4');
+});
