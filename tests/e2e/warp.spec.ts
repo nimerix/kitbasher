@@ -295,6 +295,41 @@ test('closes a seam, moves a control point, applies, undoes and cancels', async 
   expect(cancelled.past).toBe(original.past);
 });
 
+test('toolbar transform buttons choose the control point gizmo while warping', async ({ page }) => {
+  await open(page);
+  await page.keyboard.press('w');
+  await page.getByRole('radio', { name: 'Whole part', exact: true }).click();
+  await page.getByRole('button', { name: 'Lay grid', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'Close gap', exact: true })).toBeEnabled();
+  const front = await screen(page, [-4.5, 10.5, 10]);
+  await page.mouse.click(front.x, front.y);
+  expect((await editorState(page)).points).toHaveLength(1);
+
+  const toolbar = page.locator('.toolbar');
+  for (const [title, gizmo] of [
+    ['Rotate (R)', 'rotate'],
+    ['Scale (S)', 'scale'],
+    ['Transform (T)', 'transform'],
+    ['Move (G)', 'translate'],
+  ]) {
+    await toolbar.getByTitle(title, { exact: true }).click();
+    const state = await page.evaluate(async () => {
+      const urls = performance.getEntriesByType('resource').map((entry) => entry.name);
+      const { useEditor } = await import(
+        urls.find((url) => /\/src\/core\/store\.ts(?:\?.*)?$/.test(url))!
+      );
+      const { tool, warp } = useEditor.getState();
+      return { tool, gizmo: warp?.gizmo, points: warp?.points.length };
+    });
+    expect(state, title).toEqual({ tool: 'warp', gizmo, points: 1 });
+  }
+  await expect(page.getByText('Warp discarded', { exact: false })).toHaveCount(0);
+
+  // Select still leaves the tool, which ends the session.
+  await toolbar.getByTitle('Select (V)', { exact: true }).click();
+  expect((await editorState(page)).stage).toBeNull();
+});
+
 test.describe('with clipping on, as by default', () => {
   test.use({ storageState: { cookies: [], origins: [] } });
 
