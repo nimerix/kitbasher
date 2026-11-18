@@ -451,11 +451,10 @@ because the scan lost a little surface. **Warp** bends the surface of one part t
 neighbour so the two touch or slightly overlap along the join. It is also a general way to
 reshape a scan locally without leaving Kitbasher. Warp is desktop only.
 
-1. Select one visible, unlocked part and choose **Warp** in the toolbar, or press `W`, then
-   **Start warp**.
-2. Choose the **Region**. **Painted** lets you paint the area to bend with the usual
-   surface brush; the edge of the painted area stays exactly where it is. With nothing
-   painted, or with **Whole part**, every surface of the part can bend. Choose **Lay grid**.
+1. Select one visible, unlocked part and choose **Warp** in the toolbar, or press `W`.
+2. Choose the **Region**. With **Painted**, paint the area to bend with the usual surface
+   brush; the edge of the painted area stays exactly where it is. With nothing painted, or
+   with **Whole part**, every surface of the part can bend. Then choose **Lay grid**.
 3. A coarse grid appears over the region. **Density** sets how coarse it is: coarser grids
    bend broadly, finer grids bend locally. Changing Density or the region lays a new grid
    and clears any earlier Close gap result.
@@ -463,13 +462,14 @@ reshape a scan locally without leaving Kitbasher. Warp is desktop only.
    `Shift` + click to add it to the selection. Move selected points with the same tools as
    parts: the move arrows, the combined Transform tool, `Shift + G` / `Shift + R` pointer
    placement, `Shift` for fine adjustment, and numeric entry. While warping, `G` / `R` / `S` /
-   `T` switch how points move. A single point only moves; rotate and scale need two or more
-   points. `Delete` removes the selected points, and `Ctrl/⌘ + Z` steps back through your
-   point edits without touching the scene's undo history.
+   `T` and the toolbar's Move, Rotate, Scale and Transform buttons switch how points move. A
+   single point only moves; rotate and scale need two or more points. `Delete` removes the
+   selected points, and `Ctrl/⌘ + Z` steps back through your strokes and point edits without
+   touching the scene's undo history.
 5. A control point you have not moved holds its spot, which keeps the warp from spreading
    past where you want it.
 6. Turn on **Snap to neighbour** and a dragged point locks onto the nearest surface of
-   another visible part, pushed in by the **Overlap** depth (0.1 mm by default).
+   another visible part within 5 mm, pushed in by the **Overlap** depth (0.1 mm by default).
 7. **Close gap** pulls the surfaces that face the neighbour, within 60 degrees and within
    5 mm of it, onto the neighbour's surface at the Overlap depth. Keep adjusting with
    control points afterwards. Between grid nodes a small residual gap can remain; raise
