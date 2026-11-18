@@ -320,6 +320,9 @@ describe('joinedRanges', () => {
       for (let a = 0; a < 3; a++) expect(covered.has(item * 3 + a)).toBe(true);
     // Only the narrow gaps were joined.
     expect(covered.size).toBeLessThan(items.length * 3 * 400);
+    // Of equal gaps, only as many join as the cap needs.
+    const even = Array.from({ length: warpRangeCap + 10 }, (_, i) => i * 1000);
+    expect(joinedRanges(even, 3).length / 2).toBe(warpRangeCap);
   });
 });
 
