@@ -97,12 +97,13 @@ handles (section 6) and the brush-size shortcuts all use it while warping.
 ### 3. Even pins
 
 **Distribute points** in the Control points section: a count (4, 8, 16, 32; default 8) and a
-button. It adds that many unmoved points by farthest-point sampling over the grid's free
-nodes, measured along grid edges, seeded by the points already present. It is deterministic
-(fixed first seed and tie-break), never puts two points on one node, gives each disconnected
-piece of the region a point before doubling up, and stops at the number of free nodes. Each
-point sits on a node's own scan vertex and pins the surface where it is now. One session
-undo step.
+button. It adds that many unmoved points. First every connected piece of the region that has no
+point gets one, larger pieces first, at its node farthest along the grid from its edge. Then
+farthest-point sampling over the free nodes, measured along grid edges, from the points
+present, those chosen and the region's edge. It is deterministic (lowest node first among
+ties), never puts two points on one node, and stops at the number of free nodes. Each point sits
+on a node's own scan vertex and pins the surface where it is now. One session undo step. With a
+feathered region it uses painted free nodes only.
 
 Distributed points are ordinary points with radius 0 (section 4), marked automatic until
 the user moves or edits them.
@@ -110,49 +111,62 @@ the user moves or edits them.
 When the region is effectively the whole part (Whole part, or Painted with nothing
 painted), the Region stage shows "Place points automatically" (on, with the same count),
 and the first lay of the grid distributes them. Changing density, returning from Edit
-region, or deleting them never places them again. Close gap removes automatic points that
-are still untouched and sit on the nodes it is about to pull, in the same undo step, so a
-seam still closes; points the user placed or moved are kept.
+region, or deleting them never places them again.
+
+An untouched automatic point inside the reach of a moved handle rides to where the guides take
+the surface at its nodes, so a bump rises smoothly over it instead of pinching; it holds its pin
+wherever nothing guided moves. A point the user placed always holds.
+
+Close gap releases, in the same undo step, the untouched automatic points that would hold its
+seam open: it walks the grid from the nodes it pulls, never onto a node facing away from where
+its pulled node goes, settles once without the automatic points it reached, and releases those
+whose spot that settle moves by more than 5 % of the largest pull. Points on other pieces, on
+the far side of a thin wall, or that the seam would not move stay. Points the user placed or
+moved are kept.
 
 ### 4. Radius and falloff
 
-Every handle (a control point, or a line or area from section 6) has a **radius** in mm and
-a **falloff** from 0 to 100 %, edited in the Control points section for the selected
-handles. New handles take the last values used. Radius is 0 ("point only") or a value on a
-fitted logarithmic slider. Defaults: radius 6 % of the part's size, but no more than a
-quarter of the region's extent; falloff 100 %.
+Every handle has a **radius** in mm and a **falloff** from 0 to 100 %, edited in the Control
+points section for the selected handles. New handles take the last values set. Until the user
+sets a radius, a new point takes the larger of 6 % of the part's size and 4.5 node spacings
+where it is clicked, no more than a quarter of the region's extent. Radius 0 is a bare point;
+automatic points are radius 0. Effectively whole regions are laid at the 2,000-node level and
+painted ones at 500 unless the user has chosen a density.
 
-The handle's sample constraints stay exactly as they are today, at every radius: they are
-what puts the grabbed surface on the target. Radius adds **guides** around them.
+The handle's sample constraints stay exactly as they are at every radius: they place the grab.
+Radius adds soft per-node **guides** around them.
 
-- **Reach.** One bounded multi-source Dijkstra over grid edges (world rest lengths), seeded
-  from the nodes each sample is bound to, at their distance from the sample. Free nodes
-  within the radius are in reach. Cached per handle; falloff remaps cached distances.
-- **Weight.** `w` is 1 out to `radius × (1 − falloff)`, then a smoothstep to 0 at the
-  radius. Falloff 0 is a hard-edged plateau, with no division by a zero width.
-- **Guide.** Each node in reach gets a soft target `base(n) + w × D`, where `D` is how far
-  the handle has moved from its pin, at stiffness `κ × w × (that node's edge diagonal)`.
-  Stiffness reaches zero at the radius, so nothing switches on abruptly there.
-- **Baseline.** `base(n)` is where the node was when the guide was made, so an unmoved
-  handle's guide holds the surface as it is and adding a handle changes nothing. Whenever a
-  handle's reach is rebuilt (radius change, density change), `base(n)` is the node's current
-  settled position minus `w_before(n) × D`, with `w_before` the weight that node had from
-  this handle before the change. After a density change this reproduces the shape that was
-  there; after a radius change it widens or narrows the handle's own bump.
-- **Several handles on one node.** Stiffnesses add, and the target is their
-  stiffness-weighted mean. There is no case with two exact but different answers: only
-  sample constraints are exact.
-- **Solver.** `solveWarp` takes an optional per-node guide set (node, stiffness, target):
-  one diagonal term and one right-hand-side term per node. Guide nodes and stiffnesses are
-  part of the cached system's key; targets are not, so a drag reuses the system.
-- Gap targets stay full-strength constraints and are not skipped under a guide.
-- If the radius reaches no node beyond the sample's own, the handle behaves as radius 0 and
-  the panel says that a finer grid would let the radius take effect.
+- **Baseline.** A handle refers to a snapshot of the settled grid (positions and rotations),
+  taken when it is created, and replaced by the settled grid when an unmoved handle with no
+  active guides starts its first move or first gets a radius. Snapshots are never changed and
+  are shared by reference between handles made on the same surface and all undo versions.
+- **Reach.** Distance from the footprint is the larger of the straight-line distance and the
+  path along grid edges divided by 1.16 (the overstatement of edge paths on the simplified
+  flat grids, median 1.06, 99th percentile 1.15). It is round on flat areas and cannot cross a
+  fold. Fixed nodes, and with a feather unpainted ones, are never reached. A footprint is a set
+  of source points plus nodes that move as one; a point's footprint is its sample alone.
+- **Weight.** `w` is 1 out to `radius − fade`, then a smoothstep to 0 at the radius. The fade
+  runs from 1.5 node spacings, the narrowest the grid holds, at falloff 0 to the whole radius at
+  falloff 100 %, so every step of the slider changes the result. The panel states the fade.
+- **Activation.** All of a handle's radius guides are scaled by a smoothstep that rises from 0
+  at one local node spacing of radius to 1 at two, so the surface is continuous in the radius.
+- **Terms.** At each node a handle has a profile: unmoved, `w`, holding softly over its radius;
+  moved, 1 out to the radius, fading over a band of 2.5 spacings (3.5 at falloff 0) to a quarter,
+  then to 0 over 10 more spacings. It drives the node toward `baseline + offset` at stiffness
+  `κ w diag` and holds it at its baseline for the rest of the profile, so alone it targets
+  `baseline + w × offset`, never more than the offset. A holding term, and all of an unmoved
+  handle's profile, gives way by the largest driving weight any other moved handle has there.
+  Unmoved becomes moved over the first quarter spacing of travel, so nothing jumps. `κ = 4`.
+- **Accumulation.** Stiffnesses add and the target is their stiffness-weighted mean; nothing
+  depends on the order of handles. Gap-target nodes get no guides.
+- **Solver.** `solveWarp` takes the per-node guide set. Guide nodes and stiffnesses are part of
+  the cached system's key; targets are not, so a drag reuses the system.
+- **Edits.** A radius or falloff change only recomputes reach and weights; nothing settles on a
+  slider frame. Each slider gesture has one owner and is one undo step.
 
-`κ` is the builder's to set. It is right when, on a fine flat sheet with a far fixed border,
-a point lifted by `h` with falloff 100 % gives a written surface that falls monotonically
-from the point, is at least `0.9 h` at a tenth of the radius, within `0.1 h` of
-`h × smoothstep` across the radius, and under `0.03 h` beyond it.
+On a fine flat sheet with a far fixed border, a point lifted by `h` with falloff 100 % falls
+monotonically from the point, is 0.957 h at a tenth of the radius, within 0.08 h of
+`h × smoothstep` across the radius and under 0.02 h beyond it.
 
 ### 5. Feathered edge
 
@@ -229,16 +243,19 @@ smaller than a cell and a 60-node grid.
 
 ### Data model
 
-`WarpPoint` becomes the handle above. A point is a handle with one sample and keeps its
-`target` meaning. `moveWarpPoints` keeps taking one target per handle. `selectedPoints`,
-session undo (which compares radius and falloff as well as targets), rebinding after a
-density or region change, undo snapshots, Apply's restart and the live-refusal recovery all
-carry handles. Rebinding drops samples whose face left the region and a handle with none
-left.
+`WarpPoint` is a `WarpHandle`: `kind` (`point`; `line` and `area` are reserved), immutable
+samples, `radius`, `falloff`, `auto`, one `target` (null while unmoved), `baseline` (a shared
+snapshot) and a cached `reach`. `moveWarpPoints` keeps taking one target per handle.
 
-A pure module, `warp-handles.ts`, turns handles and a model into solver input: reach,
-weights, guides and baselines, and farthest-point distribution. It is unit-tested without
-the store.
+Each session undo step holds the points, gap targets, the settled grid they held and the
+settings new points take, so undo restores the surface exactly without solving. Laying the
+same region at the same density and feather keeps the model. A real rebuild carries each
+distinct snapshot to the new grid once, through the old binding of each new node's scan vertex,
+rebinds samples, and drops handles whose samples are bound only to fixed nodes, from the session
+and its undo steps; undo across it settles from the carried grid.
+
+A pure module, `warp-handles.ts`, turns handles and a model into solver input: reach, weights,
+guides, snapshots and their transfer, and distribution. It is unit-tested without the store.
 
 ## Approaches considered
 

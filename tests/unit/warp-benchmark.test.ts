@@ -204,7 +204,7 @@ it.skipIf(!process.env.KITBASHER_WARP_BENCH)(
       editor().setScene({ name: 'Bench', parts: [part], joints: [] });
       useEditor.setState({ selected: ['scan'] });
       editor().setTool('warp');
-      useEditor.setState({ warp: { ...editor().warp!, faces, density: 6 } });
+      useEditor.setState({ warp: { ...editor().warp!, faces, density: 6, densityChosen: true } });
       await editor().layWarpGrid();
       editor().setWarpPointSettings({ radius }, 'end');
       editor().addWarpPoint({ partId: 'scan', point, normal: [0, 1, 0] }, top);
@@ -220,14 +220,27 @@ it.skipIf(!process.env.KITBASHER_WARP_BENCH)(
       const endStart = performance.now();
       editor().moveWarpPoints([{ id, target: [point[0], point[1] + 3, point[2]] }], 'end');
       const endMs = performance.now() - endStart;
+      // The first frame of a radius gesture and of a falloff gesture on the moved point.
+      editor().selectWarpPoints([id]);
+      const timed = (settings: { radius?: number; falloff?: number }) => {
+        const start = performance.now();
+        editor().setWarpPointSettings(settings, 'drag');
+        const ms = performance.now() - start;
+        editor().setWarpPointSettings(settings, 'end');
+        return ms;
+      };
+      const radiusFrameMs = timed({ radius: radius ? radius + 0.5 : 8 });
+      const falloffFrameMs = timed({ falloff: 0.7 });
       frames.sort((a, b) => a - b);
       result[`radius-${radius}`] = {
         gridNodes: editor().warp!.model!.grid.nodes.length,
         interiorVertices: editor().warp!.model!.region.interiorCount,
-        guidedNodes: handle.reach?.effective ? handle.reach.node.length : 0,
+        guidedNodes: handle.reach && handle.reach.activation > 0 ? handle.reach.node.length : 0,
         frameMedianMs: frames[frames.length >> 1],
         frameP95Ms: frames[Math.floor(frames.length * 0.95)],
         endMs,
+        radiusFrameMs,
+        falloffFrameMs,
       };
       console.log(radius, JSON.stringify(result[`radius-${radius}`]));
       editor().cancelWarp();
