@@ -21,6 +21,7 @@ import { hiddenByIsolation } from '../core/isolation';
 import { PrecisionDrag } from '../core/precision';
 import { finishWarpDrag, useEditor, type WarpBaseline, type WarpSession } from '../core/store';
 import { patchGeometry } from '../core/surfaces';
+import { writtenNodePositions } from '../core/warp-evaluate';
 import {
   transformSelection,
   warpMovesFromPatches,
@@ -174,7 +175,8 @@ function Seam({ warp }: { warp: WarpSession }) {
 }
 
 /** World position of each grid node, as the grid is drawn. */
-const gridNodePositions = (warp: WarpSession) => warp.state!.positions;
+const gridNodePositions = (warp: WarpSession) =>
+  warp.model!.blend ? writtenNodePositions(warp.model!, warp.state!) : warp.state!.positions;
 
 /**
  * Grid edges are chords between scan vertices, so on a curved surface their middles dip under
