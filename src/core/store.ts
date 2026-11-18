@@ -88,7 +88,7 @@ import {
 } from './warp-evaluate';
 import { defaultWarpDensity, warpDensityNodes } from './warp-grid';
 import { buildWarpModelJob } from './warp-job';
-import type { WarpModel, WarpModelInput } from './warp-model';
+import { isPaintedFace, type WarpModel, type WarpModelInput } from './warp-model';
 import {
   closeGapTargets,
   measureSeam,
@@ -232,6 +232,12 @@ export interface WarpSession {
 }
 type WarpEdit = Pick<WarpSession, 'points' | 'gapTargets'>;
 
+export interface WarpFeatherOption {
+  enabled: boolean;
+  /** mm; null until the switch is first turned on, which takes the brush radius. */
+  width: number | null;
+}
+
 interface WarpRecovery {
   partId: string;
   source: BufferGeometry;
@@ -269,6 +275,8 @@ interface EditorState {
   paintHistory: (SurfacePair[] | Pick<WarpSession, 'faces' | 'seed'>)[];
   operation: AssemblyOperation;
   warp: WarpSession | null;
+  /** Feathered edge for painted warp regions, remembered for the page session and never saved. */
+  warpFeather: WarpFeatherOption;
   /** First warp in the queued or submitted edit, available to reopen if that batch is refused. */
   warpPending: WarpRecovery | null;
   warpInFlight: WarpRecovery | null;
@@ -356,6 +364,7 @@ interface EditorState {
   paintWarpRegion: (point: SurfacePoint, face: number, erase?: boolean, begin?: boolean) => boolean;
   layWarpGrid: () => Promise<void>;
   setWarpDensity: (density: number) => Promise<void>;
+  setWarpFeather: (patch: { enabled?: boolean; width?: number }) => void;
   cancelWarp: (notice?: string) => void;
   /** Adds a control point where the warped surface was clicked, and selects it. */
   addWarpPoint: (point: SurfacePoint, face: number) => void;
@@ -541,7 +550,12 @@ function disposeWarpPreview(preview: BufferGeometry | null) {
 }
 
 /** Copies, because the build job transfers its input arrays to a worker. */
-function warpModelInput(part: Part, faces: number[] | null, density: number): WarpModelInput {
+function warpModelInput(
+  part: Part,
+  faces: number[] | null,
+  density: number,
+  feather = 0,
+): WarpModelInput {
   const mesh = binaryGeometry(part.geometry);
   return {
     positions: mesh.positions.slice(),
@@ -550,6 +564,7 @@ function warpModelInput(part: Part, faces: number[] | null, density: number): Wa
     matrix: partMatrix(part).elements,
     faces,
     density,
+    feather,
   };
 }
 
@@ -566,9 +581,11 @@ function warpBinding(model: WarpModel, triangle: number, barycentric: Vec3) {
   };
 }
 
-/** Binds a point to a model, or returns null when its face is outside the model's region. */
+/** Binds a point to a model, or returns null when its face is not painted in the model's region. */
 function bindWarpPoint(model: WarpModel, point: WarpPoint): WarpPoint | null {
-  const triangle = regionTriangleOf(model.region, point.face);
+  const triangle = isPaintedFace(model, point.face)
+    ? regionTriangleOf(model.region, point.face)
+    : -1;
   return triangle < 0 ? null : { ...point, ...warpBinding(model, triangle, point.barycentric) };
 }
 
@@ -882,6 +899,7 @@ export const useEditor = create<EditorState>((set, get) => ({
   paintHistory: [],
   operation: blankOperation(),
   warp: null,
+  warpFeather: { enabled: false, width: null },
   warpPending: null,
   warpInFlight: null,
   view: {
@@ -1586,6 +1604,15 @@ export const useEditor = create<EditorState>((set, get) => ({
     set({ warp: { ...warp, density: level } });
     if (warp.stage !== 'region') await layWarp(from);
   },
+  setWarpFeather: (patch) =>
+    set((state) => {
+      const enabled = patch.enabled ?? state.warpFeather.enabled;
+      const width =
+        patch.width !== undefined && Number.isFinite(patch.width)
+          ? Math.max(0, Math.min(100, patch.width))
+          : (state.warpFeather.width ?? (enabled ? state.brushRadius : null));
+      return { warpFeather: { enabled, width } };
+    }),
   cancelWarp: (notice) => {
     const { warp } = get();
     if (!warp) return;
@@ -1601,9 +1628,15 @@ export const useEditor = create<EditorState>((set, get) => ({
       warp = state.warp,
       model = warp?.model;
     if (!warp || !model || state.tool !== 'warp' || warp.stage !== 'warp') return;
-    const triangle = point.partId === warp.partId ? regionTriangleOf(model.region, face) : -1;
+    const triangle =
+      point.partId === warp.partId && isPaintedFace(model, face)
+        ? regionTriangleOf(model.region, face)
+        : -1;
     if (triangle < 0) {
-      state.notify('Click inside the warp region.', 'info');
+      state.notify(
+        model.painted ? 'Click on the painted area.' : 'Click inside the warp region.',
+        'info',
+      );
       return;
     }
     // The click lands on the surface as it is warped, so it is measured against that triangle.
@@ -2802,6 +2835,8 @@ async function layWarp(from: WarpSettled) {
   const build = (warpBuild = { controller, from });
   // An empty painted region would leave the grid nothing to simplify, so it means the whole part.
   const faces = warp.region === 'painted' && warp.faces.length ? warp.faces : null;
+  const feather =
+    faces && state.warpFeather.enabled ? (state.warpFeather.width ?? state.brushRadius) : 0;
   const taskId = startTask({
     title: 'Preparing warp',
     detail: `${(faces?.length ?? triangleCount(part.geometry)).toLocaleString()} triangles`,
@@ -2817,7 +2852,10 @@ async function layWarp(from: WarpSettled) {
   useEditor.setState({ painting: false, warp: { ...warp, stage: 'building' } });
   let model: WarpModel;
   try {
-    model = await buildWarpModelJob(warpModelInput(part, faces, warp.density), controller.signal);
+    model = await buildWarpModelJob(
+      warpModelInput(part, faces, warp.density, feather),
+      controller.signal,
+    );
   } catch (error) {
     // A newer build or a cancelled session has already taken over.
     if (warpBuild !== build) return;

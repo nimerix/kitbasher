@@ -1,10 +1,12 @@
 import { LoaderCircle, TriangleAlert } from 'lucide-react';
 import { clipLimits } from '../core/clipping';
+import { fittedSizeRange, partSize } from '../core/geometry';
 import { useEditor, warpChanges } from '../core/store';
+import type { Part } from '../core/types';
 import { warpDensityNodes } from '../core/warp-grid';
 import { SurfaceBrushControls } from './SurfaceBrushControls';
 import { TransformAdjustments } from './TransformAdjustments';
-import { NumericInput, RadioGroup, Section } from './ui';
+import { LogRangeInput, NumericInput, RadioGroup, Section } from './ui';
 
 /** Ends the session without a notice and leaves the tool. */
 function cancel() {
@@ -13,11 +15,61 @@ function cancel() {
   state.setTool('select');
 }
 
+/** Feathered edge for a painted region: a switch, and a width once it is on. */
+function FeatherEdge({ part }: { part: Part | undefined }) {
+  const feather = useEditor((s) => s.warpFeather);
+  const brushRadius = useEditor((s) => s.brushRadius);
+  const width = feather.width ?? brushRadius;
+  const range = fittedSizeRange(part ? partSize(part) : 0);
+  const setWidth = (value: number) => useEditor.getState().setWarpFeather({ width: value });
+  return (
+    <>
+      <div className="appearance-row">
+        <span>Feather edge</span>
+        <button
+          role="switch"
+          aria-label="Feather the painted edge"
+          aria-checked={feather.enabled}
+          className={`toggle ${feather.enabled ? 'on' : ''}`}
+          onClick={() => useEditor.getState().setWarpFeather({ enabled: !feather.enabled })}
+        >
+          <span />
+        </button>
+      </div>
+      {feather.enabled ? (
+        <>
+          <label className="brush-radius">
+            <span>Feather width</span>
+            <NumericInput
+              label="Feather width"
+              value={width}
+              min={0}
+              max={100}
+              step={0.1}
+              onCommit={setWidth}
+            />
+            <small>mm</small>
+          </label>
+          <LogRangeInput
+            className="brush-radius-slider"
+            label="Feather width slider"
+            value={width}
+            min={range.min}
+            max={range.max}
+            onChange={setWidth}
+          />
+        </>
+      ) : null}
+    </>
+  );
+}
+
 export function WarpControls() {
   const warp = useEditor((s) => s.warp);
   const part = useEditor((s) =>
     s.warp ? s.scene.parts.find((p) => p.id === s.warp!.partId) : undefined,
   );
+  const feathered = useEditor((s) => s.warpFeather.enabled);
   if (!warp)
     return (
       <Section title="Warp">
@@ -40,9 +92,11 @@ export function WarpControls() {
         <Section title="Region">
           <p className="anchor-help">
             Warping <strong>{part?.name}</strong>.{' '}
-            {painted
-              ? 'Paint the area to bend. Its edge stays where it is.'
-              : 'Every surface of the part can bend.'}
+            {!painted
+              ? 'Every surface of the part can bend.'
+              : feathered
+                ? 'Paint the area to bend. Its edge blends into the surface around it.'
+                : 'Paint the area to bend. Its edge stays where it is.'}
           </p>
           <RadioGroup
             label="Warp region"
@@ -62,6 +116,7 @@ export function WarpControls() {
                   ? `${warp.faces.length.toLocaleString()} triangles painted.`
                   : 'Nothing painted yet, so the grid covers the whole part.'}
               </p>
+              <FeatherEdge part={part} />
             </>
           ) : null}
         </Section>
@@ -105,6 +160,13 @@ export function WarpControls() {
           <span>Fine</span>
         </div>
         <p className="anchor-help">Coarser grids bend broadly. Finer grids bend locally.</p>
+        {warp.model?.feather?.joined === 0 ? (
+          <p className="warp-warning" role="status">
+            <TriangleAlert size={13} aria-hidden="true" />
+            The mesh beside the paint is too coarse for a {warp.model.feather.width} mm feather, so
+            the painted edge stays fixed. Edit the region to widen it.
+          </p>
+        ) : null}
         {building ? (
           <p className="warp-building" role="status">
             <LoaderCircle size={13} className="spin" aria-hidden="true" />

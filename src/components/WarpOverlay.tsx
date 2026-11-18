@@ -9,6 +9,7 @@ import { hiddenByIsolation } from '../core/isolation';
 import { PrecisionDrag } from '../core/precision';
 import { finishWarpDrag, useEditor, type WarpBaseline, type WarpSession } from '../core/store';
 import { patchGeometry } from '../core/surfaces';
+import { writtenNodePositions } from '../core/warp-evaluate';
 import {
   transformSelection,
   warpMovesFromPatches,
@@ -182,7 +183,7 @@ function GridLines({ warp }: { warp: WarpSession }) {
   useEffect(() => () => geometry.dispose(), [geometry]);
   useLayoutEffect(() => {
     const position = geometry.getAttribute('position') as BufferAttribute;
-    (position.array as Float32Array).set(warp.state!.positions);
+    writtenNodePositions(model, warp.state!, position.array as Float32Array);
     position.needsUpdate = true;
     geometry.computeBoundingSphere();
     invalidate();
