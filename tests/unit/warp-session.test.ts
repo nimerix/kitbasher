@@ -1261,7 +1261,7 @@ describe('warp points, close gap and apply', () => {
     }
   });
 
-  it('apply is refused after the part changes', async () => {
+  it('apply is refused while the part is locked', async () => {
     const a = plate('a');
     setup([a], ['a']);
     await warpDisc(a, 0, 0, 8);
@@ -1272,7 +1272,7 @@ describe('warp points, close gap and apply', () => {
     useEditor.setState({ toast: null });
 
     expect(editor().applyWarp()).toBe(false);
-    expect(toast()).toBe('The part changed, so the warp could not be applied.');
+    expect(toast()).toBe('Unlock a to apply the warp.');
     expect(partOf('a').geometry).toBe(a.geometry);
     expect(editor().past).toHaveLength(past);
     expect(session().stage).toBe('warp');
