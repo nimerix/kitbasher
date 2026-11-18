@@ -621,6 +621,12 @@ function deformWarpPreview({ model, state, output, preview }: WarpSession) {
   return folds;
 }
 
+/** Solves `state` until it settles, warm-started from it. */
+function settleGrid(model: WarpModel, constraints: WarpConstraint[], state: WarpState) {
+  for (let i = 0; i < warpSettleIterations; i++)
+    if (solveWarp(model.grid, model.restNodes, constraints, state, 1) < warpSettleTolerance) break;
+}
+
 /**
  * Solves the grid for the session's points and gap targets. A drag takes a few iterations and
  * deforms the surface only for regions small enough to follow the pointer. The end of an edit
@@ -638,10 +644,7 @@ function solveWarpSession(
   if (!constraints.length) warp = { ...warp, state: createWarpState(model.restNodes) };
   else if (gesture === 'drag')
     solveWarp(model.grid, model.restNodes, constraints, warp.state!, warpDragIterations);
-  else
-    for (let i = 0; i < warpSettleIterations; i++)
-      if (solveWarp(model.grid, model.restNodes, constraints, warp.state!, 1) < warpSettleTolerance)
-        break;
+  else settleGrid(model, constraints, warp.state!);
   if (gesture === 'end')
     return {
       ...warp,
@@ -1594,11 +1597,12 @@ export const useEditor = create<EditorState>((set, get) => ({
       warp = state.warp,
       model = warp?.model;
     if (!warp || !model || warp.stage !== 'warp') return;
-    const { neighbours, indexing } = warpNeighbours(
-      state.scene,
-      warp.partId,
-      warpBounds(warp.state!),
-    );
+    // Found on the surface the points alone hold, so pressing again or changing the overlap keeps
+    // the nodes earlier targets pulled in.
+    const held = createWarpState(model.restNodes);
+    const constraints = warpConstraints({ ...warp, gapTargets: [] });
+    if (constraints.length) settleGrid(model, constraints, held);
+    const { neighbours, indexing } = warpNeighbours(state.scene, warp.partId, warpBounds(held));
     if (indexing.length) {
       state.notify(
         `Still preparing ${indexing.join(', ')}. Try Close gap again when it finishes.`,
@@ -1613,7 +1617,8 @@ export const useEditor = create<EditorState>((set, get) => ({
       );
       return;
     }
-    const gapTargets = closeGapTargets(model, warp.state!, neighbours, warp.overlap);
+    const gapTargets = closeGapTargets(model, held, neighbours, warp.overlap);
+    if (same(gapTargets, warp.gapTargets)) return;
     set({
       warp: solveWarpSession(state.scene, { ...warp, gapTargets, undo: withUndo(warp) }, 'end'),
     });
