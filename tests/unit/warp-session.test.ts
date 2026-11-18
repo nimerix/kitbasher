@@ -830,6 +830,39 @@ describe('warp points, close gap and apply', () => {
     expect(session().seam!.largestGap).toBeLessThanOrEqual(0);
   });
 
+  it('close gap again finds the same targets and keeps the seam closed', async () => {
+    const block = solid('block', new BoxGeometry(20, 20, 20, 12, 12, 12), [0, 0, 0]);
+    const wall = solid('wall', new BoxGeometry(20, 20, 20, 12, 12, 12), [21, 0, 0]);
+    setup([block, wall], ['block']);
+    editor().setTool('warp');
+    editor().setWarpRegion('whole');
+    await editor().layWarpGrid();
+    editor().addWarpPoint(
+      { partId: 'block', point: [-10, 0.5, 0.5], normal: [-1, 0, 0] },
+      faceAt(block.geometry, -10, 0.5, 0.5),
+    );
+    editor().closeWarpGap();
+    const first = session().gapTargets;
+    expect(first.length).toBeGreaterThan(0);
+    const steps = session().undo.length;
+
+    editor().closeWarpGap();
+    expect(session().gapTargets).toEqual(first);
+    editor().closeWarpGap();
+    expect(session().gapTargets).toEqual(first);
+    // Nothing changed, so nothing was recorded.
+    expect(session().undo).toHaveLength(steps);
+
+    editor().setWarpOptions({ overlap: 0.3 });
+    editor().closeWarpGap();
+    expect(session().gapTargets.map(({ node }) => node)).toEqual(first.map(({ node }) => node));
+    expect(session().seam!.largestGap).toBeLessThanOrEqual(-0.25);
+    editor().setWarpOptions({ overlap: 0.1 });
+    editor().closeWarpGap();
+    expect(session().gapTargets).toEqual(first);
+    expect(session().seam!.largestGap).toBeLessThanOrEqual(0);
+  });
+
   it('undoWarpEdit restores the previous points and surface', async () => {
     const a = plate('a');
     setup([a], ['a']);
