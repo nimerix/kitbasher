@@ -33,6 +33,7 @@ import { activeTransformTool, transformSelection } from '../../src/core/transfor
 import { bindPoint } from '../../src/core/warp-bind';
 import { deformPoint } from '../../src/core/warp-evaluate';
 import { defaultWarpDensity } from '../../src/core/warp-grid';
+import { reachWeight } from '../../src/core/warp-handles';
 import type { WarpModel } from '../../src/core/warp-model';
 import { WarpRole } from '../../src/core/warp-region';
 import type {
@@ -1984,8 +1985,11 @@ describe('warp handles', () => {
     let vertex = -1;
     for (let i = 0; i < source.count && vertex < 0; i++)
       if (source.getX(i) === 5 && source.getY(i) === 0) vertex = i;
-    // Falloff 0.5 fades from 4 mm out: 2 × (1 − smoothstep(1 / 4)).
-    expect(Math.abs(session().output!.positions[vertex * 3 + 2] - 1.69)).toBeLessThan(0.15);
+    // The written surface follows the point's profile: falloff 0.5, or the narrowest edge this
+    // grid holds.
+    const expected = 2 * reachWeight(5, 8, 0.5, session().points[0].reach!.edge);
+    expect(expected).toBeGreaterThan(0.5);
+    expect(Math.abs(session().output!.positions[vertex * 3 + 2] - expected)).toBeLessThan(0.15);
 
     // The same settings again record nothing.
     editor().setWarpPointSettings({ radius: 8 }, 'end');

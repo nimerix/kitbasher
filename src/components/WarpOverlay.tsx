@@ -198,14 +198,17 @@ function GridLines({ warp }: { warp: WarpSession }) {
   );
 }
 
-/** The grid nodes the selected points move, brighter where they carry more of the move. */
+/**
+ * The grid nodes the selected points move, lighter where they carry more of the move, each on a
+ * dark dot so it shows on light and dark parts alike.
+ */
 function Reach({ warp }: { warp: WarpSession }) {
   const geometry = useMemo(() => {
     const positions: number[] = [],
       colors: number[] = [];
     const color = new Color(),
-      faint = new Color('#3a3f46'),
-      full = new Color(pointAccent);
+      faint = new Color('#6b7178'),
+      full = new Color('#ffd9b0');
     const { positions: nodes } = warp.state!;
     for (const point of warp.points) {
       const { reach } = point;
@@ -226,9 +229,14 @@ function Reach({ warp }: { warp: WarpSession }) {
   useEffect(() => () => geometry?.dispose(), [geometry]);
   if (!geometry) return null;
   return (
-    <points geometry={geometry} raycast={noRaycast} renderOrder={7}>
-      <pointsMaterial vertexColors size={5} sizeAttenuation={false} depthWrite={false} />
-    </points>
+    <>
+      <points geometry={geometry} raycast={noRaycast} renderOrder={7}>
+        <pointsMaterial color="#1b1e22" size={7} sizeAttenuation={false} depthWrite={false} />
+      </points>
+      <points geometry={geometry} raycast={noRaycast} renderOrder={8}>
+        <pointsMaterial vertexColors size={4} sizeAttenuation={false} depthWrite={false} />
+      </points>
+    </>
   );
 }
 
