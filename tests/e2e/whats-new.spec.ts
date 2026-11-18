@@ -1,5 +1,9 @@
+import { execSync } from 'node:child_process';
 import { expect, test } from '@playwright/test';
-import { latestRelease } from '../../src/docs/changelog';
+import { latestRelease, releaseId, releases } from '../../src/docs/changelog';
+
+// The development server builds from this checkout, so it reports the same short hash.
+const commit = execSync('git rev-parse --short=7 HEAD', { encoding: 'utf8' }).trim();
 
 const trigger = (page: import('@playwright/test').Page) =>
   page.getByRole('button', { name: /^What’s new/ });
@@ -9,11 +13,12 @@ test('starts new visitors current and announces releases they have not seen', as
   await expect(trigger(page)).toHaveAccessibleName('What’s new');
   await expect(page.locator('.whats-new-dot')).toHaveCount(0);
 
-  await page.evaluate(() => localStorage.setItem('kitbasher.seen-release', '1.0.0'));
-  await page.reload();
-  await expect(trigger(page)).toHaveAccessibleName(
-    `What’s new: version ${latestRelease.version} is new`,
+  await page.evaluate(
+    (seen) => localStorage.setItem('kitbasher.seen-release', seen),
+    releaseId(releases.at(-1)!),
   );
+  await page.reload();
+  await expect(trigger(page)).toHaveAccessibleName(`What’s new: ${latestRelease.title}`);
   await expect(page.locator('.whats-new-dot')).toBeVisible();
 
   await trigger(page).click();
@@ -21,10 +26,12 @@ test('starts new visitors current and announces releases they have not seen', as
   await expect(panel).toBeVisible();
   await expect(panel.getByRole('heading', { name: 'What’s new' })).toBeFocused();
   await expect(panel).toContainText(latestRelease.title);
-  await expect(panel).toContainText(`version ${latestRelease.version}`);
+  const shipped = releases.slice(0, 3).find((release) => release.commit)!;
+  await expect(panel).toContainText(`${shipped.commit} · `);
+  await expect(panel).toContainText(`version ${commit}`);
   await expect(panel.getByRole('link', { name: 'All release notes' })).toHaveAttribute(
     'href',
-    `./docs/?guide=whats-new#v${latestRelease.version.replaceAll('.', '-')}`,
+    `./docs/?guide=whats-new#${releaseId(latestRelease)}`,
   );
   await expect(page.locator('.whats-new-dot')).toHaveCount(0);
 

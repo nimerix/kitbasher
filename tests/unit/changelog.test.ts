@@ -1,28 +1,27 @@
-import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
-import { compareVersions, releases } from '../../src/docs/changelog';
+import { releaseId, releases } from '../../src/docs/changelog';
 import { articleById } from '../../src/docs/content';
 
-const pkg = JSON.parse(readFileSync('package.json', 'utf8')) as { version: string };
-
 describe('changelog', () => {
-  it('starts with the package version', () => {
-    expect(releases[0].version).toBe(pkg.version);
-  });
-
-  it('lists releases newest first with valid versions and dates', () => {
+  it('lists releases newest first with dates, titles and changes', () => {
     for (const [i, release] of releases.entries()) {
-      expect(release.version).toMatch(/^\d+\.\d+\.\d+$/);
       expect(release.date).toMatch(/^\d{4}-\d{2}-\d{2}$/);
       expect(Number.isNaN(Date.parse(release.date))).toBe(false);
       expect(release.title.trim()).not.toBe('');
       expect(release.changes.length).toBeGreaterThan(0);
+      if (release.commit !== undefined) expect(release.commit).toMatch(/^[0-9a-f]{7}$/);
       const older = releases[i + 1];
-      if (older) {
-        expect(compareVersions(release.version, older.version)).toBeGreaterThan(0);
-        expect(release.date >= older.date).toBe(true);
-      }
+      if (older) expect(release.date >= older.date).toBe(true);
     }
+  });
+
+  it('gives every release its own link', () => {
+    const ids = releases.map(releaseId);
+    expect(new Set(ids).size).toBe(ids.length);
+    for (const id of ids) expect(id).toMatch(/^[a-z0-9]+(?:-[a-z0-9]+)*$/);
+    expect(releaseId({ date: '2026-11-17', title: 'Isolation and No clip', changes: [] })).toBe(
+      'isolation-and-no-clip',
+    );
   });
 
   it('links only to existing guides', () => {

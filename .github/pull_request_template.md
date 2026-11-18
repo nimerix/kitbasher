@@ -1,3 +1,9 @@
+<!--
+Title: (<type>) <Sentence-case summary>, for example "(feat) Add the Warp tool for closing gaps".
+Types: feat, fix, perf, docs, refactor, test, build, ci, chore. Add ! after the type, as in
+"(feat!)", for a breaking change.
+-->
+
 ## Summary
 
 -
@@ -5,8 +11,3 @@
 ## Testing
 
 -
-
-## Release notes
-
-- [ ] Added a release to `src/docs/changelog.ts` describing what changed for users
-- [ ] Bumped the version with `npm version minor --no-git-tag-version` (features) or `patch` (fixes), matching the new release

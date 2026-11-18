@@ -35,8 +35,9 @@ import {
   X,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
-import { latestRelease, releases } from './changelog';
-import type { ChangeKind, Release } from './changelog';
+import { buildCommit } from '../core/build';
+import { latestRelease, releaseCommit, releaseId, releases } from './changelog';
+import type { ChangeKind } from './changelog';
 import { articleById, articles, groups, searchDocs } from './content';
 import type { DocArticle, DocImage, DocSection } from './types';
 import { TutorialAnimation } from './TutorialAnimation';
@@ -96,7 +97,6 @@ function ArticleIcon({ article, size = 16 }: { article: DocArticle; size?: numbe
 const guideHref = (id: string) => `?guide=${encodeURIComponent(id)}`;
 const currentGuide = () => new URLSearchParams(window.location.search).get('guide');
 const whatsNewId = 'whats-new';
-const releaseId = (release: Release) => `v${release.version.replaceAll('.', '-')}`;
 
 function Brand() {
   return (
@@ -307,7 +307,7 @@ function Navigation({ active, onNavigate }: { active: string | null; onNavigate?
         onClick={onNavigate}
       >
         <Sparkles size={16} /> What’s new
-        <span className="nav-version">v{latestRelease.version}</span>
+        <span className="nav-version">{buildCommit}</span>
       </a>
       {groups.map((group) => (
         <div className="nav-group" key={group}>
@@ -368,7 +368,7 @@ function Home() {
     <div className="docs-home">
       <div className="home-intro">
         <a className="home-release" href={`${guideHref(whatsNewId)}#${releaseId(latestRelease)}`}>
-          <span>New in {latestRelease.version}</span>
+          <span>New</span>
           {latestRelease.title}
           <ChevronRight size={14} aria-hidden="true" />
         </a>
@@ -596,7 +596,7 @@ const changeKinds: Record<ChangeKind, { label: string; icon: LucideIcon }> = {
 const formatDate = (date: string) =>
   new Date(`${date}T12:00:00`).toLocaleDateString('en-US', {
     year: 'numeric',
-    month: 'long',
+    month: 'short',
     day: 'numeric',
   });
 
@@ -611,21 +611,22 @@ function WhatsNew() {
         </div>
         <h1 tabIndex={-1}>What’s new</h1>
         <p className="article-description">
-          New features, improvements, and fixes in every version of Kitbasher, newest first.
+          New features, improvements, and fixes in Kitbasher, newest first.
         </p>
         <details className="mobile-toc">
-          <summary>Versions</summary>
+          <summary>Releases</summary>
           {releases.map((release) => (
-            <a href={`#${releaseId(release)}`} key={release.version}>
-              {release.version} · {release.title}
+            <a href={`#${releaseId(release)}`} key={release.title}>
+              {releaseCommit(release) ? `${releaseCommit(release)} · ` : null}
+              {release.title}
             </a>
           ))}
         </details>
         {releases.map((release) => (
-          <section className="release" id={releaseId(release)} key={release.version}>
+          <section className="release" id={releaseId(release)} key={release.title}>
             <div className="release-meta">
               <a href={`#${releaseId(release)}`} className="release-version">
-                {release.version}
+                {releaseCommit(release) ?? 'Unreleased'}
               </a>
               <time dateTime={release.date}>{formatDate(release.date)}</time>
             </div>
@@ -660,12 +661,12 @@ function WhatsNew() {
           </section>
         ))}
       </article>
-      <aside className="docs-toc" aria-label="Versions">
-        <span>Versions</span>
+      <aside className="docs-toc" aria-label="Releases">
+        <span>Releases</span>
         <nav>
           {releases.map((release) => (
-            <a href={`#${releaseId(release)}`} key={release.version}>
-              {release.version}
+            <a href={`#${releaseId(release)}`} key={release.title}>
+              {release.title}
             </a>
           ))}
         </nav>
@@ -880,7 +881,7 @@ function App() {
         'content',
         article?.description ??
           (whatsNew
-            ? 'New features, improvements, and fixes in every version of Kitbasher.'
+            ? 'New features, improvements, and fixes in Kitbasher.'
             : 'The illustrated Kitbasher manual. Learn every tool and build your next assembly.'),
       );
     if (location.hash)
