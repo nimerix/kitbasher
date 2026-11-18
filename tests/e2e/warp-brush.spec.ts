@@ -1,4 +1,6 @@
 import { expect, test, type Page } from '@playwright/test';
+import { BoxGeometry } from 'three';
+import { serializeGeometry } from '../../src/core/geometry';
 
 const browserErrors = new WeakMap<Page, string[]>();
 test.beforeEach(({ page }) => {
@@ -121,4 +123,68 @@ test("Warp's radius stays with each part when switching between them", async ({ 
   await expect(radius).toHaveValue('2.4');
   await warpOn('Left foot');
   await expect(radius).toHaveValue('4');
+});
+
+async function leaveWarp(page: Page) {
+  const cancel = page.getByRole('button', { name: 'Cancel', exact: true });
+  if (await cancel.isVisible()) await cancel.click();
+  await page.keyboard.press('Escape');
+}
+
+test('an opened scene starts every part at its fitted Warp radius, whatever its id', async ({
+  page,
+}) => {
+  await page.goto('/');
+  await expect(page.locator('canvas')).toBeVisible();
+  const radius = page.getByRole('spinbutton', { name: 'Brush radius', exact: true });
+  await page.keyboard.press('w');
+  await radius.fill('5');
+  await radius.press('Enter');
+  await expect(radius).toHaveValue('5');
+  const reused = await page.evaluate(async () => {
+    const urls = performance.getEntriesByType('resource').map((entry) => entry.name);
+    const { useEditor } = await import(
+      urls.find((url) => /\/src\/core\/store\.ts(?:\?.*)?$/.test(url))!
+    );
+    return useEditor.getState().warp.partId as string;
+  });
+  await leaveWarp(page);
+
+  // A 6 mm part under the old part's id, and a 32 mm part whose id is an Object property.
+  const plate = (id: string, size: number) => ({
+    id,
+    name: `Plate ${id}`,
+    position: [0, 0, 0],
+    quaternion: [0, 0, 0, 1],
+    scale: [1, 1, 1],
+    color: '#aabbcc',
+    geometry: serializeGeometry(new BoxGeometry(size, size, size / 4)),
+    visible: true,
+    locked: false,
+    source: 'test',
+  });
+  const scene = {
+    format: 'kitbasher',
+    version: 1,
+    units: 'mm',
+    name: 'Brush',
+    joints: [],
+    parts: [plate(reused, 6), plate('constructor', 32)],
+  };
+  await page.getByLabel('Open Kitbasher scene').setInputFiles({
+    name: 'brush.kitbash',
+    mimeType: 'application/json',
+    buffer: Buffer.from(JSON.stringify(scene)),
+  });
+  await page.getByRole('button', { name: 'Open scene', exact: true }).click();
+  for (const [id, fitted] of [
+    [reused, '0.18'],
+    ['constructor', '0.96'],
+  ]) {
+    await page.locator(`.part-select[title="Plate ${id}"]`).click();
+    await page.keyboard.press('w');
+    await expect(radius).toHaveValue(fitted);
+    expect((await brushes(page)).warp).toBe(Number(fitted));
+    await leaveWarp(page);
+  }
 });

@@ -2,24 +2,35 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useFrame, useThree } from '@react-three/fiber';
 import {
   BufferAttribute,
+  BufferGeometry,
+  CustomBlending,
+  DataTexture,
   DoubleSide,
+  Float32BufferAttribute,
+  FloatType,
+  InstancedBufferAttribute,
+  InstancedBufferGeometry,
   InstancedInterleavedBuffer,
   InterleavedBufferAttribute,
+  MaxEquation,
+  Mesh,
   Object3D,
-  type Mesh,
+  OneFactor,
+  OneMinusSrcAlphaFactor,
+  RGBAFormat,
+  ShaderMaterial,
+  Vector2,
+  Vector3,
+  type Camera,
 } from 'three';
-import { LineMaterial } from 'three/addons/lines/LineMaterial.js';
-import { LineSegments2 } from 'three/addons/lines/LineSegments2.js';
-import { LineSegmentsGeometry } from 'three/addons/lines/LineSegmentsGeometry.js';
 import type { WarpSession } from '../core/store';
 import { writtenNodePositions } from '../core/warp-evaluate';
 import type { WarpModel } from '../core/warp-model';
 import {
   traceWarpGridPath,
   warpGridChords,
-  warpGridSegments,
-  writeWarpGridNormals,
-  writeWarpGridPath,
+  warpGridShiftWidth,
+  WarpGridDrawing,
   type WarpGridPath,
 } from '../core/warp-grid-path';
 
@@ -37,77 +48,183 @@ export function gridNodePositions(warp: WarpSession) {
 }
 
 /**
- * A grid line material. `cell` is the grid's typical edge length; its projected length sets the
- * line's width in pixels, up to `linewidth`, so the surface stays visible between lines however
- * fine the grid or far the camera. Below a pixel a line fades instead of thinning, and `fade`
- * gives the projected cell length in pixels over which a line fades out as the grid closes up.
+ * How grid lines are drawn, in CSS pixels against the cell's length on screen. The dark core is
+ * what makes the grid stand out: full width and opaque down to `coreFull`, then thinner to
+ * `coreThin` px and fading out to `coreGone`, by cells shrunk as the surface turns away. The
+ * light casing lifts only what is darker than it, so it shows on dark parts and leaves light ones
+ * alone, and fades out from `casingFull` to `casingGone`.
  */
-function gridMaterial(
-  color: string,
-  linewidth: number,
-  share: number,
-  opacity: number,
-  fade: [number, number] = [0, 0],
-) {
-  const material = new LineMaterial({
-    color,
-    linewidth,
-    opacity,
+export const warpGridStyle = {
+  core: '#0e1114',
+  coreWidth: 1.5,
+  coreThin: 1,
+  coreFull: 13,
+  coreGone: 6,
+  casing: '#b0b5b8',
+  casingWidth: 4,
+  casingFull: 22,
+  casingGone: 12,
+  /** How far a line may sit behind the surface and still show: pixels, and at most mm. */
+  tolerance: 1,
+  toleranceMax: 0.05,
+};
+
+const style = warpGridStyle;
+const glsl = (value: number) => (Number.isInteger(value) ? `${value}.0` : `${value}`);
+
+const vertexShader = `
+uniform vec2 resolution;
+uniform float cell;
+uniform highp sampler2D shifts;
+attribute vec3 instanceStart;
+attribute vec3 instanceEnd;
+attribute vec4 instanceWeights;
+attribute vec3 instanceNormalStart;
+attribute vec3 instanceNormalEnd;
+varying float vAcross;
+varying float vHalf;
+varying float vAlpha;
+#ifdef GRID_ID
+flat varying float vId;
+#endif
+
+vec3 shiftOf( float node ) {
+  int i = int( node + 0.5 );
+  return texelFetch( shifts, ivec2( i % ${warpGridShiftWidth}, i / ${warpGridShiftWidth} ), 0 ).xyz;
+}
+
+// As three's LineMaterial: a segment crossing the camera plane ends at the near plane.
+void trimSegment( const in vec4 start, inout vec4 end ) {
+  float nearEstimate = - 0.5 * projectionMatrix[ 3 ][ 2 ] / projectionMatrix[ 2 ][ 2 ];
+  float alpha = ( nearEstimate - start.z ) / ( end.z - start.z );
+  end.xyz = mix( start.xyz, end.xyz, alpha );
+}
+
+void main() {
+  bool atEnd = position.y > 0.5;
+  vec3 shiftA = shiftOf( instanceWeights.x ), shiftB = shiftOf( instanceWeights.y );
+  vec4 start = modelViewMatrix * vec4( instanceStart + mix( shiftA, shiftB, instanceWeights.z ), 1.0 );
+  vec4 end = modelViewMatrix * vec4( instanceEnd + mix( shiftA, shiftB, instanceWeights.w ), 1.0 );
+  bool perspective = projectionMatrix[ 2 ][ 3 ] == - 1.0;
+  if ( perspective ) {
+    if ( start.z < 0.0 && end.z >= 0.0 ) trimSegment( start, end );
+    else if ( end.z < 0.0 && start.z >= 0.0 ) trimSegment( end, start );
+  }
+  vec4 clipStart = projectionMatrix * start, clipEnd = projectionMatrix * end;
+  vec2 along = ( clipEnd.xy / clipEnd.w - clipStart.xy / clipStart.w ) * resolution;
+  float span = length( along );
+  along = span > 1e-6 ? along / span : vec2( 1.0, 0.0 );
+  vec2 across = vec2( - along.y, along.x );
+
+  vec3 centre = atEnd ? end.xyz : start.xyz;
+  vec4 clip = atEnd ? clipEnd : clipStart;
+  float depth = perspective ? - centre.z : 1.0;
+  vec3 normal = normalMatrix * ( atEnd ? instanceNormalEnd : instanceNormalStart );
+  // The size of a CSS pixel at the line, and of a cell on screen, squeezed where the surface
+  // turns away.
+  float pixel = 2.0 * depth / ( projectionMatrix[ 1 ][ 1 ] * resolution.y );
+  float facing = 1.0;
+  if ( dot( normal, normal ) > 1e-12 )
+    facing = abs( dot( normalize( normal ), perspective ? normalize( - centre ) : vec3( 0.0, 0.0, 1.0 ) ) );
+  float cellPixels = cell / pixel * max( facing, 0.04 );
+  float openPixels = cell / pixel;
+#ifdef CASING
+  vHalf = 0.5 * ${glsl(style.casingWidth)};
+  // Where the surface turns away, the casing still edges the core: it lifts only dark parts.
+  vAlpha = smoothstep( ${glsl(style.casingGone)}, ${glsl(style.casingFull)}, openPixels );
+  float cap = 0.0;
+#else
+  vHalf = 0.5 * mix( ${glsl(style.coreThin)}, ${glsl(style.coreWidth)},
+    clamp( ( cellPixels - ${glsl(style.coreGone)} ) / ${glsl(style.coreFull - style.coreGone)}, 0.0, 1.0 ) );
+  vAlpha = smoothstep( ${glsl(style.coreGone)}, ${glsl(style.coreFull)}, cellPixels );
+  float cap = vHalf;
+#endif
+  // A pixel beyond the line's edge, for antialiasing.
+  float reach = vHalf + 1.0;
+  vAcross = position.x * reach;
+  vec2 offset = across * vAcross + along * ( atEnd ? cap : - cap );
+  vec2 ndc = clip.xy / clip.w + offset * 2.0 / resolution;
+
+  // Each corner lies where its view ray meets the surface's tangent plane at the line, then a
+  // little nearer, by at most the tolerance. Where the plane is nearly edge on, a corner is held
+  // nearer than it by little and allowed further by much, so it never pokes through what is in
+  // front of the surface.
+  float facingLimit = 1e-6 * length( normal );
+  float limit = 8.0 * reach * pixel;
+  float lift = min( ${glsl(style.tolerance)} * pixel, ${glsl(style.toleranceMax)} );
+  vec3 corner;
+  if ( perspective ) {
+    vec3 ray = vec3(
+      ( ndc.x + projectionMatrix[ 2 ][ 0 ] ) / projectionMatrix[ 0 ][ 0 ],
+      ( ndc.y + projectionMatrix[ 2 ][ 1 ] ) / projectionMatrix[ 1 ][ 1 ],
+      - 1.0 );
+    float toward = dot( normal, ray );
+    float t = abs( toward ) > facingLimit * length( ray ) ? dot( normal, centre ) / toward : depth;
+    corner = ray * clamp( t, depth - limit, depth + 16.0 * limit );
+    corner -= normalize( corner ) * lift;
+  } else {
+    vec2 xy = vec2(
+      ( ndc.x - projectionMatrix[ 3 ][ 0 ] ) / projectionMatrix[ 0 ][ 0 ],
+      ( ndc.y - projectionMatrix[ 3 ][ 1 ] ) / projectionMatrix[ 1 ][ 1 ] );
+    float z = abs( normal.z ) > facingLimit
+      ? centre.z - dot( normal.xy, xy - centre.xy ) / normal.z
+      : centre.z;
+    corner = vec3( xy, clamp( z, centre.z - 16.0 * limit, centre.z + limit ) + lift );
+  }
+  gl_Position = projectionMatrix * vec4( corner, 1.0 );
+#ifdef GRID_ID
+  vId = float( gl_InstanceID );
+#endif
+}
+`;
+
+const fragmentShader = `
+uniform vec3 color;
+varying float vAcross;
+varying float vHalf;
+varying float vAlpha;
+
+void main() {
+  float aa = max( 0.75 * length( vec2( dFdx( vAcross ), dFdy( vAcross ) ) ), 1e-4 );
+  float coverage = clamp( ( vHalf - abs( vAcross ) ) / aa + 0.5, 0.0, 1.0 ) * vAlpha;
+  if ( coverage <= 0.0 ) discard;
+#ifdef CASING
+  gl_FragColor = vec4( color * coverage, 0.0 );
+#else
+  gl_FragColor = vec4( color * coverage, coverage );
+#endif
+}
+`;
+
+/** Colours as written to the canvas, which takes sRGB values. */
+const outputColor = (hex: string) =>
+  new Vector3(
+    parseInt(hex.slice(1, 3), 16) / 255,
+    parseInt(hex.slice(3, 5), 16) / 255,
+    parseInt(hex.slice(5, 7), 16) / 255,
+  );
+
+/** One of the line's two draws over shared uniforms: the light casing, then the dark core. */
+function gridMaterial(pass: 'casing' | 'core', uniforms: Record<string, { value: unknown }>) {
+  return new ShaderMaterial({
+    uniforms: {
+      ...uniforms,
+      color: { value: outputColor(pass === 'casing' ? style.casing : style.core) },
+    },
+    defines: pass === 'casing' ? { CASING: '' } : {},
+    vertexShader,
+    fragmentShader,
     transparent: true,
     depthWrite: false,
     toneMapped: false,
     // A mirrored part's matrix flips the winding of the screen-facing quads.
     side: DoubleSide,
-    polygonOffset: true,
-    polygonOffsetFactor: -1,
-    polygonOffsetUnits: -1,
+    blending: CustomBlending,
+    // The casing only lifts what is darker than it; the core covers by its coverage.
+    ...(pass === 'casing'
+      ? { blendEquation: MaxEquation }
+      : { blendSrc: OneFactor, blendDst: OneMinusSrcAlphaFactor }),
   });
-  Object.assign(material.uniforms, {
-    cell: { value: 1 },
-    cellShare: { value: share },
-    cellFade: { value: fade },
-  });
-  material.vertexShader = material.vertexShader
-    .replace(
-      'uniform float linewidth;',
-      `uniform float linewidth;
-      uniform float cell;
-      uniform float cellShare;
-      uniform vec2 cellFade;
-      attribute vec3 instanceNormalStart;
-      attribute vec3 instanceNormalEnd;
-      varying float vFade;`,
-    )
-    .replace(
-      'offset *= linewidth;',
-      `float cellPixels = cell * projectionMatrix[ 1 ][ 1 ] * resolution.y * 0.5 /
-        ( ( position.y < 0.5 ) ? clipStart.w : clipEnd.w );
-      float width = min( linewidth, cellPixels * cellShare );
-      vFade = clamp( width, 0.0, 1.0 ) *
-        ( cellFade.y > cellFade.x ? smoothstep( cellFade.x, cellFade.y, cellPixels ) : 1.0 );
-      offset *= max( width, 1.0 );`,
-    )
-    .replace(
-      'clip.xy += offset;',
-      `clip.xy += offset;
-      // Lay the corners on the surface's tangent plane, so a line's sides keep to the surface
-      // where it slopes across the line.
-      vec3 surfaceNormal = normalMatrix *
-        ( ( position.y < 0.5 ) ? instanceNormalStart : instanceNormalEnd );
-      if ( dot( surfaceNormal, surfaceNormal ) > 1e-12 ) {
-        vec3 centre = ( ( position.y < 0.5 ) ? start : end ).xyz;
-        vec2 shift = offset / vec2( projectionMatrix[ 0 ][ 0 ], projectionMatrix[ 1 ][ 1 ] );
-        float reach = 4.0 * length( shift );
-        float slope = abs( surfaceNormal.z ) > 1e-6 ? surfaceNormal.z : 1e-6;
-        float rise = clamp( - dot( surfaceNormal.xy, shift ) / slope, - reach, reach );
-        vec4 corner = projectionMatrix * vec4( centre + vec3( shift, rise ), 1.0 );
-        clip = vec4( clip.xy * ( corner.w / clip.w ), corner.z, corner.w );
-      }`,
-    );
-  material.fragmentShader = material.fragmentShader
-    .replace('uniform float linewidth;', 'uniform float linewidth;\nvarying float vFade;')
-    .replace('float alpha = opacity;', 'float alpha = opacity * vFade;');
-  return material;
 }
 
 /** The middle of a grid's edge lengths. */
@@ -138,11 +255,70 @@ function useTracedPath(model: WarpModel) {
 }
 
 /**
- * Grid edges laid along the written surface, a dark core over a light casing, drawn in the
- * part's own space and depth-tested like the surface they lie on. Positions are uploaded only
- * when nodes or the written surface move, and normals only when the surface is written.
+ * Grid edges laid along the written surface, drawn in the part's own space and depth-tested like
+ * the surface they lie on. Segment ends are uploaded when the surface is written; between writes,
+ * as when a large region follows a drag on the grid alone, only the nodes' shifts are.
  */
 export function WarpGrid({ warp }: { warp: WarpSession }) {
+  return legacyGrid ? <LegacyWarpGrid warp={warp} /> : <SurfaceWarpGrid warp={warp} />;
+}
+
+/** In development, `?warp-grid=1px` draws the old 1 px chords, for the rendered-frame benchmark. */
+const legacyGrid =
+  import.meta.env.DEV &&
+  typeof location !== 'undefined' &&
+  new URLSearchParams(location.search).get('warp-grid') === '1px';
+
+/** The grid as it was drawn before it followed the surface: 1 px chords between nodes. */
+function LegacyWarpGrid({ warp }: { warp: WarpSession }) {
+  const model = warp.model!;
+  const invalidate = useThree((s) => s.invalidate);
+  const geometry = useMemo(() => {
+    const { edgeStart, edges } = model.grid;
+    const pairs: number[] = [];
+    for (let n = 0; n + 1 < edgeStart.length; n++)
+      for (let k = edgeStart[n]; k < edgeStart[n + 1]; k++)
+        if (edges[k] > n) pairs.push(n, edges[k]);
+    const geometry = new BufferGeometry();
+    geometry.setAttribute(
+      'position',
+      new BufferAttribute(new Float32Array(model.restNodes.length), 3),
+    );
+    geometry.setIndex(pairs);
+    return geometry;
+  }, [model]);
+  useEffect(() => () => geometry.dispose(), [geometry]);
+  useLayoutEffect(() => {
+    const position = geometry.getAttribute('position') as BufferAttribute;
+    (position.array as Float32Array).set(warp.state!.positions);
+    position.needsUpdate = true;
+    geometry.computeBoundingSphere();
+    invalidate();
+  }, [geometry, warp, invalidate]);
+  return (
+    <lineSegments geometry={geometry} raycast={noRaycast} renderOrder={6} name="warp-grid">
+      <lineBasicMaterial color="#b9e3dd" transparent opacity={0.55} depthWrite={false} />
+    </lineSegments>
+  );
+}
+
+const eye = new Vector3();
+
+/** The longest a cell can appear anywhere on the grid, in CSS pixels. */
+function largestCell(
+  camera: Camera,
+  height: number,
+  cell: number,
+  centre: Vector3,
+  radius: number,
+) {
+  const scale = (camera.projectionMatrix.elements[5] * height) / 2;
+  if (camera.projectionMatrix.elements[11] !== -1) return cell * scale;
+  const nearest = camera.getWorldPosition(eye).distanceTo(centre) - radius;
+  return nearest > 0 ? (cell * scale) / nearest : Infinity;
+}
+
+function SurfaceWarpGrid({ warp }: { warp: WarpSession }) {
   const model = warp.model!;
   const latest = useRef(warp);
   latest.current = warp;
@@ -150,20 +326,37 @@ export function WarpGrid({ warp }: { warp: WarpSession }) {
   const size = useThree((s) => s.size);
   const path = useTracedPath(model);
   const grid = useMemo(() => {
-    const segments = warpGridSegments(path);
-    const buffer = new InstancedInterleavedBuffer(new Float32Array(segments * 6), 6, 1);
-    const geometry = new LineSegmentsGeometry();
-    geometry.setAttribute('instanceStart', new InterleavedBufferAttribute(buffer, 3, 0));
-    geometry.setAttribute('instanceEnd', new InterleavedBufferAttribute(buffer, 3, 3));
-    const normals = new InstancedInterleavedBuffer(new Float32Array(segments * 6), 6, 1);
+    const nodeCount = model.restNodes.length / 3;
+    const drawing = new WarpGridDrawing(path, nodeCount);
+    const geometry = new InstancedBufferGeometry();
+    geometry.setAttribute(
+      'position',
+      new Float32BufferAttribute([-1, 0, 0, 1, 0, 0, -1, 1, 0, 1, 1, 0], 3),
+    );
+    geometry.setIndex([0, 1, 2, 2, 1, 3]);
+    const base = new InstancedInterleavedBuffer(drawing.base, 6, 1);
+    geometry.setAttribute('instanceStart', new InterleavedBufferAttribute(base, 3, 0));
+    geometry.setAttribute('instanceEnd', new InterleavedBufferAttribute(base, 3, 3));
+    const normals = new InstancedInterleavedBuffer(drawing.normals, 6, 1);
     geometry.setAttribute('instanceNormalStart', new InterleavedBufferAttribute(normals, 3, 0));
     geometry.setAttribute('instanceNormalEnd', new InterleavedBufferAttribute(normals, 3, 3));
-    geometry.instanceCount = segments;
-    // A light casing, fading out as cells close from 32 to 14 px, under a dark core.
-    const casing = new LineSegments2(geometry, gridMaterial('#f2f5f4', 6.5, 0.16, 1, [14, 32])),
-      core = new LineSegments2(geometry, gridMaterial('#0e1114', 2.5, 0.065, 1, [5, 14]));
-    const cell = typicalLength(path.length);
-    casing.material.uniforms.cell.value = core.material.uniforms.cell.value = cell;
+    geometry.setAttribute('instanceWeights', new InstancedBufferAttribute(drawing.weights, 4));
+    geometry.instanceCount = drawing.segments;
+    const shifts = new DataTexture(
+      drawing.shifts,
+      warpGridShiftWidth,
+      drawing.shifts.length / 4 / warpGridShiftWidth,
+      RGBAFormat,
+      FloatType,
+    );
+    shifts.needsUpdate = true;
+    const uniforms = {
+      resolution: { value: new Vector2(1, 1) },
+      cell: { value: typicalLength(path.length) },
+      shifts: { value: shifts },
+    };
+    const casing = new Mesh(geometry, gridMaterial('casing', uniforms)),
+      core = new Mesh(geometry, gridMaterial('core', uniforms));
     casing.name = 'warp-grid:casing';
     core.name = 'warp-grid:core';
     casing.renderOrder = 6;
@@ -179,22 +372,31 @@ export function WarpGrid({ warp }: { warp: WarpSession }) {
     space.matrixWorldNeedsUpdate = true;
     space.name = 'warp-grid';
     // Until the trace is done, edges are chords.
-    space.userData = { model, traced: path.traced };
+    space.userData = { model, traced: path.traced, drawing };
     space.add(casing, core);
-    const nodeCount = model.restNodes.length;
+    // Where the grid lies, for whether any cell is large enough to show the casing.
+    const rest = model.restNodes,
+      node = new Vector3(),
+      centre = new Vector3();
+    for (let i = 0; i < rest.length; i += 3) centre.add(node.fromArray(rest, i));
+    centre.divideScalar(Math.max(1, nodeCount));
+    let radius = 0;
+    for (let i = 0; i < rest.length; i += 3)
+      radius = Math.max(radius, centre.distanceTo(node.fromArray(rest, i)));
     return {
-      path,
-      buffer,
+      drawing,
+      base,
       normals,
+      shifts,
       geometry,
       casing,
       core,
       space,
-      local: new Float32Array(nodeCount),
-      // Node positions when the surface was last written, and when the grid was last drawn.
-      atWrite: new Float32Array(nodeCount),
-      shift: new Float32Array(nodeCount),
-      drawn: new Float64Array(nodeCount).fill(Number.NaN),
+      uniforms,
+      centre,
+      radius,
+      local: new Float32Array(nodeCount * 3),
+      drawn: new Float64Array(nodeCount * 3).fill(Number.NaN),
       version: -1,
     };
   }, [path, model]);
@@ -203,22 +405,26 @@ export function WarpGrid({ warp }: { warp: WarpSession }) {
       grid.geometry.dispose();
       grid.casing.material.dispose();
       grid.core.material.dispose();
+      grid.shifts.dispose();
     },
     [grid],
   );
   useLayoutEffect(() => {
-    grid.casing.material.resolution.set(size.width, size.height);
-    grid.core.material.resolution.set(size.width, size.height);
+    grid.uniforms.resolution.value.set(size.width, size.height);
     invalidate();
   }, [grid, size, invalidate]);
   useLayoutEffect(() => invalidate(), [grid, invalidate]);
-  useFrame(() => {
+  useFrame(({ camera }) => {
+    const { casing, uniforms, centre, radius } = grid;
+    // No casing work once every cell is too small to show it.
+    casing.visible =
+      largestCell(camera, size.height, uniforms.cell.value, centre, radius) > style.casingGone;
     const warp = latest.current;
     if (warp.model !== model || !warp.output) return;
     const nodes = gridNodePositions(warp);
     const position = warp.preview?.getAttribute('position') as BufferAttribute | undefined;
     const version = position?.version ?? 0;
-    const { drawn, local, atWrite, shift } = grid;
+    const { drawn, local } = grid;
     let moved = false;
     for (let i = 0; i < nodes.length; i++)
       if (nodes[i] !== drawn[i]) {
@@ -227,6 +433,7 @@ export function WarpGrid({ warp }: { warp: WarpSession }) {
       }
     if (!moved && version === grid.version) return;
     drawn.set(nodes);
+    grid.version = version;
     const m = model.inverse;
     for (let i = 0; i < nodes.length; i += 3) {
       const x = nodes[i],
@@ -236,29 +443,10 @@ export function WarpGrid({ warp }: { warp: WarpSession }) {
       local[i + 1] = m[1] * x + m[5] * y + m[9] * z + m[13];
       local[i + 2] = m[2] * x + m[6] * y + m[10] * z + m[14];
     }
-    // Large regions follow a drag on the grid alone, so the points between nodes move with them
-    // until the surface is written again.
-    let shifted = false;
-    if (version !== grid.version) {
-      grid.version = version;
-      atWrite.set(local);
-      if (warp.output.normals) {
-        writeWarpGridNormals(grid.path, warp.output.normals, grid.normals.array as Float32Array);
-        grid.normals.needsUpdate = true;
-      }
-    } else
-      for (let i = 0; i < local.length; i++) {
-        shift[i] = local[i] - atWrite[i];
-        if (shift[i] !== 0) shifted = true;
-      }
-    writeWarpGridPath(
-      grid.path,
-      local,
-      warp.output.positions,
-      shifted ? shift : null,
-      grid.buffer.array as Float32Array,
-    );
-    grid.buffer.needsUpdate = true;
+    const changed = grid.drawing.update(local, warp.output.positions, warp.output.normals, version);
+    if (changed.base) grid.base.needsUpdate = true;
+    if (changed.normals) grid.normals.needsUpdate = true;
+    if (changed.shifts) grid.shifts.needsUpdate = true;
   });
   return <primitive object={grid.space} />;
 }
