@@ -6,14 +6,28 @@ import { SphereGeometry } from 'three';
 import { serializeGeometry } from '../../src/core/geometry';
 
 // Opt-in: KITBASHER_WARP_GRID_BENCH=1. Rendered drag frames with the grid overlay against the
-// old 1 px chords (`?warp-grid=1px`), in the same app and browser.
-const cases = [
+// old 1 px chords (`?warp-grid=1px`), in the same app and browser. KITBASHER_WARP_GRID_BENCH_SCAN
+// may name an STL file, such as a real scan, to time as well, framed as it is for work.
+type Case = { name: string; density: number } & (
+  { segments: readonly [number, number] } | { scan: string }
+);
+const scan = process.env.KITBASHER_WARP_GRID_BENCH_SCAN;
+const rounds = Number(process.env.KITBASHER_WARP_GRID_BENCH_ROUNDS ?? 5);
+const cases: Case[] = [
   // The grid test's ball: 6,050 welded vertices.
   { name: '502 nodes, 6,050 vertices', segments: [96, 64], density: 3 },
   { name: '4,002 nodes, 6,050 vertices', segments: [96, 64], density: 6 },
   // Large enough that a drag moves the grid alone and the surface follows at the end.
   { name: '4,002 nodes, 125,582 vertices', segments: [460, 274], density: 6 },
-] as const;
+  ...(scan
+    ? [
+        // The default for a painted region, and for a whole part.
+        { name: 'scan, density 3', scan, density: 3 },
+        { name: 'scan, density 5', scan, density: 5 },
+        { name: 'scan, highest density', scan, density: 6 },
+      ]
+    : []),
+];
 
 const scene = (segments: readonly [number, number]) => ({
   format: 'kitbasher',
@@ -37,26 +51,42 @@ const scene = (segments: readonly [number, number]) => ({
   ],
 });
 
-async function open(page: Page, legacy: boolean, segments: readonly [number, number]) {
+async function open(page: Page, legacy: boolean, source: Case) {
   await page.goto(legacy ? '/?warp-grid=1px' : '/');
   await expect(page.locator('canvas')).toBeVisible();
-  await page.getByLabel('Open Kitbasher scene').setInputFiles({
-    name: 'bench.kitbash',
-    mimeType: 'application/json',
-    buffer: Buffer.from(JSON.stringify(scene(segments))),
-  });
-  await page.getByRole('button', { name: 'Open scene', exact: true }).click();
-  await page.locator('.part-select[title="Scanned ball"]').click();
+  if ('scan' in source) {
+    await page.getByLabel('Open Kitbasher scene').setInputFiles({
+      name: 'empty.kitbash',
+      mimeType: 'application/json',
+      buffer: Buffer.from(JSON.stringify({ ...scene([3, 2]), parts: [] })),
+    });
+    await page.getByRole('button', { name: 'Open scene', exact: true }).click();
+    await expect(page.locator('.part-select')).toHaveCount(0);
+    await page.getByRole('button', { name: 'File', exact: true }).click();
+    await page.locator('.dropdown-menu button', { hasText: 'Import' }).first().click();
+    await page.getByLabel('Choose model files').setInputFiles(source.scan);
+    await page.locator('.modal-footer .button.primary').click();
+    await expect(page.locator('.part-select')).toHaveCount(1, { timeout: 60_000 });
+    await page.locator('.part-select').click();
+  } else {
+    await page.getByLabel('Open Kitbasher scene').setInputFiles({
+      name: 'bench.kitbash',
+      mimeType: 'application/json',
+      buffer: Buffer.from(JSON.stringify(scene(source.segments))),
+    });
+    await page.getByRole('button', { name: 'Open scene', exact: true }).click();
+    await page.locator('.part-select[title="Scanned ball"]').click();
+  }
   await page.keyboard.press('1');
   await page.keyboard.press('Home');
   await page.keyboard.press('w');
   await page.getByRole('radio', { name: 'Whole part', exact: true }).click();
 }
 
-/** Drags a point across the ball's front, timing each frame through rendering and a readback. */
-function dragFrames(page: Page, density: number, frames: number) {
+/** Drags a point across the part's front, timing each frame through rendering and a readback. */
+function dragFrames(page: Page, density: number, frames: number, ball: boolean) {
   return page.evaluate(
-    async ({ density, frames }) => {
+    async ({ density, frames, ball }) => {
       const urls = performance.getEntriesByType('resource').map((entry) => entry.name);
       const root = (
         await import(urls.find((url) => url.includes('/@react-three_fiber.js'))!)
@@ -71,15 +101,17 @@ function dragFrames(page: Page, density: number, frames: number) {
       for (let i = 0; i < 200 && editor().warp?.stage !== 'warp'; i++)
         await new Promise((done) => setTimeout(done, 50));
       const warp = editor().warp;
-      // The front of the ball, facing the camera.
       const { camera, gl } = root;
-      const centre = camera.position.clone().set(0, 15, 0);
-      camera.position.set(0, 15, 70);
-      camera.lookAt(centre);
-      root.controls?.target.copy(centre);
-      root.controls?.update();
-      const mesh = root.scene.getObjectByName('part:ball');
-      const face = (() => {
+      const mesh = root.scene.getObjectByName(`part:${warp.partId}`);
+      // A point at the middle of the view, dragged out along its normal.
+      let point: number[], normal: number[], face: number, world: number[];
+      if (ball) {
+        // The front of the ball, facing the camera.
+        const centre = camera.position.clone().set(0, 15, 0);
+        camera.position.set(0, 15, 70);
+        camera.lookAt(centre);
+        root.controls?.target.copy(centre);
+        root.controls?.update();
         const position = mesh.geometry.getAttribute('position');
         const index = mesh.geometry.index;
         let best = -1,
@@ -92,14 +124,30 @@ function dragFrames(page: Page, density: number, frames: number) {
             best = f;
           }
         }
-        return best;
-      })();
-      editor().addWarpPoint({ partId: 'ball', point: [0, 15, 15], normal: [0, 0, 1] }, face);
+        [point, normal, face, world] = [[0, 15, 15], [0, 0, 1], best, [0, 15, 15]];
+      } else {
+        const THREE = await import(urls.find((url) => /\/deps\/three\.js/.test(url))!);
+        camera.updateMatrixWorld();
+        const raycaster = new THREE.Raycaster();
+        raycaster.setFromCamera(new THREE.Vector2(0, 0), camera);
+        const hit = raycaster.intersectObject(mesh, false)[0];
+        const local = mesh.worldToLocal(hit.point.clone());
+        const n = hit.face.normal.clone().transformDirection(mesh.matrixWorld);
+        [point, normal, face, world] = [
+          local.toArray(),
+          n.toArray(),
+          hit.faceIndex,
+          hit.point.toArray(),
+        ];
+      }
+      editor().addWarpPoint({ partId: warp.partId, point, normal }, face);
       const id = editor().warp.points.at(-1).id;
-      // Let the trace finish before timing.
-      for (let i = 0; i < 400; i++) {
+      // Let the trace finish, and the points drawn be chosen on the surface, before timing.
+      for (let i = 0; i < 6000; i++) {
         const space = root.scene.getObjectByName('warp-grid');
-        if (!space || space.userData.traced !== false) break;
+        const drawing = space?.userData.drawing;
+        const settled = !drawing || drawing.refined === drawing.written;
+        if (!space || (space.userData.traced !== false && settled)) break;
         root.advance(performance.now());
         await new Promise((done) => setTimeout(done, 10));
       }
@@ -119,7 +167,9 @@ function dragFrames(page: Page, density: number, frames: number) {
           [
             {
               id,
-              target: [0.04 * (frame % 50), 15 + 0.02 * (frame % 50), 15 + 0.04 * (frame % 50)],
+              target: ball
+                ? [0.04 * (frame % 50), 15 + 0.02 * (frame % 50), 15 + 0.04 * (frame % 50)]
+                : world.map((v, axis) => v + 0.04 * (frame % 50) * normal[axis]),
             },
           ],
           'drag',
@@ -130,7 +180,7 @@ function dragFrames(page: Page, density: number, frames: number) {
         context.readPixels(0, 0, 1, 1, context.RGBA, context.UNSIGNED_BYTE, pixel);
         times.push(performance.now() - start);
       }
-      editor().moveWarpPoints([{ id, target: [0, 15, 15] }], 'end');
+      editor().moveWarpPoints([{ id, target: world }], 'end');
       root.setFrameloop('demand');
       const nodes = warp.model.grid.nodes.length;
       const vertices = warp.model.region.weldedCount;
@@ -144,26 +194,28 @@ function dragFrames(page: Page, density: number, frames: number) {
         frames: sorted.length,
       };
     },
-    { density, frames },
+    { density, frames, ball },
   );
 }
 
 test('times rendered warp drag frames against the old 1 px grid', async ({ page }) => {
   test.skip(!process.env.KITBASHER_WARP_GRID_BENCH, 'Opt-in timing diagnostic.');
-  test.setTimeout(600_000);
+  test.setTimeout(scan ? 3_600_000 : 600_000);
   const result: Record<string, unknown> = {};
-  for (const { name, segments, density } of cases) {
+  const only = process.env.KITBASHER_WARP_GRID_BENCH_ONLY;
+  for (const source of cases.filter((c) => !only || c.name.includes(only))) {
+    const { name, density } = source;
     const runs: Record<string, { median: number[]; p95: number[] }> = {
       old: { median: [], p95: [] },
       new: { median: [], p95: [] },
     };
     // Alternate, so drift in the machine's state falls on both alike.
-    for (let round = 0; round < 5; round++)
+    for (let round = 0; round < rounds; round++)
       for (const legacy of round % 2 ? [false, true] : [true, false]) {
-        await open(page, legacy, segments);
+        await open(page, legacy, source);
         await page.getByRole('button', { name: 'Lay grid', exact: true }).click();
         await expect(page.getByRole('button', { name: 'Close gap', exact: true })).toBeEnabled();
-        const timing = await dragFrames(page, density, 130);
+        const timing = await dragFrames(page, density, 130, !('scan' in source));
         const run = runs[legacy ? 'old' : 'new'];
         run.median.push(timing.median);
         run.p95.push(timing.p95);
@@ -176,7 +228,9 @@ test('times rendered warp drag frames against the old 1 px grid', async ({ page 
       runs,
     };
   }
-  const out = join(tmpdir(), 'kitbasher-warp-grid-benchmark.json');
+  const out =
+    process.env.KITBASHER_WARP_GRID_BENCH_OUT ??
+    join(tmpdir(), 'kitbasher-warp-grid-benchmark.json');
   writeFileSync(out, JSON.stringify(result, null, 2));
   console.log(`Wrote ${out}`);
 });

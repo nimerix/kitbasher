@@ -75,6 +75,7 @@ import { useShortcut, withShortcut } from '../core/preferences';
 import { AnnotationLayer, ProjectionTracker, ViewProjection } from './Annotations';
 import { IconButton, useDismiss } from './ui';
 import { CameraNavigation, CameraRig } from './CameraNavigation';
+import { DepthRange, groundReach } from './DepthRange';
 import { PaintCursor, SurfacePaintOverlay } from './SurfacePainter';
 import { displayedPosition, explodeFrame } from '../core/navigation';
 import type { ExplodeFrame } from '../core/navigation';
@@ -1053,6 +1054,7 @@ function Scene({
         far={50000}
       />
       <CameraRig />
+      <DepthRange />
       <SceneLighting />
       {view.grid ? (
         <Grid
@@ -1064,9 +1066,10 @@ function Scene({
           sectionThickness={0.7}
           cellColor="#42464c"
           sectionColor="#575c61"
-          fadeDistance={450}
+          fadeDistance={groundReach}
           fadeStrength={1.5}
           infiniteGrid
+          userData={{ depthRange: 'ground' }}
         />
       ) : null}
       {parts.map((part) => {

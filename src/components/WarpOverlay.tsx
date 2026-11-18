@@ -3,7 +3,17 @@ import type { ReactNode } from 'react';
 import { useThree } from '@react-three/fiber';
 import type { ThreeEvent } from '@react-three/fiber';
 import { ScreenSizer } from '@react-three/drei';
-import { BufferAttribute, BufferGeometry, Color, DoubleSide, Object3D, type Mesh } from 'three';
+import {
+  BufferAttribute,
+  BufferGeometry,
+  Color,
+  DoubleSide,
+  Matrix3,
+  Matrix4,
+  Object3D,
+  Vector3,
+  type Mesh,
+} from 'three';
 import { partMatrix, transformFromMatrix } from '../core/geometry';
 import { hiddenByIsolation } from '../core/isolation';
 import { PrecisionDrag } from '../core/precision';
@@ -19,7 +29,8 @@ import { handleGuides, reachWeights, writtenCentre } from '../core/warp-handles'
 import { CombinedTransform } from './CombinedTransform';
 import { ManagedTransformControls } from './ManagedTransformControls';
 import { warpRegionColor } from './SurfacePainter';
-import { WarpGrid } from './WarpGrid';
+import { gridNodePositions, WarpGrid } from './WarpGrid';
+import { surfacePoints } from './surface-points';
 
 const noRaycast: Mesh['raycast'] = () => {};
 const pointAccent = '#ed9b54',
@@ -133,35 +144,69 @@ function Folds({ warp, preview }: { warp: WarpSession; preview: BufferGeometry }
   return <FaceOverlay geometry={preview} faces={faces} color={foldColor} version={warp} />;
 }
 
+/**
+ * The geometry vertices of each welded vertex, in order: the first holds its position. Their
+ * normals together give the surface's at it, where a scan's unshared corners each hold one face's.
+ */
+function useWeldedVertices(warp: WarpSession) {
+  const { model } = warp;
+  return useMemo(() => {
+    const { weldOf, weldedCount } = model!.region;
+    const start = new Uint32Array(weldedCount + 1);
+    for (const welded of weldOf) if (welded !== 0xffffffff) start[welded + 1]++;
+    for (let w = 0; w < weldedCount; w++) start[w + 1] += start[w];
+    const vertices = new Uint32Array(start[weldedCount]),
+      fill = start.slice(0, weldedCount);
+    weldOf.forEach((welded, vertex) => {
+      if (welded !== 0xffffffff) vertices[fill[welded]++] = vertex;
+    });
+    const first = (welded: number) => vertices[start[welded]];
+    /** The welded vertex's normal into `out`, unnormalised. */
+    const normal = (normals: ArrayLike<number>, welded: number, out: Vector3) => {
+      out.set(0, 0, 0);
+      for (let k = start[welded]; k < start[welded + 1]; k++) {
+        const v = vertices[k] * 3;
+        out.x += normals[v];
+        out.y += normals[v + 1];
+        out.z += normals[v + 2];
+      }
+      return out;
+    };
+    return { first, normal };
+  }, [model]);
+}
+
 /** Seam vertices, green where closed and red where a gap remains. */
 function Seam({ warp }: { warp: WarpSession }) {
-  const { model, output, seam } = warp;
-  // The first geometry vertex of each welded vertex holds its position.
-  const first = useMemo(() => {
-    const first = new Int32Array(model!.region.weldedCount).fill(-1);
-    model!.region.weldOf.forEach((welded, vertex) => {
-      if (welded !== 0xffffffff && first[welded] < 0) first[welded] = vertex;
-    });
-    return first;
-  }, [model]);
+  const { output, seam } = warp;
+  const welded = useWeldedVertices(warp);
   const geometry = useMemo(() => {
     const positions = new Float32Array(seam!.vertices.length * 3),
+      normals = new Float32Array(seam!.vertices.length * 3),
       colors = new Float32Array(seam!.vertices.length * 3),
-      color = new Color();
-    seam!.vertices.forEach((welded, i) => {
-      positions.set(output!.positions.subarray(first[welded] * 3, first[welded] * 3 + 3), i * 3);
+      color = new Color(),
+      normal = new Vector3();
+    seam!.vertices.forEach((vertex, i) => {
+      const first = welded.first(vertex) * 3;
+      positions.set(output!.positions.subarray(first, first + 3), i * 3);
+      if (output!.normals)
+        welded
+          .normal(output!.normals, vertex, normal)
+          .normalize()
+          .toArray(normals, i * 3);
       // A millimetre or more of gap shows full red.
       color.lerpColors(closedColor, openColor, Math.min(1, Math.max(0, seam!.gaps[i])));
       color.toArray(colors, i * 3);
     });
     return new BufferGeometry()
       .setAttribute('position', new BufferAttribute(positions, 3))
+      .setAttribute('normal', new BufferAttribute(normals, 3))
       .setAttribute('color', new BufferAttribute(colors, 3));
-  }, [seam, output, first]);
+  }, [seam, output, welded]);
   useEffect(() => () => geometry.dispose(), [geometry]);
   return (
-    <points geometry={geometry} raycast={noRaycast} renderOrder={6}>
-      <pointsMaterial vertexColors size={4} sizeAttenuation={false} depthWrite={false} />
+    <points name="warp-seam" geometry={geometry} raycast={noRaycast} renderOrder={8}>
+      <pointsMaterial {...surfacePoints} vertexColors size={4} sizeAttenuation={false} />
     </points>
   );
 }
@@ -182,6 +227,7 @@ function reachKey(warp: WarpSession) {
  */
 function Reach({ warp }: { warp: WarpSession }) {
   const invalidate = useThree((s) => s.invalidate);
+  const welded = useWeldedVertices(warp);
   const keyRef = useRef<unknown[]>([]);
   const next = reachKey(warp);
   if (next.length !== keyRef.current.length || next.some((value, i) => value !== keyRef.current[i]))
@@ -205,6 +251,7 @@ function Reach({ warp }: { warp: WarpSession }) {
     if (!nodes.length) return null;
     const geometry = new BufferGeometry()
       .setAttribute('position', new BufferAttribute(new Float32Array(nodes.length * 3), 3))
+      .setAttribute('normal', new BufferAttribute(new Float32Array(nodes.length * 3), 3))
       .setAttribute('color', new BufferAttribute(new Float32Array(colors), 3));
     return { nodes: Uint32Array.from(nodes), geometry };
     // The key stands for the selected handles' reach and settings.
@@ -214,24 +261,41 @@ function Reach({ warp }: { warp: WarpSession }) {
     if (!dots) return;
     const position = dots.geometry.getAttribute('position') as BufferAttribute;
     const array = position.array as Float32Array;
-    const nodes = warp.state!.positions;
+    // Where the surface was written, which the grid is drawn on too.
+    const nodes = gridNodePositions(warp);
     dots.nodes.forEach((n, i) => {
       array[i * 3] = nodes[n * 3];
       array[i * 3 + 1] = nodes[n * 3 + 1];
       array[i * 3 + 2] = nodes[n * 3 + 2];
     });
     position.needsUpdate = true;
+    // Each dot's surface normal, in world space as its position is.
+    const normal = dots.geometry.getAttribute('normal') as BufferAttribute;
+    const model = warp.model!,
+      written = warp.output?.normals;
+    if (written) {
+      const toWorld = new Matrix3().getNormalMatrix(new Matrix4().fromArray(model.matrix));
+      const n = new Vector3();
+      dots.nodes.forEach((node, i) => {
+        welded
+          .normal(written, model.grid.nodes[node], n)
+          .applyMatrix3(toWorld)
+          .normalize()
+          .toArray(normal.array, i * 3);
+      });
+      normal.needsUpdate = true;
+    }
     dots.geometry.computeBoundingSphere();
     invalidate();
-  }, [dots, warp, invalidate]);
+  }, [dots, welded, warp, invalidate]);
   if (!dots) return null;
   return (
     <>
-      <points geometry={dots.geometry} raycast={noRaycast} renderOrder={7}>
-        <pointsMaterial color="#1b1e22" size={7} sizeAttenuation={false} depthWrite={false} />
+      <points name="warp-reach:ring" geometry={dots.geometry} raycast={noRaycast} renderOrder={9}>
+        <pointsMaterial {...surfacePoints} color="#1b1e22" size={7} sizeAttenuation={false} />
       </points>
-      <points geometry={dots.geometry} raycast={noRaycast} renderOrder={8}>
-        <pointsMaterial vertexColors size={4} sizeAttenuation={false} depthWrite={false} />
+      <points name="warp-reach:dot" geometry={dots.geometry} raycast={noRaycast} renderOrder={10}>
+        <pointsMaterial {...surfacePoints} vertexColors size={4} sizeAttenuation={false} />
       </points>
     </>
   );
