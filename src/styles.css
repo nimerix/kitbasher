@@ -6527,6 +6527,51 @@ optgroup {
   font-size: 10px;
   color: var(--muted);
 }
+.warp-point-settings {
+  display: grid;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+.warp-point-setting {
+  display: grid;
+  grid-template-columns: 46px minmax(0, 1fr) 58px 18px;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  color: var(--muted);
+}
+.warp-point-setting > input[type='range'] {
+  width: 100%;
+  accent-color: var(--accent);
+}
+.warp-point-setting > input[type='number'],
+.warp-distribute-row > select,
+.warp-auto-points > select {
+  padding: 6px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: #22262b;
+  color: var(--text);
+}
+.warp-point-setting > input[type='number'] {
+  width: 100%;
+}
+.warp-point-settings > .anchor-help {
+  margin: 0;
+}
+.warp-distribute-row,
+.warp-auto-points {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.warp-distribute-row > .button {
+  flex: 1;
+}
+.warp-auto-points {
+  justify-content: space-between;
+  margin-top: 8px;
+}
 .warp-building {
   display: flex;
   align-items: center;

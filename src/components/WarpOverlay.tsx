@@ -15,6 +15,7 @@ import {
   type WarpTransformSelection,
 } from '../core/transform-selection';
 import type { Part, Vec3 } from '../core/types';
+import { reachWeight } from '../core/warp-handles';
 import { CombinedTransform } from './CombinedTransform';
 import { ManagedTransformControls } from './ManagedTransformControls';
 import { warpRegionColor } from './SurfacePainter';
@@ -22,6 +23,7 @@ import { warpRegionColor } from './SurfacePainter';
 const noRaycast: Mesh['raycast'] = () => {};
 const pointAccent = '#ed9b54',
   pointIdle = '#e9eaec',
+  autoIdle = '#a4aab2',
   foldColor = '#f06a6a';
 const closedColor = new Color('#7fd18b'),
   openColor = new Color('#f06a6a');
@@ -61,12 +63,14 @@ export function WarpOverlay({ onPress, pressed }: { onPress: () => void; pressed
             {warp.seam ? <Seam warp={warp} /> : null}
           </PartSpace>
           <GridLines warp={warp} />
+          <Reach warp={warp} />
           {warp.points.map((point) => (
             <PointMarker
               key={point.id}
               id={point.id}
               position={point.target ?? point.pin}
               selected={warp.selectedPoints.includes(point.id)}
+              auto={point.auto}
               pressed={pressed}
             />
           ))}
@@ -194,16 +198,55 @@ function GridLines({ warp }: { warp: WarpSession }) {
   );
 }
 
-/** A control point, sized in pixels. Clicking it selects it, and Shift adds it. */
+/** The grid nodes the selected points move, brighter where they carry more of the move. */
+function Reach({ warp }: { warp: WarpSession }) {
+  const geometry = useMemo(() => {
+    const positions: number[] = [],
+      colors: number[] = [];
+    const color = new Color(),
+      faint = new Color('#3a3f46'),
+      full = new Color(pointAccent);
+    const { positions: nodes } = warp.state!;
+    for (const point of warp.points) {
+      const { reach } = point;
+      if (!warp.selectedPoints.includes(point.id) || !reach?.effective) continue;
+      for (let i = reach.own; i < reach.node.length; i++) {
+        const w = reachWeight(reach.distance[i], point.radius, point.falloff, reach.edge);
+        if (!(w > 0)) continue;
+        const n = reach.node[i];
+        positions.push(nodes[n * 3], nodes[n * 3 + 1], nodes[n * 3 + 2]);
+        color.lerpColors(faint, full, w).toArray(colors, colors.length);
+      }
+    }
+    if (!positions.length) return null;
+    return new BufferGeometry()
+      .setAttribute('position', new BufferAttribute(new Float32Array(positions), 3))
+      .setAttribute('color', new BufferAttribute(new Float32Array(colors), 3));
+  }, [warp.points, warp.selectedPoints, warp.state]);
+  useEffect(() => () => geometry?.dispose(), [geometry]);
+  if (!geometry) return null;
+  return (
+    <points geometry={geometry} raycast={noRaycast} renderOrder={7}>
+      <pointsMaterial vertexColors size={5} sizeAttenuation={false} depthWrite={false} />
+    </points>
+  );
+}
+
+/**
+ * A control point, sized in pixels; a point placed automatically is smaller and dimmer. Clicking
+ * it selects it, and Shift adds it.
+ */
 function PointMarker({
   id,
   position,
   selected,
+  auto,
   pressed,
 }: {
   id: string;
   position: Vec3;
   selected: boolean;
+  auto: boolean;
   pressed: () => boolean;
 }) {
   const [hovered, setHovered] = useState(false);
@@ -214,7 +257,8 @@ function PointMarker({
     },
     [],
   );
-  const color = selected ? pointAccent : hovered ? '#ffffff' : pointIdle;
+  const color = selected ? pointAccent : hovered ? '#ffffff' : auto ? autoIdle : pointIdle;
+  const size = auto && !selected ? 3.5 : 5;
   return (
     <ScreenSizer position={position}>
       <mesh
@@ -246,12 +290,12 @@ function PointMarker({
           document.body.style.cursor = 'auto';
         }}
       >
-        <sphereGeometry args={[5, 16, 12]} />
+        <sphereGeometry args={[size, 16, 12]} />
         <meshBasicMaterial color={color} toneMapped={false} />
       </mesh>
       {/* Seen faintly through the surface when it is behind the part. */}
       <mesh raycast={noRaycast} renderOrder={1000}>
-        <sphereGeometry args={[5, 16, 12]} />
+        <sphereGeometry args={[size, 16, 12]} />
         <meshBasicMaterial
           color={color}
           transparent

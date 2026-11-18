@@ -169,6 +169,7 @@ test('closes a seam, moves a control point, applies, undoes and cancels', async 
   await page.keyboard.press('w');
   await expect(page.getByTitle('Warp a scanned surface (W)')).toHaveClass(/active/);
   await page.getByRole('radio', { name: 'Whole part', exact: true }).click();
+  await page.getByRole('checkbox', { name: 'Place points automatically' }).uncheck();
   // The grid is built by the warp worker.
   await page.getByRole('button', { name: 'Lay grid', exact: true }).click();
   const close = page.getByRole('button', { name: 'Close gap', exact: true });
@@ -325,6 +326,7 @@ test('toolbar transform buttons choose the control point gizmo while warping', a
   await open(page);
   await page.keyboard.press('w');
   await page.getByRole('radio', { name: 'Whole part', exact: true }).click();
+  await page.getByRole('checkbox', { name: 'Place points automatically' }).uncheck();
   await page.getByRole('button', { name: 'Lay grid', exact: true }).click();
   await expect(page.getByRole('button', { name: 'Close gap', exact: true })).toBeEnabled();
   const front = await screen(page, [-4.5, 10.5, 10]);
@@ -360,6 +362,7 @@ test('a Shift press on the gizmo centre leaves its point selected', async ({ pag
   await open(page);
   await page.keyboard.press('w');
   await page.getByRole('radio', { name: 'Whole part', exact: true }).click();
+  await page.getByRole('checkbox', { name: 'Place points automatically' }).uncheck();
   await page.getByRole('button', { name: 'Lay grid', exact: true }).click();
   await expect(page.getByRole('button', { name: 'Close gap', exact: true })).toBeEnabled();
   const front = await screen(page, [-4.5, 10.5, 10]);
@@ -380,6 +383,61 @@ test('a Shift press on the gizmo centre leaves its point selected', async ({ pag
   const after = await editorState(page);
   expect(after.selectedPoints).toBe(1);
   expect(after.points).toHaveLength(1);
+});
+
+test('a whole part gets pins of its own, so a moved point bends it, shaped by radius and falloff', async ({
+  page,
+}) => {
+  await open(page);
+  const original = await editorState(page);
+  await page.keyboard.press('w');
+  await page.getByRole('radio', { name: 'Whole part', exact: true }).click();
+  await expect(page.getByRole('checkbox', { name: 'Place points automatically' })).toBeChecked();
+  await page.getByRole('button', { name: 'Lay grid', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'Close gap', exact: true })).toBeEnabled();
+  const laid = await editorState(page);
+  expect(laid.points).toHaveLength(8);
+  expect(laid.points.every((point) => !point.moved)).toBe(true);
+  expect(laid.undo).toBe(0);
+
+  const front = await screen(page, [-4.5, 10.5, 10]);
+  await page.mouse.click(front.x, front.y);
+  expect((await editorState(page)).points).toHaveLength(9);
+  const radius = page.getByRole('spinbutton', { name: 'Point radius', exact: true });
+  await radius.fill('0');
+  await radius.press('Tab');
+  const placed = (await editorState(page)).points.at(-1)!;
+  for (let step = 0; step < 3; step++)
+    await page.getByRole('button', { name: 'Move Z positive', exact: true }).click();
+  const point = await editorState(page);
+  expect(point.points.at(-1)!.moved).toBe(true);
+  const lift = point.points.at(-1)!.at[2] - placed.at[2];
+  expect(lift).toBeGreaterThan(0.5);
+  // The back of the block stays where it was: the drag bends the part instead of moving it.
+  const back = (mesh: number[]) =>
+    Math.max(
+      ...mesh.flatMap((value, i) =>
+        i % 3 === 2 && Math.abs(original.mesh[i] + 10) < 1e-4
+          ? [Math.abs(value - original.mesh[i])]
+          : [],
+      ),
+    );
+  expect(back(point.preview!)).toBeLessThan(0.15 * lift);
+
+  await radius.fill('6');
+  await radius.press('Tab');
+  const wide = await editorState(page);
+  expect(wide.undo).toBe(point.undo + 1);
+  expect(differs(wide.preview!, point.preview!)).toBe(true);
+  const falloff = page.getByRole('spinbutton', { name: 'Point falloff', exact: true });
+  await falloff.fill('0');
+  await falloff.press('Tab');
+  const plateau = await editorState(page);
+  expect(plateau.undo).toBe(wide.undo + 1);
+  expect(differs(plateau.preview!, wide.preview!)).toBe(true);
+
+  await page.getByRole('button', { name: 'Distribute points', exact: true }).click();
+  expect((await editorState(page)).points).toHaveLength(17);
 });
 
 test.describe('with clipping on, as by default', () => {
