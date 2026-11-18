@@ -449,7 +449,7 @@ function Toolbar({
           {keys.paint ? <Keyboard>{keys.paint}</Keyboard> : null}
         </button>
         <button
-          className={`tool-button ${tool === 'pins' ? 'active' : ''}`}
+          className={`tool-button compact-tool ${tool === 'pins' ? 'active' : ''}`}
           title="Pin parts in space"
           onClick={() => useEditor.getState().setTool('pins')}
         >
@@ -475,7 +475,7 @@ function Toolbar({
           {keys.warp ? <Keyboard>{keys.warp}</Keyboard> : null}
         </button>
         <button
-          className={`tool-button ${tool === 'joint' ? 'active' : ''}`}
+          className={`tool-button compact-tool ${tool === 'joint' ? 'active' : ''}`}
           title={withShortcut('Create joint', keys.joint)}
           onClick={() => useEditor.getState().setTool('joint')}
         >
