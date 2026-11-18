@@ -23,6 +23,10 @@ export interface WarpRegion {
   adjacencyStart: Uint32Array;
   adjacency: Uint32Array;
   interiorCount: number;
+  /** Interior welded vertices, ascending. */
+  interior: Uint32Array;
+  /** Geometry vertices of interior welded vertices, ascending: the only ones a warp moves. */
+  interiorVertices: Uint32Array;
 }
 
 export function buildWarpRegion(
@@ -85,6 +89,15 @@ export function buildWarpRegion(
       interiorCount++;
     }
   }
+  const interior = new Uint32Array(interiorCount);
+  for (let v = 0, i = 0; v < weldedCount; v++) if (role[v] === WarpRole.Interior) interior[i++] = v;
+  let vertexCount = 0;
+  for (let g = 0; g < weldOf.length; g++)
+    if (weldOf[g] !== 0xffffffff && role[weldOf[g]] === WarpRole.Interior) vertexCount++;
+  const interiorVertices = new Uint32Array(vertexCount);
+  for (let g = 0, i = 0; g < weldOf.length; g++)
+    if (weldOf[g] !== 0xffffffff && role[weldOf[g]] === WarpRole.Interior)
+      interiorVertices[i++] = g;
 
   // Each triangle edge is stored in both directions, then sorted and deduplicated per vertex.
   const start = new Uint32Array(weldedCount + 1);
@@ -127,6 +140,8 @@ export function buildWarpRegion(
     adjacencyStart,
     adjacency: raw.slice(0, written),
     interiorCount,
+    interior,
+    interiorVertices,
   };
 }
 
