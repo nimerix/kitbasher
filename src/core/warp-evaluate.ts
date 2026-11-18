@@ -44,6 +44,108 @@ export function createWarpOutput(model: WarpModel): WarpOutput {
   };
 }
 
+function writeNodeRotations(state: WarpState, count: number, rotation: Float64Array) {
+  const { rotations } = state;
+  for (let n = 0; n < count; n++)
+    writeRotation(
+      rotation,
+      n * 9,
+      rotations[n * 4],
+      rotations[n * 4 + 1],
+      rotations[n * 4 + 2],
+      rotations[n * 4 + 3],
+    );
+}
+
+/**
+ * Skinned world position of interior welded vertex `v`, before any feather blend, into `world` at
+ * `o`. Returns false, writing rest, when the vertex has no usable binding.
+ */
+function skinVertex(
+  model: WarpModel,
+  nodePos: Float64Array,
+  rotation: Float64Array,
+  v: number,
+  world: Float64Array,
+  o: number,
+) {
+  const { binding, restNodes, restWorld } = model;
+  const K = binding.node.length / model.region.weldedCount;
+  const px = restWorld[v * 3],
+    py = restWorld[v * 3 + 1],
+    pz = restWorld[v * 3 + 2];
+  let x = 0,
+    y = 0,
+    z = 0,
+    sum = 0;
+  for (let j = 0; j < K; j++) {
+    const n = binding.node[v * K + j];
+    if (n === none) continue;
+    const w = binding.weight[v * K + j];
+    const dx = px - restNodes[n * 3],
+      dy = py - restNodes[n * 3 + 1],
+      dz = pz - restNodes[n * 3 + 2];
+    const r = n * 9;
+    x += w * (rotation[r] * dx + rotation[r + 1] * dy + rotation[r + 2] * dz + nodePos[n * 3]);
+    y +=
+      w * (rotation[r + 3] * dx + rotation[r + 4] * dy + rotation[r + 5] * dz + nodePos[n * 3 + 1]);
+    z +=
+      w * (rotation[r + 6] * dx + rotation[r + 7] * dy + rotation[r + 8] * dz + nodePos[n * 3 + 2]);
+    sum += w;
+  }
+  if (!(sum > 0) || !Number.isFinite(x + y + z + sum)) {
+    world[o] = px;
+    world[o + 1] = py;
+    world[o + 2] = pz;
+    return false;
+  }
+  world[o] = x / sum;
+  world[o + 1] = y / sum;
+  world[o + 2] = z / sum;
+  return true;
+}
+
+/**
+ * Mesh-local positions of the listed welded vertices exactly as `evaluateWarp` writes them for
+ * `state`, without writing a whole mesh. A vertex the warp does not move keeps the bits of
+ * `first[v]`, the geometry vertex given for it.
+ */
+export function writtenLocalPositions(
+  model: WarpModel,
+  state: WarpState,
+  vertices: ArrayLike<number>,
+  first: ArrayLike<number>,
+): Float32Array {
+  const { region, restWorld, blend, inverse: inv } = model;
+  const rotation = new Float64Array(model.grid.nodes.length * 9);
+  writeNodeRotations(state, model.grid.nodes.length, rotation);
+  const world = new Float64Array(3);
+  const out = new Float32Array(vertices.length * 3);
+  for (let i = 0; i < vertices.length; i++) {
+    const v = vertices[i];
+    const moved =
+      region.role[v] === WarpRole.Interior &&
+      skinVertex(model, state.positions, rotation, v, world, 0);
+    if (!moved) {
+      out.set(model.positions.subarray(first[v] * 3, first[v] * 3 + 3), i * 3);
+      continue;
+    }
+    let x = world[0],
+      y = world[1],
+      z = world[2];
+    if (blend && blend[v] < 1) {
+      const b = blend[v];
+      x = restWorld[v * 3] + b * (x - restWorld[v * 3]);
+      y = restWorld[v * 3 + 1] + b * (y - restWorld[v * 3 + 1]);
+      z = restWorld[v * 3 + 2] + b * (z - restWorld[v * 3 + 2]);
+    }
+    out[i * 3] = Math.fround(inv[0] * x + inv[4] * y + inv[8] * z + inv[12]);
+    out[i * 3 + 1] = Math.fround(inv[1] * x + inv[5] * y + inv[9] * z + inv[13]);
+    out[i * 3 + 2] = Math.fround(inv[2] * x + inv[6] * y + inv[10] * z + inv[14]);
+  }
+  return out;
+}
+
 /**
  * Writes interior vertices and their normals, touching only the region. A feathered model blends
  * once, in the welded world buffer, and everything else reads that. Returns the region
@@ -67,60 +169,15 @@ export function evaluateWarp(
   out: WarpOutput,
   folds = true,
 ): Uint32Array | null {
-  const { region, grid, binding, restNodes, inverse: inv } = model;
-  const { weldOf, weldedCount, interior, interiorVertices } = region;
+  const { region, grid } = model;
+  const { weldOf, interior, interiorVertices } = region;
   const { rotation, world, moved } = scratchFor(model);
-  const { positions: nodePos, rotations } = state;
-  const K = binding.node.length / weldedCount;
-
-  for (let n = 0; n < grid.nodes.length; n++)
-    writeRotation(
-      rotation,
-      n * 9,
-      rotations[n * 4],
-      rotations[n * 4 + 1],
-      rotations[n * 4 + 2],
-      rotations[n * 4 + 3],
-    );
+  writeNodeRotations(state, grid.nodes.length, rotation);
 
   const { restWorld, blend } = model;
   for (let i = 0; i < interior.length; i++) {
     const v = interior[i];
-    moved[v] = 0;
-    const px = restWorld[v * 3],
-      py = restWorld[v * 3 + 1],
-      pz = restWorld[v * 3 + 2];
-    let x = 0,
-      y = 0,
-      z = 0,
-      sum = 0;
-    for (let j = 0; j < K; j++) {
-      const n = binding.node[v * K + j];
-      if (n === none) continue;
-      const w = binding.weight[v * K + j];
-      const dx = px - restNodes[n * 3],
-        dy = py - restNodes[n * 3 + 1],
-        dz = pz - restNodes[n * 3 + 2];
-      const r = n * 9;
-      x += w * (rotation[r] * dx + rotation[r + 1] * dy + rotation[r + 2] * dz + nodePos[n * 3]);
-      y +=
-        w *
-        (rotation[r + 3] * dx + rotation[r + 4] * dy + rotation[r + 5] * dz + nodePos[n * 3 + 1]);
-      z +=
-        w *
-        (rotation[r + 6] * dx + rotation[r + 7] * dy + rotation[r + 8] * dz + nodePos[n * 3 + 2]);
-      sum += w;
-    }
-    if (!(sum > 0) || !Number.isFinite(x + y + z + sum)) {
-      world[v * 3] = px;
-      world[v * 3 + 1] = py;
-      world[v * 3 + 2] = pz;
-      continue;
-    }
-    moved[v] = 1;
-    world[v * 3] = x / sum;
-    world[v * 3 + 1] = y / sum;
-    world[v * 3 + 2] = z / sum;
+    moved[v] = skinVertex(model, state.positions, rotation, v, world, v * 3) ? 1 : 0;
   }
   // The feather band writes part of the displacement: rest + b × (skinned − rest).
   if (blend) {
@@ -133,6 +190,7 @@ export function evaluateWarp(
     }
   }
 
+  const inv = model.inverse;
   const { positions, moved: box } = out;
   let minX = Infinity,
     minY = Infinity,

@@ -622,6 +622,23 @@ describe('feathered written surface', () => {
   });
 });
 
+/** Area-weighted world normal of the written surface at geometry vertex `v`'s welded vertex. */
+function faceNormalAround(model: WarpModel, positions: Float32Array, v: number) {
+  const { region } = model;
+  const w = region.weldOf[v];
+  const first = region.weldOf.indexOf.bind(region.weldOf);
+  const sum = new Vector3();
+  const m = new Matrix4().fromArray(model.matrix);
+  for (let t = 0; t < region.triangles.length; t += 3) {
+    if (![0, 1, 2].some((k) => region.triangles[t + k] === w)) continue;
+    const p = [0, 1, 2].map((k) =>
+      new Vector3().fromArray(positions, first(region.triangles[t + k]) * 3).applyMatrix4(m),
+    );
+    sum.add(new Vector3().subVectors(p[1], p[0]).cross(new Vector3().subVectors(p[2], p[0])));
+  }
+  return sum.normalize();
+}
+
 describe('feathered readouts', () => {
   /** A cube with a disc painted on its +X face, facing a wall 1 mm away. */
   async function seam() {
@@ -665,6 +682,49 @@ describe('feathered readouts', () => {
     expect(report.vertices.length).toBeGreaterThan(0);
     for (const v of report.vertices) expect(model.blend![v]).toBe(1);
     expect(report.largestGap).toBeCloseTo(1, 5);
+  });
+
+  it('decides which painted nodes face the neighbour as the seam readout does, after a drag', async () => {
+    // A sphere cap facing a wall at x = 4.5, its nodes turned up to 75° from it, all in range.
+    const g = new SphereGeometry(4, 64, 48);
+    const faces: number[] = [];
+    for (let f = 0; f < faceCount(g); f++) if (centroid(g, f).x > 1) faces.push(f);
+    const model = await buildWarpModel(inputOf(g, faces, 0.8));
+    const geometry = new BoxGeometry(20, 40, 40);
+    const wall: Part = {
+      id: 'wall',
+      name: 'wall',
+      geometry,
+      position: [14.5, 0, 0],
+      quaternion: [0, 0, 0, 1],
+      scale: [1, 1, 1],
+      color: '#fff',
+      visible: true,
+      locked: false,
+      source: 'test',
+    };
+    const matrix = partMatrix(wall);
+    const neighbours = [
+      { part: wall, tree: treeOf(geometry)!, matrix, inverse: matrix.clone().invert() },
+    ];
+    const { state, out } = pull(model, g, new Vector3(3, 2, 0), new Vector3(0.3, 1.2, 0));
+    const seam = new Set(measureSeam(model, out, neighbours)!.vertices);
+    const targeted = new Set(closeGapTargets(model, state, neighbours, 0.05).map((t) => t.node));
+    let near = 0,
+      compared = 0;
+    const written = writtenNodePositions(model, state);
+    for (let n = 0; n < model.grid.nodes.length; n++) {
+      if (model.grid.fixed[n] || !isPaintedNode(model, n)) continue;
+      // Well within range, so a rounding difference in position cannot cross it.
+      if (4.5 - written[n * 3] > 4) continue;
+      compared++;
+      expect(targeted.has(n)).toBe(seam.has(model.grid.nodes[n]));
+      const v = model.region.weldOf.indexOf(model.grid.nodes[n]);
+      const normal = faceNormalAround(model, out.positions, v);
+      if (Math.abs(normal.x - 0.5) < 0.05) near++;
+    }
+    expect(compared).toBeGreaterThan(20);
+    expect(near).toBeGreaterThan(0);
   });
 
   it('closes the gap at painted nodes only', async () => {
