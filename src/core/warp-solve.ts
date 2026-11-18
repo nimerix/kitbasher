@@ -200,6 +200,35 @@ function constraintTerms(
   return { key, terms };
 }
 
+/** Where the solve takes a constraint's point to be for `state`: Σ_k a_k p_k + Σ_n R_n r_n. */
+export function modelledPoint(
+  grid: WarpGrid,
+  restNodes: Float64Array,
+  constraint: WarpConstraint,
+  state: WarpState,
+): Vec3 {
+  const { node, weight, fixed } = constraint;
+  let sum = 0;
+  for (let k = 0; k < node.length; k++) sum += weight[k];
+  const term = termOf(constraint, grid, restNodes, sum);
+  const { coefficient, rotatedNode, rotated } = term;
+  const out: Vec3 = fixed ? [...fixed] : [0, 0, 0];
+  term.node.forEach((n, k) => {
+    for (let a = 0; a < 3; a++) out[a] += coefficient[k] * state.positions[n * 3 + a];
+  });
+  const r = new Float64Array(9),
+    q = state.rotations;
+  rotatedNode.forEach((n, s) => {
+    writeRotation(r, 0, q[n * 4], q[n * 4 + 1], q[n * 4 + 2], q[n * 4 + 3]);
+    for (let a = 0; a < 3; a++)
+      out[a] +=
+        r[a * 3] * rotated[s * 3] +
+        r[a * 3 + 1] * rotated[s * 3 + 1] +
+        r[a * 3 + 2] * rotated[s * 3 + 2];
+  });
+  return out;
+}
+
 function guideKey(guides: WarpGuides | undefined) {
   const key: number[] = [];
   if (!guides) return key;
