@@ -175,6 +175,16 @@ function addAt(part: Part, x: number, y: number, z = 0) {
 const move = (id: string, target: Vec3, gesture: 'drag' | 'end' = 'end') =>
   editor().moveWarpPoints([{ id, target }], gesture);
 
+/** The automatic point nearest the middle of a plate laid whole, wherever the grid put it. */
+const middleAuto = () =>
+  session()
+    .points.filter(({ auto }) => auto)
+    .reduce((best, point) =>
+      Math.hypot(point.pin[0], point.pin[1]) < Math.hypot(best.pin[0], best.pin[1]) ? point : best,
+    );
+/** A spot 1.2 mm beside a point, where a handle lifted 5 mm carries it more than 2 mm up. */
+const beside = (point: WarpPoint) => [point.pin[0] + 1.2, point.pin[1] - 0.15] as const;
+
 /** Where a point sits on the solved warp, in world space. */
 const deformed = (point: WarpPoint) =>
   deformPoint(
@@ -2033,12 +2043,11 @@ describe('warp handles', () => {
     setup([a, wall], ['a']);
     editor().setTool('warp');
     await editor().layWarpGrid();
-    const rider = session().points.find(
-      (point) => Math.hypot(point.pin[0] + 2.5, point.pin[1] - 3.75) < 0.1,
-    )!;
+    const rider = middleAuto();
     expect(rider.auto).toBe(true);
-    const lift = addAt(a, -1.3, 3.6);
-    move(lift.id, [-1.3, 3.6, 5]);
+    const [x, y] = beside(rider);
+    const lift = addAt(a, x, y);
+    move(lift.id, [x, y, 5]);
     finishWarpSettling();
     const now = deformed(session().points.find(({ id }) => id === rider.id)!);
     expect(now[2] - rider.pin[2]).toBeGreaterThan(2);
@@ -2381,11 +2390,10 @@ describe('warp handles that must land', () => {
     setup([a], ['a']);
     editor().setTool('warp');
     await editor().layWarpGrid();
-    const rider = session().points.find(
-      (point) => Math.hypot(point.pin[0] + 2.5, point.pin[1] - 3.75) < 0.1,
-    )!;
-    const lift = addAt(a, -1.3, 3.6);
-    move(lift.id, [-1.3, 3.6, 5]);
+    const rider = middleAuto();
+    const [x, y] = beside(rider);
+    const lift = addAt(a, x, y);
+    move(lift.id, [x, y, 5]);
     finishWarpSettling();
     return { a, rider: current(rider.id), lift: current(lift.id) };
   }
