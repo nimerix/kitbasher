@@ -111,7 +111,7 @@ function pointOn(model: WarpModel, part: Part, id: string, x: number, y: number)
     id,
     face,
     barycentric,
-    binding: bindPoint(model.region, model.grid, model.binding, face, barycentric),
+    binding: bindPoint(model.region, model.binding, model.restWorld, face, barycentric),
     restWorld,
     pin: restWorld,
     target: null,
@@ -454,7 +454,7 @@ describe('warp session', () => {
     expect(warp.gapTargets).toEqual([]);
     const [kept] = warp.points;
     expect(kept.binding).toEqual(
-      bindPoint(model.region, model.grid, model.binding, inside.face, inside.barycentric),
+      bindPoint(model.region, model.binding, model.restWorld, inside.face, inside.barycentric),
     );
     kept.binding.node.forEach((n) => expect(n).toBeLessThan(model.grid.nodes.length));
     kept.restWorld.forEach((v, i) => expect(v).toBeCloseTo(inside.restWorld[i], 5));
@@ -478,8 +478,8 @@ describe('warp session', () => {
     expect(warp.points[0].binding).toEqual(
       bindPoint(
         warp.model!.region,
-        warp.model!.grid,
         warp.model!.binding,
+        warp.model!.restWorld,
         inside.face,
         inside.barycentric,
       ),
@@ -602,7 +602,7 @@ describe('warp points, close gap and apply', () => {
     const expected = corners.getBarycoord(new Vector3(1, 0.5, 0), new Vector3())!.toArray();
     p.barycentric.forEach((w, i) => expect(w).toBeCloseTo(expected[i], 6));
     expect(p.binding).toEqual(
-      bindPoint(model!.region, model!.grid, model!.binding, p.face, p.barycentric),
+      bindPoint(model!.region, model!.binding, model!.restWorld, p.face, p.barycentric),
     );
     expect(distance(p.restWorld, [6, 0.5, 0])).toBeLessThan(1e-5);
     expect(distance(p.pin, p.restWorld)).toBeLessThan(1e-6);
@@ -1246,19 +1246,22 @@ describe('warp points, close gap and apply', () => {
     expect(session().stage).toBe('warp');
   });
 
-  it('measures the seam on Apply only for a session it keeps', async () => {
+  it('refreshes the seam only if the shared scene refuses the warp and it reopens', async () => {
     const a = plate('a');
     const lid = solid('lid', new BoxGeometry(10, 10, 10), [0, 0, 7]);
-    for (const live of [false, true]) {
-      setup([a, lid], ['a']);
-      useEditor.setState({ liveStatus: live ? 'connected' : null });
-      await warpDisc(a, 0, 0, 8);
-      move(addAt(a, 0, 0).id, [0, 0, 1]);
-      const measured = seams.measured;
-      expect(editor().applyWarp()).toBe(true);
-      expect(seams.measured - measured).toBe(live ? 1 : 0);
-      if (live) expect(editor().warpPending!.session.seam).not.toBeNull();
-    }
+    setup([a, lid], ['a']);
+    useEditor.setState({ liveStatus: 'disconnected' });
+    await warpDisc(a, 0, 0, 8);
+    move(addAt(a, 0, 0).id, [0, 0, 1]);
+    const confirmed = editor().scene;
+    const measured = seams.measured;
+    expect(editor().applyWarp()).toBe(true);
+    expect(seams.measured).toBe(measured);
+    expect(editor().warpPending).not.toBeNull();
+    editor().receiveScene(confirmed);
+    editor().settleWarp(false);
+    expect(seams.measured).toBe(measured + 1);
+    expect(session().seam).not.toBeNull();
   });
 
   it('apply is refused while the part is locked', async () => {
@@ -1303,7 +1306,7 @@ describe('warp points, close gap and apply', () => {
     expect(editor().warp).toBeNull();
     useEditor.setState({ tool: 'select' });
     editor().settleWarp(false);
-    expect(editor().warp).toBe(pending.session);
+    expect(editor().warp).toMatchObject({ id: pending.session.id, points: pending.session.points });
     expect(editor().warpPending).toBeNull();
     expect(editor().tool).toBe('warp');
     expect(editor().selected).toEqual(['a']);
@@ -1387,6 +1390,9 @@ describe('warp points, close gap and apply', () => {
     // Waiting ends with the live session or the scene.
     kept = await applyLive();
     useEditor.setState({ liveStatus: 'disconnected' });
+    expect(editor().warpPending).not.toBeNull();
+    expect(kept.released()).toBe(false);
+    useEditor.setState({ liveStatus: null });
     expect(editor().warpPending).toBeNull();
     expect(kept.released()).toBe(true);
     kept = await applyLive();
@@ -1546,7 +1552,13 @@ describe('warp commands', () => {
     const a = plate('a');
     setup([a], ['a']);
     editor().setTool('warp');
-    await editor().layWarpGrid();
+    const warpId = session().id;
+    chooseTransformTool('translate');
+    expect(session()).toMatchObject({ id: warpId, stage: 'region', gizmo: 'translate' });
+    const build = editor().layWarpGrid();
+    chooseTransformTool('scale');
+    expect(session()).toMatchObject({ id: warpId, stage: 'building', gizmo: 'scale' });
+    await build;
     chooseTransformTool('rotate');
     expect(editor().tool).toBe('warp');
     expect(session().gizmo).toBe('rotate');

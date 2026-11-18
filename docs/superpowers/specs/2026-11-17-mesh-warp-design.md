@@ -109,6 +109,7 @@ Warp is a new tool in the tool strip, with an inspector panel:
   │ [Cancel]           [Apply]  │
   └─────────────────────────────┘
 ```
+
 (2) marks phase-2 controls.
 
 1. Select one part and choose Warp. Optionally paint a region with the existing surface
@@ -118,7 +119,7 @@ Warp is a new tool in the tool strip, with an inspector panel:
 3. Click anywhere on the region's surface to add a control point; points need not sit on
    grid crossings. Points can be selected and deleted. Unmoved points hold their place.
 4. Move selected points with the move gizmo, the combined Transform tool, Shift+G pointer
-   move, Shift for fine adjustment, and numeric entry, all as they work for parts.
+   move, Shift for fine adjustment, and incremental step buttons.
    Control points are positions only, with no orientation of their own (designer's call).
    Rotating or scaling a multi-point selection moves the points about the selection's pivot;
    with a single point selected, rotate and scale do nothing.

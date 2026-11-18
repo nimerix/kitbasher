@@ -230,7 +230,6 @@ export class XRRuntime {
     // Warp is desktop only.
     const editor = useEditor.getState();
     if (editor.tool === 'warp') {
-      editor.cancelWarp();
       editor.setTool('select');
       this.tool = 'select';
     }

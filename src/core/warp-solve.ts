@@ -7,6 +7,8 @@ export interface WarpConstraint {
   /** World rest position of the constrained point. */
   rest: Vec3;
   target: Vec3;
+  restByNode?: Vec3[];
+  fixed?: Vec3;
 }
 
 export interface WarpState {
@@ -36,7 +38,7 @@ export function createWarpState(restNodes: Float64Array): WarpState {
  * weights. The unknowns are displacements from rest, so fixed nodes contribute nothing.
  */
 interface WarpSystem {
-  /** Per valid constraint: its index, entry count, nodes, then weights normalized to sum 1. */
+  /** Per valid constraint: its index, entry count, nodes, then their weights. */
   key: Float64Array;
   /** Matrix row of each node, -1 when fixed. */
   row: Int32Array;
@@ -63,13 +65,13 @@ const systems = new WeakMap<WarpGrid, WarpSystem>();
 function constraintKey(constraints: WarpConstraint[]) {
   const key: number[] = [];
   for (let c = 0; c < constraints.length; c++) {
-    const { node, weight } = constraints[c];
+    const { node, weight, restByNode } = constraints[c];
     let sum = 0;
     for (let k = 0; k < node.length; k++) sum += weight[k];
     if (!Number.isFinite(sum) || sum === 0) continue;
     key.push(c, node.length);
     for (let k = 0; k < node.length; k++) key.push(node[k]);
-    for (let k = 0; k < node.length; k++) key.push(weight[k] / sum);
+    for (let k = 0; k < node.length; k++) key.push(restByNode ? weight[k] : weight[k] / sum);
   }
   return key;
 }
@@ -220,13 +222,13 @@ function assemble(
 
   // Constraints: λ w_k (t − Σ_j w_j (R_j (p − g_j) + g_j)).
   for (let i = 0; i < key.length;) {
-    const { rest, target } = constraints[key[i]];
+    const { rest, target, restByNode, fixed } = constraints[key[i]];
     const length = key[i + 1];
     const nodes = i + 2,
       weights = nodes + length;
-    let dx = target[0],
-      dy = target[1],
-      dz = target[2];
+    let dx = target[0] - (fixed?.[0] ?? 0),
+      dy = target[1] - (fixed?.[1] ?? 0),
+      dz = target[2] - (fixed?.[2] ?? 0);
     for (let s = 0; s < length; s++) {
       const n = key[nodes + s],
         w = key[weights + s],
@@ -234,9 +236,10 @@ function assemble(
       const gx = restNodes[n * 3],
         gy = restNodes[n * 3 + 1],
         gz = restNodes[n * 3 + 2];
-      const ox = rest[0] - gx,
-        oy = rest[1] - gy,
-        oz = rest[2] - gz;
+      const p = restByNode?.[s] ?? rest;
+      const ox = p[0] - gx,
+        oy = p[1] - gy,
+        oz = p[2] - gz;
       dx -= w * (R[m] * ox + R[m + 1] * oy + R[m + 2] * oz + gx);
       dy -= w * (R[m + 3] * ox + R[m + 4] * oy + R[m + 5] * oz + gy);
       dz -= w * (R[m + 6] * ox + R[m + 7] * oy + R[m + 8] * oz + gz);

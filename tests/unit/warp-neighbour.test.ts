@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   Box3,
+  BufferAttribute,
   Quaternion,
   BoxGeometry,
   BufferGeometry,
@@ -14,6 +15,7 @@ import { createWarpOutput, evaluateWarp } from '../../src/core/warp-evaluate';
 import {
   closeGapTargets,
   measureSeam,
+  snapToNeighbour,
   warpNeighbours,
   type WarpNeighbour,
 } from '../../src/core/warp-neighbour';
@@ -129,7 +131,40 @@ describe('warp neighbours', () => {
     for (const { target } of targets) expect(target[0]).toBeCloseTo(11.1, 5);
     const report = measureSeam(model, createWarpOutput(model), neighbours)!;
     expect(report.gaps.some((gap) => Math.abs(gap - 1) < 1e-5)).toBe(true);
-    expect(report.largestGap).toBeCloseTo(1, 5);
+    // Vertices outside the finite plate also have a lateral gap.
+    expect(report.largestGap).toBeGreaterThan(1);
+    expect(targets.every(({ target }) => Math.abs(target[2]) <= 5 + 1e-6)).toBe(true);
+  });
+
+  it('reports lateral gaps between finite coplanar faces and targets their real edge', async () => {
+    const source = new PlaneGeometry(2, 2, 2, 2);
+    const target = new PlaneGeometry(2, 2).rotateY(Math.PI);
+    const neighbours = [neighbourOf(partOf('target', target, [3, 0, 0]))];
+    const model = await modelOf(source, new Matrix4());
+    const report = measureSeam(model, createWarpOutput(model), neighbours)!;
+    expect(Math.min(...report.gaps)).toBeCloseTo(1, 6);
+    expect(report.largestGap).toBeCloseTo(3, 6);
+    const targets = closeGapTargets(model, createWarpState(model.restNodes), neighbours, overlap);
+    expect(targets.length).toBeGreaterThan(0);
+    for (const { target } of targets) {
+      expect(target[0]).toBeCloseTo(2, 6);
+      expect(target[2]).toBeCloseTo(overlap, 6);
+    }
+  });
+
+  it('finds the nearest world surface of a non-uniformly scaled neighbour', () => {
+    const geometry = new BufferGeometry();
+    geometry.setAttribute(
+      'position',
+      new BufferAttribute(
+        new Float32Array([0.15, -2, -2, 0.15, 2, -2, 0.15, 0, 2, -2, 1, -2, 0, 1, 2, 2, 1, -2]),
+        3,
+      ),
+    );
+    const part = partOf('scaled', geometry, [0, 0, 0]);
+    part.scale = [10, 1, 1];
+    const target = snapToNeighbour(new Vector3(), [neighbourOf(part)], 0)!;
+    expect(target.toArray()).toEqual([0, 1, 0]);
   });
 
   it('counts only surface within 60 degrees of facing the neighbour', async () => {

@@ -10,7 +10,6 @@ import {
   stepTransform,
   transformSelection,
   warpMovesFromPatches,
-  warpingPoints,
 } from './transform-selection';
 import type { SurfacePoint } from './types';
 
@@ -69,7 +68,7 @@ export const redoAvailable = (state: EditorState) => canRedo(state) && !holdingW
 /** Chooses a transform tool, or while warping, the gizmo that moves control points. */
 export function chooseTransformTool(tool: WarpGizmo) {
   const state = useEditor.getState();
-  if (warpingPoints(state)) state.setWarpOptions({ gizmo: tool });
+  if (state.tool === 'warp' && state.warp) state.setWarpOptions({ gizmo: tool });
   else state.setTool(tool);
 }
 
@@ -133,7 +132,12 @@ export function editorCommands(context: CommandContext = {}) {
     ),
     deselect: command('Deselect all', () => state.select(null), hasSelection, 'deselect'),
     copy: command('Copy components', () => state.copySelected(), hasSelection, 'copy'),
-    cut: command('Cut components', () => state.copySelected(true), idle && editable, 'cut'),
+    cut: command(
+      'Cut components',
+      () => state.copySelected(true),
+      idle && editable && !holdingWarp(state),
+      'cut',
+    ),
     paste: command(
       'Paste components',
       state.pasteClipboard,
@@ -152,7 +156,12 @@ export function editorCommands(context: CommandContext = {}) {
       idle && selected.length === 1,
       'rename',
     ),
-    delete: command('Delete unlocked parts', state.deleteSelected, idle && editable, 'delete'),
+    delete: command(
+      'Delete unlocked parts',
+      state.deleteSelected,
+      idle && editable && !holdingWarp(state),
+      'delete',
+    ),
     move: command('Move', () => chooseTransformTool('translate'), idle && editable, 'move'),
     rotate: command('Rotate', () => chooseTransformTool('rotate'), idle && editable, 'rotate'),
     scale: command('Scale', () => chooseTransformTool('scale'), idle && editable, 'scale'),

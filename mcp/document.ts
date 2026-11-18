@@ -30,7 +30,7 @@ export interface Edit {
 
 interface Logged {
   author: string;
-  patch: ScenePatch;
+  summary: ReturnType<typeof summarizePatch>;
   replaced: boolean;
 }
 
@@ -39,12 +39,9 @@ const keepVersions = 200;
 const keepSteps = 40;
 const keepUploadsMs = 10 * 60 * 1000;
 
-const introducesGeometry = (patch: ScenePatch) =>
+const changesGeometry = (patch: ScenePatch) =>
   patch.some(
-    (change) =>
-      change.kind === 'parts' &&
-      change.after &&
-      (change.after.geometry as BufferGeometry) !== (change.before?.geometry as BufferGeometry),
+    (change) => change.kind === 'parts' && change.after?.geometry !== change.before?.geometry,
   );
 
 /**
@@ -162,7 +159,7 @@ export class SharedDocument {
         replaced = true;
         continue;
       }
-      const summary = summarizePatch(entry.patch);
+      const { summary } = entry;
       summary.partsAdded.forEach((id) => parts.added.add(id));
       summary.partsChanged.forEach((id) => parts.changed.add(id));
       summary.partsRemoved.forEach((id) => parts.removed.add(id));
@@ -231,19 +228,18 @@ export class SharedDocument {
   private publish(author: string, patch: ScenePatch, replaced = false) {
     this.version++;
     this.versions.set(this.version, this.scene);
-    this.log.set(this.version, { author, patch, replaced });
+    this.log.set(this.version, { author, summary: summarizePatch(patch), replaced });
     this.versions.delete(this.version - keepVersions);
     this.log.delete(this.version - keepVersions);
     for (const part of this.scene.parts) this.meshes.set(part.geometry.uuid, part.geometry);
-    if (introducesGeometry(patch)) this.trimMemory();
+    if (changesGeometry(patch)) this.trimMemory();
     if (this.version % 50 === 0) this.prune();
     for (const listener of this.listeners) listener();
   }
 
   /**
-   * Drops the oldest undo steps, then the farthest redo steps, then the oldest versions with their
-   * log entries, until the arrays that only history reaches fit the budget. Each author keeps their
-   * newest undo step and the current version stays.
+   * Drops old undo steps, far redo steps, then old scene versions until history fits the mesh
+   * budget. Change summaries, each author’s newest undo step, and the current version stay.
    */
   private trimMemory() {
     const kept = arraysOf(this.scene.parts.map((part) => part.geometry));
@@ -269,7 +265,6 @@ export class SharedDocument {
           : [],
       );
     for (const scene of this.versions.values()) hold(ofScene(scene), 1);
-    for (const entry of this.log.values()) hold(ofPatch(entry.patch), 1);
     const histories = [...this.histories.values()];
     for (const history of histories)
       for (const patch of [...history.undo, ...history.redo]) hold(ofPatch(patch), 1);
@@ -284,11 +279,6 @@ export class SharedDocument {
       if (old === undefined) return false;
       hold(ofScene(this.versions.get(old)!), -1);
       this.versions.delete(old);
-      for (const [at, entry] of this.log)
-        if (at <= old) {
-          hold(ofPatch(entry.patch), -1);
-          this.log.delete(at);
-        }
       return true;
     };
     while (total > this.budget && drop());
@@ -300,10 +290,10 @@ export class SharedDocument {
     const used = new Set<string>();
     const scenes = [...this.versions.values()];
     for (const scene of scenes) for (const part of scene.parts) used.add(part.geometry.uuid);
-    const patches = [
-      ...[...this.histories.values()].flatMap((history) => [...history.undo, ...history.redo]),
-      ...[...this.log.values()].map((entry) => entry.patch),
-    ];
+    const patches = [...this.histories.values()].flatMap((history) => [
+      ...history.undo,
+      ...history.redo,
+    ]);
     for (const patch of patches)
       for (const change of patch)
         for (const entity of [change.before, change.after])

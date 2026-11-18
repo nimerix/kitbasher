@@ -78,7 +78,7 @@ import { trimHistory } from './history-budget';
 import { captureComponents, instantiateComponents } from './clipboard';
 import type { ComponentClipboard } from './clipboard';
 import { referencePlanes, resolvePart } from './references';
-import { bindTrianglePoint } from './warp-bind';
+import { bindTrianglePoint, type WarpPointBinding } from './warp-bind';
 import {
   createWarpOutput,
   deformPoint,
@@ -92,6 +92,7 @@ import type { WarpModel, WarpModelInput } from './warp-model';
 import {
   closeGapTargets,
   measureSeam,
+  seamMeasurement,
   snapToNeighbour,
   warpNeighbourRange,
   warpNeighbours,
@@ -194,7 +195,7 @@ export interface WarpPoint {
   id: string;
   face: number;
   barycentric: Vec3;
-  binding: { node: number[]; weight: number[] };
+  binding: WarpPointBinding;
   restWorld: Vec3;
   /** Deformed world position when the point was added; an unmoved point holds it. */
   pin: Vec3;
@@ -507,6 +508,19 @@ function abortWarpBuild() {
   build?.controller.abort();
 }
 
+/** Reuse the source's indirect triangle order, with private bounds for the deformed mesh. */
+export function refitWarpTree(source: BufferGeometry, geometry: BufferGeometry) {
+  if (geometry.boundsTree) {
+    geometry.boundsTree.refit();
+  } else if (source.boundsTree) {
+    const data = MeshBVH.serialize(source.boundsTree as MeshBVH, { cloneBuffers: false });
+    const roots = data.roots.map((root) => root.slice(0));
+    const tree = MeshBVH.deserialize({ ...data, roots }, geometry, { setIndex: false });
+    tree.refit();
+    geometry.boundsTree = tree;
+  }
+}
+
 function warpPreview(source: BufferGeometry, output: WarpOutput) {
   const preview = new BufferGeometry();
   preview.setAttribute('position', new BufferAttribute(output.positions, 3));
@@ -543,7 +557,7 @@ function warpBinding(model: WarpModel, triangle: number, barycentric: Vec3) {
     for (let a = 0; a < 3; a++) restWorld[a] += barycentric[c] * model.restWorld[v * 3 + a];
   }
   return {
-    binding: bindTrianglePoint(model.region, model.binding, triangle, barycentric),
+    binding: bindTrianglePoint(model.region, model.binding, model.restWorld, triangle, barycentric),
     restWorld,
   };
 }
@@ -620,10 +634,43 @@ function warpBounds(state: WarpState) {
   return box;
 }
 
+let seamTimer: ReturnType<typeof setTimeout> | undefined;
+
 function warpSeam(scene: SceneDocument, warp: WarpSession) {
+  clearTimeout(seamTimer);
   const { neighbours, indexing } = warpNeighbours(scene, warp.partId, warpBounds(warp.state!));
   noticePreparing(warp, indexing);
-  return neighbours.length ? measureSeam(warp.model!, warp.output!, neighbours) : null;
+  if (!neighbours.length) return null;
+  const { model, output, preview } = warp;
+  if (typeof window === 'undefined' || model!.region.weldedCount <= warpDragVertices)
+    return measureSeam(model!, output!, neighbours);
+
+  // A dense seam can involve hundreds of thousands of queries. Yield between batches so the
+  // viewport stays interactive, and drop work when the preview or neighbouring scene changes.
+  const position = preview!.getAttribute('position') as BufferAttribute;
+  const version = position.version;
+  const measurement = seamMeasurement(model!, output!, neighbours);
+  const advance = () => {
+    const current = useEditor.getState();
+    if (
+      current.scene !== scene ||
+      current.warp?.stage !== 'warp' ||
+      current.warp.preview !== preview ||
+      position.version !== version
+    )
+      return;
+    const deadline = performance.now() + 8;
+    do {
+      const result = measurement.next();
+      if (result.done) {
+        useEditor.setState({ warp: { ...current.warp, seam: result.value } });
+        return;
+      }
+    } while (performance.now() < deadline);
+    seamTimer = setTimeout(advance, 0);
+  };
+  seamTimer = setTimeout(advance, 0);
+  return null;
 }
 
 // The parts still being prepared that the session was told snap and the seam pass over.
@@ -734,16 +781,7 @@ function appliedWarpGeometry(source: BufferGeometry, output: WarpOutput) {
   geometry.setIndex(source.index);
   const color = source.getAttribute('color');
   if (color) geometry.setAttribute('color', color);
-  // Topology is unchanged, so the source's index refits instead of rebuilding. It is indirect,
-  // which leaves the shared index in its order. Refitting writes only the node bounds, so only
-  // those are copied; the triangle order is shared.
-  if (source.boundsTree) {
-    const data = MeshBVH.serialize(source.boundsTree as MeshBVH, { cloneBuffers: false });
-    const roots = data.roots.map((root) => root.slice(0));
-    const tree = MeshBVH.deserialize({ ...data, roots }, geometry, { setIndex: false });
-    tree.refit();
-    geometry.boundsTree = tree;
-  }
+  refitWarpTree(source, geometry);
   geometry.computeBoundingBox();
   geometry.computeBoundingSphere();
   return geometry;
@@ -753,7 +791,7 @@ const changed = (state: EditorState, scene: SceneDocument, checkpoint = true) =>
   const base = committedScene(state);
   let past = checkpoint ? [...state.past.slice(-(historyLimit - 1)), base] : state.past;
   let notice = {};
-  if (checkpoint && newGeometry(base, scene)) {
+  if (checkpoint && (newGeometry(base, scene) || newGeometry(scene, base))) {
     const kept = trimHistory(
       past,
       [],
@@ -1426,6 +1464,7 @@ export const useEditor = create<EditorState>((set, get) => ({
   },
   startWarp: () => {
     const state = get();
+    if (useXR.getState().session) return false;
     const part =
       state.selected.length === 1
         ? state.scene.parts.find((p) => p.id === state.selected[0])
@@ -1538,6 +1577,7 @@ export const useEditor = create<EditorState>((set, get) => ({
     const { warp } = get();
     if (!warp) return;
     abortWarpBuild();
+    clearTimeout(seamTimer);
     warpDrag = null;
     disposeWarpPreview(warp.preview);
     set({ warp: null, painting: false, paintHistory: [] });
@@ -1699,7 +1739,7 @@ export const useEditor = create<EditorState>((set, get) => ({
   applyWarp: () => {
     const state = get(),
       warp = state.warp;
-    if (!warp?.model || warp.stage !== 'warp') return false;
+    if (!warp?.model || warp.stage !== 'warp' || state.warpPending) return false;
     // Nothing to bake, so the mesh keeps its exact bits.
     if (!warpChanges(warp)) return false;
     const part = state.scene.parts.find((p) => p.id === warp.partId);
@@ -1715,11 +1755,10 @@ export const useEditor = create<EditorState>((set, get) => ({
     // The session starts again on the result, keeping the region and options.
     const { region, faces, seed, density, snap, overlap, gizmo } = warp;
     // In a live session the server may still refuse it, so the session is kept to reopen.
-    const live = state.liveStatus === 'connected';
-    const settled = solveWarpSession(state.scene, warp, 'end', live);
+    const live = state.liveStatus !== null;
+    const settled = solveWarpSession(state.scene, warp, 'end', false);
     const geometry = appliedWarpGeometry(warp.source, settled.output!);
     const warped: Part = { ...part, geometry, source: `Warp · ${part.source}` };
-    if (state.warpPending) disposeWarpPreview(state.warpPending.session.preview);
     if (!live) disposeWarpPreview(settled.preview);
     set({
       ...changed(state, {
@@ -1764,7 +1803,7 @@ export const useEditor = create<EditorState>((set, get) => ({
     set({
       ...(state.tool === 'warp' ? {} : toolChange(state, 'warp')),
       selected: [pending.partId],
-      warp: session,
+      warp: { ...session, seam: warpSeam(state.scene, session) },
       warpPending: null,
     });
     state.notify(
@@ -2709,7 +2748,7 @@ function releaseWarpPending() {
 // A kept warp waits for one live server's answer about one scene.
 useEditor.subscribe((state) => {
   const pending = state.warpPending;
-  if (pending && (state.liveStatus !== 'connected' || state.sceneEpoch !== pending.session.epoch))
+  if (pending && (state.liveStatus === null || state.sceneEpoch !== pending.session.epoch))
     releaseWarpPending();
 });
 
@@ -2816,15 +2855,11 @@ useEditor.subscribe((state, previous) => {
       !same(part.quaternion, before.quaternion) ||
       !same(part.scale, before.scale));
   // A session with nothing done in it, such as the one after Apply, ends without a word.
-  const edited = warp.stage !== 'region' || warp.points.length || warp.gapTargets.length;
+  const edited = warpEdited(warp);
   if (!part || part.geometry !== warp.source || state.sceneEpoch !== warp.epoch || moved)
     state.cancelWarp(edited ? 'The part changed, so the warp was cancelled.' : undefined);
   else if (state.tool !== 'warp')
-    state.cancelWarp(
-      warp.points.length || warp.gapTargets.length
-        ? 'Warp discarded. Use Apply to keep a warp.'
-        : undefined,
-    );
+    state.cancelWarp(edited ? 'Warp discarded. Use Apply to keep a warp.' : undefined);
 });
 
 export function measureDistance() {

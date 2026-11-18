@@ -19,7 +19,7 @@ export interface WarpModel {
   grid: WarpGrid;
   binding: WarpBinding;
   /** Per welded vertex. */
-  restWorld: Float32Array;
+  restWorld: Float64Array;
   /** Per node, world. */
   restNodes: Float64Array;
   matrix: number[];
@@ -42,7 +42,7 @@ export async function buildWarpModel(input: WarpModelInput): Promise<WarpModel> 
   const grid = await buildWarpGrid(region, density);
 
   const m = matrix;
-  const restWorld = new Float32Array(region.rest.length);
+  const restWorld = new Float64Array(region.rest.length);
   for (let i = 0; i < region.rest.length; i += 3) {
     const x = region.rest[i],
       y = region.rest[i + 1],

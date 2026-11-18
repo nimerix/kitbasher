@@ -62,7 +62,7 @@ class MinHeap {
 export function bindRegion(
   region: WarpRegion,
   grid: WarpGrid,
-  restWorld: Float32Array,
+  restWorld: Float32Array | Float64Array,
 ): WarpBinding {
   const { weldedCount, role, adjacencyStart, adjacency } = region;
   const slots = K + 1;
@@ -123,35 +123,63 @@ export function bindRegion(
   return { node, weight };
 }
 
-export function bindPoint(
-  region: WarpRegion,
-  _grid: WarpGrid,
-  binding: WarpBinding,
-  face: number,
-  barycentric: Vec3,
-): { node: number[]; weight: number[] } {
-  const triangle = regionTriangleOf(region, face);
-  if (triangle < 0) throw new Error('Face is not in the warp region.');
-  return bindTrianglePoint(region, binding, triangle, barycentric);
+export interface WarpPointBinding {
+  node: number[];
+  weight: number[];
+  /** Weighted rest position per influencing node, before applying that node's rotation. */
+  restByNode: Vec3[];
+  /** Contribution from triangle corners which stay at rest. */
+  fixed: Vec3;
 }
 
-/** `bindPoint` for a region triangle already found with `regionTriangleOf`. */
+export function bindPoint(
+  region: WarpRegion,
+  binding: WarpBinding,
+  restWorld: Float32Array | Float64Array,
+  face: number,
+  barycentric: Vec3,
+): WarpPointBinding {
+  const triangle = regionTriangleOf(region, face);
+  if (triangle < 0) throw new Error('Face is not in the warp region.');
+  return bindTrianglePoint(region, binding, restWorld, triangle, barycentric);
+}
+
+/** A point on the baked triangle is the barycentric sum of its independently skinned corners. */
 export function bindTrianglePoint(
   region: WarpRegion,
   binding: WarpBinding,
+  restWorld: Float32Array | Float64Array,
   triangle: number,
   barycentric: Vec3,
-): { node: number[]; weight: number[] } {
-  const merged = new Map<number, number>();
+): WarpPointBinding {
+  const contributions = new Map<number, { weight: number; rest: Vec3 }>();
+  const fixed: Vec3 = [0, 0, 0];
   for (let c = 0; c < 3; c++) {
+    if (barycentric[c] === 0) continue;
     const v = region.triangles[triangle * 3 + c];
+    let total = 0;
+    if (region.role[v] === WarpRole.Interior)
+      for (let j = 0; j < K; j++)
+        if (binding.node[v * K + j] !== none) total += binding.weight[v * K + j];
+    if (!(total > 0)) {
+      for (let a = 0; a < 3; a++) fixed[a] += barycentric[c] * restWorld[v * 3 + a];
+      continue;
+    }
     for (let j = 0; j < K; j++) {
       const n = binding.node[v * K + j];
-      if (n === none) continue;
-      merged.set(n, (merged.get(n) ?? 0) + binding.weight[v * K + j] * barycentric[c]);
+      const w = (binding.weight[v * K + j] * barycentric[c]) / total;
+      if (n === none || w === 0) continue;
+      let entry = contributions.get(n);
+      if (!entry) contributions.set(n, (entry = { weight: 0, rest: [0, 0, 0] }));
+      entry.weight += w;
+      for (let a = 0; a < 3; a++) entry.rest[a] += w * restWorld[v * 3 + a];
     }
   }
-  const best = [...merged].sort((a, b) => b[1] - a[1]).slice(0, K);
-  const sum = best.reduce((s, [, w]) => s + w, 0);
-  return { node: best.map(([n]) => n), weight: best.map(([, w]) => w / sum) };
+  const entries = [...contributions.values()];
+  return {
+    node: [...contributions.keys()],
+    weight: entries.map(({ weight }) => weight),
+    restByNode: entries.map(({ weight, rest }) => rest.map((x) => x / weight) as Vec3),
+    fixed,
+  };
 }

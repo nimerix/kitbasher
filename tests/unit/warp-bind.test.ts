@@ -88,14 +88,14 @@ describe('bindRegion', () => {
 
 describe('bindPoint', () => {
   it('at a corner equals that vertex binding', async () => {
-    const { region, grid, binding } = await sphere();
+    const { region, binding } = await sphere();
     let t = 0;
     for (; t < region.faces.length; t++) {
       const v = region.triangles[t * 3];
       if (region.role[v] === WarpRole.Interior) break;
     }
     const v = region.triangles[t * 3];
-    const point = bindPoint(region, grid, binding, region.faces[t], [1, 0, 0]);
+    const point = bindPoint(region, binding, region.rest, region.faces[t], [1, 0, 0]);
     const expected = new Map<number, number>();
     for (let j = 0; j < K; j++)
       if (binding.node[v * K + j] !== 0xffffffff)
@@ -105,8 +105,8 @@ describe('bindPoint', () => {
   });
 
   it('throws for a face outside the region', async () => {
-    const { region, grid, binding } = await sphere();
-    expect(() => bindPoint(region, grid, binding, 3000, [1, 0, 0])).toThrow(
+    const { region, binding } = await sphere();
+    expect(() => bindPoint(region, binding, region.rest, 3000, [1, 0, 0])).toThrow(
       'Face is not in the warp region.',
     );
   });
@@ -135,7 +135,7 @@ describe('equidistant nodes', () => {
   it('never binds a triangle point to non-finite weights', async () => {
     const { region, binding } = await box();
     for (let t = 0; t < region.faces.length; t++) {
-      const point = bindTrianglePoint(region, binding, t, [1 / 3, 1 / 3, 1 / 3]);
+      const point = bindTrianglePoint(region, binding, region.rest, t, [1 / 3, 1 / 3, 1 / 3]);
       expect(point.node.length).toBeGreaterThan(0);
       for (const w of point.weight) expect(Number.isFinite(w)).toBe(true);
     }

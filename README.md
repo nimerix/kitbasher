@@ -461,7 +461,7 @@ reshape a scan locally without leaving Kitbasher. Warp is desktop only.
 4. Click the surface to add a **control point**. Click a point to select it, or
    `Shift` + click to add it to the selection. Move selected points with the same tools as
    parts: the move arrows, the combined Transform tool, `Shift + G` / `Shift + R` pointer
-   placement, `Shift` for fine adjustment, and numeric entry. While warping, `G` / `R` / `S` /
+   placement, `Shift` for fine adjustment, and step buttons. While warping, `G` / `R` / `S` /
    `T` and the toolbar's Move, Rotate, Scale and Transform buttons switch how points move. A
    single point only moves; rotate and scale need two or more points. `Delete` removes the
    selected points, and `Ctrl/⌘ + Z` steps back through your strokes and point edits without
