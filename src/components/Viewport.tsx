@@ -24,7 +24,7 @@ import {
   ScreenSizer,
 } from '@react-three/drei';
 import { DoubleSide, Group, Mesh, Object3D, Quaternion, Vector3 } from 'three';
-import type { BufferGeometry } from 'three';
+import type { BufferAttribute, BufferGeometry } from 'three';
 import {
   displayProxy,
   displayTarget,
@@ -53,12 +53,18 @@ import {
   vec,
   worldPoint,
 } from '../core/geometry';
-import { measureDistance, paintingWarpRegion, sceneLighting, useEditor } from '../core/store';
+import {
+  measureDistance,
+  paintingWarpRegion,
+  sceneLighting,
+  refitWarpTree,
+  useEditor,
+} from '../core/store';
 import { PrecisionDrag } from '../core/precision';
 import { FreeTransformController, FreeTransformPrompt } from './FreeTransform';
 import { CombinedTransform } from './CombinedTransform';
 import { ManagedTransformControls } from './ManagedTransformControls';
-import { WarpOverlay, shownWarpPreview, warpedPoint } from './WarpOverlay';
+import { WarpOverlay, shownWarpPreview } from './WarpOverlay';
 import { transformSelection } from '../core/transform-selection';
 import { referencePlanes, resolvePart } from '../core/references';
 import type { Part, SurfacePoint, FitAnchor, SceneDocument, SceneLight } from '../core/types';
@@ -171,7 +177,7 @@ const PartMesh = memo(function PartMesh({
     wireframe ||
     (!headset &&
       (pivotPicking || ['align', 'joint', 'measure', 'anchors', 'pins', 'warp'].includes(tool)));
-  // Picking still uses the source and its index, which is fast on dense scans.
+  // Display proxies use the original face IDs. Warp keeps the same IDs on the preview.
   const drawing =
     warpPreview ??
     (proxy?.source === part.geometry && shouldDrawProxy(detail, moving, headset, precision)
@@ -194,10 +200,21 @@ const PartMesh = memo(function PartMesh({
     // Hidden parts cannot be picked, so a dense one need not pay for this until shown.
     if (shown) prepareForPicking(part.geometry);
   }, [part.geometry, shown]);
-  const raycast = useMemo(
-    () => sourceRaycast(part.geometry, nearby ? nearbyRaycast(nearby.shows) : pickRaycast),
-    [nearby, part.geometry],
-  );
+  const raycast = useMemo(() => {
+    const pick = nearby ? nearbyRaycast(nearby.shows) : pickRaycast;
+    const source = sourceRaycast(part.geometry, pick);
+    if (!warpPreview) return source;
+    let indexedVersion = -1;
+    return function (this: Mesh, ...args: Parameters<Mesh['raycast']>) {
+      if (gizmoPressed || useEditor.getState().freeTransform) return;
+      const version = (warpPreview.getAttribute('position') as BufferAttribute).version;
+      if (version !== indexedVersion && part.geometry.boundsTree) {
+        refitWarpTree(part.geometry, warpPreview);
+        indexedVersion = version;
+      }
+      pick.apply(this, args);
+    };
+  }, [nearby, part.geometry, warpPreview]);
   const exploded = useMemo(() => displayedPosition(part, explode, frame), [part, explode, frame]);
   const onClick = (event: ThreeEvent<MouseEvent>) => {
     if (event.button !== 0 || event.delta > 5) return;
@@ -226,15 +243,7 @@ const PartMesh = memo(function PartMesh({
         state.notify('Reset the exploded view before adding control points.', 'info');
         return;
       }
-      // The hit is on the source surface, and the point goes where that spot is warped to.
-      const hit = toSurface(event);
-      const preview = shownWarpPreview(warp, part.id);
-      state.addWarpPoint(
-        preview
-          ? { ...hit, point: warpedPoint(part.geometry, preview, event.faceIndex, hit.point) }
-          : hit,
-        event.faceIndex,
-      );
+      state.addWarpPoint(toSurface(event), event.faceIndex);
       return;
     }
     if (state.tool === 'align' && state.operation.mode === 'surface') return;

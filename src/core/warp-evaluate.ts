@@ -1,7 +1,7 @@
 import type { Vec3 } from './types';
 import type { WarpModel } from './warp-model';
 import { WarpRole } from './warp-region';
-import { writeRotation, type WarpState } from './warp-solve';
+import { writeRotation, type WarpConstraint, type WarpState } from './warp-solve';
 
 export interface WarpOutput {
   positions: Float32Array;
@@ -15,7 +15,7 @@ const none = 0xffffffff;
 interface Scratch {
   rotation: Float64Array;
   /** Deformed world position per welded vertex; rest for vertices that do not move. */
-  world: Float32Array;
+  world: Float64Array;
   moved: Uint8Array;
   /** Unnormalized rest world normal per region triangle, made by the first fold check. */
   restNormals: Float32Array | null;
@@ -117,9 +117,9 @@ export function evaluateWarp(
       continue;
     }
     moved[v] = 1;
-    world[v * 3] = x;
-    world[v * 3 + 1] = y;
-    world[v * 3 + 2] = z;
+    world[v * 3] = x / sum;
+    world[v * 3 + 1] = y / sum;
+    world[v * 3 + 2] = z / sum;
   }
 
   const { positions, moved: box } = out;
@@ -186,7 +186,7 @@ function foldedTriangles(model: WarpModel): Uint32Array {
 }
 
 /** Unnormalized normal of each welded triangle. */
-function triangleNormals(triangles: Uint32Array, points: Float32Array) {
+function triangleNormals(triangles: Uint32Array, points: Float64Array) {
   const normals = new Float32Array(triangles.length);
   for (let o = 0; o < triangles.length; o += 3) {
     const a = triangles[o] * 3,
@@ -337,11 +337,11 @@ export function joinedRanges(items: ArrayLike<number>, size: number) {
 export function deformPoint(
   model: WarpModel,
   state: WarpState,
-  binding: { node: number[]; weight: number[] },
+  binding: Pick<WarpConstraint, 'node' | 'weight' | 'restByNode' | 'fixed'>,
   restWorld: Vec3,
 ): Vec3 {
   const r = new Float64Array(9);
-  const out: Vec3 = [0, 0, 0];
+  const out: Vec3 = binding.fixed ? [...binding.fixed] : [0, 0, 0];
   for (let j = 0; j < binding.node.length; j++) {
     const n = binding.node[j],
       w = binding.weight[j];
@@ -353,9 +353,10 @@ export function deformPoint(
       state.rotations[n * 4 + 2],
       state.rotations[n * 4 + 3],
     );
-    const dx = restWorld[0] - model.restNodes[n * 3],
-      dy = restWorld[1] - model.restNodes[n * 3 + 1],
-      dz = restWorld[2] - model.restNodes[n * 3 + 2];
+    const rest = binding.restByNode?.[j] ?? restWorld;
+    const dx = rest[0] - model.restNodes[n * 3],
+      dy = rest[1] - model.restNodes[n * 3 + 1],
+      dz = rest[2] - model.restNodes[n * 3 + 2];
     out[0] += w * (r[0] * dx + r[1] * dy + r[2] * dz + state.positions[n * 3]);
     out[1] += w * (r[3] * dx + r[4] * dy + r[5] * dz + state.positions[n * 3 + 1]);
     out[2] += w * (r[6] * dx + r[7] * dy + r[8] * dz + state.positions[n * 3 + 2]);

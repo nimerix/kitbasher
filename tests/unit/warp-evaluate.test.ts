@@ -335,13 +335,57 @@ describe('deformPoint', () => {
     solveWarp(model.grid, model.restNodes, [c], state, warpSettleIterations);
     const p = deformPoint(model, state, { node: [node], weight: [1] }, c.rest);
     expect(p[2] - c.rest[2]).toBeGreaterThan(2.5);
-    const { node: bn, weight } = bindPoint(model.region, model.grid, model.binding, 0, [
+    const binding = bindPoint(model.region, model.binding, model.restWorld, model.region.faces[0], [
       1 / 3,
       1 / 3,
       1 / 3,
     ]);
-    const idle = deformPoint(model, createWarpState(model.restNodes), { node: bn, weight }, c.rest);
-    expect(idle[0]).toBeCloseTo(c.rest[0], 6);
+    const idle = deformPoint(model, createWarpState(model.restNodes), binding, c.rest);
+    const triangle = model.region.triangles.subarray(0, 3);
+    const expected = [...triangle].reduce(
+      (sum, vertex) => sum + model.restWorld[vertex * 3] / 3,
+      0,
+    );
+    expect(idle[0]).toBeCloseTo(expected, 6);
+  });
+
+  it('tracks the point on the baked face when its corners deform differently', async () => {
+    const geometry = new SphereGeometry(10, 64, 48);
+    const model = await buildWarpModel(
+      inputOf(geometry, cap, new Matrix4().makeTranslation(7, 2, 3)),
+    );
+    const { region } = model;
+    let triangle = 0;
+    for (; triangle < region.faces.length; triangle++) {
+      const roles = region.triangles
+        .subarray(triangle * 3, triangle * 3 + 3)
+        .map((vertex) => region.role[vertex]);
+      if (roles.includes(WarpRole.Border) && roles.includes(WarpRole.Interior)) break;
+    }
+    expect(triangle).toBeLessThan(region.faces.length);
+    const face = region.faces[triangle];
+    const barycentric: Vec3 = [0.22, 0.31, 0.47];
+    const binding = bindPoint(region, model.binding, model.restWorld, face, barycentric);
+    const out = createWarpOutput(model);
+    const state = warp(model, [1, 3, 2]);
+    evaluateWarp(model, state, out);
+    const point = deformPoint(model, state, binding, [0, 0, 0]);
+    for (let axis = 0; axis < 3; axis++) {
+      let baked = model.matrix[12 + axis];
+      for (let corner = 0; corner < 3; corner++)
+        baked += barycentric[corner] * out.positions[model.index![face * 3 + corner] * 3 + axis];
+      expect(point[axis]).toBeCloseTo(baked, 5);
+    }
+  });
+
+  it('keeps local vertices stable at rest far from the world origin', async () => {
+    const geometry = new SphereGeometry(10, 12, 12);
+    const model = await buildWarpModel(
+      inputOf(geometry, null, new Matrix4().makeTranslation(2 ** 24, 2 ** 24, 2 ** 24)),
+    );
+    const out = createWarpOutput(model);
+    evaluateWarp(model, createWarpState(model.restNodes), out);
+    expect(out.positions.every((n, i) => Math.abs(n - model.positions[i]) < 1e-6)).toBe(true);
   });
 });
 

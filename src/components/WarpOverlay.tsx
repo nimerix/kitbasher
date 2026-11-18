@@ -3,20 +3,12 @@ import type { ReactNode } from 'react';
 import { useThree } from '@react-three/fiber';
 import type { ThreeEvent } from '@react-three/fiber';
 import { ScreenSizer } from '@react-three/drei';
-import {
-  BufferAttribute,
-  BufferGeometry,
-  Color,
-  DoubleSide,
-  Object3D,
-  Vector3,
-  type Mesh,
-} from 'three';
+import { BufferAttribute, BufferGeometry, Color, DoubleSide, Object3D, type Mesh } from 'three';
 import { partMatrix, transformFromMatrix } from '../core/geometry';
 import { hiddenByIsolation } from '../core/isolation';
 import { PrecisionDrag } from '../core/precision';
 import { finishWarpDrag, useEditor, type WarpBaseline, type WarpSession } from '../core/store';
-import { patchGeometry, readFace } from '../core/surfaces';
+import { patchGeometry } from '../core/surfaces';
 import {
   transformSelection,
   warpMovesFromPatches,
@@ -37,23 +29,6 @@ const closedColor = new Color('#7fd18b'),
 /** The warped surface the part draws instead of its own, once a grid is laid. */
 export const shownWarpPreview = (warp: WarpSession | null, partId: string) =>
   warp?.partId === partId && warp.stage !== 'region' ? warp.preview : null;
-
-/** Where a hit on the source surface lies on the same triangle of the warped preview. */
-export function warpedPoint(
-  source: BufferGeometry,
-  preview: BufferGeometry,
-  face: number,
-  point: Vec3,
-): Vec3 {
-  const weights = readFace(source, face).getBarycoord(new Vector3(...point), new Vector3());
-  if (!weights) return point;
-  const warped = readFace(preview, face);
-  return new Vector3()
-    .addScaledVector(warped.a, weights.x)
-    .addScaledVector(warped.b, weights.y)
-    .addScaledVector(warped.c, weights.z)
-    .toArray();
-}
 
 /**
  * The painted region, the grid, the control points and their gizmo, the seam and folds.

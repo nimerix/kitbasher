@@ -7,7 +7,6 @@ import { chooseTransformTool, executeEditorCommand, shortcutCommand } from '../c
 import { isEditableTarget, keyboardContextMenu } from '../core/context-menu';
 import { actionRepeats, keyName, matchKeyAction } from '../core/keybindings';
 import { usePreferences } from '../core/preferences';
-import { warpingPoints } from '../core/transform-selection';
 
 export function useLiveSession() {
   useEffect(() => (liveSession ? joinLiveSession() : undefined), []);
@@ -231,8 +230,9 @@ export function useKeyboard(openScene: () => void, searchParts: () => void) {
         }
         case 'delete':
           event.preventDefault();
-          if (warpingPoints(state) && state.warp!.selectedPoints.length) state.removeWarpPoints();
-          else executeEditorCommand('delete');
+          if (state.tool === 'warp' && state.warp) {
+            if (state.warp.stage === 'warp') state.removeWarpPoints();
+          } else executeEditorCommand('delete');
           return;
         case 'apply':
           if (nativeActivation || !['align', 'joint'].includes(state.tool)) return;

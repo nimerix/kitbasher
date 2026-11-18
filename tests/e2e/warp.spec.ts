@@ -183,15 +183,7 @@ test('closes a seam, moves a control point, applies, undoes and cancels', async 
   expect(closed.mesh).toEqual(original.mesh);
 
   // A point on the front face, away from the neighbour, then a numeric step along X.
-  const front = await screen(page, [-4.5, 10.5, 10]);
-  await page.mouse.click(front.x, front.y);
-  const added = await editorState(page);
-  expect(added.points).toHaveLength(1);
-  expect(added.points[0].moved).toBe(false);
-  expect(added.selectedPoints).toBe(1);
-  expect(added.undo).toBe(2);
-  // Clicks pick the source surface, and the point goes where that spot is drawn on the warp.
-  // Close gap moved the whole block toward the neighbour, so the corner shows the shift.
+  // Close gap displaced the front face. Place the point under the cursor on that surface.
   const corner = original.mesh.findIndex(
     (_, i) =>
       i % 3 === 0 &&
@@ -200,6 +192,13 @@ test('closes a seam, moves a control point, applies, undoes and cancels', async 
   const shift = [0, 1, 2].map((a) => closed.drawn[corner + a] - original.mesh[corner + a]);
   expect(shift[0]).toBeGreaterThan(0.5);
   const clicked = [-4.5 + shift[0], 10.5 + shift[1], 10 + shift[2]];
+  const front = await screen(page, clicked);
+  await page.mouse.click(front.x, front.y);
+  const added = await editorState(page);
+  expect(added.points).toHaveLength(1);
+  expect(added.points[0].moved).toBe(false);
+  expect(added.selectedPoints).toBe(1);
+  expect(added.undo).toBe(2);
   expect(Math.hypot(...added.points[0].at.map((value, a) => value - clicked[a]))).toBeLessThan(0.1);
   await page.getByRole('button', { name: 'Move X negative', exact: true }).click();
   const moved = await editorState(page);

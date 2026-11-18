@@ -47,14 +47,13 @@ async function sphere(faces: number[] | null, matrix = new Matrix4()) {
     const rest: Vec3 = [0, 0, 0];
     for (let k = 0; k < 3; k++)
       for (let a = 0; a < 3; a++) rest[a] += restWorld[region.triangles[best * 3 + k] * 3 + a] / 3;
-    const { node, weight } = bindPoint(region, grid, binding, region.faces[best], [
+    const pointBinding = bindPoint(region, binding, restWorld, region.faces[best], [
       1 / 3,
       1 / 3,
       1 / 3,
     ]);
     return {
-      node,
-      weight,
+      ...pointBinding,
       rest,
       target: [rest[0] + move[0], rest[1] + move[1], rest[2] + move[2]],
     };
@@ -63,15 +62,16 @@ async function sphere(faces: number[] | null, matrix = new Matrix4()) {
 }
 
 function deformed(c: WarpConstraint, restNodes: Float64Array, state: WarpState): Vec3 {
-  const out = new Vector3(),
+  const out = new Vector3(...(c.fixed ?? [0, 0, 0])),
     q = new Quaternion(),
     v = new Vector3();
   for (let k = 0; k < c.node.length; k++) {
     const n = c.node[k];
+    const rest = c.restByNode?.[k] ?? c.rest;
     v.set(
-      c.rest[0] - restNodes[n * 3],
-      c.rest[1] - restNodes[n * 3 + 1],
-      c.rest[2] - restNodes[n * 3 + 2],
+      rest[0] - restNodes[n * 3],
+      rest[1] - restNodes[n * 3 + 1],
+      rest[2] - restNodes[n * 3 + 2],
     )
       .applyQuaternion(q.fromArray(state.rotations, n * 4))
       .add(new Vector3().fromArray(state.positions, n * 3));

@@ -120,17 +120,19 @@ export function joinLiveSession() {
     for (const key of Object.keys(message.geometries)) known.add(key);
     const local = committedScene(useEditor.getState());
     const first = !confirmed;
+    const replaced = !!confirmed && message.epoch !== confirmed.epoch;
     let next = scene;
     // This tab is about to replace the scene, so it keeps its own.
     if (replace) next = local;
     // Changes made on a scene that has since been replaced no longer apply.
-    else if (first || message.epoch !== confirmed!.epoch) dirty = false;
+    else if (first || replaced) dirty = false;
     else if (dirty || sending) next = mergeScenes(confirmed!.scene, local, scene, 'ours');
     confirmed = { version: message.version, epoch: message.epoch, scene };
     const [undo, redo] = message.history[client] ?? [0, 0];
     useEditor.setState({ liveStatus: 'connected', sharedHistory: { undo, redo } });
     const before = new Set(local.parts.map((part) => part.id));
     show(next);
+    if (!replace && replaced) useEditor.getState().settleWarp(true);
     const shown = useEditor.getState().scene;
     if (first) useEditor.getState().markSaved(useEditor.getState().revision);
     // Keep a growing model in view, until the person watching takes over the camera.

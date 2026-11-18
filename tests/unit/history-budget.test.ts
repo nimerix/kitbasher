@@ -116,7 +116,6 @@ describe('history budget', () => {
     }
     const internal = doc as unknown as {
       meshes: Map<string, BufferGeometry>;
-      log: Map<number, { patch: { before?: Part; after?: Part }[] }>;
       versions: Map<number, SceneDocument>;
     };
     expect(doc.counts('agent').undo).toBeLessThan(6);
@@ -126,13 +125,25 @@ describe('history budget', () => {
     const reachable = new Set<string>();
     for (const scene of internal.versions.values())
       for (const p of scene.parts) reachable.add(p.geometry.uuid);
-    for (const entry of internal.log.values())
-      for (const change of entry.patch)
-        for (const e of [change.before, change.after]) if (e) reachable.add(e.geometry.uuid);
     expect(internal.versions.size).toBeLessThan(7);
     const dropped = uuids.filter((id) => !reachable.has(id));
     expect(dropped.length).toBeGreaterThan(0);
     for (const id of dropped) expect(internal.meshes.has(id)).toBe(false);
     expect(internal.meshes.has(doc.scene.parts[0].geometry.uuid)).toBe(true);
+  });
+
+  it('trims deleted geometry while still reporting unseen changes', () => {
+    const doc = new SharedDocument(1);
+    const start = sceneOf(mesh(30), mesh(30));
+    doc.replace(start);
+    const seen = doc.version;
+    for (const id of ['p0', 'p1']) {
+      const before = doc.scene;
+      useEditor.setState({ scene: { ...before, parts: before.parts.filter((p) => p.id !== id) } });
+      doc.commit('browser', before);
+    }
+    expect(doc.counts('browser').undo).toBe(1);
+    expect(doc.mesh(start.parts[0].geometry.uuid)).toBeUndefined();
+    expect(doc.changesSince(seen, 'agent')).toEqual({ parts_removed: ['p0', 'p1'] });
   });
 });

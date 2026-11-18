@@ -459,6 +459,10 @@ test('routes transform keys, Delete and Undo to warp control points while warpin
   // Delete removes the selected point, never the part.
   await page.keyboard.press('Delete');
   expect(await warpState(page)).toMatchObject({ tool: 'warp', targets: [], undo: 2, parts: 3 });
+  for (const key of ['Delete', 'Backspace']) {
+    await page.keyboard.press(key);
+    expect(await warpState(page)).toMatchObject({ tool: 'warp', targets: [], undo: 2, parts: 3 });
+  }
   await page.keyboard.press('Meta+z');
   expect(await warpState(page)).toMatchObject({ tool: 'warp', targets: [null], undo: 1 });
 });

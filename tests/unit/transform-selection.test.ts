@@ -185,7 +185,7 @@ const point = (id: string, pin: Vec3, target: Vec3 | null = null): WarpPoint => 
   id,
   face: 0,
   barycentric: [1, 0, 0],
-  binding: { node: [], weight: [] },
+  binding: { node: [], weight: [], restByNode: [], fixed: pin },
   restWorld: pin,
   pin,
   target,
