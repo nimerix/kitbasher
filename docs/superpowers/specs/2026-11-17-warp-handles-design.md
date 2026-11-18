@@ -75,23 +75,51 @@ with each node's own normal; if every walk fails, the edge follows the shortest 
 over mesh edges, or is not drawn. The trace runs a few milliseconds at a time; until it is
 done, edges are chords.
 
+The trace keeps every point it found. Once the written surface has stayed put a moment, the
+points drawn are chosen again on it, a few milliseconds at a time: each edge keeps its middle,
+then the points furthest from the line drawn so far go in wherever on the grid they are, up to
+64 per edge and 32,000 in all, then each edge's quarters, so that it follows the surface as it
+bends again. Each point remembers how far it bent the line; a view leaves out those that bend it
+by less than half its smallest pixel on the grid, and never by more than 0.0375 mm, so a chord
+never dips under the pull toward the camera.
+
+Coarser nets of the grid's own edges keep a readable grid when its cells are too small to show:
+level k picks nodes of the net below about 2^k typical edges apart along it and joins each two
+whose shares of it meet by the shortest way along it, up to three levels. Each comes in over an
+octave of its own cells as the net below it goes, its core from 10 to 20 px and its casing, which
+shows only on dark parts, from 24 to 48 px; the first net's core comes in only as the grid's own
+is nearly gone, so on a light part the grid covers no more than it does at default density. Edges
+are drawn coarsest first, and each draw leaves out the levels whose largest cell is too small on
+screen for it to show.
+
 Edges are drawn as screen-space quads (`WarpGrid.tsx`) in two draws over one instanced
 geometry: an opaque dark core 1.5 px wide, and a light casing 4 px wide drawn first with MAX
 blending, so it lifts only what is darker than itself and leaves light and mid colours alone.
 The core is full while cells are 13 px or more on screen (shrunk as the surface turns away),
 then thins to 1 px and fades out by 6 px; the casing fades out between 22 and 12 px cells.
 Each corner's depth is where its view ray meets the surface's tangent plane at the line, then
-nearer by at most a pixel or 0.05 mm, so any opaque surface in front hides the line in either
-projection. Segment ends are uploaded when the surface is written; between writes, as when a
+nearer by at most a pixel or 0.05 mm, and never more than halfway to the near plane, so any
+opaque surface in front hides the line in either projection. The perspective camera's near and
+far planes are fitted to what it sees before each render (`DepthRange.tsx`): near is half the
+nearest visible thing's view depth, in powers of two, and never under 0.1 mm, so depth stays
+fine enough at overview distance; a headset session's cameras are left alone. Segment ends are uploaded when the surface is written; between writes, as when a
 large region follows a drag on the grid alone, only a texture of node shifts is, measured
 from the node positions in the written surface itself.
+
+Reach dots and seam points are drawn after the grid, among transparent objects by render order,
+and each fragment of a dot takes its depth from the surface's tangent plane at its point, with
+the side where the surface comes nearer drawn nearer again, so a whole dot shows on a slope while
+a nearer surface still hides it. While Interference inspection draws the part see-through, the
+grid is hidden.
 
 Acceptance: at about 300 px across at default density, no more than about a third of the
 part's pixels change by more than 1.5:1; the core's centre reaches 3:1 over the first 24
 Distinct colours and white at that zoom and close up, from two directions; the line reaches
 3:1 on a near-black part; at least 90 % of front-facing grid length is visible on the curved
 part; the far side, the other sheet of a thin shell and anything behind an opaque surface do
-not show through; the grid stays on the written surface before and after deformation.
+not show through, also at 400 mm; the grid stays on the written surface before and after
+deformation, no drawn point more than 0.1 mm off it on a coarse grid over a fine mesh; at the
+highest density a coarser net still shows as the part is zoomed out, without a sudden change.
 
 ### 2. Brush size fitted to the part
 
