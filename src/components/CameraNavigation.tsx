@@ -15,7 +15,7 @@ import {
   viewDirections,
 } from '../core/navigation';
 import type { CameraDirection, CameraStep } from '../core/navigation';
-import { useEditor } from '../core/store';
+import { paintingWarpRegion, useEditor } from '../core/store';
 import { usePreferences, useShortcut, withShortcut } from '../core/preferences';
 import { clampPendingZoom, wheelZoom, zoomGlideStep } from '../core/zoom';
 import { IconButton } from './ui';
@@ -28,6 +28,12 @@ type Editor = ReturnType<typeof useEditor.getState>;
 const drawnSelection = (state: Editor) =>
   state.selected.filter((id) => partDisplay(state, id) !== 'hidden');
 const initialOrbitTarget: [number, number, number] = [0, 54, 0];
+/** Whether a left drag paints with a surface brush rather than moving the camera. */
+const brushOwnsLeftDrag = (state: Editor) =>
+  ((state.tool === 'align' && state.operation.mode === 'surface') || paintingWarpRegion(state)) &&
+  !state.navigationMode &&
+  !state.temporaryOrbit &&
+  !state.pivotPicking;
 
 export function CameraRig() {
   const freeTransform = useEditor((state) => !!state.freeTransform);
@@ -38,14 +44,7 @@ export function CameraRig() {
     state.temporaryOrbit ? 'orbit' : state.navigationMode,
   );
   const pivotPicking = useEditor((state) => state.pivotPicking);
-  const surfacePainting = useEditor(
-    (state) =>
-      state.tool === 'align' &&
-      state.operation.mode === 'surface' &&
-      !state.navigationMode &&
-      !state.temporaryOrbit &&
-      !state.pivotPicking,
-  );
+  const surfacePainting = useEditor(brushOwnsLeftDrag);
   const { camera, gl, invalidate, size } = useThree();
   const connected = useThree((state) => state.events.connected);
   const handledPivot = useRef(0);
@@ -258,13 +257,7 @@ export function CameraRig() {
       settle();
       if (!event.isPrimary || !controls.current?.enabled) return;
       const state = useEditor.getState();
-      const painting =
-        state.tool === 'align' &&
-        state.operation.mode === 'surface' &&
-        !state.navigationMode &&
-        !state.temporaryOrbit &&
-        !state.pivotPicking;
-      if (painting && event.button === 0) return;
+      if (brushOwnsLeftDrag(state) && event.button === 0) return;
       const panMode = !state.temporaryOrbit && state.navigationMode === 'pan';
       const modified = event.shiftKey || event.ctrlKey || event.metaKey;
       const orbit =
