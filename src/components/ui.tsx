@@ -432,6 +432,56 @@ export function RangeInput({
   );
 }
 
+/**
+ * A slider where each doubling of the value takes the same travel. With `zero`, the far left
+ * is 0 and the scale starts just after it.
+ */
+export function LogRangeInput({
+  label,
+  value,
+  min,
+  max,
+  zero = false,
+  className,
+  disabled,
+  onChange,
+}: {
+  label: string;
+  value: number;
+  min: number;
+  max: number;
+  zero?: boolean;
+  className?: string;
+  disabled?: boolean;
+  onChange: (value: number) => void;
+}) {
+  const steps = 200,
+    first = zero ? 1 : 0;
+  const span = Math.log(max / min);
+  const clamped = Math.min(max, Math.max(min, value));
+  const position =
+    zero && value <= 0 ? 0 : first + Math.round((Math.log(clamped / min) / span) * (steps - first));
+  return (
+    <input
+      type="range"
+      className={className}
+      aria-label={label}
+      aria-valuetext={`${Number(value.toPrecision(3))} mm`}
+      min={0}
+      max={steps}
+      step={1}
+      value={position}
+      disabled={disabled}
+      onChange={(event) => {
+        const at = Number(event.target.value);
+        if (zero && at === 0) return onChange(0);
+        const raw = min * Math.exp((span * (at - first)) / (steps - first));
+        onChange(Number(raw.toPrecision(raw < 1 ? 2 : 3)));
+      }}
+    />
+  );
+}
+
 export function Switch({
   label,
   checked,
