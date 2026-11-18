@@ -1,6 +1,6 @@
 import { useEffect, useMemo } from 'react';
 import { DoubleSide, MeshBasicMaterial, Quaternion, Vector3 } from 'three';
-import { paintingWarpRegion, useEditor } from '../core/store';
+import { paintingWarpRegion, useEditor, warpBrushRadius } from '../core/store';
 import { contactColors, patchGeometry } from '../core/surfaces';
 import { worldNormal, worldPoint } from '../core/geometry';
 import { solveAlignment } from '../core/alignment';
@@ -123,7 +123,7 @@ function FlushPreview() {
 }
 
 export function PaintCursor({ part, hit }: { part: Part; hit: SurfacePoint | null }) {
-  const radius = useEditor((s) => s.brushRadius),
+  const radius = useEditor((s) => (paintingWarpRegion(s) ? warpBrushRadius(s) : s.brushRadius)),
     erase = useEditor((s) => s.brushErase),
     op = useEditor((s) => s.operation),
     tool = useEditor((s) => s.tool),

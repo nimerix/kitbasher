@@ -136,7 +136,7 @@ function solid(id: string, geometry: BufferGeometry, position: Vec3): Part {
 /** Paints a disc of the plate around a mesh-local point and lays the grid over it. */
 async function warpDisc(part: Part, x: number, y: number, radius: number) {
   editor().setTool('warp');
-  editor().setBrush({ radius, erase: false });
+  editor().setWarpBrushRadius(radius);
   editor().paintWarpRegion(hit(part.id, x, y), faceAt(part.geometry, x, y), false, true);
   editor().endPaintStroke();
   await editor().layWarpGrid();
@@ -260,7 +260,7 @@ describe('warp session', () => {
       b = plate('b', 50);
     setup([a, b], ['a']);
     editor().setTool('warp');
-    editor().setBrush({ radius: 3, erase: false });
+    editor().setWarpBrushRadius(3);
 
     expect(editor().paintWarpRegion(hit('b', 0, 0), faceAt(b.geometry, 0, 0), false, true)).toBe(
       false,
@@ -429,7 +429,7 @@ describe('warp session', () => {
 
     editor().setWarpRegion('painted');
     expect(session().stage).toBe('region');
-    editor().setBrush({ radius: 6, erase: false });
+    editor().setWarpBrushRadius(6);
     expect(
       editor().paintWarpRegion(hit('a', -10, 0), faceAt(a.geometry, -10, 0), false, true),
     ).toBe(true);
@@ -1479,7 +1479,7 @@ describe('warp commands', () => {
     editor().patchParts(['a'], { color: '#112233' });
     expect(editor().past).toHaveLength(1);
     editor().setTool('warp');
-    editor().setBrush({ radius: 3, erase: false });
+    editor().setWarpBrushRadius(3);
     editor().paintWarpRegion(hit('a', 0, 0), faceAt(a.geometry, 0, 0), false, true);
     editor().endPaintStroke();
     const first = session().faces;
@@ -1527,7 +1527,7 @@ describe('warp commands', () => {
     setup([a], ['a']);
     editor().patchParts(['a'], { color: '#112233' });
     editor().setTool('warp');
-    editor().setBrush({ radius: 3, erase: false });
+    editor().setWarpBrushRadius(3);
     editor().paintWarpRegion(hit('a', 0, 0), faceAt(a.geometry, 0, 0), false, true);
     editor().endPaintStroke();
     const painted = session().faces;
@@ -1583,7 +1583,7 @@ describe('warp commands', () => {
     editor().undo();
     editor().setTool('warp');
     expect(editorCommands().redo.enabled).toBe(true);
-    editor().setBrush({ radius: 3, erase: false });
+    editor().setWarpBrushRadius(3);
     editor().paintWarpRegion(hit('a', 0, 0), faceAt(a.geometry, 0, 0), false, true);
     editor().endPaintStroke();
     expect(editorCommands().redo.enabled).toBe(false);
@@ -1605,7 +1605,7 @@ describe('warp commands', () => {
     setup([a], ['a']);
     editor().setTool('warp');
     expect(editorCommands().undo.enabled).toBe(false);
-    editor().setBrush({ radius: 3, erase: false });
+    editor().setWarpBrushRadius(3);
     editor().paintWarpRegion(hit('a', 0, 0), faceAt(a.geometry, 0, 0), false, true);
     editor().endPaintStroke();
     expect(editorCommands().undo.enabled).toBe(true);
