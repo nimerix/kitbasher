@@ -115,10 +115,11 @@ region follows a drag on the grid alone, only a texture of node shifts is, measu
 node positions in the written surface itself.
 
 Reach dots and seam points are drawn after the grid, among transparent objects by render order,
-and each fragment of a dot takes its depth from the surface's tangent plane at its point, with
-the side where the surface comes nearer drawn nearer again, so a whole dot shows on a slope while
-a nearer surface still hides it. While Interference inspection draws the part see-through, the
-grid is hidden.
+and each fragment of a dot takes its depth from the surface's tangent plane at its point, drawn
+nearer again by as much as the plane turns there but by no more than two pixels, so a whole dot
+shows on a slope while a surface 0.2 mm or more in front hides it, or the part of it that it
+covers, at working distance. While Interference inspection draws the part see-through, the grid
+is hidden.
 
 Acceptance: at about 300 px across at default density, no more than about a third of the
 part's pixels change by more than 1.5:1; the core's centre reaches 3:1 over the first 24

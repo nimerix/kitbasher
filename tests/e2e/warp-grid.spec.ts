@@ -456,7 +456,7 @@ const slope = () => {
   return { quaternion: turn.toArray() as Placement['quaternion'], normal };
 };
 
-test('reach dots show whole on a slope over the grid, and a nearer part hides them', async ({
+test('reach dots show whole on a slope over the grid, and a part 0.2 mm in front hides them', async ({
   page,
 }) => {
   const { quaternion, normal } = slope();
@@ -502,14 +502,43 @@ test('reach dots show whole on a slope over the grid, and a nearer part hides th
     expect(open[name].clear.pixels, name).toBeGreaterThan(250);
     expect(open[name].clear.shown / open[name].clear.pixels, name).toBeGreaterThan(0.9);
   }
-  // In front of the plate's middle and of the bump the handle raised, along the camera's axis.
-  await placePart(page, 'cover', [0, radius, 5]);
+  // The written surface's left half, 0.2 mm nearer along the camera's axis: dots under it are
+  // hidden, and those beside it, or partly under it, show where it does not cover them.
+  await page.evaluate(async (radius) => {
+    const urls = performance.getEntriesByType('resource').map((entry) => entry.name);
+    const THREE = await import(urls.find((url) => /\/deps\/three\.js/.test(url))!);
+    const { useEditor } = await import(
+      urls.find((url) => /\/src\/core\/store\.ts(?:\?.*)?$/.test(url))!
+    );
+    const { preview } = useEditor.getState().warp;
+    const position = preview.getAttribute('position'),
+      index = preview.index;
+    const half: number[] = [];
+    for (let f = 0; f < index.count / 3; f++) {
+      const corners = [0, 1, 2].map((k) => index.getX(f * 3 + k));
+      if (corners.every((v) => position.getX(v) <= 0))
+        for (const v of corners) half.push(position.getX(v), position.getY(v), position.getZ(v));
+    }
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute('position', new THREE.Float32BufferAttribute(half, 3));
+    geometry.computeVertexNormals();
+    useEditor.setState((state: any) => ({
+      scene: {
+        ...state.scene,
+        parts: state.scene.parts.map((part: any) =>
+          part.id === 'cover' ? { ...part, geometry, position: [0, radius, 0.2] } : part,
+        ),
+      },
+    }));
+    await new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
+  }, radius);
   const covered = await dotsShown(page, ['warp-reach'], 'cover');
   note('covered', covered);
-  expect(covered['warp-reach'].covered.pixels).toBeGreaterThan(500);
-  expect(covered['warp-reach'].covered.shown / covered['warp-reach'].covered.pixels).toBeLessThan(
-    0.02,
-  );
+  const { clear, covered: under } = covered['warp-reach'];
+  expect(under.pixels).toBeGreaterThan(500);
+  expect(under.shown / under.pixels).toBeLessThan(0.002);
+  expect(clear.pixels).toBeGreaterThan(500);
+  expect(clear.shown / clear.pixels).toBeGreaterThan(0.99);
 });
 
 test('seam points beside a neighbouring part show whole on a slope, and the part hides its own', async ({
