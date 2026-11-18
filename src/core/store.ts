@@ -202,6 +202,7 @@ export interface WarpPoint {
   target: Vec3 | null;
 }
 export interface WarpSession {
+  id: string;
   partId: string;
   source: BufferGeometry;
   epoch: number;
@@ -466,6 +467,7 @@ const toolChange = (state: EditorState, tool: Tool): Partial<EditorState> => {
 };
 
 const newWarpSession = (part: Part, epoch: number, faces: number[] = []): WarpSession => ({
+  id: uid(),
   partId: part.id,
   source: part.geometry,
   epoch,
@@ -619,8 +621,23 @@ function warpBounds(state: WarpState) {
 }
 
 function warpSeam(scene: SceneDocument, warp: WarpSession) {
-  const { neighbours } = warpNeighbours(scene, warp.partId, warpBounds(warp.state!));
+  const { neighbours, indexing } = warpNeighbours(scene, warp.partId, warpBounds(warp.state!));
+  noticePreparing(warp, indexing);
   return neighbours.length ? measureSeam(warp.model!, warp.output!, neighbours) : null;
+}
+
+// The parts still being prepared that the session was told snap and the seam pass over.
+let preparingNoticed: { session: string; names: Set<string> } | null = null;
+
+/** Says once a session, for each set of parts, that parts still being prepared were skipped. */
+function noticePreparing(warp: WarpSession, indexing: string[]) {
+  if (!indexing.length) return;
+  if (preparingNoticed?.session !== warp.id)
+    preparingNoticed = { session: warp.id, names: new Set() };
+  const names = indexing.join(', ');
+  if (preparingNoticed.names.has(names)) return;
+  preparingNoticed.names.add(names);
+  useEditor.getState().notify(`Still preparing ${names}. Try again when it finishes.`, 'info');
 }
 
 /** Deforms the preview from the solved grid, and returns the region triangles that folded. */
@@ -696,7 +713,8 @@ function snapWarpTargets(
 ) {
   const bounds = warpBounds(warp.state!);
   for (const { target } of moves) bounds.expandByPoint(new Vector3(...target));
-  const { neighbours } = warpNeighbours(scene, warp.partId, bounds);
+  const { neighbours, indexing } = warpNeighbours(scene, warp.partId, bounds);
+  noticePreparing(warp, indexing);
   if (!neighbours.length) return moves;
   return moves.map(({ id, target }) => ({
     id,
