@@ -313,13 +313,17 @@ export function joinedRanges(items: ArrayLike<number>, size: number) {
       ends.push(start + size);
     }
   }
-  // Gap i lies after range i.
+  // Gap i lies after range i. Exactly enough of the narrowest join, the leftmost of equal ones.
   const joined = new Uint8Array(starts.length);
   if (starts.length > warpRangeCap) {
-    const order = Array.from({ length: starts.length - 1 }, (_, i) => i).sort(
-      (a, b) => starts[a + 1] - ends[a] - (starts[b + 1] - ends[b]) || a - b,
-    );
-    for (let k = 0; k < starts.length - warpRangeCap; k++) joined[order[k]] = 1;
+    const gaps = new Float64Array(starts.length - 1);
+    for (let i = 0; i < gaps.length; i++) gaps[i] = starts[i + 1] - ends[i];
+    const need = starts.length - warpRangeCap;
+    const widest = gaps.slice().sort()[need - 1];
+    let ties = need;
+    for (let i = 0; i < gaps.length; i++) if (gaps[i] < widest) ties--;
+    for (let i = 0; i < gaps.length; i++)
+      if (gaps[i] < widest || (gaps[i] === widest && ties-- > 0)) joined[i] = 1;
   }
   const ranges: number[] = [];
   for (let i = 0; i < starts.length; i++) {
