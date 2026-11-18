@@ -951,12 +951,11 @@ See [design specification](docs/design.md) and [verification notes](docs/verific
 
 ## Contributing
 
-Every pull request must add a release to the documentation's **What's new** page.
-Bump the version with `npm version minor --no-git-tag-version` for features or
-`patch` for fixes, then add a release with the same version at the top of
-`src/docs/changelog.ts` describing what changed for users. The Changelog check on
-pull requests fails until both are done. See
-[maintaining the documentation](docs/documentation.md#whats-new).
+Pull request titles start with a type such as `feat:`, `fix:`, `perf:`, or `docs:`,
+descriptions follow the template's Summary, Testing, and Release notes sections, and
+every pull request adds a release to the documentation's **What's new** page with a
+matching version bump. Checks on pull requests enforce all three. See
+[CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
 

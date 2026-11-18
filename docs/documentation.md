@@ -36,21 +36,17 @@ client-side navigation enhancement.
 workbench header's What's new button shows the three newest releases and marks
 one the visitor hasn't opened yet.
 
-Every pull request adds one release at the top of the list:
-
-1. Run `npm version minor --no-git-tag-version` for a new feature, or `patch` for
-   a fix or small improvement. This updates `package.json` and `package-lock.json`.
-2. Add a release with the same `version`, today's `date`, a short `title`, and one
-   entry per user-visible change. Mark each `new`, `improved`, or `fixed`, and set
-   `guide` to an article ID to link to it.
+Every pull request adds one release at the top of the list, with the version
+bump its title type calls for (see [CONTRIBUTING.md](../CONTRIBUTING.md)). Give the
+release the same `version` as `package.json`, today's `date`, a short `title`, and
+one entry per user-visible change. Mark each `new`, `improved`, or `fixed`, and set
+`guide` to an article ID to link to it.
 
 Write for people using Kitbasher, not for reviewers: what they can now do, or what
-works differently. The Changelog workflow runs `scripts/check-changelog.mjs`, which
-fails a pull request that leaves the changelog untouched, does not raise the
-version above `main`, or lets `package.json`, `package-lock.json`, and the newest
-release disagree. `tests/unit/changelog.test.ts` checks ordering, dates, and guide
-links. If two open pull requests take the same version, the one merged second must
-move to the next version.
+works differently. `scripts/check-changelog.mjs` fails a pull request that leaves the
+changelog untouched, sets a version other than the one its title type calls for, or
+lets `package.json`, `package-lock.json`, and the newest release disagree.
+`tests/unit/changelog.test.ts` checks ordering, dates, and guide links.
 
 ## Images
 
