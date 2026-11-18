@@ -44,7 +44,8 @@ export async function buildWarpGrid(region: WarpRegion, density: number): Promis
     3,
     Math.min(target * 6, indices.length),
     1,
-    ['LockBorder'],
+    // Even spacing keeps each vertex's nearest nodes apart, so its skin weights change smoothly.
+    ['LockBorder', 'Regularize'],
   );
 
   const nodeOf = new Uint32Array(weldedCount).fill(0xffffffff);
