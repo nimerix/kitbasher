@@ -188,11 +188,64 @@ export function lineSamples(
     const key = i === 0 || i === end ? `end ${i}` : nodeKey(hits[i]);
     if (!kept.has(key)) kept.set(key, i);
   }
-  const order = [...kept.values()].sort((a, b) => a - b);
+  const order = followSurface(
+    hits,
+    [...kept.values()].sort((a, b) => a - b),
+  );
   let middle = 0;
   for (let i = 1; i < hits.length; i++)
     if (Math.abs(along[i] - length / 2) < Math.abs(along[middle] - length / 2)) middle = i;
   return { samples: order.map((i) => hits[i]), pin: hits[middle].pin, length };
+}
+
+/**
+ * How far the surface a line is drawn on may stand off the chord between two of its samples, as a
+ * share of the chord, before a hit between them is kept too.
+ */
+export const warpLineBend = 0.035;
+
+/** Distance from a point to the segment from `a` to `b`. */
+function segmentDistance(p: Vec3, a: Vec3, b: Vec3) {
+  const u = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+  const length = u[0] * u[0] + u[1] * u[1] + u[2] * u[2];
+  const t =
+    length > 0
+      ? Math.max(
+          0,
+          Math.min(
+            1,
+            ((p[0] - a[0]) * u[0] + (p[1] - a[1]) * u[1] + (p[2] - a[2]) * u[2]) / length,
+          ),
+        )
+      : 0;
+  return Math.hypot(p[0] - a[0] - t * u[0], p[1] - a[1] - t * u[1], p[2] - a[2] - t * u[2]);
+}
+
+/**
+ * The kept hits, with more wherever the surface between two of them stands off their chord by more
+ * than `warpLineBend` of it: the hit farthest from the chord is kept, and both halves are looked at
+ * again. On tight curvature even a line about one node spacing long keeps samples along it.
+ */
+function followSurface(hits: readonly WarpSample[], order: number[]) {
+  const kept: number[] = [order[0]];
+  const split = (a: number, b: number) => {
+    const chord = distance(hits[a].restWorld, hits[b].restWorld);
+    let far = -1,
+      most = warpLineBend * chord;
+    for (let i = a + 1; i < b; i++) {
+      const d = segmentDistance(hits[i].restWorld, hits[a].restWorld, hits[b].restWorld);
+      if (d > most) [far, most] = [i, d];
+    }
+    if (far < 0) return;
+    split(a, far);
+    kept.push(far);
+    split(far, b);
+  };
+  for (let k = 1; k < order.length; k++) {
+    split(order[k - 1], order[k]);
+    kept.push(order[k]);
+  }
+  return kept;
 }
 
 /** At most `limit` points spread evenly along a path, keeping its ends. */

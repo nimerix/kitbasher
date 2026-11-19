@@ -1,6 +1,13 @@
 import { writeFileSync } from 'node:fs';
 import { afterEach, describe, expect, it } from 'vitest';
-import { BufferAttribute, PlaneGeometry, SphereGeometry, Triangle, Vector3 } from 'three';
+import {
+  BufferAttribute,
+  CylinderGeometry,
+  PlaneGeometry,
+  SphereGeometry,
+  Triangle,
+  Vector3,
+} from 'three';
 import type { BufferGeometry } from 'three';
 import { triangleCount } from '../../src/core/geometry';
 import {
@@ -237,6 +244,57 @@ describe('line handles', () => {
       figures[`slow and quick, ${surface.label}`] = { counts, difference: difference / h };
       expect(difference).toBeLessThan(0.02 * h);
     });
+
+  for (const span of [25, 45])
+    it(`keep samples along a short line over tight curvature on the coarsest grid, ±${span}°`, async () => {
+      // A 32 mm open half-pipe of radius 0.9 mm along y, laid whole at the coarsest density and
+      // held by two points near its ends. Its grid spacing is several times the line's length.
+      const R = 0.9;
+      const part = partOf(new CylinderGeometry(R, R, 32, 32, 400, true, -Math.PI / 2, Math.PI));
+      editor().setScene({ name: 'Warp', parts: [part], joints: [] });
+      useEditor.setState({ selected: [part.id] });
+      editor().setTool('warp');
+      editor().setWarpOptions({ autoPoints: false });
+      editor().setWarpRegion('whole');
+      await editor().setWarpDensity(0);
+      await editor().layWarpGrid();
+      editor().setWarpPointSettings({ radius: 0 }, 'end');
+      for (const y of [-15, 15]) {
+        const pin = surfaceAt(part, [0, y, R]);
+        editor().addWarpPoint({ partId: part.id, point: [0, y, R], normal: [0, 0, 1] }, pin.face);
+      }
+      // Around the pipe, rising a little along it.
+      const around = (a: number) =>
+        surfaceAt(part, [R * Math.sin(a), 1.3 + 0.2 * a, R * Math.cos(a)]);
+      const a = (span * Math.PI) / 180;
+      const points = Array.from({ length: 120 }, (_, i) => around(-a + (2 * a * i) / 119));
+      expect(editor().addWarpStroke({ kind: 'line', points })).toBe(true);
+      const line = latest();
+      const spacing = line.reach!.spacing;
+      expect(spacing).toBeGreaterThan(2 * R * a);
+      expect(line.samples.length).toBeGreaterThan(3);
+      const lift = 0.5;
+      editor().moveWarpPoints(
+        [{ id: line.id, target: [line.pin[0], line.pin[1], line.pin[2] + lift] }],
+        'end',
+      );
+      finishWarpSettling();
+      const model = session().model!;
+      const rises = points.map(
+        (p) =>
+          facePoint(model, session().output!.positions, p)[2] -
+          facePoint(model, model.positions, p)[2],
+      );
+      figures[`short curved line, ±${span}°`] = {
+        samples: line.samples.length,
+        spacing,
+        ends: [rises[0], rises.at(-1)],
+        highest: Math.max(...rises),
+        lowest: Math.min(...rises),
+      };
+      // Both ends land, and nothing between them stands above or sinks below the lift.
+      for (const rise of rises) expect(Math.abs(rise - lift)).toBeLessThan(0.05 * lift);
+    }, 30_000);
 
   it('take a sample about every half spacing and merge those bound alike, keeping both ends', async () => {
     const surface = { ...surfaces.plate, make: () => partOf(new PlaneGeometry(40, 40, 8, 8)) };

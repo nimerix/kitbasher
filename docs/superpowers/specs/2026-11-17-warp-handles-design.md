@@ -371,6 +371,12 @@ painted so far are drawn the same way on the warped surface, appended in place.
 **Samples.** A line's hits are taken about every half local node spacing along the surface at
 rest, keeping the first and the last, then one sample is kept for each set of grid nodes the
 inner ones are bound to, so pointer speed does not change stiffness; both ends are always kept.
+Where the surface between two kept samples stands off their chord by more than 3.5 % of it, the hit
+farthest from the chord is kept too and both halves are looked at again, so a line over tight
+curvature keeps samples along it even when it is about one node spacing long or shorter. On a
+32 mm open half-pipe of radius 0.9 mm laid whole at the coarsest density (spacing 4.3 mm), a
+±25° line around it kept 5 samples instead of 2 and, lifted 0.5 mm, stands between 0.497 and
+0.503 mm, where two samples left it between −0.88 and 0.73 mm.
 An area takes up to 32 face centres spread by farthest-point sampling at rest from the first hit,
 at least 4 and about half a node spacing apart; an area of fewer than 4 faces also offers a spot
 toward each corner of each face, so even one face has several samples and lifts a small plateau
