@@ -223,8 +223,12 @@ points section for the selected handles. New handles take the last values set; w
 selected, setting one is a session undo step of its own. Where the selected handles differ in
 radius, or in falloff, that field shows no value with a Mixed placeholder and its slider no thumb;
 a value typed or slid there sets every selected handle, as one undo step, even one equal to a
-value some already have. The line under the fields says what a new point will take: the same
-settings as the selection when it does, or else its radius and falloff. Until the user
+value some already have. The slider's least value counts too: a press at its left end, Home,
+Left, Down or Page Down sets 0 on every selected handle, as one undo step, though the hidden
+value the slider holds while mixed is already its least. The line under the fields says what
+the selection does, and what a new point will take: the same settings as the selection when it
+does, or else its radius and falloff. At radius 0 it says the selected point, line or area (or
+handles, of mixed kinds) moves the surface it lies on, with nothing added around it. Until the user
 sets a radius, a new point takes the larger of 6 % of the part's size and 4.5 node spacings
 where it is clicked, no more than a quarter of the region's extent. Radius 0 is a bare point;
 automatic points are radius 0. Effectively whole regions are laid at the 2,000-node level and
@@ -423,35 +427,60 @@ the shoulder 1,501 faces and 13.
 **Footprint.** A line or an area moves as one the free nodes within 0.75 node spacings (each
 node's own) of the line through its samples in order, or of an area's samples, found by walking
 the grid from the nodes the samples are bound to; a sample with none of its nodes among them adds
-its most heavily bound one; an area also moves the free nodes on its faces. A line also moves
-every free node its drawn path is bound to: every hit the stroke kept, not only its samples,
-whatever its length, bend or radius. Every bound free node seeds the reach's paths, and
-straight-line distance is measured from the samples and an area's outline. Taking every node the
-samples alone are bound to, as first written, made the ridge's width depend on which triangles
-the samples fell in: a binding reaches one to one and a half spacings, unevenly to either side,
-and two samplings of one stroke differed by a quarter of the lift. Taking only the nodes near the
-samples left nodes a hit is bound to that the guides held only partly while the line pulled the
-hit, and the surface between the samples rose or sank: on 16 dabs of paint each on the 35 mm Tomb
-Crawler and the torso scaled to 32 mm, at default settings and pulled 0.5 mm along a view up to
-25° off the surface, 383 of 509 short lines and 127 of 257 longer ones stood within 0.45 to
-0.55 mm with no peak over 0.025 mm, and drawn between two faces on the Tomb Crawler the middle of
-a 0.6 mm line reached only 0.265 mm. A rule that took the samples' nodes only for short curved
-lines (five spacings at most, bowed off the chord by more than 3.5 %, radius one to four
-spacings) fixed the case it was written for and made the lift jump where a line crossed one of
-those limits. With the path's nodes, 509 of 509 short lines and 256 of 257 longer ones meet that
-tolerance; the other, ending one node spacing from the fixed edge, stands between 0.484 and
-0.519 mm with a 0.030 mm peak beside the edge. Whole parts at default settings keep lines within
-0.491 and 0.506 mm. Pointer speed does not change a line: its hits are taken every 2 screen
-pixels along the pointer's path, so a straight stroke drawn slowly or quickly binds the same
-nodes. Section 4 applies with distance measured from the footprint: radius 0 gives a continuous
-ridge or a rigid patch, and a radius above 0 adds the smooth skirt.
+its most heavily bound one; an area also moves the free nodes on its faces. Every bound free node
+seeds the reach's paths, and straight-line distance is measured from the samples, the footprint's
+nodes and an area's outline. Taking every node the samples alone are bound to, as first written,
+made the ridge's width depend on which triangles the samples fell in: a binding reaches one to
+one and a half spacings, unevenly to either side (on the scans, up to nearly three), and two
+samplings of one stroke differed by a quarter of the lift.
+
+**Path nodes.** A line also guides the other free nodes its drawn path is bound to: every hit the
+stroke kept, not only its samples. A node left behind while the line pulls the hits on it raises
+or sinks the surface between the samples, but lifting every such node with the line widens the
+ridge. So each takes a share of the guides graded by how far the path would lag there. A hit
+bound to the node by `w`, with weight `B` on free nodes outside the footprint, gives it
+`min(1, 6 (w B)^1.5)`, and the node takes the most any hit gives it. As a radius's guides apply
+(the activation of section 4), the share rises to a smoothstep of the node's largest `w` over
+0.05, and the radius's hold on the node at its baseline lets go by as much: a firm partial lift of
+a node the path is bound to, as the radius's profile gives it beside the line, raises or sinks
+the surface between the samples. The node's drive weight is the larger of its share and the
+radius's `w`. Distance for the radius is still measured from the footprint, so the skirt begins
+at the line. Every part of the rule is continuous in the line's length, bend and radius.
+
+Measured on 16 dabs of paint each, at the fitted brush, and 8 patches at a 3 mm brush, on the
+35 mm Tomb Crawler and the torso scaled to 32 mm, with short strokes of 0.1 to 1.2 mm and longer
+ones of 1.2 to 4 mm, straight or bowed, pulled 0.5 mm along a view up to 25° off the surface, and
+counting a line as level when it stands within 0.45 to 0.55 mm with no peak over 0.025 mm (51
+lines the fixed edge stops short are left out):
+
+| Rule                         | Level at radius 0 | Level at default radius | Band at radius 0, Tomb Crawler line |
+| ---------------------------- | ----------------- | ----------------------- | ----------------------------------- |
+| Before path nodes            | 351 of 372        | 300 of 373              | 0.52 mm                             |
+| Every path node moved as one | 370 of 372        | 369 of 373              | 1.28 mm                             |
+| Graded shares                | 364 of 372        | 368 of 373              | 0.63 mm                             |
+
+The band is the width rising at least 0.45 mm across the middle of a 1.3 mm line drawn between
+faces 458196 and 457924 on the Tomb Crawler. Moving every path node as one widened that band by
+more than 0.1 mm on 81 of the 372 lines at radius 0, and the surface 0.7 mm beside the line by
+more than 0.05 mm on 14; with graded shares, 6 and none. The share trades level against width:
+a larger share levels more lines at radius 0 and widens more; a smaller one the reverse (at the
+reviewer's line, 0.58 mm wide with 362 level, 0.70 mm with 366, 0.87 mm with 369). On 72 lines
+across the whole of both scans, with automatic points, every line stands within 0.486 and
+0.516 mm. Pointer speed does not change a line: its hits are taken every 2 screen pixels along
+the pointer's path, so a straight stroke drawn slowly or quickly binds the same nodes. Section 4
+applies with distance measured from the footprint: radius 0 gives a continuous ridge or a rigid
+patch, and a radius above 0 adds the smooth skirt.
 
 Acceptance: along a line handle moved by `h`, the written surface between samples stays within
 `0.1 h` of `h`, and no local maximum stands more than `0.05 h` above its neighbours; several interior
 points of an area do the same, including an area smaller than a cell and a 60-node grid; the same
-stroke drawn slowly and quickly gives results within `0.02 h`. Measured: a line within 0.007 h
-(radius 0: 0.005 h) with no peak above 0.006 h at default density, within 0.011 h on a 60-node
-ball; areas within 0.01 h; slow and quick within 0.003 h. On the 32 mm torso scan, lifted 1.92 mm,
+stroke drawn slowly and quickly gives results within `0.02 h`. At radius 0, a line raises a band
+across it about as narrow as its footprint does alone. Measured: a line within 0.027 h (radius 0:
+0.006 h) with no peak above 0.006 h at default density, within 0.013 h with no peak above 0.016 h
+on a 60-node ball; areas within 0.01 h; slow and quick within 0.002 h. On wider dabs of creased
+relief, the band rising at least 0.9 h across 60 lines at radius 0 is 2.69 node spacings wide on
+average and 3.71 at most (the footprint alone: 2.66 and 3.71; every path node moved as one: 3.00
+and 4.36). On the 32 mm torso scan, lifted 1.92 mm,
 a line across the chest stays between 1.912 and 1.921 mm (default radius: 1.901 and 1.927), where
 points placed along the same path range from 0.71 to 2.03 mm.
 

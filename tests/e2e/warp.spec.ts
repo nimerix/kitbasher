@@ -756,3 +756,66 @@ test('selected points with different radii or falloffs show each field as mixed'
   await expect(radius).not.toHaveValue('');
   await expect(help).toHaveText('New points use this radius and falloff.');
 });
+
+test('choosing the least value on a mixed slider sets it on every selected point', async ({
+  page,
+}) => {
+  await open(page);
+  await page.keyboard.press('w');
+  await page.getByRole('radio', { name: 'Whole part', exact: true }).click();
+  await page.getByRole('checkbox', { name: 'Place points automatically' }).uncheck();
+  await page.getByRole('button', { name: 'Lay grid', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'Close gap', exact: true })).toBeEnabled();
+  const radius = page.getByRole('spinbutton', { name: 'Point radius', exact: true });
+  const falloff = page.getByRole('spinbutton', { name: 'Point falloff', exact: true });
+  const set = async (field: typeof radius, value: string) => {
+    await field.fill(value);
+    await field.press('Tab');
+  };
+  const place = async (at: number[], r: string, f: string) => {
+    const spot = await screen(page, at);
+    await page.mouse.click(spot.x, spot.y);
+    await set(radius, r);
+    await set(falloff, f);
+    return spot;
+  };
+  const a = await place([-5, 5, 10], '2.6', '70');
+  await place([5, 15, 10], '3.8', '35');
+  await page.keyboard.down('Shift');
+  await page.mouse.click(a.x, a.y);
+  await page.keyboard.up('Shift');
+  const mixed = await pointSettings(page);
+  expect(mixed.points.map(({ selected }) => selected)).toEqual([true, true]);
+  const blur = () => page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
+
+  for (const [name, setting, field] of [
+    ['Point radius slider', 'radius', radius],
+    ['Point falloff slider', 'falloff', falloff],
+  ] as const) {
+    const slider = page.getByRole('slider', { name, exact: true });
+    const gestures = {
+      Home: () => slider.press('Home'),
+      Left: () => slider.press('ArrowLeft'),
+      'a click at the left end': async () => {
+        const box = (await slider.boundingBox())!;
+        await page.mouse.click(box.x + 1, box.y + box.height / 2);
+      },
+    };
+    for (const [gesture, act] of Object.entries(gestures)) {
+      await expect(slider, gesture).toHaveAttribute('aria-valuetext', 'Mixed');
+      await act();
+      const least = await pointSettings(page);
+      expect(
+        least.points.map((point) => point[setting]),
+        `${setting} after ${gesture}`,
+      ).toEqual([0, 0]);
+      expect(least.undo, `${setting} after ${gesture}`).toBe(mixed.undo + 1);
+      await expect(slider).not.toHaveClass(/mixed/);
+      await expect(field).toHaveValue('0');
+      // Undo gives the two values back.
+      await blur();
+      await page.keyboard.press('ControlOrMeta+z');
+      expect((await pointSettings(page)).points).toEqual(mixed.points);
+    }
+  }
+});

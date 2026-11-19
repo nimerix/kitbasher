@@ -3,6 +3,7 @@ import {
   useMemo,
   useRef,
   type FocusEvent,
+  type KeyboardEvent,
   type PointerEvent as ReactPointerEvent,
 } from 'react';
 import { LoaderCircle, TriangleAlert } from 'lucide-react';
@@ -20,6 +21,7 @@ import {
   warpShortfallCause,
   warpShortfallShown,
   warpWholePart,
+  type WarpPoint,
   type WarpSession,
 } from '../core/store';
 import type { Part } from '../core/types';
@@ -62,9 +64,9 @@ function usePointSettingsGesture() {
       window.removeEventListener('blur', blur);
       if (owner.patch) useEditor.getState().setWarpPointSettings(owner.patch, 'end');
     };
-    const begin = (slider: Slider, pointer: number | null) => {
+    const begin = (slider: Slider, pointer: number | null, patch: PointSettings | null = null) => {
       end();
-      current.current = { slider, pointer, patch: null, frame: 0 };
+      current.current = { slider, pointer, patch, frame: 0 };
       window.addEventListener('pointerup', release);
       window.addEventListener('pointercancel', release);
       window.addEventListener('blur', blur);
@@ -86,6 +88,9 @@ function usePointSettingsGesture() {
   return gesture;
 }
 
+/** Keys that take a slider to or toward its least value. */
+const lowering = new Set(['Home', 'PageDown', 'ArrowLeft', 'ArrowDown']);
+
 const isSlider = (target: EventTarget) =>
   target instanceof HTMLInputElement && target.type === 'range';
 
@@ -95,6 +100,15 @@ const shortfallCauses = {
   gap: 'Close gap holds the surface beside it.',
   spot: 'A point on the same spot holds it back.',
 } as const;
+
+/** What selected handles with radius 0 move. */
+function zeroRadius(selected: readonly WarpPoint[]) {
+  const kinds = new Set(selected.map(({ kind }) => kind));
+  const kind = kinds.size === 1 ? selected[0].kind : 'handle';
+  return selected.length === 1
+    ? `The selected ${kind} moves the surface it lies on, with nothing added around it.`
+    : `The selected ${kind}s move the surface they lie on, with nothing added around them.`;
+}
 
 /** Radius, falloff and Distribute points, for the selected points or for new ones. */
 function PointSettingsControls({ warp, part }: { warp: WarpSession; part: Part | undefined }) {
@@ -121,10 +135,20 @@ function PointSettingsControls({ warp, part }: { warp: WarpSession; part: Part |
   const shortfall = warpShortfall(warp);
   const drift = warpPinDrift(warp);
   const commit = (patch: PointSettings) => useEditor.getState().setWarpPointSettings(patch, 'end');
+  // A mixed slider's hidden value is already its least, so choosing that fires no change.
+  const least = (slider: Slider): PointSettings | null =>
+    (slider === 'radius' ? mixedRadius : mixedFalloff) ? { [slider]: 0 } : null;
   const owned = (slider: Slider) => ({
     'data-slider': slider,
     onPointerDown: (event: ReactPointerEvent) => {
-      if (isSlider(event.target)) gesture.begin(slider, event.pointerId);
+      if (isSlider(event.target)) gesture.begin(slider, event.pointerId, least(slider));
+    },
+    onKeyDown: (event: KeyboardEvent) => {
+      const patch = least(slider);
+      if (patch && isSlider(event.target) && lowering.has(event.key)) {
+        gesture.change(slider, patch);
+        gesture.end(slider);
+      }
     },
     onBlur: (event: FocusEvent) => {
       if (isSlider(event.target)) gesture.end(slider);
@@ -201,7 +225,7 @@ function PointSettingsControls({ warp, part }: { warp: WarpSession; part: Part |
             ? `The selected points move the surface within their own radii. ${newPoints}`
             : radius > 0
               ? `Moves the surface within ${Number(radius.toPrecision(3))} mm of the selected ${selected.length === 1 ? 'point' : 'points'}${fade !== null ? `, fading over the outer ${Number(fade.toPrecision(2))} mm` : ''}. ${newPoints}`
-              : `The selected ${selected.length === 1 ? 'point moves' : 'points move'} the surface at the point only.`
+              : `${zeroRadius(selected)} ${newPoints}`
           : warp.pointRadius === null
             ? 'New points use this falloff, and reach a few grid spacings where you click until you set a radius.'
             : 'New points use this radius and falloff.'}

@@ -33,6 +33,7 @@ import {
   bandWidth,
   warpFootprintSpacings,
   warpGuides,
+  warpPathBound,
   warpPathStretch,
   warpPriorityStrength,
   warpTailSpacings,
@@ -853,7 +854,7 @@ describe('footprints', () => {
     expect(wider.reach).not.toBe(line.reach);
     expect(wider.reach!.own).toBe(along.length);
 
-    // Drawn, a line also moves every free node its path is bound to, at any radius.
+    // Drawn, a line also guides the other free nodes its path is bound to, by graded shares.
     const [a, b] = samples.map(({ restWorld }) => restWorld);
     const path = Array.from({ length: 41 }, (_, i) => {
       const at = [0, 1, 2].map((k) => a[k] + ((b[k] - a[k]) * i) / 40) as Vec3;
@@ -867,11 +868,27 @@ describe('footprints', () => {
         (n) => !model.grid.fixed[n],
       ),
     );
-    expect(onPath.filter((n) => !along.includes(n)).length).toBeGreaterThan(0);
-    const drawn = [...new Set([...along, ...onPath])].sort((x, y) => x - y);
+    const others = [...new Set(onPath)].filter((n) => !along.includes(n)).sort((x, y) => x - y);
+    expect(others.length).toBeGreaterThan(0);
+    const footprint = handleFootprint(model, { ...line, path });
+    expect(footprint.nodes).toEqual(along);
+    expect(footprint.path).toEqual(others);
+    for (const share of footprint.pathShare) {
+      expect(share).toBeGreaterThan(0);
+      expect(share).toBeLessThanOrEqual(1);
+    }
+    expect(Math.min(...footprint.pathShare)).toBeLessThan(Math.max(...footprint.pathShare));
+    // As the radius applies, each share rises toward a smoothstep of the node's weight.
+    const smooth = (t: number) => (t <= 0 ? 0 : t >= 1 ? 1 : t * t * (3 - 2 * t));
     for (const radius of [0, 0.5, 2, 20]) {
       const reach = reachHandle(model, { ...line, path, radius }).reach!;
-      expect(Array.from(reach.node.subarray(0, reach.own))).toEqual(drawn);
+      expect(Array.from(reach.node.subarray(0, reach.own))).toEqual(along);
+      const least = new Map([...reach.node].map((n, i) => [n, reach.least[i]]));
+      others.forEach((n, k) => {
+        const at0 = footprint.pathShare[k],
+          bound = smooth(footprint.pathWeight[k] / warpPathBound);
+        expect(least.get(n)).toBeCloseTo(at0 + reach.activation * (bound - at0), 12);
+      });
     }
 
     // An area also holds the nodes on its faces.

@@ -538,6 +538,57 @@ test('the first drag of a new line with the default radius lifts a smooth ridge'
     expect(found[i] - Math.min(found[i - 1], found[i + 1])).toBeLessThan(0.05 * lift);
 });
 
+test('at radius 0 the help says a point, a line or an area moves only the surface it lies on', async ({
+  page,
+}) => {
+  await warpFront(page);
+  const help = page.locator('.warp-point-settings > .anchor-help');
+  const radius = page.getByRole('spinbutton', { name: 'Point radius', exact: true });
+  const falloff = page.getByRole('spinbutton', { name: 'Point falloff', exact: true });
+  const set = async (field: typeof radius, value: string) => {
+    await field.fill(value);
+    await field.press('Enter');
+  };
+  const plain = 'moves the surface it lies on, with nothing added around it.';
+  // New handles take radius 0, so each is made with it.
+  await set(radius, '0');
+  const spot = await screen(page, [-6, 4, 10]);
+  await page.mouse.click(spot.x, spot.y);
+  await expect(help).toHaveText(`The selected point ${plain} New points use the same settings.`);
+  await page.getByRole('radio', { name: 'Line', exact: true }).click();
+  await drag(page, [
+    [-5, 9, 10],
+    [5, 11, 10],
+  ]);
+  await expect(help).toHaveText(`The selected line ${plain} New points use the same settings.`);
+  await page.getByRole('radio', { name: 'Area', exact: true }).click();
+  await drag(page, [
+    [-3, 15, 10],
+    [3, 16, 10],
+  ]);
+  await expect(help).toHaveText(`The selected area ${plain} New points use the same settings.`);
+  const made = await state(page);
+  expect(made.handles.map(({ kind }: { kind: string }) => kind)).toEqual(['point', 'line', 'area']);
+
+  // With new points set apart, the text says what they take.
+  const empty = await screen(page, [16, 10, 10]);
+  await page.mouse.click(empty.x, empty.y);
+  expect((await state(page)).selected).toEqual([]);
+  await set(radius, '3.3');
+  await set(falloff, '45');
+  const select = (ids: string[]) =>
+    inStore(page, 'store.useEditor.getState().selectWarpPoints(args);', ids);
+  const [point, line, area] = made.handles.map(({ id }: { id: string }) => id);
+  await select([line]);
+  await expect(help).toHaveText(
+    `The selected line ${plain} New points use a 3.3 mm radius and 45% falloff.`,
+  );
+  await select([point, area]);
+  await expect(help).toHaveText(
+    'The selected handles move the surface they lie on, with nothing added around them. New points use a 3.3 mm radius and 45% falloff.',
+  );
+});
+
 test('a press on a part in front makes no handle on the part behind', async ({ page }) => {
   // An opaque cover 4 mm in front of the left of the block's painted face.
   const cover = part('cover', 'Cover', new BoxGeometry(8, 20, 1), [-6, 10, 14], '#3a4a5a');
