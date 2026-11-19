@@ -952,14 +952,15 @@ export function warpResponse(
 
 /**
  * For a node response from `warpResponse` along unit direction `u`, the most the skin map of a free
- * node beside a fixed one loses of its determinant per mm, to first order with rotations held: the
- * map gains u (Σ_e (r_n − r_j) B e)ᵀ, which turns it inside out once that loss reaches 1.
+ * node beside an `anchored` one loses of its determinant per mm, to first order with rotations
+ * held: the map gains u (Σ_e (r_n − r_j) B e)ᵀ, which turns it inside out once that loss reaches 1.
  */
 export function responseShrink(
   grid: WarpGrid,
   restNodes: Float64Array,
   response: ArrayLike<number>,
   u: Vec3,
+  anchored: ArrayLike<number>,
 ) {
   const frame = stretchFrame(grid, restNodes);
   const { edgeStart, edges } = grid;
@@ -968,7 +969,7 @@ export function responseShrink(
   for (let n = 0; n < grid.fixed.length; n++) {
     if (!stretches(grid, frame, n)) continue;
     let beside = false;
-    for (let e = edgeStart[n]; e < edgeStart[n + 1]; e++) beside ||= !!grid.fixed[edges[e]];
+    for (let e = edgeStart[n]; e < edgeStart[n + 1]; e++) beside ||= !!anchored[edges[e]];
     if (!beside) continue;
     let gx = 0,
       gy = 0,

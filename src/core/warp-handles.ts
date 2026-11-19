@@ -764,11 +764,12 @@ export function warpGuides(
  */
 export const warpCarryLimit = 1.25;
 /**
- * How far apart the ends of a grid edge against the fixed edge may move, as a share of its rest
- * length, when a grab bound partly to fixed nodes moves them. Steeper, and the scan's relief folds.
+ * How far apart the ends of a grid edge against the fixed edge, or against a pin that must hold,
+ * may move, as a share of its rest length, under a grab held back that way. Steeper, and the
+ * scan's relief folds.
  */
 export const warpCreaseStrain = 1;
-/** The least share of its determinant a node map beside the fixed edge keeps under such a grab. */
+/** The least share of its determinant a node map beside such an edge or pin keeps under it. */
 export const warpMapFloor = 0.5;
 /** How far a moved handle may move a stationary pin the user placed, mm. */
 export const warpPinHold = 0.005;
@@ -781,9 +782,9 @@ const freeShare = (binding: WarpPointBinding, fixed: Uint8Array) =>
  * The share of its offset each moved handle can carry, for the handles that must stop short: those
  * bound partly to fixed nodes, and those that would move a stationary pin the user placed. From
  * the solve's linear response to the handle's travel with rotations held, a handle carries as far
- * as keeps every node within `warpCarryLimit` of its travel and the pins within `warpPinHold`; one
- * bound partly to fixed nodes also keeps the edges against the fixed edge within
- * `warpCreaseStrain` and the node maps beside it above `warpMapFloor`. `constraints` and `guides`
+ * as keeps every node within `warpCarryLimit` of its travel, the pins within `warpPinHold`, the
+ * edges against the fixed nodes, and against those pins, within `warpCreaseStrain`, and the node
+ * maps beside them above `warpMapFloor`. `constraints` and `guides`
  * are what the solve is given, the handles' constraints first in order. Handles on fully free
  * surface with no pin they would move are never in the map.
  */
@@ -837,23 +838,6 @@ export function handleCarry(
       }
     }
     const response = warpResponse(grid, restNodes, constraints, guides, share, guideShare);
-    // How far nodes move, and how steeply the edges against the fixed edge rise, per mm of travel.
-    let largest = 0,
-      strain = 0;
-    for (let n = 0; n < response.length; n++) {
-      largest = Math.max(largest, Math.abs(response[n]));
-      if (fixed[n]) continue;
-      for (let e = edgeStart[n]; e < edgeStart[n + 1]; e++) {
-        const j = edges[e];
-        if (!fixed[j]) continue;
-        const length = Math.hypot(
-          restNodes[n * 3] - restNodes[j * 3],
-          restNodes[n * 3 + 1] - restNodes[j * 3 + 1],
-          restNodes[n * 3 + 2] - restNodes[j * 3 + 2],
-        );
-        if (length > 0) strain = Math.max(strain, Math.abs(response[n] - response[j]) / length);
-      }
-    }
     let pinned = 0;
     for (const p of close)
       for (let s = 0; s < handles[p].samples.length; s++)
@@ -863,14 +847,34 @@ export function handleCarry(
         );
     const pulls = pinned * travel > warpPinHold;
     if (!held && !pulls) return;
-    let carried = largest > warpCarryLimit ? warpCarryLimit / largest : 1;
-    if (held) {
-      if (strain * travel > warpCreaseStrain)
-        carried = Math.min(carried, warpCreaseStrain / (strain * travel));
-      const u: Vec3 = [offset[0] / travel, offset[1] / travel, offset[2] / travel];
-      const shrink = responseShrink(grid, restNodes, response, u) * travel;
-      if (shrink > 1 - warpMapFloor) carried = Math.min(carried, (1 - warpMapFloor) / shrink);
+    // What holds the surface still: the fixed nodes and, when they must hold, the pins' nodes.
+    const anchored = pulls ? fixed.slice() : fixed;
+    if (pulls)
+      for (const p of close)
+        for (const { binding } of handles[p].samples) for (const n of binding.node) anchored[n] = 1;
+    // How far nodes move, and how steeply the edges against what holds still rise, per mm.
+    let largest = 0,
+      strain = 0;
+    for (let n = 0; n < response.length; n++) {
+      largest = Math.max(largest, Math.abs(response[n]));
+      if (fixed[n]) continue;
+      for (let e = edgeStart[n]; e < edgeStart[n + 1]; e++) {
+        const j = edges[e];
+        if (!anchored[j] || anchored[n]) continue;
+        const length = Math.hypot(
+          restNodes[n * 3] - restNodes[j * 3],
+          restNodes[n * 3 + 1] - restNodes[j * 3 + 1],
+          restNodes[n * 3 + 2] - restNodes[j * 3 + 2],
+        );
+        if (length > 0) strain = Math.max(strain, Math.abs(response[n] - response[j]) / length);
+      }
     }
+    let carried = largest > warpCarryLimit ? warpCarryLimit / largest : 1;
+    if (strain * travel > warpCreaseStrain)
+      carried = Math.min(carried, warpCreaseStrain / (strain * travel));
+    const u: Vec3 = [offset[0] / travel, offset[1] / travel, offset[2] / travel];
+    const shrink = responseShrink(grid, restNodes, response, u, anchored) * travel;
+    if (shrink > 1 - warpMapFloor) carried = Math.min(carried, (1 - warpMapFloor) / shrink);
     if (pulls) carried = Math.min(carried, warpPinHold / (pinned * travel));
     if (carried < 1) carry.set(handle, carried);
   });

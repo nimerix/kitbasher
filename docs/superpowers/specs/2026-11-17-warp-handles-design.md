@@ -199,9 +199,9 @@ Radius adds soft per-node **guides** around them.
   surface can take; its constraints and guides move by that share, and it stops short. The share
   comes from the solve's linear response to the handle's travel with rotations held (one more
   conjugate-gradient solve on the system the solve builds anyway): no node moves more than 1.25
-  times the travel, an unmoved point the user placed moves no more than 0.005 mm, and, bound
-  partly to fixed nodes, no edge with a fixed end rises by more than its rest length and no node
-  map beside the fixed edge loses more than half its determinant. Otherwise the stiff constraint
+  times the travel, an unmoved point the user placed moves no more than 0.005 mm, no edge with an
+  end on a fixed node, or on such a point that must hold, rises by more than its rest length, and
+  no node map beside one loses more than half its determinant. Otherwise the stiff constraint
   reached its target by overdriving the few free nodes it had: on a scan a 1 mm pull beside the
   fixed edge moved a node 4.5 mm and turned node maps inside out. Handles on free surface with no
   such pin beside them are left alone. The panel states a moved handle's shortfall from its
