@@ -20,6 +20,40 @@ export interface Release {
 // Newest first. Each title must be unique: it names the release's link.
 export const releases: Release[] = [
   {
+    date: '2026-11-18',
+    title: 'Warp handles, lines and a clearer grid',
+    changes: [
+      {
+        kind: 'improved',
+        text: 'The warp grid is drawn in dark lines that follow the surface and stay readable on any part color. Lines lighten as the grid gets denser, so the model stays visible underneath.',
+      },
+      {
+        kind: 'improved',
+        text: 'Warp has its own brush, with a size slider fitted to the part you are warping.',
+      },
+      {
+        kind: 'new',
+        text: 'A whole-part warp can place control points automatically, so moving one bends the part and no longer carries it away. Distribute points spreads more points over any region.',
+      },
+      {
+        kind: 'new',
+        text: 'Each control point has a radius and a falloff, so one point can move a wide, smooth area.',
+      },
+      {
+        kind: 'new',
+        text: 'Feather edge softens the edge of a painted region by letting the surface just beyond it bend too.',
+      },
+      {
+        kind: 'new',
+        text: 'Draw a line or paint an area on the surface and move it as one handle, without a peak at each point.',
+      },
+      {
+        kind: 'improved',
+        text: 'Warped surfaces fold far less on dense scans, a density or region change is one undo step, and Apply waits for the surface to settle.',
+      },
+    ],
+  },
+  {
     date: '2026-11-17',
     title: 'Commit versions',
     changes: [
