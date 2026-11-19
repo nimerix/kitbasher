@@ -2,13 +2,13 @@ import { writeFileSync } from 'node:fs';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   BufferAttribute,
+  BufferGeometry,
   CylinderGeometry,
   PlaneGeometry,
   SphereGeometry,
   Triangle,
   Vector3,
 } from 'three';
-import type { BufferGeometry } from 'three';
 import { triangleCount } from '../../src/core/geometry';
 import {
   finishWarpSettling,
@@ -18,8 +18,11 @@ import {
   type WarpPoint,
 } from '../../src/core/store';
 import { readFace } from '../../src/core/surfaces';
+import { bindTrianglePoint } from '../../src/core/warp-bind';
+import { warpEligibleNodes } from '../../src/core/warp-handles';
 import { defaultWarpDensity } from '../../src/core/warp-grid';
-import { isPaintedFace } from '../../src/core/warp-model';
+import { isPaintedFace, type WarpModel } from '../../src/core/warp-model';
+import { regionTriangleOf } from '../../src/core/warp-region';
 import {
   areaBrushFaces,
   facePoint,
@@ -27,7 +30,6 @@ import {
   strokeSample,
   type WarpStrokePoint,
 } from '../../src/core/warp-strokes';
-import { warpShortLineRadius } from '../../src/core/warp-handles';
 import type { Part, SceneDocument, Vec3 } from '../../src/core/types';
 
 function partOf(geometry: BufferGeometry): Part {
@@ -165,6 +167,22 @@ function profile(part: Part, surface: Surface, handle: WarpPoint) {
   return Array.from({ length: count + 1 }, (_, i) =>
     lifted(part, surface.onto(lerp(a, b, i / count))),
   );
+}
+
+const distance = (a: ArrayLike<number>, b: ArrayLike<number>) =>
+  Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]);
+
+/** Distance from a point to the segment from `a` to `b`. */
+function segmentDistance(p: Vec3, a: Vec3, b: Vec3) {
+  const u = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+  const t = Math.max(
+    0,
+    Math.min(
+      1,
+      (u[0] * (p[0] - a[0]) + u[1] * (p[1] - a[1]) + u[2] * (p[2] - a[2])) / distance(a, b) ** 2,
+    ),
+  );
+  return distance(p, [a[0] + t * u[0], a[1] + t * u[1], a[2] + t * u[2]]);
 }
 
 /** The most any local maximum stands above the lowest point within `window` probes each side. */
@@ -323,7 +341,6 @@ describe('line handles', () => {
     const line = latest();
     const spacing = line.reach!.spacing;
     expect(2 * a * R).toBeLessThan(3 * spacing);
-    expect(line.radius).toBeLessThan(warpShortLineRadius * spacing);
     const lift = 0.5;
     editor().moveWarpPoints(
       [{ id: line.id, target: [line.pin[0], line.pin[1], line.pin[2] + lift] }],
@@ -348,6 +365,289 @@ describe('line handles', () => {
     // Moving only the nodes nearest the line left spots between its samples 0.08 of the lift off.
     for (const rise of rises) expect(Math.abs(rise - lift)).toBeLessThan(0.05 * lift);
     expect(worstPeak(rises, 4)).toBeLessThan(0.02 * lift);
+  });
+
+  /**
+   * A 10 mm patch of creased relief, a heightfield about as finely and as unevenly triangulated as
+   * a scanned miniature, and the face under any spot seen from above.
+   */
+  function creasedRelief() {
+    const size = 10,
+      cell = 0.05,
+      n = size / cell;
+    const height = (x: number, y: number) =>
+      0.25 *
+      (Math.abs(Math.sin(4.1 * x + 0.8 * Math.sin(1.9 * y))) +
+        0.6 * Math.abs(Math.sin(3.3 * y - 1.7 * x + 0.5)));
+    let seed = 99;
+    const noise = () => {
+      seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+      return seed / 0x7fffffff - 0.5;
+    };
+    // Jittered, in denser and sparser bands, with the cells split either way at random.
+    const xy: number[][] = [];
+    for (let j = 0; j <= n; j++)
+      for (let i = 0; i <= n; i++) {
+        let u = -size / 2 + i * cell,
+          v = -size / 2 + j * cell;
+        if (i > 0 && i < n) u += 0.4 * cell * noise();
+        if (j > 0 && j < n) v += 0.4 * cell * noise();
+        u += 0.15 * Math.sin((u * Math.PI) / 1.5) * (size / 2 - Math.abs(u));
+        v += 0.15 * Math.sin((v * Math.PI) / 1.1) * (size / 2 - Math.abs(v));
+        xy.push([u, v]);
+      }
+    const at = (i: number, j: number) => {
+      const [x, y] = xy[j * (n + 1) + i];
+      return [x, y, height(x, y)];
+    };
+    const positions: number[] = [];
+    for (let j = 0; j < n; j++)
+      for (let i = 0; i < n; i++) {
+        const [a, b, c, d] = [at(i, j), at(i + 1, j), at(i + 1, j + 1), at(i, j + 1)];
+        if (noise() > 0) positions.push(...a, ...b, ...c, ...a, ...c, ...d);
+        else positions.push(...a, ...b, ...d, ...b, ...c, ...d);
+      }
+    const geometry = new BufferGeometry();
+    geometry.setAttribute('position', new BufferAttribute(new Float32Array(positions), 3));
+    const key = (x: number, y: number) =>
+      Math.floor((x + size) / cell) * 100000 + Math.floor((y + size) / cell);
+    const buckets = new Map<number, number[]>();
+    for (let f = 0; f < positions.length / 9; f++) {
+      const xs = [0, 3, 6].map((k) => positions[f * 9 + k]),
+        ys = [1, 4, 7].map((k) => positions[f * 9 + k]);
+      for (let x = Math.min(...xs); x < Math.max(...xs) + cell; x += cell)
+        for (let y = Math.min(...ys); y < Math.max(...ys) + cell; y += cell) {
+          const k = key(Math.min(x, Math.max(...xs)), Math.min(y, Math.max(...ys)));
+          const list = buckets.get(k) ?? [];
+          if (!list.includes(f)) list.push(f);
+          buckets.set(k, list);
+        }
+    }
+    const below = (x: number, y: number): WarpStrokePoint => {
+      let best: WarpStrokePoint | null = null,
+        inside = -Infinity;
+      for (const f of buckets.get(key(x, y)) ?? []) {
+        const [ax, ay, , bx, by, , cx, cy] = positions.slice(f * 9, f * 9 + 9);
+        const det = (by - cy) * (ax - cx) + (cx - bx) * (ay - cy);
+        const l1 = ((by - cy) * (x - cx) + (cx - bx) * (y - cy)) / det;
+        const l2 = ((cy - ay) * (x - cx) + (ax - cx) * (y - cy)) / det;
+        const weights = [l1, l2, 1 - l1 - l2];
+        if (Math.min(...weights) <= inside) continue;
+        inside = Math.min(...weights);
+        const clamped = weights.map((w) => Math.max(0, w));
+        const sum = clamped[0] + clamped[1] + clamped[2];
+        best = { face: f, barycentric: clamped.map((w) => w / sum) as Vec3 };
+      }
+      return best!;
+    };
+    return { part: partOf(geometry), height, below };
+  }
+
+  /** Whether a spot is painted and every node it is bound to is free. */
+  const freeAt = (model: WarpModel, { face, barycentric }: WarpStrokePoint) =>
+    isPaintedFace(model, face) &&
+    bindTrianglePoint(
+      model.region,
+      model.binding,
+      model.restWorld,
+      regionTriangleOf(model.region, face),
+      barycentric,
+    ).node.every((n) => !model.grid.fixed[n]);
+
+  it('lift short lines of every length, direction and bend level on painted patches of creased relief', async () => {
+    // Six dabs of paint at the default density, ten strokes of up to 1 mm on each, curved either
+    // way, each pulled 0.5 mm along a view up to 17 degrees off vertical and measured at its hits.
+    const { part, height, below } = creasedRelief();
+    let seed = 5;
+    const random = () => {
+      seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+      return seed / 0x7fffffff;
+    };
+    const lift = 0.5;
+    const failures: string[] = [];
+    let lines = 0,
+      lowest = Infinity,
+      highest = -Infinity,
+      largest = 0;
+    for (let dab = 0; dab < 6; dab++) {
+      const x0 = (random() - 0.5) * 3,
+        y0 = (random() - 0.5) * 3;
+      editor().setScene({ name: 'Warp', parts: [part], joints: [] });
+      useEditor.setState({ selected: [part.id] });
+      editor().setTool('warp');
+      editor().setWarpBrushRadius(1.5);
+      editor().paintWarpRegion(
+        { partId: part.id, point: [x0, y0, height(x0, y0)], normal: [0, 0, 1] },
+        below(x0, y0).face,
+        false,
+        true,
+      );
+      editor().endPaintStroke();
+      await editor().layWarpGrid();
+      const model = session().model!;
+      for (let k = 0, made = 0; k < 40 && made < 10; k++) {
+        const direction = random() * Math.PI * 2,
+          length = 0.1 + random() * 0.9,
+          bend = (random() - 0.5) * 1.2;
+        const cx = x0 + (random() - 0.5) * 0.8,
+          cy = y0 + (random() - 0.5) * 0.8;
+        const points = Array.from({ length: 61 }, (_, i) => {
+          const s = i / 60 - 0.5,
+            q = bend * length * (s * s - 0.25);
+          return below(
+            cx + length * s * Math.cos(direction) - q * Math.sin(direction),
+            cy + length * s * Math.sin(direction) + q * Math.cos(direction),
+          );
+        });
+        // A line partly held by fixed nodes stops short by design.
+        if (!points.every((point) => freeAt(model, point))) continue;
+        expect(editor().addWarpStroke({ kind: 'line', points })).toBe(true);
+        made++;
+        lines++;
+        const line = latest();
+        const tilt = random() * 0.3,
+          turn = random() * Math.PI * 2;
+        const up = [
+          Math.sin(tilt) * Math.cos(turn),
+          Math.sin(tilt) * Math.sin(turn),
+          Math.cos(tilt),
+        ];
+        editor().moveWarpPoints(
+          [{ id: line.id, target: line.pin.map((p, a) => p + lift * up[a]) as Vec3 }],
+          'end',
+        );
+        finishWarpSettling();
+        const rest = points.map((p) => facePoint(model, model.positions, p));
+        const rises = points.map((p, i) => {
+          const moved = facePoint(model, session().output!.positions, p);
+          return [0, 1, 2].reduce((sum, a) => sum + (moved[a] - rest[i][a]) * up[a], 0);
+        });
+        let along = 0;
+        for (let i = 1; i < rest.length; i++) along += distance(rest[i], rest[i - 1]);
+        const peak = worstPeak(rises, Math.max(1, Math.round((line.reach!.spacing / along) * 60)));
+        const low = Math.min(...rises),
+          high = Math.max(...rises);
+        [lowest, highest, largest] = [
+          Math.min(lowest, low),
+          Math.max(highest, high),
+          Math.max(largest, peak),
+        ];
+        if (low < 0.9 * lift || high > 1.1 * lift || peak > 0.05 * lift)
+          failures.push(
+            `dab ${dab}, line ${made}: ${(along / line.reach!.spacing).toFixed(1)} spacings, ` +
+              `${low.toFixed(3)} to ${high.toFixed(3)} mm, peak ${peak.toFixed(3)} mm`,
+          );
+        editor().undoWarpEdit();
+        editor().undoWarpEdit();
+      }
+      editor().cancelWarp();
+    }
+    figures['short lines on creased relief'] = { lines, lowest, highest, peak: largest };
+    expect(lines).toBe(60);
+    // Moving only the nodes nearest the samples left 5 of these between 0.41 and 0.54 mm, with
+    // peaks up to 0.09 mm.
+    expect(failures).toEqual([]);
+  }, 30_000);
+
+  it('lift a line by as much on either side of where its footprint used to change', async () => {
+    // A line along a 1.2 mm tube on a dab of paint at the default density, bowed around it. Its
+    // footprint used to take more nodes at radii between 1 and 4 node spacings, for lines no
+    // longer than 5 spacings, bowed off their chord by more than 3.5 % of it.
+    const R = 0.6;
+    const part = partOf(new CylinderGeometry(R, R, 12, 12, 70, true).toNonIndexed());
+    editor().setScene({ name: 'Warp', parts: [part], joints: [] });
+    useEditor.setState({ selected: [part.id] });
+    editor().setTool('warp');
+    editor().setWarpBrushRadius(1.6);
+    editor().paintWarpRegion(
+      { partId: part.id, point: [0, 0, R], normal: [0, 0, 1] },
+      surfaceAt(part, [0, 0, R]).face,
+      false,
+      true,
+    );
+    editor().endPaintStroke();
+    await editor().layWarpGrid();
+    const spot = surfaceAt(part, [0, 0, R]);
+    /** Lifts a line `length` long through the spot, bowed by `bow`, and reads the spot's rise. */
+    const lifted = (length: number, bow: number, radius: (spacing: number) => number) => {
+      const steps = session().undo.length;
+      const points = Array.from({ length: 81 }, (_, i) => {
+        const s = i / 80 - 0.5,
+          around = (bow * length * s * s) / R;
+        return surfaceAt(part, [R * Math.sin(around), length * s, R * Math.cos(around)]);
+      });
+      expect(editor().addWarpStroke({ kind: 'line', points })).toBe(true);
+      const line = latest();
+      const spacing = line.reach!.spacing;
+      const at = line.samples.map(({ restWorld }) => restWorld);
+      let along = 0,
+        off = 0;
+      for (let k = 1; k < at.length; k++) {
+        along += distance(at[k], at[k - 1]);
+        off = Math.max(off, segmentDistance(at[k], at[0], at.at(-1)!));
+      }
+      editor().moveWarpPoints(
+        [{ id: line.id, target: [line.pin[0], line.pin[1], line.pin[2] + 0.5] }],
+        'end',
+      );
+      editor().setWarpPointSettings({ radius: radius(spacing) }, 'end');
+      finishWarpSettling();
+      const model = session().model!;
+      const rise =
+        facePoint(model, session().output!.positions, spot)[2] -
+        facePoint(model, model.positions, spot)[2];
+      while (session().undo.length > steps) editor().undoWarpEdit();
+      return {
+        rise,
+        spacings: along / spacing,
+        bend: off / distance(at[0], at.at(-1)!),
+        radius: radius(spacing) / spacing,
+      };
+    };
+    /** Two values of `x` about `gap` apart either side of where `f` passes 0. */
+    const straddle = (f: (x: number) => number, low: number, high: number, gap: number) => {
+      while (high - low > gap) {
+        const middle = (low + high) / 2;
+        if (f(middle) <= 0) low = middle;
+        else high = middle;
+      }
+      return [low, high];
+    };
+    const twice = (s: number) => 2 * s;
+    const pairs = {
+      'radius of 1 spacing': [
+        lifted(0.6, 0.6, (s) => s - 0.0005),
+        lifted(0.6, 0.6, (s) => s + 0.0005),
+      ],
+      'radius of 4 spacings': [
+        lifted(0.6, 0.6, (s) => 4 * s - 0.0005),
+        lifted(0.6, 0.6, (s) => 4 * s + 0.0005),
+      ],
+      'length of 5 spacings': straddle(
+        (length) => lifted(length, 0.6, twice).spacings - 5,
+        0.3,
+        2.5,
+        1e-4,
+      ).map((length) => lifted(length, 0.6, twice)),
+      'bend of 3.5 %': straddle((bow) => lifted(0.8, bow, twice).bend - 0.035, 0, 1.5, 1e-5).map(
+        (bow) => lifted(0.8, bow, twice),
+      ),
+    };
+    expect(pairs['radius of 1 spacing'].map(({ radius }) => radius > 1)).toEqual([false, true]);
+    expect(pairs['radius of 4 spacings'].map(({ radius }) => radius > 4)).toEqual([false, true]);
+    expect(pairs['length of 5 spacings'].map(({ spacings }) => spacings > 5)).toEqual([
+      false,
+      true,
+    ]);
+    expect(pairs['bend of 3.5 %'].map(({ bend }) => bend > 0.035)).toEqual([false, true]);
+    figures['rise either side of the old footprint thresholds'] = Object.fromEntries(
+      Object.entries(pairs).map(([name, [a, b]]) => [name, [a.rise, b.rise]]),
+    );
+    // These changed the rise by 0.0008, 0.0073, 0.0098 and 0.0028 mm.
+    for (const [a, b] of Object.values(pairs)) {
+      expect(a.rise).toBeGreaterThan(0.45);
+      expect(Math.abs(b.rise - a.rise)).toBeLessThan(0.0001);
+    }
   });
 
   it('take a sample about every half spacing and merge those bound alike, keeping both ends', async () => {
@@ -533,6 +833,22 @@ describe('handles made by strokes through a session', () => {
   }
   const offset = (handle: WarpPoint) =>
     handle.target ? handle.target.map((value, a) => value - handle.pin[a]) : null;
+  /** Whether a line moves as one every free node its drawn path is bound to on the current grid. */
+  const movesItsPath = (line: WarpPoint) => {
+    const model = session().model!;
+    const eligible = warpEligibleNodes(model);
+    const own = new Set(line.reach!.node.subarray(0, line.reach!.own));
+    const bound = line.path!.flatMap(({ face, barycentric }) =>
+      bindTrianglePoint(
+        model.region,
+        model.binding,
+        model.restWorld,
+        regionTriangleOf(model.region, face),
+        barycentric,
+      ).node.filter((n) => eligible[n]),
+    );
+    return bound.length > 0 && bound.every((n) => own.has(n));
+  };
 
   for (const moved of [false, true])
     it(`keep the run of a ${moved ? 'moved' : 'still'} line left on a smaller region, centred on it`, async () => {
@@ -551,6 +867,7 @@ describe('handles made by strokes through a session', () => {
       expect(line.path!.length).toBeGreaterThan(10);
       for (const spot of line.path!) expect(isPaintedFace(model, spot.face)).toBe(true);
       for (const sample of line.samples) expect(isPaintedFace(model, sample.face)).toBe(true);
+      expect(movesItsPath(line)).toBe(true);
       const xs = line.samples.map(({ restWorld }) => restWorld[0]);
       expect(Math.max(...xs)).toBeLessThan(2.5);
       expect(Math.max(...xs)).toBeGreaterThan(1);
@@ -648,6 +965,7 @@ describe('handles made by strokes through a session', () => {
         expect(handle.samples.length).toBeGreaterThan(1);
         expect(handle.reach!.grid).toBe(session().model!.grid);
         expect(handle.reach!.own).toBeGreaterThan(2);
+        if (kind === 'line') expect(movesItsPath(handle)).toBe(true);
       };
       /** The handle's spots stand at its lift. */
       const holds = (h: number) => {

@@ -853,6 +853,27 @@ describe('footprints', () => {
     expect(wider.reach).not.toBe(line.reach);
     expect(wider.reach!.own).toBe(along.length);
 
+    // Drawn, a line also moves every free node its path is bound to, at any radius.
+    const [a, b] = samples.map(({ restWorld }) => restWorld);
+    const path = Array.from({ length: 41 }, (_, i) => {
+      const at = [0, 1, 2].map((k) => a[k] + ((b[k] - a[k]) * i) / 40) as Vec3;
+      const face = faceContaining(geometry, at);
+      const triangle = readFace(geometry, face);
+      const point = triangle.closestPointToPoint(new Vector3(...at), new Vector3());
+      return { face, barycentric: triangle.getBarycoord(point, new Vector3())!.toArray() as Vec3 };
+    });
+    const onPath = path.flatMap(({ face, barycentric }) =>
+      bindPoint(model.region, model.binding, model.restWorld, face, barycentric).node.filter(
+        (n) => !model.grid.fixed[n],
+      ),
+    );
+    expect(onPath.filter((n) => !along.includes(n)).length).toBeGreaterThan(0);
+    const drawn = [...new Set([...along, ...onPath])].sort((x, y) => x - y);
+    for (const radius of [0, 0.5, 2, 20]) {
+      const reach = reachHandle(model, { ...line, path, radius }).reach!;
+      expect(Array.from(reach.node.subarray(0, reach.own))).toEqual(drawn);
+    }
+
     // An area also holds the nodes on its faces.
     const faces = disc(geometry, 9);
     const area = reachHandle(model, { ...point, kind: 'area', samples, faces });

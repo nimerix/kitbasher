@@ -360,23 +360,15 @@ export function warpEligibleNodes(model: WarpModel) {
 
 /** What a footprint is made from. Without a kind, a handle is a point. */
 type WarpFootprintOf = Pick<WarpHandle, 'samples'> &
-  Partial<Pick<WarpHandle, 'kind' | 'faces' | 'radius'>>;
+  Partial<Pick<WarpHandle, 'kind' | 'faces' | 'path'>>;
 
 /**
  * A line or an area moves as one the free nodes within this many node spacings of it. A sample's
- * binding reaches farther, unevenly to either side, so taking every node bound would make the
- * ridge's width depend on which triangles the samples fell in, and so on pointer speed.
+ * binding reaches farther, unevenly to either side, so taking every node the samples are bound to
+ * would make the ridge's width depend on which triangles they fell in, and so on pointer speed. A
+ * line also takes every node its whole drawn path is bound to.
  */
 export const warpFootprintSpacings = 0.75;
-
-/**
- * A line no longer than this many node spacings that bends off its chord by more than
- * `warpShortLineBend` of it is short and curved. With a radius under `warpShortLineRadius`
- * spacings, its guides fade across the nodes its samples are bound to.
- */
-export const warpShortLineSpacings = 5;
-export const warpShortLineBend = 0.035;
-export const warpShortLineRadius = 4;
 
 /** Distance from a point to the segment from `a` to `b`. */
 function segmentDistance(p: ArrayLike<number>, a: Vec3, b: Vec3) {
@@ -394,32 +386,43 @@ function segmentDistance(p: ArrayLike<number>, a: Vec3, b: Vec3) {
   return Math.hypot(p[0] - a[0] - t * ux, p[1] - a[1] - t * uy, p[2] - a[2] - t * uz);
 }
 
-/** Whether a line is short and curved, at this node spacing. */
-function shortCurvedLine(samples: readonly WarpSample[], spacing: number) {
-  const a = samples[0].restWorld,
-    b = samples[samples.length - 1].restWorld;
-  let length = 0,
-    off = 0;
-  for (let s = 1; s < samples.length; s++) {
-    const p = samples[s].restWorld,
-      q = samples[s - 1].restWorld;
-    length += Math.hypot(p[0] - q[0], p[1] - q[1], p[2] - q[2]);
-    off = Math.max(off, segmentDistance(p, a, b));
+type WarpPath = NonNullable<WarpHandle['path']>;
+const boundToPath = new WeakMap<WarpModel, WeakMap<WarpPath, readonly number[]>>();
+
+/** The grid nodes a line's drawn path is bound to, in node order. */
+function pathNodes(model: WarpModel, path: WarpPath) {
+  let paths = boundToPath.get(model);
+  if (!paths) boundToPath.set(model, (paths = new WeakMap()));
+  let nodes = paths.get(path);
+  if (!nodes) {
+    const bound = new Set<number>();
+    for (const { face, barycentric } of path) {
+      const triangle = regionTriangleOf(model.region, face);
+      if (triangle < 0) continue;
+      const { node } = bindTrianglePoint(
+        model.region,
+        model.binding,
+        model.restWorld,
+        triangle,
+        barycentric,
+      );
+      for (const n of node) bound.add(n);
+    }
+    nodes = [...bound].sort((a, b) => a - b);
+    paths.set(path, nodes);
   }
-  const chord = Math.hypot(b[0] - a[0], b[1] - a[1], b[2] - a[2]);
-  return length <= warpShortLineSpacings * spacing && off > warpShortLineBend * chord;
+  return nodes;
 }
 
 /**
  * Where a handle's reach is measured from, by kind. A point is its samples alone. A line or an area
  * moves as one the free nodes on it: within `warpFootprintSpacings` of the line through its
  * samples in order, or of an area's samples, found along the grid from the nodes the samples are
- * bound to. A sample with none of its own nodes among them adds its most heavily bound one. A short
- * curved line whose guides fade across its samples' nodes moves every free node they are bound to:
- * guides that hold one of them only partly while the samples pull it whole raise the surface
- * between them. An
- * area also moves the free nodes on its faces still in the region, and straight-line distance is
- * also measured from its outline. Paths start at every free node the samples are bound to.
+ * bound to. A sample with none of its own nodes among them adds its most heavily bound one. A line
+ * also moves every free node its drawn path is bound to: guides that hold one of them only partly
+ * while the line pulls the hits on it raise or sink the surface between the samples. An area also
+ * moves the free nodes on its faces still in the region, and straight-line distance is also
+ * measured from its outline. Paths start at every free node the samples are bound to.
  */
 export function handleFootprint(model: WarpModel, handle: WarpFootprintOf): WarpFootprint {
   const eligible = warpEligibleNodes(model);
@@ -467,15 +470,8 @@ export function handleFootprint(model: WarpModel, handle: WarpFootprintOf): Warp
       });
       if (heaviest >= 0) nodes.add(binding.node[heaviest]);
     }
-    if (handle.kind === 'line' && handle.radius) {
-      const spacing = spacingAt(model, new Set([...seeds, ...nodes]));
-      if (
-        reachActivation(handle.radius, spacing) > 0 &&
-        handle.radius < warpShortLineRadius * spacing &&
-        shortCurvedLine(handle.samples, spacing)
-      )
-        for (const n of seeds) nodes.add(n);
-    }
+    if (handle.kind === 'line' && handle.path)
+      for (const n of pathNodes(model, handle.path)) if (eligible[n]) nodes.add(n);
   }
   if (handle.kind === 'area' && handle.faces) {
     const { region, grid, restWorld } = model;
