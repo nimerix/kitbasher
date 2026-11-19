@@ -135,13 +135,11 @@ const distance = (a: ArrayLike<number>, b: ArrayLike<number>) =>
 afterEach(() => editor().cancelWarp());
 
 describe('a long pull on a flat face', () => {
-  // A 30 mm pull from the middle of an irregularly triangulated face. The grid used to interpolate
-  // the bend's profile between its nodes, which left teeth a node apart around the spike's root
-  // and a dip past its radius: 2.93 mm and −0.37 mm at the default falloff, 6.2 mm and −1.64 mm at
-  // 0 %. What is left at 0 % is the face's own triangles turning that sharply.
+  // A 30 mm pull on an irregularly triangulated face, tall enough to expose any surface
+  // drift and roughness left by the grid near the shoulder.
   for (const [falloff, teethLimit] of [
-    [null, 0.5],
-    [0, 1.2],
+    [null, 0.3],
+    [0, 0.2],
   ] as const)
     it(`rises cleanly from the face at ${falloff === null ? 'the default falloff' : '0 % falloff'}`, async () => {
       const geometry = block();
@@ -153,9 +151,24 @@ describe('a long pull on a flat face', () => {
       expect(session().folds).toHaveLength(0);
       const { teeth, dip } = relief(geometry, centre, point.radius);
       expect(teeth).toBeLessThan(teethLimit);
-      expect(dip).toBeGreaterThan(-0.1);
+      expect(dip).toBeGreaterThan(-0.02);
+      const rest = geometry.getAttribute('position').array;
+      const written = session().output!.positions;
+      let drift = 0;
+      for (let i = 0; i < rest.length; i += 3) {
+        if (
+          rest[i + 1] !== 4 ||
+          Math.hypot(rest[i] - centre.x, rest[i + 2] - centre.z) > point.radius
+        )
+          continue;
+        drift = Math.max(drift, Math.hypot(written[i] - rest[i], written[i + 2] - rest[i + 2]));
+      }
+      expect(drift).toBeLessThan(1e-6);
       // The tip still lands where it was pulled.
-      expect(distance(writtenWarpSample(point.samples[0]), target)).toBeLessThan(0.01);
+      const writtenCentre = readFace(session().preview!, point.samples[0].face).getMidpoint(
+        new Vector3(),
+      );
+      expect(distance(writtenCentre.toArray(), target)).toBeLessThan(0.01);
       // Apply bakes exactly what is shown.
       const shown = Array.from(session().output!.positions);
       expect(editor().applyWarp()).toBe(true);
