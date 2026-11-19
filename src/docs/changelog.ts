@@ -21,6 +21,16 @@ export interface Release {
 export const releases: Release[] = [
   {
     date: '2026-11-18',
+    title: 'Smoother long warp pulls',
+    changes: [
+      {
+        kind: 'fixed',
+        text: 'A long warp pull, especially at 0 % falloff, rises from the surface without a jagged ring or a dip around its base.',
+      },
+    ],
+  },
+  {
+    date: '2026-11-18',
     title: 'Warp handles, lines and a clearer grid',
     changes: [
       {

@@ -4,6 +4,7 @@ import { triangleCount } from '../../src/core/geometry';
 import {
   finishWarpSettling,
   useEditor,
+  writtenWarpSample,
   warpPinDrift,
   warpShortfall,
   warpShortfallShown,
@@ -11,7 +12,6 @@ import {
 } from '../../src/core/store';
 import { readFace } from '../../src/core/surfaces';
 import type { Part, SurfacePoint, Vec3 } from '../../src/core/types';
-import { deformPoint } from '../../src/core/warp-evaluate';
 import { defaultWarpDensity } from '../../src/core/warp-grid';
 import { WarpRole } from '../../src/core/warp-region';
 import { skinMapOf } from '../../src/core/warp-solve';
@@ -21,13 +21,8 @@ const session = () => useEditor.getState().warp!;
 const current = (id: string) => session().points.find((point) => point.id === id)!;
 const distance = (a: ArrayLike<number>, b: ArrayLike<number>) =>
   Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]);
-const deformed = (point: WarpPoint) =>
-  deformPoint(
-    session().model!,
-    session().state!,
-    point.samples[0].binding,
-    point.samples[0].restWorld,
-  );
+/** Where the surface is written at the point's first sample. */
+const deformed = (point: WarpPoint) => writtenWarpSample(point.samples[0]);
 
 const initial = useEditor.getState();
 afterEach(() => {

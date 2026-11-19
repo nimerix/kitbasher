@@ -1,10 +1,9 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { BufferAttribute, IcosahedronGeometry, Matrix4, Vector3, type BufferGeometry } from 'three';
 import { triangleCount } from '../../src/core/geometry';
-import { useEditor } from '../../src/core/store';
+import { useEditor, writtenWarpSample } from '../../src/core/store';
 import { readFace } from '../../src/core/surfaces';
 import type { Part, Vec3 } from '../../src/core/types';
-import { deformPoint } from '../../src/core/warp-evaluate';
 import { handleGuides } from '../../src/core/warp-handles';
 
 const editor = () => useEditor.getState();
@@ -137,12 +136,7 @@ async function firstDrags(size: number, clicks: number) {
       }
       ring.sort((a, b) => a - b);
       const moved = session().points.at(-1)!;
-      const tip = deformPoint(
-        session().model!,
-        session().state!,
-        moved.samples[0].binding,
-        moved.samples[0].restWorld,
-      );
+      const tip = writtenWarpSample(moved.samples[0]);
       result.pulls.push({
         lift: lift / h,
         folds: session().folds.length,

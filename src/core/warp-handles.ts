@@ -3,7 +3,7 @@ import { bindTrianglePoint, warpBindingNodes, type WarpPointBinding } from './wa
 import type { WarpGrid } from './warp-grid';
 import { isPaintedNode, type WarpModel } from './warp-model';
 import { regionTriangleOf } from './warp-region';
-import { deformPoint, skinnedWorldPositions } from './warp-evaluate';
+import { deformPoint, skinnedWorldPositions, type WarpOutput } from './warp-evaluate';
 import {
   modelledResponse,
   responseShrink,
@@ -73,6 +73,8 @@ export interface WarpReach {
   own: number;
   /** Intrinsic rest distance from the footprint, mm. */
   distance: Float64Array;
+  /** World rest points the straight-line part of `distance` is measured from, three values each. */
+  sources: Float64Array;
   /** The least share of the guides each node takes, from the line's path. */
   least: Float64Array;
   /** How much of the radius's hold on each node the line's path lets go. */
@@ -186,6 +188,7 @@ export function handleConstraints(
   guides?: WarpGuides,
   exact: Iterable<number> = [],
   carry?: ReadonlyMap<WarpHandle, number>,
+  detail?: WarpDetail,
 ): WarpConstraint[] {
   const riding =
     !!model &&
@@ -200,17 +203,24 @@ export function handleConstraints(
     for (const sample of handle.samples) {
       const ride = rides ? rideOffset(model!, guides!, handle.baseline, sample.binding) : null;
       owner.push(h);
+      const target: Vec3 =
+        handle.target === null
+          ? ride
+            ? [sample.pin[0] + ride[0], sample.pin[1] + ride[1], sample.pin[2] + ride[2]]
+            : sample.pin
+          : share === 1 && samePosition(sample.pin, handle.pin)
+            ? handle.target
+            : [sample.pin[0] + offset[0], sample.pin[1] + offset[1], sample.pin[2] + offset[2]];
+      // The detail is written on top of what the nodes carry, so the nodes aim short of it.
+      const extra =
+        model && detail ? detailAt(model, detail, sample.face, sample.barycentric) : null;
       constraints.push({
         ...sample.binding,
         rest: sample.restWorld,
         target:
-          handle.target === null
-            ? ride
-              ? [sample.pin[0] + ride[0], sample.pin[1] + ride[1], sample.pin[2] + ride[2]]
-              : sample.pin
-            : share === 1 && samePosition(sample.pin, handle.pin)
-              ? handle.target
-              : [sample.pin[0] + offset[0], sample.pin[1] + offset[1], sample.pin[2] + offset[2]],
+          extra && (extra[0] || extra[1] || extra[2])
+            ? [target[0] - extra[0], target[1] - extra[1], target[2] - extra[2]]
+            : target,
       });
     }
   });
@@ -278,15 +288,14 @@ export function writtenCentre(
   model: WarpModel,
   state: Pick<WarpState, 'positions' | 'rotations'>,
   handle: Pick<WarpHandle, 'samples' | 'pin'>,
+  detail?: WarpDetail,
 ): Vec3 {
-  if (handle.samples.length === 1) {
-    const [{ binding, restWorld }] = handle.samples;
-    return deformPoint(model, state, binding, restWorld);
-  }
+  if (handle.samples.length === 1) return writtenSample(model, state, handle.samples[0], detail);
   const centre: Vec3 = [...handle.pin];
   const share = 1 / handle.samples.length;
-  for (const { binding, restWorld, pin } of handle.samples) {
-    const at = deformPoint(model, state, binding, restWorld);
+  for (const sample of handle.samples) {
+    const { pin } = sample;
+    const at = writtenSample(model, state, sample, detail);
     for (let a = 0; a < 3; a++) centre[a] += share * (at[a] - pin[a]);
   }
   return centre;
@@ -301,13 +310,14 @@ export function heldWhereItIs(
   state: Pick<WarpState, 'positions' | 'rotations'>,
   handle: WarpHandle,
   baseline: WarpSnapshot,
+  detail?: WarpDetail,
 ): WarpHandle {
   return {
     ...handle,
-    pin: writtenCentre(model, state, handle),
+    pin: writtenCentre(model, state, handle, detail),
     samples: handle.samples.map((sample) => ({
       ...sample,
-      pin: deformPoint(model, state, sample.binding, sample.restWorld),
+      pin: writtenSample(model, state, sample, detail),
     })),
     baseline,
   };
@@ -934,6 +944,7 @@ export function footprintReach(
     node: Uint32Array.from(node),
     own: own.length,
     distance: Float64Array.from(distance),
+    sources: Float64Array.from(sources),
     least: Float64Array.from(least),
     release: Float64Array.from(release),
   };
@@ -970,6 +981,76 @@ function motionOf(handle: WarpHandle) {
   return travel === 0 ? 0 : scale > 0 ? Math.min(1, travel / scale) : 1;
 }
 
+/** What a guiding handle's profile needs at any place, with its weights at each node it reaches. */
+interface GuideProfile {
+  handle: WarpHandle;
+  reach: WarpReach;
+  motion: number;
+  offset: Vec3;
+  fade: number;
+  band: number;
+  tail: number;
+  weight: Float64Array;
+  profile: Float64Array;
+}
+
+/**
+ * A handle's driving weight and whole profile at distance `d` from its footprint, `border` from
+ * the fixed edge, with the line's least share there, into `out`.
+ */
+function profileAt(
+  p: Omit<GuideProfile, 'weight' | 'profile'>,
+  d: number,
+  border: number,
+  least: number,
+  out: [number, number],
+) {
+  const { handle, reach, motion, fade, band, tail } = p;
+  const { radius, falloff } = handle;
+  // A bend fades into the fixed border as it does at its radius, so the border does not crease.
+  const w =
+    handleWeight(d, radius, falloff, reach.spacing) * (fade > 0 ? smoothstep(border / fade) : 1);
+  const held =
+    d <= radius
+      ? 1
+      : d <= radius + band
+        ? 1 - (1 - warpTailShare) * smoothstep((d - radius) / band)
+        : warpTailShare * (1 - smoothstep((d - radius - band) / tail));
+  out[0] = Math.max(least, reach.activation * w);
+  out[1] = Math.max(least, reach.activation * ((1 - motion) * w + motion * held));
+}
+
+function guideProfile(
+  handle: WarpHandle,
+  border: Float64Array,
+  carry?: ReadonlyMap<WarpHandle, number>,
+): GuideProfile {
+  const reach = handle.reach!;
+  const share = carry?.get(handle) ?? 1;
+  const p = {
+    handle,
+    reach,
+    motion: motionOf(handle),
+    offset: handleOffset(handle).map((value) => share * value) as Vec3,
+    fade: fadeWidth(handle),
+    band: bandWidth(handle.falloff, reach.spacing),
+    tail: warpTailSpacings * reach.spacing,
+  };
+  const weight = new Float64Array(reach.node.length),
+    profile = new Float64Array(reach.node.length);
+  const out: [number, number] = [0, 0];
+  for (let i = 0; i < reach.node.length; i++) {
+    if (i < reach.own) {
+      weight[i] = profile[i] = 1;
+      continue;
+    }
+    profileAt(p, reach.distance[i], border[reach.node[i]], reach.least[i], out);
+    weight[i] = out[0];
+    profile[i] = out[1];
+  }
+  return { ...p, weight, profile };
+}
+
 /**
  * Soft per-node targets from the handles' radii. At each node it reaches, a handle with guides
  * has a profile: unmoved, its weight `w`, holding the surface softly over its radius; moved, 1
@@ -999,39 +1080,7 @@ export function warpGuides(
   const border = borderDistance(model);
   const blocked = new Uint8Array(count);
   for (const n of exact) blocked[n] = 1;
-  const profiles = guiding.map((handle) => {
-    const reach = handle.reach!;
-    const motion = motionOf(handle);
-    const { radius, falloff } = handle;
-    const fade = fadeWidth(handle);
-    const band = bandWidth(falloff, reach.spacing),
-      tail = warpTailSpacings * reach.spacing;
-    const weight = new Float64Array(reach.node.length),
-      profile = new Float64Array(reach.node.length);
-    for (let i = 0; i < reach.node.length; i++) {
-      if (i < reach.own) {
-        weight[i] = profile[i] = 1;
-        continue;
-      }
-      const d = reach.distance[i];
-      // A bend fades into the fixed border as it does at its radius, so the border does not crease.
-      const w =
-        handleWeight(d, radius, falloff, reach.spacing) *
-        (fade > 0 ? smoothstep(border[reach.node[i]] / fade) : 1);
-      const held =
-        d <= radius
-          ? 1
-          : d <= radius + band
-            ? 1 - (1 - warpTailShare) * smoothstep((d - radius) / band)
-            : warpTailShare * (1 - smoothstep((d - radius - band) / tail));
-      const least = reach.least[i];
-      weight[i] = Math.max(least, reach.activation * w);
-      profile[i] = Math.max(least, reach.activation * ((1 - motion) * w + motion * held));
-    }
-    const share = carry?.get(handle) ?? 1;
-    const offset = handleOffset(handle).map((value) => share * value) as Vec3;
-    return { handle, reach, weight, profile, motion, offset };
-  });
+  const profiles = guiding.map((handle) => guideProfile(handle, border, carry));
   // The two largest driving weights at each node, and whose the largest is.
   const first = new Float64Array(count),
     second = new Float64Array(count),
@@ -1081,6 +1130,460 @@ export function warpGuides(
     for (let a = 0; a < 3; a++) guides.target[g * 3 + a] = target[n * 3 + a] / s;
   }
   return guides;
+}
+
+/** Each reach's entry index per grid node, -1 where it does not reach. */
+const reachIndices = new WeakMap<WarpReach, Int32Array>();
+
+function reachIndex(reach: WarpReach) {
+  let index = reachIndices.get(reach);
+  if (!index) {
+    index = new Int32Array(reach.grid.nodes.length).fill(-1);
+    for (let i = 0; i < reach.node.length; i++) index[reach.node[i]] = i;
+    reachIndices.set(reach, index);
+  }
+  return index;
+}
+
+/** Straight-line distance from (x, y, z) to the nearest of a reach's sources. */
+function straightTo(sources: Float64Array, x: number, y: number, z: number) {
+  let d = Infinity;
+  for (let s = 0; s < sources.length; s += 3)
+    d = Math.min(d, Math.hypot(x - sources[s], y - sources[s + 1], z - sources[s + 2]));
+  return d;
+}
+
+const reachExcesses = new WeakMap<WarpReach, { excess: Float64Array; slope: Float64Array }>();
+
+/**
+ * Per reach entry, how far its distance exceeds the straight line to the sources, and the
+ * least-squares gradient of that excess over the node's grid edges to other entries, world, three
+ * values each. The slope is NaN where an end has no finite distance.
+ */
+function reachExcess(reach: WarpReach, restNodes: Float64Array) {
+  let found = reachExcesses.get(reach);
+  if (found) return found;
+  const { grid, node, sources } = reach;
+  const distance = new Float64Array(node.length);
+  for (let i = 0; i < node.length; i++) {
+    const n = node[i];
+    distance[i] =
+      reach.distance[i] -
+      straightTo(sources, restNodes[n * 3], restNodes[n * 3 + 1], restNodes[n * 3 + 2]);
+  }
+  const slope = new Float64Array(node.length * 3);
+  const { edgeStart, edges } = grid;
+  const index = reachIndex(reach);
+  for (let i = 0; i < node.length; i++) {
+    const n = node[i];
+    let a00 = 0,
+      a01 = 0,
+      a02 = 0,
+      a11 = 0,
+      a12 = 0,
+      a22 = 0,
+      b0 = 0,
+      b1 = 0,
+      b2 = 0,
+      usable = Number.isFinite(distance[i]);
+    for (let e = edgeStart[n]; usable && e < edgeStart[n + 1]; e++) {
+      const j = index[edges[e]];
+      if (j < 0) continue;
+      if (!Number.isFinite(distance[j])) {
+        usable = false;
+        break;
+      }
+      const m = node[j];
+      const ex = restNodes[m * 3] - restNodes[n * 3],
+        ey = restNodes[m * 3 + 1] - restNodes[n * 3 + 1],
+        ez = restNodes[m * 3 + 2] - restNodes[n * 3 + 2];
+      const dd = distance[j] - distance[i];
+      a00 += ex * ex;
+      a01 += ex * ey;
+      a02 += ex * ez;
+      a11 += ey * ey;
+      a12 += ey * ez;
+      a22 += ez * ez;
+      b0 += ex * dd;
+      b1 += ey * dd;
+      b2 += ez * dd;
+    }
+    // A small ridge keeps the solve sound across the normal, which no edge spans.
+    const ridge = 0.01 * (a00 + a11 + a22);
+    a00 += ridge;
+    a11 += ridge;
+    a22 += ridge;
+    const c00 = a11 * a22 - a12 * a12,
+      c01 = a02 * a12 - a01 * a22,
+      c02 = a01 * a12 - a02 * a11,
+      c11 = a00 * a22 - a02 * a02,
+      c12 = a01 * a02 - a00 * a12,
+      c22 = a00 * a11 - a01 * a01;
+    const det = a00 * c00 + a01 * c01 + a02 * c02;
+    if (!usable || !(Math.abs(det) > 0)) {
+      slope.fill(NaN, i * 3, i * 3 + 3);
+      continue;
+    }
+    slope[i * 3] = (c00 * b0 + c01 * b1 + c02 * b2) / det;
+    slope[i * 3 + 1] = (c01 * b0 + c11 * b1 + c12 * b2) / det;
+    slope[i * 3 + 2] = (c02 * b0 + c12 * b1 + c22 * b2) / det;
+  }
+  reachExcesses.set(reach, (found = { excess: distance, slope }));
+  return found;
+}
+
+/**
+ * Rings of grid nodes over which the detail fades in from where something else holds the surface
+ * or the profile is cut off. The solve smooths a cut-off profile over a few spacings, so the
+ * profile does not describe the surface there.
+ */
+const detailRings = 6;
+
+/** Per-vertex displacement added to the skinned surface: see `warpDetail`. */
+export interface WarpDetail {
+  /** Welded vertices it moves. */
+  vertices: Uint32Array;
+  /** World displacement per listed vertex, three values each. */
+  delta: Float64Array;
+}
+
+/**
+ * The bend the moved handles' guides ask for, as the surface between grid nodes should take it.
+ * The guides set each node's target from its distance to the handle; skinning then interpolates
+ * those targets between nodes, and where the profile turns sharply, as at a low falloff, that
+ * leaves teeth a grid spacing apart and dips past the radius. Here each vertex takes the guides'
+ * displacement at its own distance, measured to first order from its nodes, in place of what
+ * skinning makes of the nodes' guided displacement. That is nothing at a node, and nothing
+ * wherever the profile is even across the vertex's nodes, so only the vertices where it turns are
+ * listed. It fades out toward nodes something else holds, and where the profile is cut off, as
+ * at the edge of the paint. Undefined when no moved handle guides the surface.
+ */
+export function warpDetail(
+  model: WarpModel,
+  handles: readonly WarpHandle[],
+  exact: Iterable<number> = [],
+  carry?: ReadonlyMap<WarpHandle, number>,
+): WarpDetail | undefined {
+  const { grid, restNodes, restWorld, region, binding } = model;
+  // Only moved handles bend the surface. An unmoved one holds the surface as it was when it was
+  // made, detail and all, so making one changes nothing.
+  const guiding = handles.filter(
+    (handle) =>
+      handle.target !== null &&
+      handle.reach?.grid === grid &&
+      handle.baseline.grid === grid &&
+      handleGuides(handle),
+  );
+  const border = borderDistance(model);
+  // The profile from distance alone: the footprint's and the path's shares are held exactly, and
+  // only the distance turns between nodes.
+  const profiles = guiding.map((handle) => {
+    const p = guideProfile(handle, border, carry);
+    const { reach } = p;
+    const share: [number, number] = [0, 0];
+    for (let i = 0; i < reach.node.length; i++) {
+      profileAt(p, reach.distance[i], border[reach.node[i]], 0, share);
+      p.weight[i] = share[0];
+      p.profile[i] = share[1];
+    }
+    return p;
+  });
+  if (!profiles.some(({ motion, offset }) => motion > 0 && offset.some((x) => x !== 0)))
+    return undefined;
+  const count = grid.nodes.length;
+  const H = profiles.length;
+
+  // The guides' displacement at a place, from each handle's weight, profile and release there:
+  // Σ drive × offset over Σ (drive + hold), as `warpGuides` weighs its target. The node's
+  // stiffness scales every term alike, so it drops out.
+  const weightAt = new Float64Array(H),
+    profileAtH = new Float64Array(H),
+    releaseAt = new Float64Array(H);
+  const displacement = (out: Float64Array, o: number) => {
+    let first = 0,
+      second = 0,
+      leader = -1;
+    for (let h = 0; h < H; h++) {
+      const m = weightAt[h] * profiles[h].motion;
+      if (m > first) {
+        second = first;
+        first = m;
+        leader = h;
+      } else if (m > second) second = m;
+    }
+    let sum = 0,
+      x = 0,
+      y = 0,
+      z = 0;
+    for (let h = 0; h < H; h++) {
+      const { motion, offset } = profiles[h];
+      const others = leader === h ? second : first;
+      const drive = weightAt[h] * (1 - (1 - motion) * others);
+      const hold = (profileAtH[h] - weightAt[h]) * (1 - others) * (1 - releaseAt[h]);
+      if (!(drive + hold > 0)) continue;
+      sum += drive + hold;
+      x += drive * offset[0];
+      y += drive * offset[1];
+      z += drive * offset[2];
+    }
+    out[o] = sum > 0 ? x / sum : 0;
+    out[o + 1] = sum > 0 ? y / sum : 0;
+    out[o + 2] = sum > 0 ? z / sum : 0;
+  };
+
+  // Each node's guided displacement.
+  const indices = profiles.map(({ reach }) => reachIndex(reach));
+  const guided = new Float64Array(count * 3);
+  for (let n = 0; n < count; n++) {
+    let any = false;
+    for (let h = 0; h < H; h++) {
+      const i = indices[h][n];
+      weightAt[h] = i < 0 ? 0 : profiles[h].weight[i];
+      profileAtH[h] = i < 0 ? 0 : profiles[h].profile[i];
+      releaseAt[h] = i < 0 ? 0 : profiles[h].reach.release[i];
+      any ||= i >= 0;
+    }
+    if (any) displacement(guided, n * 3);
+  }
+
+  // Nodes whose guided displacement differs from a neighbour's, and the ring beside them: a
+  // vertex bound only to nodes outside these sees an even profile.
+  const { edgeStart, edges } = grid;
+  const turning = new Uint8Array(count);
+  for (let n = 0; n < count; n++)
+    for (let e = edgeStart[n]; e < edgeStart[n + 1]; e++) {
+      const j = edges[e];
+      if (
+        Math.abs(guided[n * 3] - guided[j * 3]) +
+          Math.abs(guided[n * 3 + 1] - guided[j * 3 + 1]) +
+          Math.abs(guided[n * 3 + 2] - guided[j * 3 + 2]) >
+        1e-9
+      ) {
+        turning[n] = 1;
+        break;
+      }
+    }
+  const near = turning.slice();
+  for (let n = 0; n < count; n++)
+    if (turning[n]) for (let e = edgeStart[n]; e < edgeStart[n + 1]; e++) near[edges[e]] = 1;
+
+  // Where something other than the profile holds the surface: a moved line's or area's samples'
+  // nodes, a line's path nodes, whose share comes from the path rather than the distance, and the
+  // exact nodes. A moved point's own nodes are not among them: its profile is centred there.
+  const held = new Uint8Array(count);
+  for (const n of exact) held[n] = 1;
+  for (const { reach } of profiles)
+    for (let i = 0; i < reach.node.length; i++) if (reach.least[i] > 0) held[reach.node[i]] = 1;
+  for (const { handle } of profiles) {
+    if (handle.kind === 'point') continue;
+    for (const { binding: sample } of handle.samples)
+      sample.node.forEach((n, k) => {
+        if (sample.weight[k] > 0) held[n] = 1;
+      });
+  }
+
+  // Where the profile is cut off while it still moves the surface: fixed nodes, and nodes past
+  // the edge of a handle's reach, as at the edge of the paint, beside a node the guides move. In
+  // an unfeathered region the profile fades to nothing at the fixed edge, so nothing is cut there.
+  let largest = 0;
+  for (const { offset } of profiles) largest = Math.max(largest, Math.hypot(...offset));
+  const alive = 1e-3 * largest;
+  profiles.forEach(({ reach }, h) => {
+    const index = indices[h];
+    for (let i = 0; i < reach.node.length; i++) {
+      const n = reach.node[i];
+      if (Math.hypot(guided[n * 3], guided[n * 3 + 1], guided[n * 3 + 2]) <= alive) continue;
+      for (let e = edgeStart[n]; e < edgeStart[n + 1]; e++) {
+        const m = edges[e];
+        if (grid.fixed[m] || index[m] < 0) held[m] = 1;
+      }
+    }
+  });
+  // Each node's share of the detail: none on those nodes, rising smoothly to all of it
+  // `detailRings` rings of grid nodes from them, so the detail fades out instead of stopping short.
+  const hops = new Uint8Array(count).fill(detailRings);
+  let ring: number[] = [];
+  for (let n = 0; n < count; n++)
+    if (held[n]) {
+      hops[n] = 0;
+      ring.push(n);
+    }
+  for (let r = 1; r < detailRings && ring.length; r++) {
+    const next: number[] = [];
+    for (const n of ring)
+      for (let e = edgeStart[n]; e < edgeStart[n + 1]; e++)
+        if (hops[edges[e]] > r) {
+          hops[edges[e]] = r;
+          next.push(edges[e]);
+        }
+    ring = next;
+  }
+  const open = new Float64Array(count);
+  // The ring beside them takes none either: its skin maps span the step.
+  for (let n = 0; n < count; n++) open[n] = smoothstep((hops[n] - 1) / (detailRings - 1));
+
+  const K = warpBindingNodes;
+  const { node: bound, weight: bindWeight } = binding;
+  const listed: number[] = [];
+  for (const v of region.interior)
+    for (let k = 0; k < K; k++) {
+      const n = bound[v * K + k];
+      if (n !== 0xffffffff && near[n]) {
+        listed.push(v);
+        break;
+      }
+    }
+  if (!listed.length) return undefined;
+
+  // What skinning makes of the guided displacement alone, unturned.
+  const positions = restNodes.slice(),
+    rotations = new Float64Array(count * 4);
+  for (let n = 0; n < count; n++) {
+    rotations[n * 4 + 3] = 1;
+    for (let a = 0; a < 3; a++) positions[n * 3 + a] += guided[n * 3 + a];
+  }
+  const skinned = skinnedWorldPositions(model, { positions, rotations }, listed);
+
+  const excesses = profiles.map(({ reach }) => reachExcess(reach, restNodes));
+  const share: [number, number] = [0, 0];
+  const intended = new Float64Array(3);
+  const gone = new Uint8Array(K);
+  const vertices: number[] = [],
+    delta: number[] = [];
+  for (let l = 0; l < listed.length; l++) {
+    const v = listed[l];
+    if (Number.isNaN(skinned[l * 3])) continue;
+    const px = restWorld[v * 3],
+      py = restWorld[v * 3 + 1],
+      pz = restWorld[v * 3 + 2];
+    for (let h = 0; h < H; h++) {
+      const p = profiles[h];
+      const { reach } = p;
+      const index = indices[h],
+        { excess, slope } = excesses[h];
+      // Where every node of the vertex has a slope, its own straight-line distance and the
+      // nodes' excess over theirs to first order; otherwise the nodes' weights and profiles,
+      // blended.
+      let total = 0,
+        d = 0,
+        far = 0,
+        release = 0,
+        weight = 0,
+        profile = 0,
+        smooth = true;
+      let reached = false;
+      for (let k = 0; k < K; k++) {
+        const n = bound[v * K + k];
+        if (n === 0xffffffff) continue;
+        const w = bindWeight[v * K + k];
+        total += w;
+        const i = index[n];
+        if (i < 0) {
+          smooth = false;
+          continue;
+        }
+        reached = true;
+        weight += w * p.weight[i];
+        profile += w * p.profile[i];
+        release += w * reach.release[i];
+        far += w * border[n];
+        if (Number.isNaN(slope[i * 3])) smooth = false;
+        else
+          d +=
+            w *
+            (excess[i] +
+              slope[i * 3] * (px - restNodes[n * 3]) +
+              slope[i * 3 + 1] * (py - restNodes[n * 3 + 1]) +
+              slope[i * 3 + 2] * (pz - restNodes[n * 3 + 2]));
+      }
+      if (!(total > 0)) smooth = false;
+      if (smooth) {
+        const straight = straightTo(reach.sources, px, py, pz);
+        profileAt(p, Math.max(straight, straight + d / total), far / total, 0, share);
+        weightAt[h] = share[0];
+        profileAtH[h] = share[1];
+      } else {
+        weightAt[h] = total > 0 ? weight / total : 0;
+        profileAtH[h] = total > 0 ? profile / total : 0;
+      }
+      releaseAt[h] = total > 0 ? release / total : 0;
+      // Nodes this handle does not reach, beside ones it does, have no distance to turn by.
+      if (reached)
+        for (let k = 0; k < K; k++) {
+          const n = bound[v * K + k];
+          if (n !== 0xffffffff && index[n] < 0) gone[k] = 1;
+        }
+    }
+    let total = 0,
+      opened = 0;
+    for (let k = 0; k < K; k++) {
+      const n = bound[v * K + k];
+      if (n === 0xffffffff) continue;
+      const w = bindWeight[v * K + k];
+      total += w;
+      if (!gone[k]) opened += w * open[n];
+      gone[k] = 0;
+    }
+    const free = total > 0 ? opened / total : 0;
+    if (!(free > 0)) continue;
+    displacement(intended, 0);
+    const dx = free * (intended[0] - (skinned[l * 3] - px)),
+      dy = free * (intended[1] - (skinned[l * 3 + 1] - py)),
+      dz = free * (intended[2] - (skinned[l * 3 + 2] - pz));
+    if (!(Math.abs(dx) + Math.abs(dy) + Math.abs(dz) > 0)) continue;
+    vertices.push(v);
+    delta.push(dx, dy, dz);
+  }
+  return { vertices: Uint32Array.from(vertices), delta: Float64Array.from(delta) };
+}
+
+const shownDetails = new WeakMap<WarpOutput, WarpDetail | undefined>();
+
+/** Records the detail a preview's output was written with. */
+export function showDetail(output: WarpOutput, detail: WarpDetail | undefined) {
+  shownDetails.set(output, detail);
+}
+
+/** The detail a preview's output was last written with: what a point made on it sits on. */
+export const shownDetail = (output: WarpOutput | null | undefined) =>
+  output ? shownDetails.get(output) : undefined;
+
+const detailSlots = new WeakMap<WarpDetail, Map<number, number>>();
+
+/** The detail at a surface point: the blend of its face corners' by `barycentric`, world. */
+export function detailAt(
+  model: WarpModel,
+  detail: WarpDetail | undefined,
+  face: number,
+  barycentric: ArrayLike<number>,
+): Vec3 {
+  const out: Vec3 = [0, 0, 0];
+  if (!detail?.vertices.length) return out;
+  let slots = detailSlots.get(detail);
+  if (!slots) {
+    slots = new Map();
+    for (let i = 0; i < detail.vertices.length; i++) slots.set(detail.vertices[i], i);
+    detailSlots.set(detail, slots);
+  }
+  for (let c = 0; c < 3; c++) {
+    const corner = model.index ? model.index[face * 3 + c] : face * 3 + c;
+    const i = slots.get(model.region.weldOf[corner]);
+    if (i === undefined) continue;
+    for (let a = 0; a < 3; a++) out[a] += barycentric[c] * detail.delta[i * 3 + a];
+  }
+  return out;
+}
+
+/** Where `state` writes a sample, detail included. */
+export function writtenSample(
+  model: WarpModel,
+  state: Pick<WarpState, 'positions' | 'rotations'>,
+  sample: Pick<WarpSample, 'face' | 'barycentric' | 'binding' | 'restWorld'>,
+  detail?: WarpDetail,
+): Vec3 {
+  const at = deformPoint(model, state, sample.binding, sample.restWorld);
+  const extra = detailAt(model, detail, sample.face, sample.barycentric);
+  return [at[0] + extra[0], at[1] + extra[1], at[2] + extra[2]];
 }
 
 /**
@@ -1240,12 +1743,13 @@ export const snapshotOf = (
  * A snapshot carried from one grid to another: each node of `to` sits where the preview writes its
  * scan vertex under the snapshot on `from`, turned by the blend of its bound nodes' rotations.
  * Vertices `from` did not move stay at rest. A vertex `from` feathered and `to` paints sits where
- * it was written.
+ * it was written. `detail`, when the snapshot was written with it, is carried along too.
  */
 export function transferSnapshot(
   from: WarpModel,
   snapshot: WarpSnapshot,
   to: WarpModel,
+  detail?: WarpDetail,
 ): WarpSnapshot {
   const K = warpBindingNodes;
   const { binding, restWorld } = from;
@@ -1254,6 +1758,15 @@ export function transferSnapshot(
   const positions = to.restNodes.slice(),
     rotations = new Float64Array(count * 4);
   const skinned = skinnedWorldPositions(from, snapshot, to.grid.nodes);
+  if (detail?.vertices.length) {
+    const slot = new Map<number, number>();
+    to.grid.nodes.forEach((v, n) => slot.set(v, n));
+    detail.vertices.forEach((v, i) => {
+      const n = slot.get(v);
+      if (n === undefined || Number.isNaN(skinned[n * 3])) return;
+      for (let a = 0; a < 3; a++) skinned[n * 3 + a] += detail.delta[i * 3 + a];
+    });
+  }
   for (let n = 0; n < count; n++) {
     rotations[n * 4 + 3] = 1;
     const v = to.grid.nodes[n];
