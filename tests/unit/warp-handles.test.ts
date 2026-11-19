@@ -17,6 +17,7 @@ import type { Part, Vec3 } from '../../src/core/types';
 import { bindPoint } from '../../src/core/warp-bind';
 import { createWarpOutput, deformPoint, evaluateWarp } from '../../src/core/warp-evaluate';
 import {
+  detailAt,
   distributionNodes,
   fadeWidth,
   handleConstraints,
@@ -31,6 +32,7 @@ import {
   transferSnapshot,
   uniqueSamples,
   bandWidth,
+  warpDetail,
   warpFootprintSpacings,
   warpGuides,
   warpPathBound,
@@ -521,6 +523,32 @@ describe('point handles', () => {
       if (d < 7) expect(world[v * 3 + 2]).toBeGreaterThan(1.9);
       if (d > 13) expect(Math.abs(world[v * 3 + 2])).toBeLessThan(0.03 * 2);
     }
+  });
+
+  it('uses the same written detail at constraints during full-surface and grid-only drags', async () => {
+    const { geometry, model } = await sheet(4, 120);
+    const state = createWarpState(model.restNodes);
+    const a = pointHandle(model, geometry, [-1.5, 0.2, 0], state, 12, 0, 'a');
+    const b = pointHandle(model, geometry, [1, 0.5, 0], state, 8, 0.4, 'b');
+    let peak = 0;
+    for (const selection of [
+      [moved(a, [0, 0, 7])],
+      [moved(a, [-2, 4, -3])],
+      [moved(a, [0, 1, 3]), moved(b, [2, -3, 4])],
+      [moved(a, [3, -4, 2]), moved(b, [-2, 0, 5])],
+      [moved({ ...a, falloff: 1 }, [0, 2, 5]), moved(b, [-2, 0, 5])],
+    ]) {
+      const full = warpDetail(model, selection);
+      const sampled = warpDetail(model, selection, [], undefined, true);
+      for (const { samples } of selection)
+        for (const { face, barycentric } of samples) {
+          const written = detailAt(model, full, face, barycentric);
+          const constrained = detailAt(model, sampled, face, barycentric);
+          peak = Math.max(peak, Math.hypot(...written));
+          expect(distance(written, constrained)).toBeLessThan(1e-8);
+        }
+    }
+    expect(peak).toBeGreaterThan(1e-4);
   });
 
   it('never targets a node farther from its baseline than the handle moved, alone or together', async () => {
