@@ -321,9 +321,13 @@ var MeshoptSimplifier = (function () {
 		var start = sbrk(0);
 		var arena_size = vertex_positions.byteLength + indices.byteLength + max_triangles * 9 * 4;
 		var memory_error = 'The remesh exceeded the voxel memory limit. Lower voxel resolution.';
+		var sp = sbrk(arena_size);
+		if (sp === -1) {
+			// This allocator advances the break even when memory.grow fails. The arena is word-aligned.
+			sbrk(-arena_size);
+			throw new Error(memory_error);
+		}
 		try {
-			var sp = sbrk(arena_size);
-			if (sp === -1) throw new Error(memory_error);
 			var si = sp + vertex_positions.byteLength;
 			var tp = si + indices.byteLength;
 			var heap = new Uint8Array(instance.exports.memory.buffer);
