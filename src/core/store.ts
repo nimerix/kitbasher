@@ -251,6 +251,8 @@ export interface WarpSession {
   density: number;
   /** Feather width in mm the grid was laid with, 0 or absent for none. Density changes keep it. */
   feather?: number;
+  /** The feather switch and width Edit region shows and the next lay takes. */
+  featherEdge: WarpFeatherOption;
   /** Whether the user chose the density. Otherwise it follows the region. */
   densityChosen: boolean;
   /** What the model was built from, so laying the same region again keeps it. */
@@ -294,17 +296,25 @@ export interface WarpSession {
  */
 type WarpEdit = Pick<
   WarpSession,
-  'points' | 'gapTargets' | 'gapHeld' | 'surface' | 'pointRadius' | 'pointFalloff'
+  | 'points'
+  | 'selectedPoints'
+  | 'gapTargets'
+  | 'gapHeld'
+  | 'surface'
+  | 'pointRadius'
+  | 'pointFalloff'
 > & {
   /** On the step a new grid records: the grid it undoes to, rebuilt when it is undone. */
   grid?: WarpGridStep;
+  /** On the step laying the same grid records: the region as painted before, put back on undo. */
+  painted?: WarpLaid['painted'];
 };
 type WarpLaid = {
   faces: number[] | null;
   density: number;
   feather: number;
   /** The region as painted when the grid was laid, which undoing a later grid paints again. */
-  painted: Pick<WarpSession, 'region' | 'faces' | 'seed'>;
+  painted: Pick<WarpSession, 'region' | 'faces' | 'seed' | 'featherEdge'>;
 };
 /**
  * The grid a density change or a new region left. Its steps' snapshots name `token` instead of the
@@ -596,7 +606,12 @@ const toolChange = (state: EditorState, tool: Tool): Partial<EditorState> => {
   };
 };
 
-const newWarpSession = (part: Part, epoch: number, faces: number[] = []): WarpSession => ({
+const newWarpSession = (
+  part: Part,
+  epoch: number,
+  featherEdge: WarpFeatherOption,
+  faces: number[] = [],
+): WarpSession => ({
   id: uid(),
   partId: part.id,
   source: part.geometry,
@@ -607,6 +622,7 @@ const newWarpSession = (part: Part, epoch: number, faces: number[] = []): WarpSe
   startFaces: faces,
   density: defaultWarpDensity,
   feather: 0,
+  featherEdge,
   densityChosen: false,
   laid: null,
   model: null,
@@ -866,6 +882,7 @@ export const isWarpDragging = () =>
 
 const warpEdit = (warp: WarpSession): WarpEdit => ({
   points: warp.points,
+  selectedPoints: warp.selectedPoints,
   gapTargets: warp.gapTargets,
   gapHeld: warp.gapHeld ?? 0,
   surface: warp.model && warp.state ? settledOf(warp) : warp.surface,
@@ -1372,11 +1389,13 @@ function restWarpPreview({ model, output, preview, source }: WarpSession) {
  */
 function restoreWarp(scene: SceneDocument, warp: WarpSession, step: WarpEdit): WarpSession {
   const kept = new Set(step.points.map((point) => point.id));
+  const { painted, ...edit } = step;
   const next: WarpSession = {
     ...warp,
-    ...step,
+    ...edit,
+    ...(painted && warp.laid ? { ...painted, laid: { ...warp.laid, painted } } : {}),
     surface: warp.surface,
-    selectedPoints: warp.selectedPoints.filter((id) => kept.has(id)),
+    selectedPoints: step.selectedPoints.filter((id) => kept.has(id)),
   };
   const { model } = warp;
   const { surface } = step;
@@ -2325,7 +2344,7 @@ export const useEditor = create<EditorState>((set, get) => ({
     disposeWarpPreview(state.warp?.preview ?? null);
     set((state) => ({
       ...toolChange(state, 'warp'),
-      warp: newWarpSession(part, state.sceneEpoch),
+      warp: newWarpSession(part, state.sceneEpoch, state.warpFeather),
     }));
     return true;
   },
@@ -2422,12 +2441,17 @@ export const useEditor = create<EditorState>((set, get) => ({
   },
   setWarpFeather: (patch) =>
     set((state) => {
-      const enabled = patch.enabled ?? state.warpFeather.enabled;
+      const current = state.warp?.featherEdge ?? state.warpFeather;
+      const enabled = patch.enabled ?? current.enabled;
       const width =
         patch.width !== undefined && Number.isFinite(patch.width)
           ? Math.max(0, Math.min(100, patch.width))
-          : (state.warpFeather.width ?? (enabled ? warpBrushRadius(state) : null));
-      return { warpFeather: { enabled, width } };
+          : (current.width ?? (enabled ? warpBrushRadius(state) : null));
+      const warpFeather = { enabled, width };
+      return {
+        warpFeather,
+        ...(state.warp ? { warp: { ...state.warp, featherEdge: warpFeather } } : {}),
+      };
     }),
   cancelWarp: (notice) => {
     const { warp } = get();
@@ -2691,7 +2715,7 @@ export const useEditor = create<EditorState>((set, get) => ({
     if (falloff !== undefined && Number.isFinite(falloff))
       settings.pointFalloff = Math.min(1, Math.max(0, falloff));
     const selected = new Set(warp.selectedPoints);
-    if (!model || warp.stage !== 'warp' || !warp.points.some((point) => selected.has(point.id))) {
+    if (!model || warp.stage !== 'warp') {
       set({ warp: { ...warp, ...settings } });
       return;
     }
@@ -2716,9 +2740,11 @@ export const useEditor = create<EditorState>((set, get) => ({
         ? { ...next, baseline: surface }
         : next;
     });
-    // Settings that leave every point as it was settle nothing.
-    if (!continuing && points.every((point, i) => point === warp.points[i])) {
+    // Settings that leave every point as it was settle nothing. With none selected they are what
+    // new points take, a step of their own.
+    if ((!continuing || !start.size) && points.every((point, i) => point === warp.points[i])) {
       const next = { ...warp, ...settings };
+      if (!start.size) warpDrag = gesture === 'drag' ? { model, before, settings: start } : null;
       set({
         warp:
           gesture === 'end' && !sameEdit(before, warpEdit(next))
@@ -2816,7 +2842,11 @@ export const useEditor = create<EditorState>((set, get) => ({
     const points = warp.points.filter((point) => !released.has(point.id));
     // Samples the user holds still keep their place: the seam stays open around them.
     const yielded = yieldingGapTargets(warp, points, gapTargets);
-    if (same(yielded.gapTargets, warp.gapTargets) && points.length === warp.points.length) return;
+    if (same(yielded.gapTargets, warp.gapTargets) && points.length === warp.points.length) {
+      // Nothing moves, but the panel still says why the seam stays open.
+      if (yielded.held !== (warp.gapHeld ?? 0)) set({ warp: { ...warp, gapHeld: yielded.held } });
+      return;
+    }
     const kept = new Set(points.map((point) => point.id));
     set({
       warp: solveWarpSession(
@@ -2880,6 +2910,7 @@ export const useEditor = create<EditorState>((set, get) => ({
       seed,
       density,
       densityChosen,
+      featherEdge,
       snap,
       overlap,
       gizmo,
@@ -2903,7 +2934,7 @@ export const useEditor = create<EditorState>((set, get) => ({
         parts: state.scene.parts.map((p) => (p.id === part.id ? warped : p)),
       }),
       warp: {
-        ...newWarpSession(warped, state.sceneEpoch, faces),
+        ...newWarpSession(warped, state.sceneEpoch, featherEdge, faces),
         region,
         seed,
         density,
@@ -3939,6 +3970,12 @@ useEditor.subscribe((state) => {
     state.settleWarp(true);
 });
 
+const samePainted = (a: WarpLaid['painted'], b: WarpLaid['painted']) =>
+  a.region === b.region &&
+  same(a.faces, b.faces) &&
+  same(a.seed ?? null, b.seed ?? null) &&
+  same(a.featherEdge, b.featherEdge);
+
 const sameLaid = (a: WarpLaid, b: WarpLaid) =>
   a.density === b.density &&
   a.feather === b.feather &&
@@ -4055,8 +4092,8 @@ async function layWarp(from: WarpSettled, kind: 'region' | 'density' | WarpGridS
       ? 0
       : kind === 'density'
         ? (warp.feather ?? 0)
-        : state.warpFeather.enabled
-          ? (state.warpFeather.width ?? warpBrushRadius(state))
+        : warp.featherEdge.enabled
+          ? (warp.featherEdge.width ?? warpBrushRadius(state))
           : 0;
   const density = restore
     ? restore.laid.density
@@ -4069,15 +4106,35 @@ async function layWarp(from: WarpSettled, kind: 'region' | 'density' | WarpGridS
     faces,
     density,
     feather,
-    painted: { region: warp.region, faces: warp.faces, seed: warp.seed },
+    painted: {
+      region: warp.region,
+      faces: warp.faces,
+      seed: warp.seed,
+      // A density change keeps the feather the grid was laid with.
+      featherEdge: (kind === 'density' && warp.laid?.painted.featherEdge) || warp.featherEdge,
+    },
   };
-  // The same region at the same density keeps its grid, so nothing moves.
+  // The same region at the same density keeps its grid, so nothing moves. A region painted or set
+  // differently since is a step of its own, which undo paints again without a rebuild.
   if (!restore && warp.model && warp.laid && sameLaid(warp.laid, laid)) {
     if (warp.settling) scheduleWarpSettle();
+    const repainted = !samePainted(warp.laid.painted, laid.painted);
     useEditor.setState({
       painting: false,
       paintHistory: [],
-      warp: { ...warp, stage: 'warp', density, feather, seam: warpSeam(state.scene, warp) },
+      warp: {
+        ...warp,
+        stage: 'warp',
+        density,
+        feather,
+        seam: warpSeam(state.scene, warp),
+        ...(repainted
+          ? {
+              laid: { ...warp.laid, painted: laid.painted },
+              undo: withUndo(warp, { ...warpEdit(warp), painted: warp.laid.painted }),
+            }
+          : {}),
+      },
     });
     return;
   }

@@ -485,6 +485,7 @@ describe('warp session', () => {
         undo: [
           {
             points: [inside, outside],
+            selectedPoints: ['inside', 'outside'],
             gapTargets,
             surface: inside.baseline,
             pointRadius: null,
@@ -777,11 +778,11 @@ describe('warp points, close gap and apply', () => {
     expect(distance(deformed(session().points[0]), [0, 0, 3])).toBeLessThan(0.01);
 
     // One undo step for the whole gesture, holding the points from before it.
-    expect(session().undo).toHaveLength(2);
+    expect(session().undo).toHaveLength(3);
     expect(session().undo.at(-1)!.points[0].target).toBeNull();
     // A release that moved nothing adds none.
     move(p.id, [0, 0, 3]);
-    expect(session().undo).toHaveLength(2);
+    expect(session().undo).toHaveLength(3);
     expect(session().folds.length).toBe(0);
     expect(session().seam).toBeNull();
 
@@ -1083,7 +1084,7 @@ describe('warp points, close gap and apply', () => {
     const lifted = Array.from(session().output!.positions);
     const q = addAt(a, -4, 0);
     move(q.id, [-4, 0, -1]);
-    expect(session().undo).toHaveLength(4);
+    expect(session().undo).toHaveLength(5);
 
     editor().selectWarpPoints([p.id, 'missing']);
     expect(session().selectedPoints).toEqual([p.id]);
@@ -1114,8 +1115,12 @@ describe('warp points, close gap and apply', () => {
     expect(close(rest, session().output!.positions)).toBeLessThan(0.01);
     editor().undoWarpEdit();
     expect(session().points).toEqual([]);
-    expect(session().undo).toEqual([]);
+    expect(session().undo).toHaveLength(1);
     expect(close(rest, session().output!.positions)).toBeLessThan(1e-5);
+    // The radius new points take was a step of its own.
+    editor().undoWarpEdit();
+    expect(session().pointRadius).toBeNull();
+    expect(session().undo).toEqual([]);
     editor().undoWarpEdit();
     expect(session().points).toEqual([]);
   });
@@ -2091,6 +2096,35 @@ describe('warp handles', () => {
     }
   });
 
+  it('close gap says why when a point the user placed holds back every target', async () => {
+    const a = plate('a', 0, 64);
+    const small = new PlaneGeometry(1.5, 1.5, 3, 3);
+    small.setAttribute(
+      'color',
+      new BufferAttribute(new Float32Array(small.getAttribute('position').count * 3).fill(0.5), 3),
+    );
+    // A small part facing the plate 1 mm in front of a point the user placed.
+    const b: Part = {
+      ...plate('b'),
+      geometry: small,
+      position: [3, 2, 1],
+      quaternion: [0, 1, 0, 0],
+    };
+    setup([a, b], ['a']);
+    await warpDisc(a, 0, 0, 14);
+    editor().setWarpPointSettings({ radius: 0 }, 'end');
+    addAt(a, 3, 2);
+    finishWarpSettling();
+    const { undo, state } = session();
+    const positions = Array.from(state!.positions);
+    editor().closeWarpGap();
+    expect(session().gapTargets).toEqual([]);
+    expect(session().gapHeld).toBeGreaterThan(0);
+    expect(session().seam!.largestGap).toBeGreaterThan(0);
+    expect(session().undo).toBe(undo);
+    expect(Array.from(session().state!.positions)).toEqual(positions);
+  });
+
   it('names Close gap or a moved handle as what pulls a held point, whichever is nearer', async () => {
     const a = plate('a', 0, 32);
     setup([a], ['a']);
@@ -2196,7 +2230,9 @@ describe('warp handles', () => {
     expect(handleGuides(first)).toBe(true);
     editor().selectWarpPoints([]);
     editor().setWarpPointSettings({ radius: 1.5, falloff: 0.4 }, 'end');
-    expect(session().undo).toHaveLength(1);
+    // With nothing selected it changes only what new points take, as a step of its own.
+    expect(session().undo).toHaveLength(2);
+    expect(session().undo.at(-1)).toMatchObject({ pointRadius: null, pointFalloff: 1 });
     expect(addAt(a, 4, 0)).toMatchObject({ radius: 1.5, falloff: 0.4 });
     // A radius the user chose is used as given, and 0 stays a bare point.
     editor().selectWarpPoints([]);
@@ -2211,6 +2247,50 @@ describe('warp handles', () => {
     let extent = 0;
     for (let i = 0; i < nodes.length; i += 3) extent = Math.max(extent, Math.abs(nodes[i]) * 2);
     expect(addAt(a, 0, 0).radius).toBeLessThanOrEqual(Number((extent / 4).toPrecision(2)));
+  });
+
+  it('undo selects the handles it brings back, and a radius set with none selected is a step', async () => {
+    const a = plate('a', 0, 64);
+    setup([a], ['a']);
+    await warpDisc(a, 0, 0, 14);
+    const spots = Array.from({ length: 60 }, (_, i) => {
+      const x = -6 + (12 * i) / 59;
+      return { face: faceAt(a.geometry, x, 1), barycentric: barycentricAt(a, x, 1) };
+    });
+    expect(editor().addWarpStroke({ kind: 'line', points: spots })).toBe(true);
+    const line = session().points.at(-1)!;
+    editor().selectWarpPoints([line.id]);
+    editor().setWarpPointSettings({ radius: 3.3 }, 'end');
+    const first = { face: faceAt(a.geometry, -5, -5), barycentric: barycentricAt(a, -5, -5) };
+    const faces = Array.from({ length: triangleCount(a.geometry) }, (_, f) => f).filter(
+      (f) =>
+        readFace(a.geometry, f)
+          .getMidpoint(new Vector3())
+          .distanceTo(new Vector3(-5, -5, 0)) < 1.2,
+    );
+    expect(editor().addWarpStroke({ kind: 'area', faces, first })).toBe(true);
+    expect(session().selectedPoints).not.toContain(line.id);
+
+    await editor().undoWarpEdit();
+    expect(session().points.map(({ id }) => id)).toEqual([line.id]);
+    expect(session().selectedPoints).toEqual([line.id]);
+    const depth = session().undo.length;
+    editor().setWarpPointSettings({ radius: 6.6 }, 'end');
+    expect(session().points[0].radius).toBe(6.6);
+    expect(session().undo).toHaveLength(depth + 1);
+
+    // With nothing selected, a radius or falloff is what new handles take, and one step per gesture.
+    editor().selectWarpPoints([]);
+    for (const radius of [3, 4]) editor().setWarpPointSettings({ radius }, 'drag');
+    editor().setWarpPointSettings({ radius: 5, falloff: 0.5 }, 'end');
+    expect(session()).toMatchObject({ pointRadius: 5, pointFalloff: 0.5 });
+    expect(session().undo).toHaveLength(depth + 2);
+    await editor().undoWarpEdit();
+    expect(session()).toMatchObject({ pointRadius: 6.6, pointFalloff: 1 });
+    expect(session().points[0].radius).toBe(6.6);
+    await editor().undoWarpEdit();
+    expect(session().points[0].radius).toBe(3.3);
+    expect(session().selectedPoints).toEqual([line.id]);
   });
 
   it('a whole part starts on a finer grid than a painted region, unless the user chose one', async () => {
@@ -2493,6 +2573,53 @@ describe('warp handles', () => {
     }
     useEditor.setState({ warpFeather: { enabled: false, width: null } });
   }, 60_000);
+
+  it('laying the same grid on a repainted region keeps what was painted, and undo puts it back', async () => {
+    const a = plate('a', 0, 64);
+    setup([a], ['a']);
+    editor().setTool('warp');
+    editor().setWarpOptions({ autoPoints: false });
+    editor().setWarpBrushRadius(6);
+    editor().paintWarpRegion(hit('a', 0, 0), faceAt(a.geometry, 0, 0), false, true);
+    editor().endPaintStroke();
+    const painted = session().faces;
+    editor().setWarpRegion('whole');
+    await editor().layWarpGrid();
+    const model = session().model!;
+    const steps = session().undo.length;
+    // Paint more, then lay the whole part again: the same grid.
+    editor().setWarpRegion('painted');
+    editor().paintWarpRegion(hit('a', 8, 0), faceAt(a.geometry, 8, 0), false, true);
+    editor().endPaintStroke();
+    const repainted = session().faces;
+    expect(repainted.length).toBeGreaterThan(painted.length);
+    editor().setWarpRegion('whole');
+    const tasks = warpTasks().length;
+    await editor().layWarpGrid();
+    expect(session().model).toBe(model);
+    expect(warpTasks()).toHaveLength(tasks);
+    expect(session().undo).toHaveLength(steps + 1);
+    expect(session().laid!.painted.faces).toBe(repainted);
+
+    await editor().setWarpDensity(2);
+    expect(session().model).not.toBe(model);
+    await editor().undoWarpEdit();
+    expect(session().model!.grid.nodes).toEqual(model.grid.nodes);
+    expect(session()).toMatchObject({ region: 'whole', faces: repainted });
+    // Undo once more paints the region as it was, on the same grid.
+    const rebuilt = session().model;
+    const surface = positionsOf(session().preview!);
+    await editor().undoWarpEdit();
+    expect(session().model).toBe(rebuilt);
+    expect(session()).toMatchObject({ region: 'whole', faces: painted });
+    expect(session().laid!.painted.faces).toBe(painted);
+    expect(session().undo).toHaveLength(steps);
+    expect(positionsOf(session().preview!)).toEqual(surface);
+    // Laying again with nothing changed adds no step.
+    editor().setWarpRegion('whole');
+    await editor().layWarpGrid();
+    expect(session().undo).toHaveLength(steps);
+  });
 
   it('a density change that would drop a handle is not made, and says why', async () => {
     for (const feather of [false, true])

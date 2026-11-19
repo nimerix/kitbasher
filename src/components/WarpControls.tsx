@@ -296,7 +296,7 @@ function cancel() {
 
 /** Feathered edge for a painted region: a switch, and a width once it is on. */
 function FeatherEdge({ part }: { part: Part | undefined }) {
-  const feather = useEditor((s) => s.warpFeather);
+  const feather = useEditor((s) => s.warp?.featherEdge ?? s.warpFeather);
   const brushRadius = useEditor(warpBrushRadius);
   const width = feather.width ?? brushRadius;
   const range = fittedSizeRange(part ? partSize(part) : 0);
@@ -348,7 +348,7 @@ export function WarpControls() {
   const part = useEditor((s) =>
     s.warp ? s.scene.parts.find((p) => p.id === s.warp!.partId) : undefined,
   );
-  const feathered = useEditor((s) => s.warpFeather.enabled);
+  const feathered = useEditor((s) => (s.warp?.featherEdge ?? s.warpFeather).enabled);
   const featherNote = featherWarning(warp?.model?.feather);
   const featherWidth = warp?.model?.feather?.width;
   if (!warp)
