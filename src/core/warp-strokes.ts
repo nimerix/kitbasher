@@ -315,7 +315,8 @@ const third: Vec3 = [1 / 3, 1 / 3, 1 / 3];
  * An area's samples: face centres spread by farthest-point sampling at rest from the first hit, up
  * to a few dozen, about half a node spacing apart. An area of fewer faces than that also takes
  * spots toward each face's corners, so even one face holds several samples and lifts as a small
- * plateau. `pin` is where the surface is at the face centre nearest the area's centroid.
+ * plateau. `pin` is where the surface is at the face centre nearest the area's centroid. Null when
+ * no spot on the faces is painted and free.
  */
 export function areaSamples(
   model: WarpModel,
@@ -363,8 +364,12 @@ export function areaSamples(
     area += weight;
   }
   if (area > 0) for (let a = 0; a < 3; a++) centroid[a] /= area;
-  const spacing = sampleSpacing(model, start ?? strokeSample(model, state, candidates[0])!);
-  const apart = warpLineStep * spacing;
+  // Spaced by the grid at the first spot that can hold; none can where fixed nodes alone bind it.
+  let spaced = start;
+  for (let i = 0; !spaced && i < candidates.length; i++)
+    spaced = strokeSample(model, state, candidates[i]);
+  if (!spaced) return null;
+  const apart = warpLineStep * sampleSpacing(model, spaced);
   const near = new Float64Array(candidates.length).fill(Infinity);
   const chosen: WarpSample[] = [];
   const take = (sample: WarpSample) => {

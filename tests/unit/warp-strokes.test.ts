@@ -10,6 +10,7 @@ import {
   areaBrushFaces,
   facePoint,
   lineSamples,
+  strokeSample,
   type WarpStrokePoint,
 } from '../../src/core/warp-strokes';
 import type { Part, SceneDocument, Vec3 } from '../../src/core/types';
@@ -329,6 +330,64 @@ describe('area handles', () => {
     expect(session().faces).toBe(region);
     expect(session().seed).toBe(seed);
     expect(editor().paintHistory).toBe(history);
+  });
+
+  it('refuse a dab whose faces are all held by fixed nodes, and say to paint farther inside', async () => {
+    // A sheet as fine as a scan, painted in a small disc on the coarsest grid: most of the disc
+    // is bound only to its fixed edge.
+    const part = partOf(new PlaneGeometry(16, 16, 320, 320));
+    editor().setScene({ name: 'Warp', parts: [part], joints: [] });
+    useEditor.setState({ selected: [part.id] });
+    editor().setTool('warp');
+    editor().setWarpBrushRadius(1.5);
+    editor().paintWarpRegion(
+      { partId: part.id, point: [0, 0, 0], normal: [0, 0, 1] },
+      surfaceAt(part, [0, 0, 0]).face,
+      false,
+      true,
+    );
+    editor().endPaintStroke();
+    await editor().setWarpDensity(0);
+    await editor().layWarpGrid();
+    const { model, state } = session();
+    const third: Vec3 = [1 / 3, 1 / 3, 1 / 3];
+    const fixed = Array.from(model!.region.faces).filter(
+      (face) =>
+        strokeSample(model!, state!, { face, barycentric: third }) === null &&
+        [
+          [0.6, 0.2, 0.2],
+          [0.2, 0.6, 0.2],
+          [0.2, 0.2, 0.6],
+        ].every(
+          (barycentric) =>
+            strokeSample(model!, state!, { face, barycentric: barycentric as Vec3 }) === null,
+        ),
+    );
+    expect(fixed.length).toBeGreaterThan(10);
+    // Fixed faces alone, and fixed faces first with a free one last.
+    const free = Array.from(model!.region.faces).find(
+      (face) => strokeSample(model!, state!, { face, barycentric: third }) !== null,
+    )!;
+    useEditor.setState({ toast: null });
+    expect(
+      editor().addWarpStroke({
+        kind: 'area',
+        faces: fixed.slice(0, 20),
+        first: { face: fixed[0], barycentric: third },
+      }),
+    ).toBe(false);
+    expect(session().points).toHaveLength(0);
+    expect(useEditor.getState().toast?.message).toBe(
+      'This spot is fixed. Paint farther inside the warp region.',
+    );
+    expect(
+      editor().addWarpStroke({
+        kind: 'area',
+        faces: [...fixed.slice(0, 20), free],
+        first: { face: fixed[0], barycentric: third },
+      }),
+    ).toBe(true);
+    expect(latest().samples.length).toBeGreaterThan(0);
   });
 
   it('paint only faces turned toward the brush', async () => {

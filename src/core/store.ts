@@ -2343,7 +2343,9 @@ export const useEditor = create<EditorState>((set, get) => ({
       state.notify(
         stroke.kind === 'line'
           ? 'Draw a longer line on the painted area.'
-          : 'Paint on the painted area.',
+          : stroke.faces.some((face) => isPaintedFace(model, face))
+            ? 'This spot is fixed. Paint farther inside the warp region.'
+            : 'Paint on the painted area.',
         'info',
       );
       return false;
