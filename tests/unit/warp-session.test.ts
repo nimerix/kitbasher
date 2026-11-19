@@ -2574,6 +2574,53 @@ describe('warp handles', () => {
     useEditor.setState({ warpFeather: { enabled: false, width: null } });
   }, 60_000);
 
+  it('laying the same grid on a repainted region keeps what was painted, and undo puts it back', async () => {
+    const a = plate('a', 0, 64);
+    setup([a], ['a']);
+    editor().setTool('warp');
+    editor().setWarpOptions({ autoPoints: false });
+    editor().setWarpBrushRadius(6);
+    editor().paintWarpRegion(hit('a', 0, 0), faceAt(a.geometry, 0, 0), false, true);
+    editor().endPaintStroke();
+    const painted = session().faces;
+    editor().setWarpRegion('whole');
+    await editor().layWarpGrid();
+    const model = session().model!;
+    const steps = session().undo.length;
+    // Paint more, then lay the whole part again: the same grid.
+    editor().setWarpRegion('painted');
+    editor().paintWarpRegion(hit('a', 8, 0), faceAt(a.geometry, 8, 0), false, true);
+    editor().endPaintStroke();
+    const repainted = session().faces;
+    expect(repainted.length).toBeGreaterThan(painted.length);
+    editor().setWarpRegion('whole');
+    const tasks = warpTasks().length;
+    await editor().layWarpGrid();
+    expect(session().model).toBe(model);
+    expect(warpTasks()).toHaveLength(tasks);
+    expect(session().undo).toHaveLength(steps + 1);
+    expect(session().laid!.painted.faces).toBe(repainted);
+
+    await editor().setWarpDensity(2);
+    expect(session().model).not.toBe(model);
+    await editor().undoWarpEdit();
+    expect(session().model!.grid.nodes).toEqual(model.grid.nodes);
+    expect(session()).toMatchObject({ region: 'whole', faces: repainted });
+    // Undo once more paints the region as it was, on the same grid.
+    const rebuilt = session().model;
+    const surface = positionsOf(session().preview!);
+    await editor().undoWarpEdit();
+    expect(session().model).toBe(rebuilt);
+    expect(session()).toMatchObject({ region: 'whole', faces: painted });
+    expect(session().laid!.painted.faces).toBe(painted);
+    expect(session().undo).toHaveLength(steps);
+    expect(positionsOf(session().preview!)).toEqual(surface);
+    // Laying again with nothing changed adds no step.
+    editor().setWarpRegion('whole');
+    await editor().layWarpGrid();
+    expect(session().undo).toHaveLength(steps);
+  });
+
   it('a density change that would drop a handle is not made, and says why', async () => {
     for (const feather of [false, true])
       for (const [x, y] of [

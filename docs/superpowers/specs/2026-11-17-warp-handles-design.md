@@ -449,11 +449,14 @@ its source `faces`, for a line its drawn `path`, `radius`, `falloff`, `auto`, on
 while unmoved), `baseline` (a shared snapshot) and a cached `reach`. `moveWarpPoints` keeps taking one
 target per handle.
 
-Each session undo step holds the points, gap targets, the settled grid they held and the
-settings new points take, so undo restores the surface exactly without solving. Laying the
-same region at the same density and feather keeps the model. A real rebuild carries each
-distinct snapshot to the new grid once, writing each new node where the preview's own skinning
-wrote its scan vertex, and rebinds samples, dropping those bound exactly as another. A line keeps
+Each session undo step holds the points, which of them were selected, gap targets, the settled grid
+they held and the settings new points take, so undo restores the surface exactly without solving
+and selects again the handles it brings back that were selected. Laying the same region at the same
+density and feather keeps the model. When the region was painted or set differently since, as a
+mask painted wider and then laid as the whole part, the session keeps it as it now is, and the step
+that records holds the region as it was, which undo puts back without a rebuild. A real rebuild
+carries each distinct snapshot to the new grid once, writing each new node where the preview's own
+skinning wrote its scan vertex, and rebinds samples, dropping those bound exactly as another. A line keeps
 its longest unbroken run of painted samples and its drawn path between them; an area keeps its
 largest connected piece of painted faces and the samples on it. Either is centred again on what is
 left, its target moved by as much as its centre; a line left with fewer than two samples, or an area

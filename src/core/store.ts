@@ -306,6 +306,8 @@ type WarpEdit = Pick<
 > & {
   /** On the step a new grid records: the grid it undoes to, rebuilt when it is undone. */
   grid?: WarpGridStep;
+  /** On the step laying the same grid records: the region as painted before, put back on undo. */
+  painted?: WarpLaid['painted'];
 };
 type WarpLaid = {
   faces: number[] | null;
@@ -1387,9 +1389,11 @@ function restWarpPreview({ model, output, preview, source }: WarpSession) {
  */
 function restoreWarp(scene: SceneDocument, warp: WarpSession, step: WarpEdit): WarpSession {
   const kept = new Set(step.points.map((point) => point.id));
+  const { painted, ...edit } = step;
   const next: WarpSession = {
     ...warp,
-    ...step,
+    ...edit,
+    ...(painted && warp.laid ? { ...painted, laid: { ...warp.laid, painted } } : {}),
     surface: warp.surface,
     selectedPoints: step.selectedPoints.filter((id) => kept.has(id)),
   };
@@ -3966,6 +3970,12 @@ useEditor.subscribe((state) => {
     state.settleWarp(true);
 });
 
+const samePainted = (a: WarpLaid['painted'], b: WarpLaid['painted']) =>
+  a.region === b.region &&
+  same(a.faces, b.faces) &&
+  same(a.seed ?? null, b.seed ?? null) &&
+  same(a.featherEdge, b.featherEdge);
+
 const sameLaid = (a: WarpLaid, b: WarpLaid) =>
   a.density === b.density &&
   a.feather === b.feather &&
@@ -4104,13 +4114,27 @@ async function layWarp(from: WarpSettled, kind: 'region' | 'density' | WarpGridS
       featherEdge: (kind === 'density' && warp.laid?.painted.featherEdge) || warp.featherEdge,
     },
   };
-  // The same region at the same density keeps its grid, so nothing moves.
+  // The same region at the same density keeps its grid, so nothing moves. A region painted or set
+  // differently since is a step of its own, which undo paints again without a rebuild.
   if (!restore && warp.model && warp.laid && sameLaid(warp.laid, laid)) {
     if (warp.settling) scheduleWarpSettle();
+    const repainted = !samePainted(warp.laid.painted, laid.painted);
     useEditor.setState({
       painting: false,
       paintHistory: [],
-      warp: { ...warp, stage: 'warp', density, feather, seam: warpSeam(state.scene, warp) },
+      warp: {
+        ...warp,
+        stage: 'warp',
+        density,
+        feather,
+        seam: warpSeam(state.scene, warp),
+        ...(repainted
+          ? {
+              laid: { ...warp.laid, painted: laid.painted },
+              undo: withUndo(warp, { ...warpEdit(warp), painted: warp.laid.painted }),
+            }
+          : {}),
+      },
     });
     return;
   }
