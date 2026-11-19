@@ -28,8 +28,11 @@ import {
   isWarpDragging,
   useEditor,
   warpChanges,
+  warpPinDrift,
+  warpPinDriftCause,
   warpRadiusSpacings,
   warpShortfall,
+  warpShortfallCause,
   warpShortfallShown,
   warpWholeDensity,
   type WarpBaseline,
@@ -47,6 +50,7 @@ import {
   snapshotOf,
   spacingAt,
   warpFootprintSpacings,
+  warpPinHold,
   warpPriorityStrength,
   type WarpSample,
 } from '../../src/core/warp-handles';
@@ -116,6 +120,13 @@ function faceAt(geometry: BufferGeometry, x: number, y: number, z = 0) {
     if (triangle.closestPointToPoint(point, closest).distanceTo(point) < 1e-6) return face;
   }
   throw new Error('No face under the point.');
+}
+
+/** Barycentric coordinates of a mesh-local point on the z = 0 plate, on the face containing it. */
+function barycentricAt(part: Part, x: number, y: number) {
+  return readFace(part.geometry, faceAt(part.geometry, x, y))
+    .getBarycoord(new Vector3(x, y, 0), new Vector3())!
+    .toArray() as Vec3;
 }
 
 const hit = (partId: string, x: number, y: number, z = 0): SurfacePoint => ({
@@ -2022,6 +2033,80 @@ describe('warp handles', () => {
     expect(session().points.map(({ id }) => id)).toContain(touched.id);
   });
 
+  it('close gap leaves the points, lines and areas the user holds where they are, and the seam open there', async () => {
+    const a = plate('a', 0, 64);
+    // Facing it, 1 mm in front.
+    const b: Part = { ...plate('b'), position: [0, 0, 1], quaternion: [0, 1, 0, 0] };
+    for (const region of ['whole', 'painted'] as const) {
+      setup([a, b], ['a']);
+      editor().setTool('warp');
+      editor().setWarpOptions({ autoPoints: false });
+      if (region === 'whole') {
+        editor().setWarpRegion('whole');
+        await editor().layWarpGrid();
+      } else await warpDisc(a, 0, 0, 14);
+      const label = region;
+      addAt(a, 3, 2);
+      const spots = Array.from({ length: 120 }, (_, i) => {
+        const x = -6 + (12 * i) / 119,
+          y = -4 + i / 119;
+        return { face: faceAt(a.geometry, x, y), barycentric: barycentricAt(a, x, y) };
+      });
+      expect(editor().addWarpStroke({ kind: 'line', points: spots })).toBe(true);
+      const first = { face: faceAt(a.geometry, -5, 5), barycentric: barycentricAt(a, -5, 5) };
+      const faces = Array.from({ length: triangleCount(a.geometry) }, (_, f) => f).filter(
+        (f) =>
+          readFace(a.geometry, f)
+            .getMidpoint(new Vector3())
+            .distanceTo(new Vector3(-5, 5, 0)) < 1.2,
+      );
+      expect(editor().addWarpStroke({ kind: 'area', faces, first })).toBe(true);
+      finishWarpSettling();
+      const model = session().model!;
+      const held = session().points;
+      const where = () =>
+        held.flatMap((point) =>
+          point.samples.map(({ binding, restWorld }) =>
+            deformPoint(model, session().state!, binding, restWorld),
+          ),
+        );
+      const before = where();
+      editor().closeWarpGap();
+      finishWarpSettling();
+      const { gapTargets, gapHeld, state, seam } = session();
+      expect(gapTargets.length, label).toBeGreaterThan(100);
+      expect(gapHeld, label).toBeGreaterThan(0);
+      where().forEach((at, i) =>
+        expect(distance(at, before[i]), `${label}, sample ${i}`).toBeLessThanOrEqual(warpPinHold),
+      );
+      // The seam closes elsewhere, and stays open where they hold it.
+      for (const { node, target } of gapTargets)
+        expect(distance(state!.positions.subarray(node * 3, node * 3 + 3), target)).toBeLessThan(
+          0.05,
+        );
+      expect(seam!.largestGap, label).toBeGreaterThan(0.5);
+      editor().selectWarpPoints(held.map(({ id }) => id));
+      expect(warpPinDrift(session()), label).toBeLessThanOrEqual(warpPinHold);
+      editor().cancelWarp();
+    }
+  });
+
+  it('names Close gap or a moved handle as what pulls a held point, whichever is nearer', async () => {
+    const a = plate('a', 0, 32);
+    setup([a], ['a']);
+    await warpDisc(a, 0, 0, 12);
+    editor().setWarpPointSettings({ radius: 0 }, 'end');
+    const pin = addAt(a, 0.5, 0.3);
+    const far = addAt(a, -8, 0.3);
+    move(far.id, [-8, 0.3, 1]);
+    editor().selectWarpPoints([pin.id]);
+    const node = pin.samples[0].binding.node[0];
+    const gap = [{ node, target: [0, 0, 0] as Vec3 }];
+    expect(warpPinDriftCause(session())).toBe('moved');
+    useEditor.setState({ warp: { ...session(), gapTargets: gap } });
+    expect(warpPinDriftCause(session())).toBe('gap');
+  });
+
   it('close gap closes the box seam whatever the number of automatic points', async () => {
     for (const count of [8, 16, 32]) {
       const block = solid('block', new BoxGeometry(20, 20, 20, 12, 12, 12), [0, 0, 0]);
@@ -2665,11 +2750,44 @@ describe('warp handles that must land', () => {
     const short = distance(deformed(current(p.id)), [0.53, 0.31, 2]);
     expect(short).toBeGreaterThan(warpShortfallShown);
     expect(warpShortfall(session())).toBeCloseTo(short, 9);
+    expect(warpShortfallCause(session())).toBe('pin');
     // It is the pin's own spot that holds it, not the grid.
     editor().removeWarpPoints([pin.id]);
     finishWarpSettling();
     editor().selectWarpPoints([p.id]);
     expect(warpShortfall(session())).toBeLessThan(0.01);
+  });
+
+  it('names the fixed edge when it holds a grab back', async () => {
+    const a = plate('a', 0, 32);
+    setup([a], ['a']);
+    await warpDisc(a, 0, 0, 12);
+    editor().setWarpPointSettings({ radius: 0 }, 'end');
+    const model = session().model!;
+    // The first spot in from the disc's edge whose point is bound partly to its fixed edge.
+    let p: WarpPoint | undefined,
+      x = 11.9;
+    for (; x > 8 && !p; x -= 0.1) {
+      if (!model.region.faces.includes(faceAt(a.geometry, x, 0.3))) continue;
+      const count = session().points.length;
+      const added = addAt(a, x, 0.3);
+      if (session().points.length === count) continue;
+      if (added.samples[0].binding.weight.reduce((sum, w) => sum + w, 0) < 0.9) p = added;
+      else editor().undoWarpEdit();
+    }
+    x += 0.1;
+    expect(p).toBeDefined();
+    move(p!.id, [x, 0.3, 3]);
+    finishWarpSettling();
+    editor().selectWarpPoints([p!.id]);
+    expect(warpShortfall(session())).toBeGreaterThan(warpShortfallShown);
+    expect(warpShortfallCause(session())).toBe('edge');
+    // Grabbed farther inside, it lands.
+    const q = addAt(a, 2, 0.3);
+    move(q.id, [2, 0.3, 3]);
+    finishWarpSettling();
+    editor().selectWarpPoints([q.id]);
+    expect(warpShortfall(session())).toBeLessThan(warpShortfallShown);
   });
 
   it('Apply waits for a settling surface and bakes it settled, exactly as then shown', async () => {

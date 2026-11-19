@@ -180,6 +180,14 @@ from where it is written before closing. Points on other pieces, on
 the far side of a thin wall, or that the seam would not move stay. Points the user placed or
 moved are kept.
 
+Close gap's targets yield to the samples of stationary points, lines and areas the user placed:
+it withholds the targets on each sample's nodes and those beside them, settles a trial from the
+surface as shown, and for each sample the trial moves by more than 0.005 mm, the pin-hold rule's
+limit, withholds the next ring of grid edges around it, up to twelve rounds. The seam readout then
+reports the gap left there, and the panel says that Close gap leaves the seam open around points
+the user placed. On two plates 1 mm apart, laid whole (2,129 nodes), a held point moved 0.00007 mm
+and a held line's samples at most 0.0027 mm, where the seam had moved them 0.78 and 0.72 mm.
+
 ### 4. Radius and falloff
 
 Every handle has a **radius** in mm and a **falloff** from 0 to 100 %, edited in the Control
@@ -212,7 +220,10 @@ Radius adds soft per-node **guides** around them.
   reached its target by overdriving the few free nodes it had: on a scan a 1 mm pull beside the
   fixed edge moved a node 4.5 mm and turned node maps inside out. Handles on free surface with no
   such pin beside them are left alone. The panel states a moved handle's shortfall from its
-  target, and an unmoved one's drift from its pin, once either exceeds 0.02 mm.
+  target, and an unmoved one's drift from its pin, once either exceeds 0.02 mm, with its cause in
+  one sentence: a point the user placed beside it, the fixed edge (with the remedy: feather the
+  edge, or grab farther inside the paint), Close gap's targets beside it, or a point on the same
+  spot; a drift names Close gap or a moved point, whichever the grid reaches first from the pin.
 - **Settling.** The end of an edit settles for up to 50 iterations. A solve whose last iteration
   still moved a node by 1 µm or more is marked settling and goes on in idle steps of 8 ms,
   redrawing every 200 ms and counting folds on each redraw, until it converges (or 20,000
