@@ -392,8 +392,11 @@ Each session undo step holds the points, gap targets, the settled grid they held
 settings new points take, so undo restores the surface exactly without solving. Laying the
 same region at the same density and feather keeps the model. A real rebuild carries each
 distinct snapshot to the new grid once, writing each new node where the preview's own skinning
-wrote its scan vertex, and rebinds samples, dropping those bound exactly as another and an area's
-faces no longer painted. A vertex in the old feather band that the new region paints is carried
+wrote its scan vertex, and rebinds samples, dropping those bound exactly as another. A line keeps
+its longest unbroken run of painted samples and its drawn path between them; an area keeps its
+largest connected piece of painted faces and the samples on it. Either is centred again on what is
+left, its target moved by as much as its centre; a line left with fewer than two samples, or an area
+with none, is dropped with the notice that points were removed. A vertex in the old feather band that the new region paints is carried
 at the position it was written at; where a feather still applies, it stays unblended so the blend
 applies once.
 
