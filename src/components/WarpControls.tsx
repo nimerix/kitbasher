@@ -141,7 +141,8 @@ function PointSettingsControls({ warp, part }: { warp: WarpSession; part: Part |
   const owned = (slider: Slider) => ({
     'data-slider': slider,
     onPointerDown: (event: ReactPointerEvent) => {
-      if (isSlider(event.target)) gesture.begin(slider, event.pointerId, least(slider));
+      if (event.button === 0 && isSlider(event.target))
+        gesture.begin(slider, event.pointerId, least(slider));
     },
     onKeyDown: (event: KeyboardEvent) => {
       const patch = least(slider);
