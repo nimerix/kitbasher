@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   Cloud,
   CloudCheck,
@@ -75,6 +75,8 @@ function DriveDialog() {
   const [files, setFiles] = useState<DriveFile[]>([]);
   const [nextPage, setNextPage] = useState<string | undefined>();
   const [selected, setSelected] = useState<DriveFile | null>(null);
+  const [discardEpoch, setDiscardEpoch] = useState<number | null>(null);
+  const cancelOpen = useRef<HTMLButtonElement>(null);
   const [refresh, setRefresh] = useState(0);
   const [resolution, setResolution] = useState<'load' | 'overwrite' | null>(null);
   const close = () => useDrive.setState({ dialogOpen: false });
@@ -98,6 +100,9 @@ function DriveDialog() {
       setWorking(false);
     }
   };
+  useEffect(() => {
+    if (discardEpoch !== null) cancelOpen.current?.focus();
+  }, [discardEpoch]);
   useEffect(() => {
     if (!googleClientId) return;
     let active = true;
@@ -332,15 +337,26 @@ function DriveDialog() {
                 {selected ? (
                   <div className="drive-open-confirmation">
                     <strong>Open {selected.name}?</strong>
-                    <p>
-                      This replaces the current workbench. Save or download any changes you want to
-                      keep first.
-                    </p>
+                    {discardEpoch !== null ? (
+                      <p role="alert">
+                        Changes to the current scene that haven’t been saved to Drive will be
+                        discarded.
+                      </p>
+                    ) : (
+                      <p>
+                        This replaces the current workbench. Save or download any changes you want
+                        to keep first.
+                      </p>
+                    )}
                     <div className="drive-inline-actions">
                       <button
                         className="button secondary"
+                        ref={cancelOpen}
                         disabled={working}
-                        onClick={() => setSelected(null)}
+                        onClick={() => {
+                          setSelected(null);
+                          setDiscardEpoch(null);
+                        }}
                       >
                         Cancel
                       </button>
@@ -349,12 +365,19 @@ function DriveDialog() {
                         disabled={working}
                         onClick={() =>
                           void perform(async () => {
-                            if (await openDriveScene(selected.id)) close();
+                            const epoch = useEditor.getState().sceneEpoch;
+                            if (discardEpoch !== null && discardEpoch !== epoch) {
+                              setDiscardEpoch(null);
+                              return;
+                            }
+                            if (await openDriveScene(selected.id, discardEpoch !== null)) close();
+                            else if (useEditor.getState().sceneEpoch === epoch)
+                              setDiscardEpoch(epoch);
                           })
                         }
                       >
                         <FolderOpen size={14} />
-                        Open scene
+                        {discardEpoch !== null ? 'Discard and open scene' : 'Open scene'}
                       </button>
                     </div>
                   </div>

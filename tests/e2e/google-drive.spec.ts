@@ -17,6 +17,7 @@ async function mockGoogle(page: Page, denied = false, hosted = false) {
   const cloud = {
     files: new Map<string, CloudFile>(),
     uploads: [] as string[],
+    downloads: [] as string[],
     expired: false,
     renewals: 0,
     authorizations: 0,
@@ -130,6 +131,7 @@ async function mockGoogle(page: Page, denied = false, hosted = false) {
         return;
       }
       if (url.searchParams.get('alt') === 'media') {
+        cloud.downloads.push(file.id);
         await route.fulfill({ contentType: 'application/octet-stream', body: file.bytes });
         return;
       }
@@ -375,6 +377,104 @@ async function conflictingScene(page: Page) {
   await driveButton(page).click();
   return cloud;
 }
+
+test('discards a recovered Drive conflict and starts an empty assembly without loading Drive', async ({
+  page,
+  context,
+}) => {
+  const cloud = await mockGoogle(page);
+  await connectAndSave(page);
+  const remote = cloud.files.get('cloud-1')!;
+  await changeRemote(remote, 'Cloud assembly');
+  await context.setOffline(true);
+  await rename(page, 'Recovered local edits');
+  await expect(page.getByText('Saved locally', { exact: true })).toBeVisible();
+  page.once('dialog', (dialog) => dialog.accept());
+  await page.goto('about:blank');
+  await context.setOffline(false);
+  await page.goto('/');
+  await expect(page.getByText('Recovered your local assembly', { exact: true })).toBeVisible();
+  await expect(driveButton(page)).toHaveAccessibleName('Google Drive: Drive file changed');
+  const downloadsBeforeDiscard = [...cloud.downloads];
+
+  const chooseEmptyAssembly = async () => {
+    await page.getByRole('button', { name: 'File', exact: true }).click();
+    await page.getByRole('button', { name: /New assembly/ }).click();
+    await page.getByRole('button', { name: /Empty assembly/ }).click();
+  };
+  const discard = page.getByRole('button', { name: 'Discard and start new', exact: true });
+  const sceneName = page.getByTitle('Rename assembly', { exact: true });
+  await chooseEmptyAssembly();
+  await expect(discard).toBeVisible();
+  await expect(page.getByRole('dialog', { name: 'Google Drive', exact: true })).toHaveCount(0);
+  await page.keyboard.press('Escape');
+  await expect(discard).toHaveCount(0);
+  await expect(sceneName).toContainText('Recovered local edits');
+  await expect(driveButton(page)).toHaveAccessibleName('Google Drive: Drive file changed');
+
+  await chooseEmptyAssembly();
+  await discard.click();
+  await expect(sceneName).toContainText('Untitled assembly');
+  await expect(page.locator('.part-row')).toHaveCount(0);
+  await expect(driveButton(page)).toHaveAccessibleName('Google Drive: Google Drive');
+  await expect(page.getByText('Saved locally', { exact: true })).toBeVisible();
+  await page.reload();
+  await expect(page.getByText('Recovered your local assembly', { exact: true })).toBeVisible();
+  await expect(sceneName).toContainText('Untitled assembly');
+  expect(cloud.downloads).toEqual(downloadsBeforeDiscard);
+  expect(cloud.uploads).toEqual(['cloud-1']);
+  expect(remote.name).toBe('Cloud assembly.kitbash');
+});
+
+test('opens a local file after discarding a Drive conflict', async ({ page }) => {
+  const cloud = await conflictingScene(page);
+  const downloadsBeforeOpen = [...cloud.downloads];
+  await page.getByRole('button', { name: 'Done', exact: true }).click();
+  const blob = await sceneFileBlob({ name: 'Local file', parts: [], joints: [] });
+  await page.getByLabel('Open Kitbasher scene').setInputFiles({
+    name: 'Local file.kitbash',
+    mimeType: 'application/octet-stream',
+    buffer: Buffer.from(await blob.arrayBuffer()),
+  });
+  await page.getByRole('button', { name: 'Open scene', exact: true }).click();
+  await page.getByRole('button', { name: 'Discard and open scene', exact: true }).click();
+  await expect(page.getByTitle('Rename assembly', { exact: true })).toContainText('Local file');
+  await expect(driveButton(page)).toHaveAccessibleName('Google Drive: Google Drive');
+  expect(cloud.downloads).toEqual(downloadsBeforeOpen);
+  expect(cloud.uploads).toEqual(['cloud-1']);
+});
+
+test('discards a Drive conflict only after the selected Drive scene opens successfully', async ({
+  page,
+}) => {
+  const cloud = await conflictingScene(page);
+  const downloadsBeforeOpen = [...cloud.downloads];
+  await page.getByRole('button', { name: 'Done', exact: true }).click();
+  const other = { ...cloud.files.get('cloud-1')!, id: 'cloud-2' };
+  await changeRemote(other, 'Another assembly');
+  cloud.files.set(other.id, other);
+
+  await driveButton(page).click();
+  const dialog = page.getByRole('dialog', { name: 'Google Drive', exact: true });
+  await dialog.getByRole('button', { name: 'Another assembly.kitbash' }).click();
+  await dialog.getByRole('button', { name: 'Open scene', exact: true }).click();
+  const discard = dialog.getByRole('button', { name: 'Discard and open scene', exact: true });
+  const mediaUrl = '**/drive/v3/files/cloud-2?alt=media';
+  await page.route(mediaUrl, (route) => route.fulfill({ status: 503, json: {} }));
+  await discard.click();
+  await expect(dialog.getByText(/temporarily unavailable/)).toBeVisible();
+  await expect(page.getByTitle('Rename assembly', { exact: true })).toContainText('Local assembly');
+  await expect(driveButton(page)).toHaveAccessibleName('Google Drive: Drive file changed');
+
+  await page.unroute(mediaUrl);
+  await discard.click();
+  await saved(page);
+  await expect(page.getByTitle('Rename assembly', { exact: true })).toContainText(
+    'Another assembly',
+  );
+  expect(cloud.downloads).toEqual([...downloadsBeforeOpen, 'cloud-2']);
+  expect(cloud.uploads).toEqual(['cloud-1']);
+});
 
 test('loads the cloud version directly from a conflict, with cancel leaving local edits intact', async ({
   page,
