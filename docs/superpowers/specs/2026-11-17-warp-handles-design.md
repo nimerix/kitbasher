@@ -332,8 +332,9 @@ inner ones are bound to, so pointer speed does not change stiffness; both ends a
 An area takes up to 32 face centres spread by farthest-point sampling at rest from the first hit,
 at least 4 and about half a node spacing apart; an area of fewer than 4 faces also offers a spot
 toward each corner of each face, so even one face has several samples and lifts a small plateau
-rather than a peak. A typical 8 mm line on a 32 mm torso has 25 to 35 samples; a 3 mm area there
-has about 3,000 faces and 32 samples.
+rather than a peak. On the 32 mm torso scan, a line drawn across the chest took 35 samples and one
+across the shoulder 10; an area painted on the chest took 3,300 to 3,500 faces and 32 samples, and one on
+the shoulder 1,501 faces and 13.
 
 **Footprint.** A line or an area moves as one the free nodes within 0.75 node spacings (each
 node's own) of the line through its samples in order, or of an area's samples, found by walking
