@@ -475,7 +475,7 @@ test('says the surface is still settling, and Apply waits for it to settle', asy
     const { useEditor } = await import(url);
     const w = window as unknown as { pressed: number[] | null; settled: number[] | null };
     const shown = () =>
-      Array.from(useEditor.getState().warp.preview.getAttribute('position').array);
+      Array.from(useEditor.getState().warp.preview.getAttribute('position').array) as number[];
     w.pressed = w.settled = null;
     document.addEventListener(
       'click',
