@@ -211,6 +211,46 @@ describe('a session’s own feather', () => {
   });
 });
 
+describe('the feather switch through undo', () => {
+  it('comes back with the layout undo restores, so laying the grid again changes nothing', async () => {
+    editor().setWarpFeather({ enabled: true, width: 1.75 });
+    const part = plate();
+    await layOn(part, disc(part.geometry, 8));
+    editor().addWarpPoint(hit(0.3, 0.2), faceAt(part.geometry, 0.3, 0.2));
+    editor().moveWarpPoints([{ id: session().points[0].id, target: [0.3, 0.2, 1] }], 'end');
+    finishWarpSettling();
+    const steps = session().undo.length;
+    // Turn the feather off and lay the grid again: a layout of its own.
+    editor().setWarpRegion('painted');
+    editor().setWarpFeather({ enabled: false });
+    expect(session().featherEdge.enabled).toBe(false);
+    await editor().layWarpGrid();
+    expect(session().model!.feather).toBeNull();
+
+    await editor().undoWarpEdit();
+    expect(session().model!.feather).toMatchObject({ width: 1.75 });
+    expect(session().featherEdge).toEqual({ enabled: true, width: 1.75 });
+    expect(session().undo).toHaveLength(steps);
+    finishWarpSettling();
+    const { model, undo } = session();
+    const surface = Array.from(session().output!.positions);
+    // Edit region, then Lay grid with nothing changed: no rebuild, no step, no movement.
+    editor().setWarpRegion('painted');
+    await editor().layWarpGrid();
+    finishWarpSettling();
+    expect(session().model).toBe(model);
+    expect(session().undo).toBe(undo);
+    expect(Array.from(session().output!.positions)).toEqual(surface);
+    // The page option still starts a new session as the user last set it.
+    expect(editor().warpFeather).toEqual({ enabled: false, width: 1.75 });
+    editor().cancelWarp();
+    editor().setTool('select');
+    useEditor.setState({ selected: [part.id] });
+    editor().setTool('warp');
+    expect(session().featherEdge).toEqual({ enabled: false, width: 1.75 });
+  });
+});
+
 describe('a feathered region painted wider', () => {
   it('carries the band the new paint covers at the surface the user saw', async () => {
     editor().setWarpFeather({ enabled: true, width: 7 });
