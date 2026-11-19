@@ -21,8 +21,9 @@ import {
   X,
 } from 'lucide-react';
 import { useEditor } from '../core/store';
-import { saveCurrentScene } from '../core/commands';
-import { flushDriveBeforeReplace } from '../core/drive-sync';
+import { downloadCurrentScene, saveCurrentScene } from '../core/commands';
+import { driveAutosave } from '../core/drive-sync';
+import type { SceneDocument } from '../core/types';
 import { bindingsFor, formatBindings } from '../core/keybindings';
 import type { KeyActionId } from '../core/keybindings';
 import { usePreferences } from '../core/preferences';
@@ -763,41 +764,139 @@ function HelpDialog() {
   );
 }
 
-function NewDialog() {
-  const create = async (sample: boolean) => {
-    if (!(await flushDriveBeforeReplace())) return;
-    useEditor
-      .getState()
-      .setScene(sample ? createSample() : { name: 'Untitled assembly', parts: [], joints: [] });
+type SceneTarget = SceneDocument | 'empty' | 'sample';
+
+export function ReplaceSceneDialog({
+  scene,
+  onClose,
+}: {
+  scene?: SceneDocument;
+  onClose: () => void;
+}) {
+  const busy = useEditor((state) => state.busy);
+  const [checking, setChecking] = useState(false);
+  const [discard, setDiscard] = useState<{ target: SceneTarget; epoch: number } | null>(null);
+  const cancelButton = useRef<HTMLButtonElement>(null);
+  const dismissed = useRef(false);
+
+  useEffect(() => {
+    dismissed.current = false;
+    return () => {
+      dismissed.current = true;
+    };
+  }, []);
+  useEffect(() => {
+    if (discard) cancelButton.current?.focus();
+  }, [discard]);
+
+  const replace = (target: SceneTarget) => {
+    const state = useEditor.getState();
+    const next =
+      target === 'empty'
+        ? { name: 'Untitled assembly', parts: [], joints: [] }
+        : target === 'sample'
+          ? createSample()
+          : target;
+    state.setScene(next);
+    if (scene) state.notify('Scene opened');
+    onClose();
   };
+  const requestReplace = async (target: SceneTarget) => {
+    const epoch = useEditor.getState().sceneEpoch;
+    setChecking(true);
+    try {
+      const saved = await driveAutosave.flush();
+      if (dismissed.current || useEditor.getState().sceneEpoch !== epoch) return;
+      if (saved) replace(target);
+      else setDiscard({ target, epoch });
+    } finally {
+      setChecking(false);
+    }
+  };
+  const close = () => {
+    dismissed.current = true;
+    onClose();
+  };
+
   return (
     <Modal
-      title="Start something new."
-      subtitle="Save your current assembly before opening a fresh workbench."
-      onClose={() => useEditor.getState().setModal(null)}
+      title={scene ? `Open ${scene.name}?` : 'Start something new.'}
+      subtitle={
+        checking
+          ? 'Saving the current scene to Drive…'
+          : discard
+            ? undefined
+            : scene
+              ? 'This replaces the current workbench. Save a scene copy if you want to keep it.'
+              : 'Save a copy if you want to keep your current assembly.'
+      }
+      onClose={close}
     >
-      <div className="new-options">
-        <button onClick={() => create(false)}>
-          <Plus size={25} />
-          <strong>Empty assembly</strong>
-          <span>A clean space for your own parts.</span>
-          <ArrowRight size={17} />
-        </button>
-        <button onClick={() => create(true)}>
-          <Box size={25} />
-          <strong>Scout · MK.04</strong>
-          <span>Explore the editable sample assembly.</span>
-          <ArrowRight size={17} />
-        </button>
-      </div>
+      {discard ? (
+        <p role="alert" className="drive-open-confirmation">
+          Changes to the current scene that haven’t been saved to Drive will be discarded.
+        </p>
+      ) : scene ? (
+        <div className="open-scene-summary">
+          <FolderOpen size={29} />
+          <div>
+            <strong>
+              {scene.parts.length} parts · {scene.joints.length} joints
+            </strong>
+            <p>All geometry, placement, and joint constraints will be restored.</p>
+          </div>
+        </div>
+      ) : (
+        <div className="new-options">
+          <button disabled={checking} onClick={() => void requestReplace('empty')}>
+            <Plus size={25} />
+            <strong>Empty assembly</strong>
+            <span>A clean space for your own parts.</span>
+            <ArrowRight size={17} />
+          </button>
+          <button disabled={checking} onClick={() => void requestReplace('sample')}>
+            <Box size={25} />
+            <strong>Scout · MK.04</strong>
+            <span>Explore the editable sample assembly.</span>
+            <ArrowRight size={17} />
+          </button>
+        </div>
+      )}
       <div className="modal-footer">
-        <button className="button secondary" onClick={() => useEditor.getState().setModal(null)}>
-          Cancel
+        {discard || !scene ? (
+          <button ref={cancelButton} className="button secondary" onClick={close}>
+            Cancel
+          </button>
+        ) : null}
+        <button
+          className="button secondary"
+          disabled={checking || !!busy}
+          onClick={discard ? downloadCurrentScene : saveCurrentScene}
+        >
+          {!scene || discard ? <ArrowDownToLine size={14} /> : null}
+          {discard ? 'Download scene copy' : 'Save current scene'}
         </button>
-        <button className="button secondary" onClick={saveCurrentScene}>
-          <ArrowDownToLine size={14} />
-          Save current scene
-        </button>
+        {discard ? (
+          <button
+            className="button primary"
+            disabled={!!busy}
+            onClick={() => {
+              if (useEditor.getState().sceneEpoch === discard.epoch) replace(discard.target);
+              else onClose();
+            }}
+          >
+            {scene ? 'Discard and open scene' : 'Discard and start new'}
+          </button>
+        ) : scene ? (
+          <button
+            className="button primary"
+            disabled={checking}
+            onClick={() => void requestReplace(scene)}
+          >
+            Open scene
+            <ArrowRight size={14} />
+          </button>
+        ) : null}
       </div>
     </Modal>
   );
@@ -810,7 +909,8 @@ export function Dialogs({ importFiles }: { importFiles: File[] }) {
   if (modal === 'merge') return <MergeDialog />;
   if (modal === 'mesh') return <MeshProcessingDialog />;
   if (modal === 'help') return <HelpDialog />;
-  if (modal === 'new') return <NewDialog />;
+  if (modal === 'new')
+    return <ReplaceSceneDialog onClose={() => useEditor.getState().setModal(null)} />;
   if (modal === 'rename') return <RenameDialog />;
   return null;
 }

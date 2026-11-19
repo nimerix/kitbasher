@@ -1,7 +1,6 @@
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react';
 import {
   ArrowDownToLine,
-  ArrowRight,
   Box,
   BookOpen,
   Check,
@@ -56,10 +55,9 @@ import {
   editorCommands,
   executeEditorCommand,
   redoAvailable,
-  saveCurrentScene,
   undoAvailable,
 } from './core/commands';
-import { driveAutosave, flushDriveBeforeReplace, useDrive } from './core/drive-sync';
+import { driveAutosave, useDrive } from './core/drive-sync';
 import { DriveButton, GoogleDriveDialog } from './components/GoogleDrive';
 import { ActivityCenter, NotificationToasts } from './components/ActivityCenter';
 import { WhatsNew } from './components/WhatsNew';
@@ -73,8 +71,8 @@ import { PreferencesPanel } from './components/PreferencesPanel';
 import { PartsPanel } from './components/PartsPanel';
 import { Inspector } from './components/Inspector';
 import { moveSteps, rotationSteps } from './components/TransformAdjustments';
-import { Dialogs } from './components/Dialogs';
-import { IconButton, Keyboard, Logo, Modal, NumericInput, useDismiss } from './components/ui';
+import { Dialogs, ReplaceSceneDialog } from './components/Dialogs';
+import { IconButton, Keyboard, Logo, NumericInput, useDismiss } from './components/ui';
 import { clipLimits } from './core/clipping';
 import { partColorModes } from './core/appearance';
 import type { SceneDocument } from './core/types';
@@ -729,7 +727,8 @@ export default function App() {
     [right, setRight] = useState(() => window.innerWidth > 1050),
     [dragging, setDragging] = useState(false),
     [importFiles, setImportFiles] = useState<File[]>([]),
-    [pendingScene, setPendingScene] = useState<SceneDocument | null>(null);
+    [pendingScene, setPendingScene] = useState<{ scene: SceneDocument; id: number } | null>(null);
+  const openRequestId = useRef(0);
   const fileInput = useRef<HTMLInputElement>(null),
     dragDepth = useRef(0);
   const tool = useEditor((s) => s.tool),
@@ -817,11 +816,10 @@ export default function App() {
     if (files.length === 1 && files[0].name.toLowerCase().endsWith('.kitbash')) {
       editor.setBusy('Opening scene…');
       try {
-        setPendingScene(
-          await readSceneFile(files[0], (fraction) =>
-            editor.setBusy(`Opening scene… ${Math.round(fraction * 100)}%`),
-          ),
+        const scene = await readSceneFile(files[0], (fraction) =>
+          editor.setBusy(`Opening scene… ${Math.round(fraction * 100)}%`),
         );
+        setPendingScene({ scene, id: ++openRequestId.current });
       } catch (error) {
         editor.notify((error as Error).message, 'error');
       } finally {
@@ -1031,38 +1029,11 @@ export default function App() {
       />
       <GoogleDriveDialog />
       {pendingScene ? (
-        <Modal
-          title={`Open ${pendingScene.name}?`}
-          subtitle="This replaces the current workbench. Save a scene copy if you want to keep it."
+        <ReplaceSceneDialog
+          key={pendingScene.id}
+          scene={pendingScene.scene}
           onClose={() => setPendingScene(null)}
-        >
-          <div className="open-scene-summary">
-            <FolderOpen size={29} />
-            <div>
-              <strong>
-                {pendingScene.parts.length} parts · {pendingScene.joints.length} joints
-              </strong>
-              <p>All geometry, placement, and joint constraints will be restored.</p>
-            </div>
-          </div>
-          <div className="modal-footer">
-            <button className="button secondary" onClick={saveCurrentScene}>
-              Save current scene
-            </button>
-            <button
-              className="button primary"
-              onClick={async () => {
-                if (!(await flushDriveBeforeReplace())) return;
-                useEditor.getState().setScene(pendingScene);
-                setPendingScene(null);
-                useEditor.getState().notify('Scene opened');
-              }}
-            >
-              Open scene
-              <ArrowRight size={14} />
-            </button>
-          </div>
-        </Modal>
+        />
       ) : null}
       <EditorContextMenu openScene={openScene} searchParts={searchParts} />
       {dragging ? (

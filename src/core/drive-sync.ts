@@ -379,18 +379,6 @@ export class DriveAutosave {
 
 export const driveAutosave = new DriveAutosave();
 
-export async function flushDriveBeforeReplace() {
-  if (await driveAutosave.flush()) return true;
-  useDrive.setState({ dialogOpen: true });
-  useEditor
-    .getState()
-    .notify(
-      'The current scene has not reached Drive. Retry saving, or download a copy and stop autosave before replacing it.',
-      'error',
-    );
-  return false;
-}
-
 export function stopDriveAutosave() {
   useEditor.setState({ driveFile: null });
 }
@@ -410,9 +398,11 @@ export async function saveNewDriveScene() {
 }
 
 export async function openDriveScene(id: string, discardLocal = false) {
-  if (!discardLocal && !(await flushDriveBeforeReplace())) return false;
+  const epoch = useEditor.getState().sceneEpoch;
+  if (!discardLocal && !(await driveAutosave.flush())) return false;
   return driveAutosave.whilePaused(async () => {
     const state = useEditor.getState();
+    if (state.sceneEpoch !== epoch) return false;
     state.setBusy('Opening scene from Google Drive…');
     try {
       const { scene, file } = await googleDrive.open(id);
