@@ -1262,18 +1262,6 @@ export interface WarpDetail {
   delta: Float64Array;
 }
 
-// With one fully engaged point, its unrotated guide field is linear in the drag offset.
-// Each component uses the same scalar vertex response, even when the drag changes direction.
-const pointDetails = new WeakMap<
-  WarpReach,
-  {
-    model: WarpModel;
-    falloff: number;
-    vertices: Uint32Array;
-    gain: Float64Array;
-  }
->();
-
 /**
  * The bend the moved handles' guides ask for, as the surface between grid nodes should take it.
  * The guides set each node's target from its distance to the handle; skinning then interpolates
@@ -1312,37 +1300,53 @@ export function warpDetail(
       for (const { face } of handle.samples)
         for (let c = 0; c < 3; c++)
           corners.add(model.region.weldOf[model.index?.[face * 3 + c] ?? face * 3 + c]);
-    return buildWarpDetail(model, guiding, exact, carry, false, corners);
+    return buildWarpDetail(model, guiding, exact, carry, corners);
   }
+  // A single point with no exact targets has the same held nodes in every direction.
   const point = guiding[0];
+  const cached = selectionBases.get(model);
   if (
     guiding.length === 1 &&
     point.kind === 'point' &&
     motionOf(point) === 1 &&
+    cached?.freePoint &&
+    point.reach === cached.reaches[0] &&
+    point.falloff === cached.falloffs[0] &&
     Array.isArray(exact) &&
-    exact.length === 0
+    !exact.length
   ) {
-    const reach = point.reach!;
     const share = carry?.get(point) ?? 1;
     if (!share) return undefined;
-    let cached = pointDetails.get(reach);
-    if (!cached || cached.model !== model || cached.falloff !== point.falloff) {
-      const unit = buildWarpDetail(model, guiding, exact, carry, true);
-      const vertices = unit?.vertices ?? new Uint32Array();
-      const gain = Float64Array.from(vertices, (_, i) => unit!.delta[i * 3]);
-      cached = { model, falloff: point.falloff, vertices, gain };
-      pointDetails.set(reach, cached);
-    }
-    if (!cached.vertices.length) return undefined;
-    const offset = handleOffset(point);
-    const delta = new Float64Array(cached.vertices.length * 3);
-    for (let i = 0; i < cached.vertices.length; i++) {
-      const gain = share * cached.gain[i];
-      for (let a = 0; a < 3; a++) delta[i * 3 + a] = gain * offset[a];
-    }
-    return { vertices: cached.vertices, delta };
+    return applyBasis(cached.detail, [handleOffset(point).map((x) => x * share) as Vec3]);
   }
   return buildWarpDetail(model, guiding, exact, carry);
+}
+
+// Three independent scalar responses fit in the x, y and z components of one skinning
+// pass. Keep the last set per model while a selection of handles moves together.
+interface DetailBasis {
+  freePoint: boolean;
+  reaches: WarpReach[];
+  falloffs: number[];
+  held: Uint8Array;
+  detail: WarpDetail;
+}
+
+const selectionBases = new WeakMap<WarpModel, DetailBasis>();
+
+function applyBasis(basis: WarpDetail, offsets: Vec3[]): WarpDetail {
+  const { vertices, delta: gains } = basis;
+  const delta = new Float64Array(gains.length);
+  for (let h = 0; h < offsets.length; h++) {
+    const [x, y, z] = offsets[h];
+    for (let i = 0; i < delta.length; i += 3) {
+      const gain = gains[i + h];
+      delta[i] += gain * x;
+      delta[i + 1] += gain * y;
+      delta[i + 2] += gain * z;
+    }
+  }
+  return { vertices, delta };
 }
 
 function buildWarpDetail(
@@ -1350,7 +1354,6 @@ function buildWarpDetail(
   guiding: readonly WarpHandle[],
   exact: Iterable<number>,
   carry: ReadonlyMap<WarpHandle, number> | undefined,
-  unitPoint = false,
   candidates: Iterable<number> = model.region.interior,
 ): WarpDetail | undefined {
   const { grid, restNodes, restWorld, binding } = model;
@@ -1359,7 +1362,6 @@ function buildWarpDetail(
   // only the distance turns between nodes.
   const profiles = guiding.map((handle) => {
     const p = guideProfile(handle, border, carry);
-    if (unitPoint) p.offset = [1, 0, 0];
     const { reach } = p;
     const share: [number, number] = [0, 0];
     for (let i = 0; i < reach.node.length; i++) {
@@ -1415,39 +1417,22 @@ function buildWarpDetail(
   // Each node's guided displacement.
   const indices = profiles.map(({ reach }) => reachIndex(reach));
   const guided = new Float64Array(count * 3);
-  for (let n = 0; n < count; n++) {
-    let any = false;
-    for (let h = 0; h < H; h++) {
-      const i = indices[h][n];
-      weightAt[h] = i < 0 ? 0 : profiles[h].weight[i];
-      profileAtH[h] = i < 0 ? 0 : profiles[h].profile[i];
-      releaseAt[h] = i < 0 ? 0 : profiles[h].reach.release[i];
-      any ||= i >= 0;
-    }
-    if (any) displacement(guided, n * 3);
-  }
-
-  // Nodes whose guided displacement differs from a neighbour's, and the ring beside them: a
-  // vertex bound only to nodes outside these sees an even profile.
-  const { edgeStart, edges } = grid;
-  const turning = new Uint8Array(count);
-  for (let n = 0; n < count; n++)
-    for (let e = edgeStart[n]; e < edgeStart[n + 1]; e++) {
-      const j = edges[e];
-      if (
-        Math.abs(guided[n * 3] - guided[j * 3]) +
-          Math.abs(guided[n * 3 + 1] - guided[j * 3 + 1]) +
-          Math.abs(guided[n * 3 + 2] - guided[j * 3 + 2]) >
-        1e-9
-      ) {
-        turning[n] = 1;
-        break;
+  const writeGuided = () => {
+    for (let n = 0; n < count; n++) {
+      let any = false;
+      for (let h = 0; h < H; h++) {
+        const i = indices[h][n];
+        weightAt[h] = i < 0 ? 0 : profiles[h].weight[i];
+        profileAtH[h] = i < 0 ? 0 : profiles[h].profile[i];
+        releaseAt[h] = i < 0 ? 0 : profiles[h].reach.release[i];
+        any ||= i >= 0;
       }
+      if (any) displacement(guided, n * 3);
     }
-  const near = turning.slice();
-  for (let n = 0; n < count; n++)
-    if (turning[n]) for (let e = edgeStart[n]; e < edgeStart[n + 1]; e++) near[edges[e]] = 1;
+  };
+  writeGuided();
 
+  const { edgeStart, edges } = grid;
   // Where something other than the profile holds the surface: a moved line's or area's samples'
   // nodes, a line's path nodes, whose share comes from the path rather than the distance, and the
   // exact nodes. A moved point's own nodes are not among them: its profile is centred there.
@@ -1480,6 +1465,50 @@ function buildWarpDetail(
       }
     }
   });
+  // Once fully engaged, the blend weights stay fixed as targets move. Its only
+  // offset-dependent boundary is the set of held nodes, which we have just measured.
+  const offsets =
+    candidates === model.region.interior && H <= 3 && profiles.every((p) => p.motion === 1)
+      ? profiles.map((p) => p.offset)
+      : undefined;
+  if (offsets) {
+    const cached = selectionBases.get(model);
+    if (
+      cached &&
+      cached.reaches.length === H &&
+      profiles.every(
+        (p, h) => p.reach === cached.reaches[h] && p.handle.falloff === cached.falloffs[h],
+      ) &&
+      held.every((x, n) => x === cached.held[n])
+    )
+      return applyBasis(cached.detail, offsets);
+    profiles.forEach((p, h) => {
+      p.offset = [0, 0, 0];
+      p.offset[h] = 1;
+    });
+    writeGuided();
+  }
+
+  // Nodes whose guided displacement differs from a neighbour's, and the ring beside them: a
+  // vertex bound only to nodes outside these sees an even profile.
+  const turning = new Uint8Array(count);
+  for (let n = 0; n < count; n++)
+    for (let e = edgeStart[n]; e < edgeStart[n + 1]; e++) {
+      const j = edges[e];
+      if (
+        Math.abs(guided[n * 3] - guided[j * 3]) +
+          Math.abs(guided[n * 3 + 1] - guided[j * 3 + 1]) +
+          Math.abs(guided[n * 3 + 2] - guided[j * 3 + 2]) >
+        1e-9
+      ) {
+        turning[n] = 1;
+        break;
+      }
+    }
+  const near = turning.slice();
+  for (let n = 0; n < count; n++)
+    if (turning[n]) for (let e = edgeStart[n]; e < edgeStart[n + 1]; e++) near[edges[e]] = 1;
+
   // Each node's share of the detail: none on those nodes, rising smoothly to all of it
   // `detailRings` rings of grid nodes from them, so the detail fades out instead of stopping short.
   const hops = new Uint8Array(count).fill(detailRings);
@@ -1615,7 +1644,16 @@ function buildWarpDetail(
     vertices.push(v);
     delta.push(dx, dy, dz);
   }
-  return { vertices: Uint32Array.from(vertices), delta: Float64Array.from(delta) };
+  const detail = { vertices: Uint32Array.from(vertices), delta: Float64Array.from(delta) };
+  if (!offsets) return detail;
+  selectionBases.set(model, {
+    freePoint: H === 1 && guiding[0].kind === 'point' && Array.isArray(exact) && !exact.length,
+    detail,
+    held,
+    reaches: profiles.map((p) => p.reach),
+    falloffs: profiles.map((p) => p.handle.falloff),
+  });
+  return applyBasis(detail, offsets);
 }
 
 const shownDetails = new WeakMap<WarpOutput, WarpDetail | undefined>();
