@@ -255,7 +255,7 @@ describe('free transform on warp control points', () => {
     return warp().points.at(-1)!.id;
   };
 
-  /** Lays a grid over a whole plate and adds two selected points on it. */
+  /** Lays a grid over a whole plate and adds two selected points on it: three session steps. */
   async function warpPlate() {
     const plate = part('plate', { geometry: new PlaneGeometry(40, 40, 16, 16) });
     state().setScene({ name: 'Warp', parts: [plate], joints: [] });
@@ -295,7 +295,7 @@ describe('free transform on warp control points', () => {
   it('free move on points confirms one session undo step and cancel restores', async () => {
     const [a, b] = await warpPlate();
     const { scene, past, revision } = state();
-    expect(warp().undo).toHaveLength(2);
+    expect(warp().undo).toHaveLength(3);
 
     const lift = freeLift();
     expect(state().tool).toBe('warp');
@@ -303,12 +303,12 @@ describe('free transform on warp control points', () => {
     lift(10);
     expect(distance(targets()[0]!, [-4, 0, 2])).toBeLessThan(1e-6);
     expect(distance(targets()[1]!, [4, 0, 2])).toBeLessThan(1e-6);
-    expect(warp().undo).toHaveLength(2);
+    expect(warp().undo).toHaveLength(3);
     state().finishFreeTransform(true);
     expect(state().freeTransform).toBeNull();
     expect(state().tool).toBe('warp');
     // The whole gesture is one session step, holding the points from before it.
-    expect(warp().undo).toHaveLength(3);
+    expect(warp().undo).toHaveLength(4);
     expect(
       warp()
         .undo.at(-1)!
@@ -329,7 +329,7 @@ describe('free transform on warp control points', () => {
     state().finishFreeTransform(false);
     expect(state().freeTransform).toBeNull();
     expect(warp().points).toEqual(settled);
-    expect(warp().undo).toHaveLength(3);
+    expect(warp().undo).toHaveLength(4);
     const output = warp().output!.positions;
     expect(Math.max(...surface.map((value, i) => Math.abs(value - output[i])))).toBeLessThan(0.01);
     expect(state().scene).toBe(scene);
@@ -339,7 +339,7 @@ describe('free transform on warp control points', () => {
     const c = add(0, 6);
     const added = warp().points;
     state().moveWarpPoints([{ id: a, target: [-4, 0, 1] }], 'end');
-    expect(warp().undo).toHaveLength(5);
+    expect(warp().undo).toHaveLength(6);
     expect(warp().undo.at(-1)!.points).toEqual(added);
     state().undoWarpEdit();
     expect(targets()).toEqual(added.map((point) => point.target));
@@ -354,12 +354,12 @@ describe('free transform on warp control points', () => {
     lift(-20);
     state().finishFreeTransform(true);
     expect(warp().points).toEqual(before);
-    expect(warp().undo).toHaveLength(2);
+    expect(warp().undo).toHaveLength(3);
     // Confirming without any movement adds none either.
     freeLift();
     state().finishFreeTransform(true);
     expect(warp().points).toEqual(before);
-    expect(warp().undo).toHaveLength(2);
+    expect(warp().undo).toHaveLength(3);
   });
 
   it('refuses a free move with no point selected and keeps the session', async () => {
@@ -381,7 +381,7 @@ describe('free transform on warp control points', () => {
     expect(state().freeTransform).toBeNull();
     expect(state().warp).not.toBeNull();
     expect(warp().points).toEqual(before);
-    expect(warp().undo).toHaveLength(2);
+    expect(warp().undo).toHaveLength(3);
     add(0, 6);
     const added = warp().points;
     state().moveWarpPoints([{ id: a, target: [-4, 0, 1] }], 'end');

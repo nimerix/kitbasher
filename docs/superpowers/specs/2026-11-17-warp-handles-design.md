@@ -219,7 +219,8 @@ samples at most 0.0027 mm, where the seam had moved them 0.78 and 0.72 mm.
 ### 4. Radius and falloff
 
 Every handle has a **radius** in mm and a **falloff** from 0 to 100 %, edited in the Control
-points section for the selected handles. New handles take the last values set. Until the user
+points section for the selected handles. New handles take the last values set; with nothing
+selected, setting one is a session undo step of its own. Until the user
 sets a radius, a new point takes the larger of 6 % of the part's size and 4.5 node spacings
 where it is clicked, no more than a quarter of the region's extent. Radius 0 is a bare point;
 automatic points are radius 0. Effectively whole regions are laid at the 2,000-node level and

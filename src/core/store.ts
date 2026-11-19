@@ -294,7 +294,13 @@ export interface WarpSession {
  */
 type WarpEdit = Pick<
   WarpSession,
-  'points' | 'gapTargets' | 'gapHeld' | 'surface' | 'pointRadius' | 'pointFalloff'
+  | 'points'
+  | 'selectedPoints'
+  | 'gapTargets'
+  | 'gapHeld'
+  | 'surface'
+  | 'pointRadius'
+  | 'pointFalloff'
 > & {
   /** On the step a new grid records: the grid it undoes to, rebuilt when it is undone. */
   grid?: WarpGridStep;
@@ -866,6 +872,7 @@ export const isWarpDragging = () =>
 
 const warpEdit = (warp: WarpSession): WarpEdit => ({
   points: warp.points,
+  selectedPoints: warp.selectedPoints,
   gapTargets: warp.gapTargets,
   gapHeld: warp.gapHeld ?? 0,
   surface: warp.model && warp.state ? settledOf(warp) : warp.surface,
@@ -1376,7 +1383,7 @@ function restoreWarp(scene: SceneDocument, warp: WarpSession, step: WarpEdit): W
     ...warp,
     ...step,
     surface: warp.surface,
-    selectedPoints: warp.selectedPoints.filter((id) => kept.has(id)),
+    selectedPoints: step.selectedPoints.filter((id) => kept.has(id)),
   };
   const { model } = warp;
   const { surface } = step;
@@ -2691,7 +2698,7 @@ export const useEditor = create<EditorState>((set, get) => ({
     if (falloff !== undefined && Number.isFinite(falloff))
       settings.pointFalloff = Math.min(1, Math.max(0, falloff));
     const selected = new Set(warp.selectedPoints);
-    if (!model || warp.stage !== 'warp' || !warp.points.some((point) => selected.has(point.id))) {
+    if (!model || warp.stage !== 'warp') {
       set({ warp: { ...warp, ...settings } });
       return;
     }
@@ -2716,9 +2723,11 @@ export const useEditor = create<EditorState>((set, get) => ({
         ? { ...next, baseline: surface }
         : next;
     });
-    // Settings that leave every point as it was settle nothing.
-    if (!continuing && points.every((point, i) => point === warp.points[i])) {
+    // Settings that leave every point as it was settle nothing. With none selected they are what
+    // new points take, a step of their own.
+    if ((!continuing || !start.size) && points.every((point, i) => point === warp.points[i])) {
       const next = { ...warp, ...settings };
+      if (!start.size) warpDrag = gesture === 'drag' ? { model, before, settings: start } : null;
       set({
         warp:
           gesture === 'end' && !sameEdit(before, warpEdit(next))
