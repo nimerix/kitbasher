@@ -2,10 +2,13 @@ import type { Vec3 } from './types';
 import { bindTrianglePoint, warpBindingNodes, type WarpPointBinding } from './warp-bind';
 import type { WarpGrid } from './warp-grid';
 import { isPaintedNode, type WarpModel } from './warp-model';
-import { regionTriangleOf, WarpRole } from './warp-region';
-import { deformPoint } from './warp-evaluate';
+import { regionTriangleOf } from './warp-region';
+import { deformPoint, skinnedWorldPositions } from './warp-evaluate';
 import {
+  modelledResponse,
+  responseShrink,
   warpNodeStiffness,
+  warpResponse,
   type WarpConstraint,
   type WarpGuides,
   type WarpState,
@@ -170,6 +173,7 @@ export function handleConstraints(
   model?: WarpModel,
   guides?: WarpGuides,
   exact: Iterable<number> = [],
+  carry?: ReadonlyMap<WarpHandle, number>,
 ): WarpConstraint[] {
   const riding =
     !!model &&
@@ -178,7 +182,8 @@ export function handleConstraints(
   const constraints: WarpConstraint[] = [];
   const owner: number[] = [];
   handles.forEach((handle, h) => {
-    const offset = handleOffset(handle);
+    const share = carry?.get(handle) ?? 1;
+    const offset = handleOffset(handle).map((value) => share * value) as Vec3;
     const rides = riding && untouchedAuto(handle);
     for (const sample of handle.samples) {
       const ride = rides ? rideOffset(model!, guides!, handle.baseline, sample.binding) : null;
@@ -191,7 +196,7 @@ export function handleConstraints(
             ? ride
               ? [sample.pin[0] + ride[0], sample.pin[1] + ride[1], sample.pin[2] + ride[2]]
               : sample.pin
-            : samePosition(sample.pin, handle.pin)
+            : share === 1 && samePosition(sample.pin, handle.pin)
               ? handle.target
               : [sample.pin[0] + offset[0], sample.pin[1] + offset[1], sample.pin[2] + offset[2]],
       });
@@ -209,6 +214,20 @@ export function handleConstraints(
   });
   const fixed = model?.grid.fixed;
   const edgeStart = model?.grid.edgeStart;
+  // The free nodes moved handles' samples are bound to, and those beside them: a pin the user
+  // placed there holds as firmly as the handle pulls.
+  const grabbed = new Set<number>();
+  if (model)
+    for (const handle of handles) {
+      if (handle.target === null) continue;
+      for (const { binding } of handle.samples)
+        for (const n of binding.node) {
+          if (fixed![n]) continue;
+          grabbed.add(n);
+          for (let e = edgeStart![n]; e < edgeStart![n + 1]; e++)
+            if (!fixed![model.grid.edges[e]]) grabbed.add(model.grid.edges[e]);
+        }
+    }
   constraints.forEach((constraint, c) => {
     const handle = handles[owner[c]];
     if (untouchedAuto(handle)) return;
@@ -218,13 +237,13 @@ export function handleConstraints(
     const own = reach?.grid === model?.grid ? reach?.node.subarray(0, reach.own) : undefined;
     // A moved point lands; a line or an area does by moving its footprint as one, and many stiff
     // samples on the same nodes would only slow the solve. Otherwise a sample outranks fully on
-    // shared nodes, and under guides by how firmly they hold its nodes, so the surface stays
-    // continuous as a radius reaches them.
+    // shared nodes, a pin also beside a moved handle's nodes, and under guides by how firmly they
+    // hold its nodes, so the surface stays continuous as a radius reaches them.
     let contest = handle.target !== null && handle.samples.length === 1 ? 1 : 0;
     for (let k = 0; k < node.length && contest < 1; k++) {
       const n = node[k];
       if (fixed?.[n]) continue;
-      if (held.get(n) === -1) contest = 1;
+      if (held.get(n) === -1 || (handle.target === null && grabbed.has(n))) contest = 1;
       else if (guides && edgeStart && !own?.includes(n)) {
         const g = guideIndex(guides, n);
         if (g >= 0)
@@ -643,6 +662,7 @@ export function warpGuides(
   model: WarpModel,
   handles: readonly WarpHandle[],
   exact: Iterable<number> = [],
+  carry?: ReadonlyMap<WarpHandle, number>,
 ): WarpGuides | undefined {
   const { grid } = model;
   const guiding = handles.filter(
@@ -682,7 +702,9 @@ export function warpGuides(
       weight[i] = reach.activation * w;
       profile[i] = reach.activation * ((1 - motion) * w + motion * held);
     }
-    return { handle, reach, weight, profile, motion, offset: handleOffset(handle) };
+    const share = carry?.get(handle) ?? 1;
+    const offset = handleOffset(handle).map((value) => share * value) as Vec3;
+    return { handle, reach, weight, profile, motion, offset };
   });
   // The two largest driving weights at each node, and whose the largest is.
   const first = new Float64Array(count),
@@ -735,6 +757,130 @@ export function warpGuides(
   return guides;
 }
 
+/**
+ * How far any grid node may move, per mm a grab travels, when the grab is bound partly to fixed
+ * nodes or would move a pin the user placed: past this it stops short instead of overdriving the
+ * few free nodes it has.
+ */
+export const warpCarryLimit = 1.25;
+/**
+ * How far apart the ends of a grid edge against the fixed edge, or against a pin that must hold,
+ * may move, as a share of its rest length, under a grab held back that way. Steeper, and the
+ * scan's relief folds.
+ */
+export const warpCreaseStrain = 1;
+/** The least share of its determinant a node map beside such an edge or pin keeps under it. */
+export const warpMapFloor = 0.5;
+/** How far a moved handle may move a stationary pin the user placed, mm. */
+export const warpPinHold = 0.005;
+
+/** Share of a binding's weight on free nodes. */
+const freeShare = (binding: WarpPointBinding, fixed: Uint8Array) =>
+  binding.node.reduce((sum, n, k) => sum + (fixed[n] ? 0 : binding.weight[k]), 0);
+
+/**
+ * The share of its offset each moved handle can carry, for the handles that must stop short: those
+ * bound partly to fixed nodes, and those that would move a stationary pin the user placed. From
+ * the solve's linear response to the handle's travel with rotations held, a handle carries as far
+ * as keeps every node within `warpCarryLimit` of its travel, the pins within `warpPinHold`, the
+ * edges against the fixed nodes, and against those pins, within `warpCreaseStrain`, and the node
+ * maps beside them above `warpMapFloor`. `constraints` and `guides` are what the solve is given,
+ * the handles' constraints first in order. Handles on fully free surface with no pin they would
+ * move are never in the map.
+ */
+export function handleCarry(
+  model: WarpModel,
+  handles: readonly WarpHandle[],
+  constraints: WarpConstraint[],
+  guides: WarpGuides | undefined,
+  exact: Iterable<number> = [],
+): Map<WarpHandle, number> {
+  const carry = new Map<WarpHandle, number>();
+  const { grid, restNodes } = model;
+  const { fixed, edgeStart, edges } = grid;
+  const first: number[] = [];
+  let count = 0;
+  for (const handle of handles) {
+    first.push(count);
+    count += handle.samples.length;
+  }
+  const pins = handles.flatMap((handle, h) => (handle.target === null && !handle.auto ? [h] : []));
+  handles.forEach((handle, h) => {
+    if (handle.target === null) return;
+    const offset = handleOffset(handle);
+    const travel = Math.hypot(offset[0], offset[1], offset[2]);
+    if (!(travel > 0)) return;
+    const held = handle.samples.some(({ binding }) => freeShare(binding, fixed) < 1 - 1e-9);
+    // The pins its constraints fight directly: bound to its nodes or beside them.
+    const near = new Set<number>();
+    for (const { binding } of handle.samples)
+      for (const n of binding.node) {
+        near.add(n);
+        for (let e = edgeStart[n]; e < edgeStart[n + 1]; e++) near.add(edges[e]);
+      }
+    const close = pins.filter((p) =>
+      handles[p].samples.some(({ binding }) => binding.node.some((n) => near.has(n))),
+    );
+    if (!held && !close.length) return;
+    const share = new Float64Array(constraints.length);
+    for (let s = 0; s < handle.samples.length; s++) share[first[h] + s] = 1;
+    let guideShare: Float64Array | undefined;
+    if (guides && handleGuides(handle)) {
+      const without = warpGuides(model, handles, exact, new Map([[handle, 0]]));
+      if (without && without.node.length === guides.node.length) {
+        guideShare = new Float64Array(guides.node.length);
+        for (let g = 0; g < guideShare.length; g++) {
+          let along = 0;
+          for (let a = 0; a < 3; a++)
+            along += (guides.target[g * 3 + a] - without.target[g * 3 + a]) * offset[a];
+          guideShare[g] = along / (travel * travel);
+        }
+      }
+    }
+    const response = warpResponse(grid, restNodes, constraints, guides, share, guideShare);
+    let pinned = 0;
+    for (const p of close)
+      for (let s = 0; s < handles[p].samples.length; s++)
+        pinned = Math.max(
+          pinned,
+          Math.abs(modelledResponse(grid, restNodes, constraints[first[p] + s], response)),
+        );
+    const pulls = pinned * travel > warpPinHold;
+    if (!held && !pulls) return;
+    // What holds the surface still: the fixed nodes and, when they must hold, the pins' nodes.
+    const anchored = pulls ? fixed.slice() : fixed;
+    if (pulls)
+      for (const p of close)
+        for (const { binding } of handles[p].samples) for (const n of binding.node) anchored[n] = 1;
+    // How far nodes move, and how steeply the edges against what holds still rise, per mm.
+    let largest = 0,
+      strain = 0;
+    for (let n = 0; n < response.length; n++) {
+      largest = Math.max(largest, Math.abs(response[n]));
+      if (fixed[n]) continue;
+      for (let e = edgeStart[n]; e < edgeStart[n + 1]; e++) {
+        const j = edges[e];
+        if (!anchored[j] || anchored[n]) continue;
+        const length = Math.hypot(
+          restNodes[n * 3] - restNodes[j * 3],
+          restNodes[n * 3 + 1] - restNodes[j * 3 + 1],
+          restNodes[n * 3 + 2] - restNodes[j * 3 + 2],
+        );
+        if (length > 0) strain = Math.max(strain, Math.abs(response[n] - response[j]) / length);
+      }
+    }
+    let carried = largest > warpCarryLimit ? warpCarryLimit / largest : 1;
+    if (strain * travel > warpCreaseStrain)
+      carried = Math.min(carried, warpCreaseStrain / (strain * travel));
+    const u: Vec3 = [offset[0] / travel, offset[1] / travel, offset[2] / travel];
+    const shrink = responseShrink(grid, restNodes, response, u, anchored) * travel;
+    if (shrink > 1 - warpMapFloor) carried = Math.min(carried, (1 - warpMapFloor) / shrink);
+    if (pulls) carried = Math.min(carried, warpPinHold / (pinned * travel));
+    if (carried < 1) carry.set(handle, carried);
+  });
+  return carry;
+}
+
 /** Each node's weight from the handle's radius and falloff, for drawing its reach. */
 export function reachWeights(handle: WarpHandle) {
   const reach = handle.reach!;
@@ -762,8 +908,8 @@ export const snapshotOf = (
 });
 
 /**
- * A snapshot carried from one grid to another: each node of `to` sits where `from`'s binding of
- * its scan vertex puts it under the snapshot, turned by the blend of its bound nodes' rotations.
+ * A snapshot carried from one grid to another: each node of `to` sits where the preview writes its
+ * scan vertex under the snapshot on `from`, turned by the blend of its bound nodes' rotations.
  * Vertices `from` did not move stay at rest. A vertex `from` feathered and `to` paints sits where
  * it was written.
  */
@@ -773,23 +919,23 @@ export function transferSnapshot(
   to: WarpModel,
 ): WarpSnapshot {
   const K = warpBindingNodes;
-  const { binding, region, restNodes, restWorld } = from;
-  const { positions: P, rotations: Q } = snapshot;
+  const { binding, restWorld } = from;
+  const { rotations: Q } = snapshot;
   const count = to.grid.nodes.length;
   const positions = to.restNodes.slice(),
     rotations = new Float64Array(count * 4);
-  const r = new Float64Array(9);
+  const skinned = skinnedWorldPositions(from, snapshot, to.grid.nodes);
   for (let n = 0; n < count; n++) {
     rotations[n * 4 + 3] = 1;
     const v = to.grid.nodes[n];
-    if (v >= region.weldedCount || region.role[v] !== WarpRole.Interior) continue;
+    const px = skinned[n * 3],
+      py = skinned[n * 3 + 1],
+      pz = skinned[n * 3 + 2];
+    if (Number.isNaN(px)) continue;
     const x = restWorld[v * 3],
       y = restWorld[v * 3 + 1],
       z = restWorld[v * 3 + 2];
-    let px = 0,
-      py = 0,
-      pz = 0,
-      qx = 0,
+    let qx = 0,
       qy = 0,
       qz = 0,
       qw = 0,
@@ -802,13 +948,6 @@ export function transferSnapshot(
         b = Q[j * 4 + 1],
         c = Q[j * 4 + 2],
         d = Q[j * 4 + 3];
-      rotationOf(r, a, b, c, d);
-      const ox = x - restNodes[j * 3],
-        oy = y - restNodes[j * 3 + 1],
-        oz = z - restNodes[j * 3 + 2];
-      px += w * (r[0] * ox + r[1] * oy + r[2] * oz + P[j * 3]);
-      py += w * (r[3] * ox + r[4] * oy + r[5] * oz + P[j * 3 + 1]);
-      pz += w * (r[6] * ox + r[7] * oy + r[8] * oz + P[j * 3 + 2]);
       // Quaternions q and −q turn alike, so each joins the blend on the side of the first.
       const sign = total > 0 && a * qx + b * qy + c * qz + d * qw < 0 ? -w : w;
       qx += sign * a;
@@ -821,9 +960,9 @@ export function transferSnapshot(
     // A vertex in the old feather band that the new region paints takes the position it was
     // written at. Where a feather still applies the blend comes later, so it stays unblended.
     const b = from.blend && isPaintedNode(to, n) ? from.blend[v] : 1;
-    positions[n * 3] = b === 1 ? px / total : x + b * (px / total - x);
-    positions[n * 3 + 1] = b === 1 ? py / total : y + b * (py / total - y);
-    positions[n * 3 + 2] = b === 1 ? pz / total : z + b * (pz / total - z);
+    positions[n * 3] = b === 1 ? px : x + b * (px - x);
+    positions[n * 3 + 1] = b === 1 ? py : y + b * (py - y);
+    positions[n * 3 + 2] = b === 1 ? pz : z + b * (pz - z);
     if (b < 1) {
       // Turned as far as it was written: part way from no turn.
       const side = qw < 0 ? -b : b;
@@ -839,18 +978,6 @@ export function transferSnapshot(
     rotations[n * 4 + 3] = qw / length;
   }
   return { grid: to.grid, positions, rotations, settled: false, converged: false };
-}
-
-function rotationOf(out: Float64Array, x: number, y: number, z: number, w: number) {
-  out[0] = 1 - 2 * (y * y + z * z);
-  out[1] = 2 * (x * y - z * w);
-  out[2] = 2 * (x * z + y * w);
-  out[3] = 2 * (x * y + z * w);
-  out[4] = 1 - 2 * (x * x + z * z);
-  out[5] = 2 * (y * z - x * w);
-  out[6] = 2 * (x * z - y * w);
-  out[7] = 2 * (y * z + x * w);
-  out[8] = 1 - 2 * (x * x + y * y);
 }
 
 const cornerTriangles = new WeakMap<WarpModel, Int32Array>();
