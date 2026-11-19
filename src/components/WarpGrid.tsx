@@ -24,6 +24,7 @@ import {
   type Camera,
 } from 'three';
 import { isWarpDragging, useEditor, type WarpSession } from '../core/store';
+import { shownDetail } from '../core/warp-handles';
 import { writtenNodePositions } from '../core/warp-evaluate';
 import type { WarpModel } from '../core/warp-model';
 import {
@@ -43,10 +44,11 @@ const blended = new WeakMap<WarpModel, Float64Array>();
 export function gridNodePositions(warp: WarpSession) {
   const model = warp.model!,
     state = warp.state!;
-  if (!model.blend) return state.positions;
+  const detail = shownDetail(warp.output);
+  if (!model.blend && !detail) return state.positions;
   let out = blended.get(model);
   if (!out) blended.set(model, (out = new Float64Array(state.positions.length)));
-  return writtenNodePositions(model, state, out);
+  return writtenNodePositions(model, state, out, detail);
 }
 
 /**

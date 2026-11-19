@@ -4,7 +4,7 @@ import { treeOf } from './clipping';
 import { partMatrix } from './geometry';
 import { readFace } from './surfaces';
 import type { Part, SceneDocument, Vec3 } from './types';
-import { writtenLocalPositions, type WarpOutput } from './warp-evaluate';
+import { writtenLocalPositions, writtenNodePositions, type WarpOutput } from './warp-evaluate';
 import type { WarpDetail } from './warp-handles';
 import { isPaintedNode, type WarpModel } from './warp-model';
 import { WarpRole, type WarpRegion } from './warp-region';
@@ -333,6 +333,7 @@ export function closeGapTargets(
   neighbours: WarpNeighbour[],
   overlap: number,
   detail?: WarpDetail,
+  positions = writtenNodePositions(model, state, new Float64Array(state.positions.length), detail),
 ): { node: number; target: Vec3 }[] {
   const { grid } = model;
   const normals = writtenNodeNormals(model, state, detail);
@@ -341,7 +342,7 @@ export function closeGapTargets(
   for (let n = 0; n < grid.nodes.length; n++) {
     // A feather band carries the bend to the outer border, so only painted nodes are pulled.
     if (grid.fixed[n] || !isPaintedNode(model, n)) continue;
-    point.fromArray(state.positions, n * 3);
+    point.fromArray(positions, n * 3);
     const hit = closestHit(point, neighbours);
     if (!hit) continue;
     const facing =
