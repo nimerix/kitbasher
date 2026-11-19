@@ -619,7 +619,8 @@ function StatusBar() {
     navigationMode = useEditor((s) => (s.temporaryOrbit ? 'orbit' : s.navigationMode)),
     indexing = useEditor((s) => s.indexingMeshes > 0),
     live = useEditor((s) => s.liveStatus),
-    warpStage = useEditor((s) => (s.tool === 'warp' ? s.warp?.stage : undefined));
+    warpStage = useEditor((s) => (s.tool === 'warp' ? s.warp?.stage : undefined)),
+    warpAdd = useEditor((s) => s.warpAdd);
   const hold = useShortcut('holdOrbit'),
     cancel = useShortcut('cancel'),
     pivot = useShortcut('pivot'),
@@ -652,7 +653,11 @@ function StatusBar() {
                   : surfacePainting
                     ? `Drag to paint · Alt erases${smaller || larger ? ` · ${[smaller, larger].filter(Boolean).join(' / ')} brush size` : ''} · ${orbitHint} orbits`
                     : warpStage === 'warp'
-                      ? 'Click the surface to add a control point · Drag a handle to warp · Shift for fine adjustment'
+                      ? warpAdd === 'line'
+                        ? `Drag on the surface to draw a line · Esc discards it · ${orbitHint} orbits`
+                        : warpAdd === 'area'
+                          ? `Drag to paint an area${smaller || larger ? ` · ${[smaller, larger].filter(Boolean).join(' / ')} brush size` : ''} · Esc discards it · ${orbitHint} orbits`
+                          : 'Click the surface to add a control point · Drag a handle to warp · Shift for fine adjustment'
                       : warpStage
                         ? `Paint the area to warp, or choose Whole part · Alt erases · ${orbitHint} orbits`
                         : tool === 'align'

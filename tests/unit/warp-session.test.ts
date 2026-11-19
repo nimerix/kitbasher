@@ -5,6 +5,7 @@ import {
   BufferAttribute,
   BufferGeometry,
   DoubleSide,
+  Line3,
   PlaneGeometry,
   Ray,
   Triangle,
@@ -44,6 +45,8 @@ import {
   handleGuides,
   reachHandle,
   snapshotOf,
+  spacingAt,
+  warpFootprintSpacings,
   warpPriorityStrength,
   type WarpSample,
 } from '../../src/core/warp-handles';
@@ -2766,12 +2769,28 @@ describe('line and area handles through a session', () => {
     return handle;
   }
 
-  /** The free nodes the footprint must hold: its samples' and, for an area, those on its faces. */
+  /**
+   * The free nodes the footprint must hold: those within its reach of the line through its samples
+   * or of an area's samples, and those on an area's faces.
+   */
   function footprintNodes(handle: WarpPoint) {
     const model = session().model!;
     const nodes = new Set<number>();
-    for (const { binding } of handle.samples)
-      for (const n of binding.node) if (!model.grid.fixed[n]) nodes.add(n);
+    const points = handle.samples.map(({ restWorld }) => new Vector3(...restWorld));
+    for (let n = 0; n < model.grid.nodes.length; n++) {
+      if (model.grid.fixed[n]) continue;
+      const at = new Vector3().fromArray(model.restNodes, n * 3);
+      const near = points.map((p, i) =>
+        handle.kind === 'line' && i > 0
+          ? new Line3(points[i - 1], p).closestPointToPoint(at, true, new Vector3())
+          : p,
+      );
+      if (
+        Math.min(...near.map((p) => p.distanceTo(at))) <=
+        warpFootprintSpacings * spacingAt(model, [n])
+      )
+        nodes.add(n);
+    }
     for (const face of handle.faces ?? []) {
       const triangle = regionTriangleOf(model.region, face);
       for (let c = 0; c < 3; c++) {
@@ -2856,9 +2875,9 @@ describe('line and area handles through a session', () => {
     const line = handleOf('line', samples);
     expect(line.samples).toHaveLength(13);
     const between = Array.from({ length: 12 }, (_, i): [number, number] => [-2.75 + i * 0.5, 0.3]);
-    // On the evenly spaced grid a radius of 4 pulls a footprint node 0.1 mm under the ridge, and
-    // the line's end samples ride their nodes' tilted skin maps to 1.971 and 2.056 mm.
-    await lifecycle(line, between, 0.06);
+    // At radius 0 the ridge holds within 1.995 and 2.010 mm. A radius of 4 starts its skirt at the
+    // line, so the line's end samples ride their nodes' tilted skin maps to 1.978 and 2.072 mm.
+    await lifecycle(line, between, 0.08);
   });
 
   it('an area moves as one patch, also one smaller than a grid cell', async () => {
@@ -2874,7 +2893,8 @@ describe('line and area handles through a session', () => {
     const area = handleOf('area', samples, faces);
     expect(area.faces).toEqual(faces);
     const inside = centres.map((c): [number, number] => [c.x, c.y]);
-    await lifecycle(area, inside, 0.05);
+    // A radius of 4 tilts the rim's face centres to 1.927 and 2.037 mm.
+    await lifecycle(area, inside, 0.08);
 
     // One face, smaller than a cell, with a few samples on it.
     editor().cancelWarp();
