@@ -307,7 +307,10 @@ monotonically from the point, is 0.957 h at a tenth of the radius, within 0.08 h
 
 Region stage, painted regions only: **Feather edge**, off by default, with a width in mm
 (fitted logarithmic slider, starting at Warp's brush radius). The choice is remembered for
-the page session. Off, or width 0, builds exactly today's region with its fixed edge.
+the page session and starts each new session. A session keeps its own switch and width, which the
+grid is laid with and which undoing back to a layout restores with it, so Edit region then Lay
+grid with nothing changed keeps the grid. Off, or width 0, builds exactly today's region with its
+fixed edge.
 
 - **Growth.** The build worker keeps the painted-face mask, builds whole-mesh welded
   topology once, and runs a bounded Dijkstra over world-length edges outward from the
@@ -467,10 +470,10 @@ dropped with a notice, and so is an unmoved one left on the new region's edge.
 A density change is one session undo step, and so is laying the grid on a changed region. The
 steps before it stay on the grid they were recorded on: their snapshots name a stand-in for it,
 their points let go of their reach and of binding arrays the solver caches against the old grid,
-and the step the change records keeps the region as painted, the density and feather that grid was
-laid from, with a hash of the model built. Undoing it rebuilds that grid (the build is
-deterministic, one build's time), checks the hash, puts every step recorded on it back on the
-rebuilt grid and restores the region, the handles and the surface exactly; undoing further restores
+and the step the change records keeps the region as painted and the feather switch and width, the
+density and feather that grid was laid from, with a hash of the model built. Undoing it rebuilds
+that grid (the build is deterministic, one build's time), checks the hash, puts every step recorded
+on it back on the rebuilt grid and restores the region, the handles and the surface exactly; undoing further restores
 each earlier step exactly, and undoing an earlier layout step rebuilds the grid it names in turn.
 Steps recorded on still earlier grids keep their own stand-ins and grid steps untouched. A rebuild
 that hashed differently would settle those steps again from rest and say so. Only the current

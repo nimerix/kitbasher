@@ -221,6 +221,7 @@ const warping = (patch: Partial<WarpSession> = {}, tool: 'warp' | 'select' = 'wa
     faces: [],
     startFaces: [],
     density: 3,
+    featherEdge: { enabled: false, width: null },
     densityChosen: false,
     laid: null,
     model: null,

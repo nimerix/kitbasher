@@ -251,6 +251,8 @@ export interface WarpSession {
   density: number;
   /** Feather width in mm the grid was laid with, 0 or absent for none. Density changes keep it. */
   feather?: number;
+  /** The feather switch and width Edit region shows and the next lay takes. */
+  featherEdge: WarpFeatherOption;
   /** Whether the user chose the density. Otherwise it follows the region. */
   densityChosen: boolean;
   /** What the model was built from, so laying the same region again keeps it. */
@@ -310,7 +312,7 @@ type WarpLaid = {
   density: number;
   feather: number;
   /** The region as painted when the grid was laid, which undoing a later grid paints again. */
-  painted: Pick<WarpSession, 'region' | 'faces' | 'seed'>;
+  painted: Pick<WarpSession, 'region' | 'faces' | 'seed' | 'featherEdge'>;
 };
 /**
  * The grid a density change or a new region left. Its steps' snapshots name `token` instead of the
@@ -602,7 +604,12 @@ const toolChange = (state: EditorState, tool: Tool): Partial<EditorState> => {
   };
 };
 
-const newWarpSession = (part: Part, epoch: number, faces: number[] = []): WarpSession => ({
+const newWarpSession = (
+  part: Part,
+  epoch: number,
+  featherEdge: WarpFeatherOption,
+  faces: number[] = [],
+): WarpSession => ({
   id: uid(),
   partId: part.id,
   source: part.geometry,
@@ -613,6 +620,7 @@ const newWarpSession = (part: Part, epoch: number, faces: number[] = []): WarpSe
   startFaces: faces,
   density: defaultWarpDensity,
   feather: 0,
+  featherEdge,
   densityChosen: false,
   laid: null,
   model: null,
@@ -2332,7 +2340,7 @@ export const useEditor = create<EditorState>((set, get) => ({
     disposeWarpPreview(state.warp?.preview ?? null);
     set((state) => ({
       ...toolChange(state, 'warp'),
-      warp: newWarpSession(part, state.sceneEpoch),
+      warp: newWarpSession(part, state.sceneEpoch, state.warpFeather),
     }));
     return true;
   },
@@ -2429,12 +2437,17 @@ export const useEditor = create<EditorState>((set, get) => ({
   },
   setWarpFeather: (patch) =>
     set((state) => {
-      const enabled = patch.enabled ?? state.warpFeather.enabled;
+      const current = state.warp?.featherEdge ?? state.warpFeather;
+      const enabled = patch.enabled ?? current.enabled;
       const width =
         patch.width !== undefined && Number.isFinite(patch.width)
           ? Math.max(0, Math.min(100, patch.width))
-          : (state.warpFeather.width ?? (enabled ? warpBrushRadius(state) : null));
-      return { warpFeather: { enabled, width } };
+          : (current.width ?? (enabled ? warpBrushRadius(state) : null));
+      const warpFeather = { enabled, width };
+      return {
+        warpFeather,
+        ...(state.warp ? { warp: { ...state.warp, featherEdge: warpFeather } } : {}),
+      };
     }),
   cancelWarp: (notice) => {
     const { warp } = get();
@@ -2893,6 +2906,7 @@ export const useEditor = create<EditorState>((set, get) => ({
       seed,
       density,
       densityChosen,
+      featherEdge,
       snap,
       overlap,
       gizmo,
@@ -2916,7 +2930,7 @@ export const useEditor = create<EditorState>((set, get) => ({
         parts: state.scene.parts.map((p) => (p.id === part.id ? warped : p)),
       }),
       warp: {
-        ...newWarpSession(warped, state.sceneEpoch, faces),
+        ...newWarpSession(warped, state.sceneEpoch, featherEdge, faces),
         region,
         seed,
         density,
@@ -4068,8 +4082,8 @@ async function layWarp(from: WarpSettled, kind: 'region' | 'density' | WarpGridS
       ? 0
       : kind === 'density'
         ? (warp.feather ?? 0)
-        : state.warpFeather.enabled
-          ? (state.warpFeather.width ?? warpBrushRadius(state))
+        : warp.featherEdge.enabled
+          ? (warp.featherEdge.width ?? warpBrushRadius(state))
           : 0;
   const density = restore
     ? restore.laid.density
@@ -4082,7 +4096,13 @@ async function layWarp(from: WarpSettled, kind: 'region' | 'density' | WarpGridS
     faces,
     density,
     feather,
-    painted: { region: warp.region, faces: warp.faces, seed: warp.seed },
+    painted: {
+      region: warp.region,
+      faces: warp.faces,
+      seed: warp.seed,
+      // A density change keeps the feather the grid was laid with.
+      featherEdge: (kind === 'density' && warp.laid?.painted.featherEdge) || warp.featherEdge,
+    },
   };
   // The same region at the same density keeps its grid, so nothing moves.
   if (!restore && warp.model && warp.laid && sameLaid(warp.laid, laid)) {
