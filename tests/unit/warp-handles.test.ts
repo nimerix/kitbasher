@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   BoxGeometry,
   BufferGeometry,
+  Line3,
   Matrix4,
   PlaneGeometry,
   SphereGeometry,
@@ -26,9 +27,11 @@ import {
   reachHandle,
   reachWeight,
   snapshotOf,
+  spacingAt,
   transferSnapshot,
   uniqueSamples,
   bandWidth,
+  warpFootprintSpacings,
   warpGuides,
   warpPathStretch,
   warpPriorityStrength,
@@ -802,6 +805,27 @@ describe('point handles', () => {
 });
 
 describe('footprints', () => {
+  /** The free nodes within the footprint's reach of the line through the samples, or of each. */
+  function onHandle(model: WarpModel, samples: WarpHandle['samples'], kind: 'line' | 'area') {
+    const nodes: number[] = [];
+    const points = samples.map(({ restWorld }) => new Vector3(...restWorld));
+    for (let n = 0; n < model.grid.nodes.length; n++) {
+      if (model.grid.fixed[n]) continue;
+      const at = new Vector3().fromArray(model.restNodes, n * 3);
+      const d = Math.min(
+        ...points.map((p, i) =>
+          kind === 'line' && i > 0
+            ? new Line3(points[i - 1], p)
+                .closestPointToPoint(at, true, new Vector3())
+                .distanceTo(at)
+            : p.distanceTo(at),
+        ),
+      );
+      if (d <= warpFootprintSpacings * spacingAt(model, [n])) nodes.push(n);
+    }
+    return nodes;
+  }
+
   it('are built by kind and keep reach while the footprint is the same', async () => {
     const { geometry, model } = await sheet(3, 120);
     const state = createWarpState(model.restNodes);
@@ -817,18 +841,22 @@ describe('footprints', () => {
       .sort((a, b) => a - b);
     expect(handleFootprint(model, { kind: 'point', samples }).nodes).toEqual([]);
     const line = reachHandle(model, { ...point, kind: 'line', samples });
-    expect(handleFootprint(model, line).nodes).toEqual(bound);
-    expect(Array.from(line.reach!.node.subarray(0, line.reach!.own))).toEqual(bound);
+    const along = onHandle(model, samples, 'line');
+    // Nodes beside the line that a binding also reaches are not on it.
+    expect(bound.filter((n) => !along.includes(n)).length).toBeGreaterThan(0);
+    expect(handleFootprint(model, line).nodes).toEqual(along);
+    expect(handleFootprint(model, line).seeds).toEqual(bound);
+    expect(Array.from(line.reach!.node.subarray(0, line.reach!.own))).toEqual(along);
     // The same footprint at the same radius keeps its reach; another radius measures it again.
     expect(reachHandle(model, { ...line, falloff: 0.3 }).reach).toBe(line.reach);
     const wider = reachHandle(model, { ...line, radius: 5 });
     expect(wider.reach).not.toBe(line.reach);
-    expect(wider.reach!.own).toBe(bound.length);
+    expect(wider.reach!.own).toBe(along.length);
 
     // An area also holds the nodes on its faces.
     const faces = disc(geometry, 9);
     const area = reachHandle(model, { ...point, kind: 'area', samples, faces });
-    const onFaces = new Set(bound);
+    const onFaces = new Set(onHandle(model, samples, 'area'));
     for (const face of faces) {
       const triangle = readFace(geometry, face);
       for (const corner of [triangle.a, triangle.b, triangle.c]) {
@@ -841,7 +869,7 @@ describe('footprints', () => {
       }
     }
     expect(area.reach!.own).toBe(onFaces.size);
-    expect(area.reach!.own).toBeGreaterThan(bound.length);
+    expect(area.reach!.own).toBeGreaterThan(along.length);
   });
 });
 

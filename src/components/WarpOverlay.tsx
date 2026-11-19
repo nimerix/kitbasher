@@ -31,11 +31,10 @@ import { ManagedTransformControls } from './ManagedTransformControls';
 import { warpRegionColor } from './SurfacePainter';
 import { gridNodePositions, WarpGrid } from './WarpGrid';
 import { surfacePoints } from './surface-points';
+import { pointAccent, pointIdle, WarpHandleShapes } from './WarpStroke';
 
 const noRaycast: Mesh['raycast'] = () => {};
-const pointAccent = '#ed9b54',
-  pointIdle = '#e9eaec',
-  autoIdle = '#a4aab2',
+const autoIdle = '#a4aab2',
   foldColor = '#f06a6a';
 const closedColor = new Color('#7fd18b'),
   openColor = new Color('#f06a6a');
@@ -75,6 +74,7 @@ export function WarpOverlay({ onPress, pressed }: { onPress: () => void; pressed
             {warp.seam ? <Seam warp={warp} /> : null}
           </PartSpace>
           <WarpGrid warp={warp} />
+          <WarpHandleShapes warp={warp} part={part} />
           <Reach warp={warp} />
           {warp.points.map((point) => (
             <PointMarker
@@ -334,6 +334,8 @@ function PointMarker({
       <mesh
         name={`warp-point:${id}`}
         renderOrder={1000}
+        // A press on a marker selects it, and starts no stroke on the surface behind it.
+        onPointerDown={(event: ThreeEvent<PointerEvent>) => event.stopPropagation()}
         onClick={(event: ThreeEvent<MouseEvent>) => {
           event.stopPropagation();
           const state = useEditor.getState();
