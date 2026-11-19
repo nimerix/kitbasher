@@ -784,9 +784,9 @@ const freeShare = (binding: WarpPointBinding, fixed: Uint8Array) =>
  * the solve's linear response to the handle's travel with rotations held, a handle carries as far
  * as keeps every node within `warpCarryLimit` of its travel, the pins within `warpPinHold`, the
  * edges against the fixed nodes, and against those pins, within `warpCreaseStrain`, and the node
- * maps beside them above `warpMapFloor`. `constraints` and `guides`
- * are what the solve is given, the handles' constraints first in order. Handles on fully free
- * surface with no pin they would move are never in the map.
+ * maps beside them above `warpMapFloor`. `constraints` and `guides` are what the solve is given,
+ * the handles' constraints first in order. Handles on fully free surface with no pin they would
+ * move are never in the map.
  */
 export function handleCarry(
   model: WarpModel,

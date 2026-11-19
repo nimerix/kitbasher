@@ -270,7 +270,7 @@ export interface WarpSession {
   undo: WarpEdit[];
   /** The last edit's solve has not converged yet. It goes on settling in idle frames. */
   settling: boolean;
-  /** Apply was pressed while settling: it bakes once the surface settles, unless an edit comes first. */
+  /** Apply was pressed while settling: it bakes once the surface settles, unless an edit comes. */
   applying?: boolean;
 }
 /**
@@ -464,7 +464,7 @@ interface EditorState {
   distributeWarpPoints: () => void;
   /** Pulls the grid nodes that face a nearby part onto its surface, at the overlap depth. */
   closeWarpGap: () => void;
-  /** Undoes a session step. Undoing a density change rebuilds the grid it left, which this awaits. */
+  /** Undoes a session step. Undoing a density change rebuilds the grid it left; this awaits it. */
   undoWarpEdit: () => Promise<void>;
   /**
    * Bakes the warp into the part as one undo step, then starts again on the result. A surface
@@ -3854,6 +3854,7 @@ async function layWarp(from: WarpSettled, kind: 'region' | 'density' | WarpGridS
   const old = current.model;
 
   if (restore) {
+    forgetWarpSettle();
     const output = createWarpOutput(model);
     disposeWarpPreview(current.preview);
     const same = warpFingerprint(model) === restore.fingerprint;
@@ -3984,6 +3985,8 @@ async function layWarp(from: WarpSettled, kind: 'region' | 'density' | WarpGridS
         surface: step.surface && carry(step.surface),
       };
     });
+  // The idle steps would otherwise go on holding the session on the old grid.
+  forgetWarpSettle();
   const output = createWarpOutput(model);
   disposeWarpPreview(current.preview);
   let next: WarpSession = {
