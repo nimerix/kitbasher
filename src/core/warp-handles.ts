@@ -1667,6 +1667,20 @@ export function showDetail(output: WarpOutput, detail: WarpDetail | undefined) {
 export const shownDetail = (output: WarpOutput | null | undefined) =>
   output ? shownDetails.get(output) : undefined;
 
+const snapshotDetails = new WeakMap<WarpSnapshot, WarpDetail>();
+
+/**
+ * Records the detail a snapshot's surface was written with. A handle made on that surface holds it
+ * as written, so carrying the snapshot to another grid carries the detail too.
+ */
+export function writeSnapshotDetail(snapshot: WarpSnapshot, detail: WarpDetail | undefined) {
+  if (detail?.vertices.length) snapshotDetails.set(snapshot, detail);
+  else snapshotDetails.delete(snapshot);
+}
+
+/** The detail a snapshot's surface was written with, if any. */
+export const snapshotDetail = (snapshot: WarpSnapshot) => snapshotDetails.get(snapshot);
+
 const detailSlots = new WeakMap<Uint32Array, Map<number, number>>();
 
 /** The detail at a surface point: the blend of its face corners' by `barycentric`, world. */
@@ -1862,15 +1876,28 @@ export const snapshotOf = (
  * A snapshot carried from one grid to another: each node of `to` sits where the preview writes its
  * scan vertex under the snapshot on `from`, turned by the blend of its bound nodes' rotations.
  * Vertices `from` did not move stay at rest. A vertex `from` feathered and `to` paints sits where
- * it was written. `detail`, when the snapshot was written with it, is carried along too.
+ * it was written. The detail the snapshot was written with is carried along too, so each node of
+ * `to` sits where its vertex was shown.
  */
 export function transferSnapshot(
   from: WarpModel,
   snapshot: WarpSnapshot,
   to: WarpModel,
-  detail?: WarpDetail,
+  detail = snapshotDetail(snapshot),
 ): WarpSnapshot {
   const K = warpBindingNodes;
+  // A snapshot of the untouched surface is carried as rest exactly, so it still reads as untouched.
+  if (!detail?.vertices.length && atRest(from, snapshot)) {
+    const rotations = new Float64Array(to.grid.nodes.length * 4);
+    for (let n = 0; n < to.grid.nodes.length; n++) rotations[n * 4 + 3] = 1;
+    return {
+      grid: to.grid,
+      positions: to.restNodes.slice(),
+      rotations,
+      settled: false,
+      converged: false,
+    };
+  }
   const { binding, restWorld } = from;
   const { rotations: Q } = snapshot;
   const count = to.grid.nodes.length;
@@ -1939,6 +1966,15 @@ export function transferSnapshot(
     rotations[n * 4 + 3] = qw / length;
   }
   return { grid: to.grid, positions, rotations, settled: false, converged: false };
+}
+
+/** Whether a snapshot holds every node of `model` at rest, unturned. */
+function atRest(model: WarpModel, { positions, rotations }: WarpSnapshot) {
+  for (let i = 0; i < positions.length; i++) if (positions[i] !== model.restNodes[i]) return false;
+  for (let n = 0; n < rotations.length; n += 4)
+    if (rotations[n] || rotations[n + 1] || rotations[n + 2] || rotations[n + 3] !== 1)
+      return false;
+  return true;
 }
 
 const cornerTriangles = new WeakMap<WarpModel, Int32Array>();

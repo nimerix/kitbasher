@@ -5,6 +5,7 @@ import { partMatrix } from './geometry';
 import { readFace } from './surfaces';
 import type { Part, SceneDocument, Vec3 } from './types';
 import { writtenLocalPositions, type WarpOutput } from './warp-evaluate';
+import type { WarpDetail } from './warp-handles';
 import { isPaintedNode, type WarpModel } from './warp-model';
 import { WarpRole, type WarpRegion } from './warp-region';
 import type { WarpState } from './warp-solve';
@@ -261,10 +262,11 @@ function firstVertices(region: WarpRegion) {
 }
 
 /**
- * World normal of each grid node's written surface for `state`: the same area-weighted normal of
- * the deformed mesh, summed in the same order, that the seam readout measures at that vertex.
+ * World normal of each grid node's written surface for `state` and `detail`: the same
+ * area-weighted normal of the deformed mesh, summed in the same order, that the seam readout
+ * measures at that vertex.
  */
-function writtenNodeNormals(model: WarpModel, state: WarpState) {
+function writtenNodeNormals(model: WarpModel, state: WarpState, detail?: WarpDetail) {
   const { region, grid, matrix } = model;
   const { triangles } = region;
   const first = firstVertices(region);
@@ -283,7 +285,7 @@ function writtenNodeNormals(model: WarpModel, state: WarpState) {
       slot[v] = listed.length;
       listed.push(v);
     }
-  const positions = writtenLocalPositions(model, state, listed, first);
+  const positions = writtenLocalPositions(model, state, listed, first, detail);
   const sums = new Float32Array(grid.nodes.length * 3);
   for (let t = 0; t < triangles.length; t += 3) {
     if (!near[triangles[t]]) continue;
@@ -322,16 +324,18 @@ function writtenNodeNormals(model: WarpModel, state: WarpState) {
 
 /**
  * Targets for every free painted node that faces a neighbour in range, on the surface written for
- * `state`. A node faces the neighbour by the same written normal the seam readout uses.
+ * `state` and `detail`. A node faces the neighbour by the same written normal the seam readout
+ * uses.
  */
 export function closeGapTargets(
   model: WarpModel,
   state: WarpState,
   neighbours: WarpNeighbour[],
   overlap: number,
+  detail?: WarpDetail,
 ): { node: number; target: Vec3 }[] {
   const { grid } = model;
-  const normals = writtenNodeNormals(model, state);
+  const normals = writtenNodeNormals(model, state, detail);
   const point = new Vector3();
   const result: { node: number; target: Vec3 }[] = [];
   for (let n = 0; n < grid.nodes.length; n++) {

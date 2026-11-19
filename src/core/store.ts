@@ -87,13 +87,7 @@ import { captureComponents, instantiateComponents } from './clipboard';
 import type { ComponentClipboard } from './clipboard';
 import { referencePlanes, resolvePart } from './references';
 import { bindTrianglePoint } from './warp-bind';
-import {
-  createWarpOutput,
-  deformPoint,
-  evaluateWarp,
-  warpUpdateRanges,
-  type WarpOutput,
-} from './warp-evaluate';
+import { createWarpOutput, evaluateWarp, warpUpdateRanges, type WarpOutput } from './warp-evaluate';
 import { defaultWarpDensity, warpDensityNodes, type WarpGrid } from './warp-grid';
 import {
   distributionNodes,
@@ -115,8 +109,10 @@ import {
   warpGuides,
   warpPinHold,
   warpPriorityStrength,
+  writeSnapshotDetail,
   writtenCentre,
   writtenSample,
+  snapshotDetail,
   type WarpDetail,
   type WarpHandle,
   type WarpSample,
@@ -843,10 +839,13 @@ function rebindHandle(model: WarpModel, handle: WarpPoint): WarpPoint | null {
 }
 
 /** The session's settled grid as a snapshot, or the grid as shown while it is still settling. */
-const settledOf = (warp: WarpSession) =>
-  warp.surface?.grid === warp.model!.grid && warp.surface.settled
-    ? warp.surface
-    : snapshotOf(warp.model!.grid, warp.state!, !warp.settling);
+function settledOf(warp: WarpSession) {
+  if (warp.surface?.grid === warp.model!.grid && warp.surface.settled) return warp.surface;
+  const snapshot = snapshotOf(warp.model!.grid, warp.state!, !warp.settling);
+  // As shown: with the detail the points bend between nodes, which a handle made on it holds.
+  writeSnapshotDetail(snapshot, shownDetail(warp));
+  return snapshot;
+}
 
 /** Unmoved points on free nodes spread over the grid, away from the points there already. */
 function distributedPoints(warp: WarpSession, count: number): WarpPoint[] {
@@ -1312,10 +1311,18 @@ function solveWarpSession(
 function showWarp(scene: SceneDocument, warp: WarpSession, measure = true): WarpSession {
   const resting = !warp.gapTargets.length && !warp.points.some(holdsWarp);
   if (warp.settling) scheduleWarpSettle();
+  const surface = warp.settling
+    ? null
+    : (warp.surface ?? snapshotOf(warp.model!.grid, warp.state!));
+  const folds = resting
+    ? (restWarpPreview(warp), new Uint32Array(0))
+    : deformWarpPreview(warp, 'end')!;
+  // The surface keeps the detail it is shown with, which a new grid takes along with it.
+  if (surface) writeSnapshotDetail(surface, shownDetail(warp));
   return {
     ...warp,
-    surface: warp.settling ? null : (warp.surface ?? snapshotOf(warp.model!.grid, warp.state!)),
-    folds: resting ? (restWarpPreview(warp), new Uint32Array(0)) : deformWarpPreview(warp, 'end')!,
+    surface,
+    folds,
     seam: measure && warp.stage === 'warp' ? warpSeam(scene, warp) : warp.seam,
   };
 }
@@ -1593,23 +1600,23 @@ function yieldingGapTargets(
     }
     return hop;
   });
-  const now = samples.map(({ binding, restWorld }) =>
-    deformPoint(model, state, binding, restWorld),
-  );
+  // Where each is written now and in each trial, detail included.
+  const shown = shownDetail(warp);
+  const now = samples.map((sample) => writtenSample(model, state, sample, shown));
   // A sample's own nodes and those beside them carry its skin map, so they are never pulled.
   const ring = samples.map(() => 1);
   const trial = { positions: state.positions.slice(), rotations: state.rotations.slice() };
   let kept = gapTargets;
   for (let round = 0; round < gapYieldRounds; round++) {
     kept = gapTargets.filter(({ node }) => hops.every((hop, s) => hop[node] > ring[s]));
-    const { guides, constraints } = warpSolveInput({ model, points, gapTargets: kept });
+    const { guides, constraints, detail } = warpSolveInput({ model, points, gapTargets: kept });
     if (constraints.length)
       for (let i = 0; i < gapTrialIterations; i++)
         if (solveWarp(model.grid, model.restNodes, constraints, trial, 1, guides) < gapTrialMove)
           break;
     let moved = false;
-    samples.forEach(({ binding, restWorld }, s) => {
-      const at = deformPoint(model, trial, binding, restWorld);
+    samples.forEach((sample, s) => {
+      const at = writtenSample(model, trial, sample, detail);
       if (Math.hypot(...at.map((value, a) => value - now[s][a])) > warpPinHold) {
         ring[s]++;
         moved = true;
@@ -2791,8 +2798,10 @@ export const useEditor = create<EditorState>((set, get) => ({
       const radius = settings.pointRadius ?? from.radius,
         falloff = settings.pointFalloff ?? from.falloff;
       if (radius === from.radius && falloff === from.falloff) return from;
-      // An automatic point the guides have carried is taken where it is now.
-      const held = untouchedAuto(from) ? heldWhereItIs(model, surface, from, surface) : from;
+      // An automatic point the guides have carried is taken where it is written now.
+      const held = untouchedAuto(from)
+        ? heldWhereItIs(model, surface, from, surface, snapshotDetail(surface))
+        : from;
       const next = reachHandle(model, { ...held, radius, falloff, auto: false });
       // An unmoved point first given a radius holds the surface as it is.
       return from.target === null && !handleGuides(from) && handleGuides(next)
@@ -2840,7 +2849,7 @@ export const useEditor = create<EditorState>((set, get) => ({
     // Found on the surface the points alone hold, so pressing again or changing the overlap keeps
     // the nodes earlier targets pulled in.
     const held = createWarpState(model.restNodes);
-    const { guides, constraints } = warpSolveInput({ ...warp, gapTargets: [] });
+    const { guides, constraints, detail } = warpSolveInput({ ...warp, gapTargets: [] });
     if (constraints.length) settleGrid(model, constraints, held, guides);
     const { neighbours, indexing } = warpNeighbours(state.scene, warp.partId, warpBounds(held));
     if (indexing.length) {
@@ -2857,7 +2866,8 @@ export const useEditor = create<EditorState>((set, get) => ({
       );
       return;
     }
-    const gapTargets = closeGapTargets(model, held, neighbours, warp.overlap);
+    // Faced by the surface as it is written there, detail and all.
+    const gapTargets = closeGapTargets(model, held, neighbours, warp.overlap, detail);
     // Untouched automatic points on the closing surface that the seam would move are holding it
     // open, so they go in the same step. Points the user placed or moved stay.
     const surface = closingSurface(model, held, gapTargets);
@@ -2882,18 +2892,15 @@ export const useEditor = create<EditorState>((set, get) => ({
       for (const { node, target } of gapTargets)
         pull = Math.max(pull, distanceTo(held.positions, node, target));
       // Measured from where each is written now, so a point that has ridden with a bump is
-      // judged by what closing the seam would do to it.
+      // judged by what closing the seam would do to it. Both surfaces carry their detail.
+      const shown = shownDetail(warp);
       for (const point of warp.points)
         if (
           candidate(point) &&
-          point.samples.some(({ binding, restWorld }) => {
-            const now = deformPoint(model, warp.state!, binding, restWorld);
-            return (
-              Math.hypot(
-                ...deformPoint(model, trial, binding, restWorld).map((value, a) => value - now[a]),
-              ) >
-              gapHoldShare * pull
-            );
+          point.samples.some((sample) => {
+            const now = writtenSample(model, warp.state!, sample, shown);
+            const then = writtenSample(model, trial, sample, input.detail);
+            return Math.hypot(...then.map((value, a) => value - now[a])) > gapHoldShare * pull;
           })
         )
           released.add(point.id);
@@ -4089,7 +4096,10 @@ function moveSteps(steps: WarpEdit[], from: WarpGrid, to: WarpGrid, model?: Warp
   const snapshot = (value: WarpSnapshot) => {
     if (value.grid !== from) return value;
     let moved = snapshots.get(value);
-    if (!moved) snapshots.set(value, (moved = { ...value, grid: to }));
+    if (!moved) {
+      snapshots.set(value, (moved = { ...value, grid: to }));
+      writeSnapshotDetail(moved, snapshotDetail(value));
+    }
     return moved;
   };
   const points = new Map<WarpPoint, WarpPoint>();
@@ -4308,21 +4318,15 @@ async function layWarp(from: WarpSettled, kind: 'region' | 'density' | WarpGridS
   }
 
   // Each settled grid the session keeps is carried to the new grid once, so every version of a
-  // handle and every undo step goes on sharing it.
+  // handle and every undo step goes on sharing it. Each goes with the detail it was written with,
+  // so a handle made on an earlier surface still holds it as it was shown.
   const carried = new Map<WarpSnapshot, WarpSnapshot>();
-  // The surface shown was written with the detail the points bend between nodes, so it goes too.
-  const written = old && current.surface?.grid === old.grid ? shownDetail(current) : undefined;
   const carry = (snapshot: WarpSnapshot) => {
     let next = carried.get(snapshot);
     if (!next) {
       next =
         old && snapshot.grid === old.grid
-          ? transferSnapshot(
-              old,
-              snapshot,
-              model,
-              snapshot === current.surface ? written : undefined,
-            )
+          ? transferSnapshot(old, snapshot, model)
           : { ...snapshotOf(model.grid, createWarpState(model.restNodes)), settled: false };
       carried.set(snapshot, next);
     }
