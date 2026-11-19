@@ -180,6 +180,14 @@ from where it is written before closing. Points on other pieces, on
 the far side of a thin wall, or that the seam would not move stay. Points the user placed or
 moved are kept.
 
+Close gap's targets yield to the samples of stationary points, lines and areas the user placed:
+it withholds the targets on each sample's nodes and those beside them, settles a trial from the
+surface as shown, and for each sample the trial moves by more than 0.005 mm, the pin-hold rule's
+limit, withholds the next ring of grid edges around it, up to twelve rounds. The seam readout then
+reports the gap left there, and the panel says that Close gap leaves the seam open around points
+the user placed. On two plates 1 mm apart, laid whole (2,129 nodes), a held point moved 0.00007 mm
+and a held line's samples at most 0.0027 mm, where the seam had moved them 0.78 and 0.72 mm.
+
 ### 4. Radius and falloff
 
 Every handle has a **radius** in mm and a **falloff** from 0 to 100 %, edited in the Control
@@ -212,7 +220,10 @@ Radius adds soft per-node **guides** around them.
   reached its target by overdriving the few free nodes it had: on a scan a 1 mm pull beside the
   fixed edge moved a node 4.5 mm and turned node maps inside out. Handles on free surface with no
   such pin beside them are left alone. The panel states a moved handle's shortfall from its
-  target, and an unmoved one's drift from its pin, once either exceeds 0.02 mm.
+  target, and an unmoved one's drift from its pin, once either exceeds 0.02 mm, with its cause in
+  one sentence: a point the user placed beside it, the fixed edge (with the remedy: feather the
+  edge, or grab farther inside the paint), Close gap's targets beside it, or a point on the same
+  spot; a drift names Close gap or a moved point, whichever the grid reaches first from the pin.
 - **Settling.** The end of an edit settles for up to 50 iterations. A solve whose last iteration
   still moved a node by 1 µm or more is marked settling and goes on in idle steps of 8 ms,
   redrawing every 200 ms and counting folds on each redraw, until it converges (or 20,000
@@ -220,7 +231,8 @@ Radius adds soft per-node **guides** around them.
   surface exactly as shown, settling on from there if it was. Apply bakes the preview as shown,
   and only a settled one: pressed while settling, the button shows it is applying and the settle
   finishes in the same idle steps, so input goes on, then bakes. Any edit before then (another
-  drag, undo, a density change, Edit region), Cancel or leaving the tool drops the waiting Apply.
+  drag, undo, a density change, Edit region), a stroke starting, Cancel or leaving the tool drops
+  the waiting Apply.
   Apply and Cancel let go of the session the idle steps were settling. An edit that changes
   nothing settles nothing.
 
@@ -307,7 +319,8 @@ surface makes, and says so in a line:
   stroke.
 
 **Input.** A stroke is a draft owned by one pointer (`WarpStroke.tsx`). It starts only on an
-unmodified primary press on a painted face of the warped part, when no camera navigation (middle
+unmodified primary press on a painted face of the warped part, where no other part is nearer the eye
+at the press, when no camera navigation (middle
 and right buttons, Space, the orbit and pan tools), pivot picking, free transform or exploded view
 is in force; a point marker stops the press before it reaches the surface. The camera's controls
 are switched off for that press, so a stroke never orbits, and a primary drag that begins off the
@@ -315,7 +328,8 @@ region still does. A gizmo handle hears the press after the surface does, so the
 or the release after a gizmo press discards the draft. The pointer's path is sampled every 2 screen
 pixels, whatever the pointer's speed, by a raycast on the warped preview that another part in front
 blocks. Release commits once; Escape, pointer cancel, lost pointer capture, window blur, camera
-navigation starting and the session changing discard. The click that ends a stroke adds no point
+navigation starting, another Add mode being chosen and the session changing discard. A stroke that
+starts drops an Apply waiting for the surface to settle. The click that ends a stroke adds no point
 and changes no selection, also when a line is rejected; in Line and Area mode a click adds nothing.
 A line shorter than 4 px makes nothing; an area from a press alone is the one dab.
 
@@ -345,15 +359,24 @@ its default radius from the spacing at its samples' nodes.
 
 It is drawn as its line on the written surface, or its faces hatched in diagonal stripes of the
 handle colour and a dark tone with their outline, and one marker at the centre. Lines are a dark
-5 px casing under a 2.5 px core in the point markers' colours (selected and idle), drawn 4 px
-nearer the eye so a line's width does not sink into a surface sloping across it; the stripes leave
-the surface showing between them. Shapes are built when a handle's path or faces change; a solve
+5 px casing under a 2.5 px core in the point markers' colours (selected and idle). Each corner of a
+line's width lies where its view ray meets the surface's tangent plane at the line, as the grid's
+do, so the width does not sink into a surface sloping across it, then nearer by a pixel or 0.05 mm,
+whichever is less, measured across the surface (up to twice that along the ray where the surface
+turns away). A surface 0.2 mm or more in front, or the other side of a 0.2 mm wall, hides it. The
+stripes leave the surface showing between them. Shapes are built when a handle's path or faces change; a solve
 only rewrites their positions, read from the preview. While drawing, the line so far or the faces
 painted so far are drawn the same way on the warped surface, appended in place.
 
 **Samples.** A line's hits are taken about every half local node spacing along the surface at
 rest, keeping the first and the last, then one sample is kept for each set of grid nodes the
 inner ones are bound to, so pointer speed does not change stiffness; both ends are always kept.
+Where the surface between two kept samples stands off their chord by more than 3.5 % of it, the hit
+farthest from the chord is kept too and both halves are looked at again, so a line over tight
+curvature keeps samples along it even when it is about one node spacing long or shorter. On a
+32 mm open half-pipe of radius 0.9 mm laid whole at the coarsest density (spacing 4.3 mm), a
+±25° line around it kept 5 samples instead of 2 and, lifted 0.5 mm, stands between 0.497 and
+0.503 mm, where two samples left it between −0.88 and 0.73 mm.
 An area takes up to 32 face centres spread by farthest-point sampling at rest from the first hit,
 at least 4 and about half a node spacing apart; an area of fewer than 4 faces also offers a spot
 toward each corner of each face, so even one face has several samples and lifts a small plateau
@@ -392,8 +415,11 @@ Each session undo step holds the points, gap targets, the settled grid they held
 settings new points take, so undo restores the surface exactly without solving. Laying the
 same region at the same density and feather keeps the model. A real rebuild carries each
 distinct snapshot to the new grid once, writing each new node where the preview's own skinning
-wrote its scan vertex, and rebinds samples, dropping those bound exactly as another and an area's
-faces no longer painted. A vertex in the old feather band that the new region paints is carried
+wrote its scan vertex, and rebinds samples, dropping those bound exactly as another. A line keeps
+its longest unbroken run of painted samples and its drawn path between them; an area keeps its
+largest connected piece of painted faces and the samples on it. Either is centred again on what is
+left, its target moved by as much as its centre; a line left with fewer than two samples, or an area
+with none, is dropped with the notice that points were removed. A vertex in the old feather band that the new region paints is carried
 at the position it was written at; where a feather still applies, it stays unblended so the blend
 applies once.
 
@@ -403,15 +429,17 @@ too coarse for the points on this region. Laying a new region is not made either
 leave a moved handle bound only to fixed nodes; a handle the repaint leaves outside the paint is
 dropped with a notice, and so is an unmoved one left on the new region's edge.
 
-A density change is one session undo step. The steps before it stay on the grid they were
-recorded on: their snapshots name a stand-in for it, their points let go of their reach and of
-binding arrays the solver caches against the old grid, and the step the change records keeps the
-region, density and feather that grid was laid from, with a hash of the model built. Undoing it
-rebuilds that grid (the build is deterministic, one build's time), checks the hash, puts every
-step recorded on it back on the rebuilt grid and restores the surface exactly; undoing further
-restores each earlier step exactly. A rebuild that hashed differently would settle those steps
-again from rest and say so. Laying a new region still carries every step to the new grid and
-settles undo across it from there.
+A density change is one session undo step, and so is laying the grid on a changed region. The
+steps before it stay on the grid they were recorded on: their snapshots name a stand-in for it,
+their points let go of their reach and of binding arrays the solver caches against the old grid,
+and the step the change records keeps the region as painted, the density and feather that grid was
+laid from, with a hash of the model built. Undoing it rebuilds that grid (the build is
+deterministic, one build's time), checks the hash, puts every step recorded on it back on the
+rebuilt grid and restores the region, the handles and the surface exactly; undoing further restores
+each earlier step exactly, and undoing an earlier layout step rebuilds the grid it names in turn.
+Steps recorded on still earlier grids keep their own stand-ins and grid steps untouched. A rebuild
+that hashed differently would settle those steps again from rest and say so. Only the current
+handles are carried to a new grid.
 
 A pure module, `warp-handles.ts`, turns handles and a model into solver input: reach, weights,
 guides, snapshots and their transfer, and distribution. It is unit-tested without the store.

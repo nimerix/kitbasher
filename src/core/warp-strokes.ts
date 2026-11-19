@@ -2,7 +2,7 @@ import { Triangle, Vector3 } from 'three';
 import type { Vec3 } from './types';
 import { bindTrianglePoint } from './warp-bind';
 import { deformPoint } from './warp-evaluate';
-import { spacingAt, warpEligibleNodes, type WarpSample } from './warp-handles';
+import { spacingAt, warpEligibleNodes, type WarpHandle, type WarpSample } from './warp-handles';
 import { isPaintedFace, type WarpModel } from './warp-model';
 import { regionTriangleOf } from './warp-region';
 import type { WarpState } from './warp-solve';
@@ -188,11 +188,64 @@ export function lineSamples(
     const key = i === 0 || i === end ? `end ${i}` : nodeKey(hits[i]);
     if (!kept.has(key)) kept.set(key, i);
   }
-  const order = [...kept.values()].sort((a, b) => a - b);
+  const order = followSurface(
+    hits,
+    [...kept.values()].sort((a, b) => a - b),
+  );
   let middle = 0;
   for (let i = 1; i < hits.length; i++)
     if (Math.abs(along[i] - length / 2) < Math.abs(along[middle] - length / 2)) middle = i;
   return { samples: order.map((i) => hits[i]), pin: hits[middle].pin, length };
+}
+
+/**
+ * How far the surface a line is drawn on may stand off the chord between two of its samples, as a
+ * share of the chord, before a hit between them is kept too.
+ */
+export const warpLineBend = 0.035;
+
+/** Distance from a point to the segment from `a` to `b`. */
+function segmentDistance(p: Vec3, a: Vec3, b: Vec3) {
+  const u = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+  const length = u[0] * u[0] + u[1] * u[1] + u[2] * u[2];
+  const t =
+    length > 0
+      ? Math.max(
+          0,
+          Math.min(
+            1,
+            ((p[0] - a[0]) * u[0] + (p[1] - a[1]) * u[1] + (p[2] - a[2]) * u[2]) / length,
+          ),
+        )
+      : 0;
+  return Math.hypot(p[0] - a[0] - t * u[0], p[1] - a[1] - t * u[1], p[2] - a[2] - t * u[2]);
+}
+
+/**
+ * The kept hits, with more wherever the surface between two of them stands off their chord by more
+ * than `warpLineBend` of it: the hit farthest from the chord is kept, and both halves are looked at
+ * again. On tight curvature even a line about one node spacing long keeps samples along it.
+ */
+function followSurface(hits: readonly WarpSample[], order: number[]) {
+  const kept: number[] = [order[0]];
+  const split = (a: number, b: number) => {
+    const chord = distance(hits[a].restWorld, hits[b].restWorld);
+    let far = -1,
+      most = warpLineBend * chord;
+    for (let i = a + 1; i < b; i++) {
+      const d = segmentDistance(hits[i].restWorld, hits[a].restWorld, hits[b].restWorld);
+      if (d > most) [far, most] = [i, d];
+    }
+    if (far < 0) return;
+    split(a, far);
+    kept.push(far);
+    split(far, b);
+  };
+  for (let k = 1; k < order.length; k++) {
+    split(order[k - 1], order[k]);
+    kept.push(order[k]);
+  }
+  return kept;
 }
 
 /** At most `limit` points spread evenly along a path, keeping its ends. */
@@ -315,7 +368,8 @@ const third: Vec3 = [1 / 3, 1 / 3, 1 / 3];
  * An area's samples: face centres spread by farthest-point sampling at rest from the first hit, up
  * to a few dozen, about half a node spacing apart. An area of fewer faces than that also takes
  * spots toward each face's corners, so even one face holds several samples and lifts as a small
- * plateau. `pin` is where the surface is at the face centre nearest the area's centroid.
+ * plateau. `pin` is where the surface is at the face centre nearest the area's centroid. Null when
+ * no spot on the faces is painted and free.
  */
 export function areaSamples(
   model: WarpModel,
@@ -363,8 +417,12 @@ export function areaSamples(
     area += weight;
   }
   if (area > 0) for (let a = 0; a < 3; a++) centroid[a] /= area;
-  const spacing = sampleSpacing(model, start ?? strokeSample(model, state, candidates[0])!);
-  const apart = warpLineStep * spacing;
+  // Spaced by the grid at the first spot that can hold; none can where fixed nodes alone bind it.
+  let spaced = start;
+  for (let i = 0; !spaced && i < candidates.length; i++)
+    spaced = strokeSample(model, state, candidates[i]);
+  if (!spaced) return null;
+  const apart = warpLineStep * sampleSpacing(model, spaced);
   const near = new Float64Array(candidates.length).fill(Infinity);
   const chosen: WarpSample[] = [];
   const take = (sample: WarpSample) => {
@@ -388,4 +446,160 @@ export function areaSamples(
     if (middle < 0 || distance(at[i], centroid) < distance(at[middle], centroid)) middle = i;
   const pin = strokeSample(model, state, candidates[middle])?.pin ?? chosen[0].pin;
   return { samples: chosen, pin };
+}
+
+/** A spot's mesh-local rest position carried to world space. */
+function restWorldOf(model: WarpModel, point: WarpStrokePoint): Vec3 {
+  const [x, y, z] = facePoint(model, model.positions, point);
+  const m = model.matrix;
+  return [
+    m[0] * x + m[4] * y + m[8] * z + m[12],
+    m[1] * x + m[5] * y + m[9] * z + m[13],
+    m[2] * x + m[6] * y + m[10] * z + m[14],
+  ];
+}
+
+/** The handle centred on `pin`, its target moved with its centre. */
+function recentred(handle: WarpHandle, pin: Vec3) {
+  const target = handle.target;
+  return {
+    pin,
+    target: target && ([0, 1, 2].map((a) => target[a] + pin[a] - handle.pin[a]) as Vec3),
+  };
+}
+
+/**
+ * What is left of a line or an area on a model's paint: a line's longest unbroken run of painted
+ * samples, with its drawn path between them, or an area's largest connected piece of painted
+ * faces, with the samples on it. Each is centred again on what is left, its target moved by as
+ * much as its centre. The handle itself when nothing was lost, and null when a line keeps fewer
+ * than two samples or an area none.
+ */
+export function survivingStroke(model: WarpModel, handle: WarpHandle): WarpHandle | null {
+  if (handle.kind === 'line') return survivingLine(model, handle);
+  if (handle.kind === 'area') return survivingArea(model, handle);
+  return handle;
+}
+
+function survivingLine(model: WarpModel, handle: WarpHandle): WarpHandle | null {
+  const { samples } = handle;
+  const path = handle.path ?? [];
+  const painted = path.map(({ face }) => isPaintedFace(model, face));
+  if (samples.every(({ face }) => isPaintedFace(model, face)) && painted.every(Boolean))
+    return handle;
+  // Where along the drawn path each sample lies; both are in stroke order.
+  const at = path.map((point) => restWorldOf(model, point));
+  let from = 0;
+  const index = samples.map(({ restWorld }) => {
+    let best = from;
+    for (let i = from + 1; i < at.length; i++)
+      if (distance(at[i], restWorld) < distance(at[best], restWorld)) best = i;
+    return (from = best);
+  });
+  // Unbroken runs of painted samples joined by painted path.
+  const runs: number[][] = [[]];
+  samples.forEach(({ face }, s) => {
+    const run = runs[runs.length - 1];
+    if (!isPaintedFace(model, face) || (path.length && !painted[index[s]])) {
+      if (run.length) runs.push([]);
+    } else if (
+      run.length &&
+      path.length &&
+      !painted.slice(index[run[run.length - 1]], index[s] + 1).every(Boolean)
+    )
+      runs.push([s]);
+    else run.push(s);
+  });
+  const lengthOf = (run: number[]) => {
+    let length = 0;
+    for (let k = 1; k < run.length; k++)
+      length += distance(samples[run[k - 1]].restWorld, samples[run[k]].restWorld);
+    return length;
+  };
+  let longest: number[] = [];
+  for (const run of runs) if (run.length > 1 && lengthOf(run) > lengthOf(longest)) longest = run;
+  if (longest.length < 2) return null;
+  const kept = longest.map((s) => samples[s]);
+  // The surface halfway along what is left.
+  const half = lengthOf(longest) / 2;
+  let pin: Vec3 = kept[0].pin;
+  for (let k = 1, along = 0; k < kept.length; k++) {
+    const step = distance(kept[k - 1].restWorld, kept[k].restWorld);
+    if (along + step >= half) {
+      const t = step > 0 ? (half - along) / step : 0;
+      pin = [0, 1, 2].map(
+        (a) => kept[k - 1].pin[a] + t * (kept[k].pin[a] - kept[k - 1].pin[a]),
+      ) as Vec3;
+      break;
+    }
+    along += step;
+  }
+  return {
+    ...handle,
+    samples: kept,
+    ...(path.length ? { path: path.slice(index[longest[0]], index[longest.at(-1)!] + 1) } : {}),
+    ...recentred(handle, pin),
+  };
+}
+
+function survivingArea(model: WarpModel, handle: WarpHandle): WarpHandle | null {
+  const faces = handle.faces ?? [];
+  const { samples } = handle;
+  const left = faces.filter((face) => isPaintedFace(model, face));
+  if (left.length === faces.length && samples.every(({ face }) => isPaintedFace(model, face)))
+    return handle;
+  // Pieces of what is left that share an edge, by area at rest.
+  const { region, restWorld } = model;
+  const { weldedCount } = region;
+  const parent = left.map((_, i) => i);
+  const root = (i: number): number => (parent[i] === i ? i : (parent[i] = root(parent[i])));
+  const edges = new Map<number, number>();
+  left.forEach((face, i) => {
+    const t = regionTriangleOf(region, face);
+    for (let c = 0; c < 3; c++) {
+      const v = region.triangles[t * 3 + c],
+        w = region.triangles[t * 3 + ((c + 1) % 3)];
+      const key = v < w ? v * weldedCount + w : w * weldedCount + v;
+      const other = edges.get(key);
+      if (other === undefined) edges.set(key, i);
+      else parent[root(i)] = root(other);
+    }
+  });
+  const triangle = new Triangle();
+  const corner = (t: number, c: number, out: Vector3) => {
+    const v = region.triangles[t * 3 + c];
+    return out.set(restWorld[v * 3], restWorld[v * 3 + 1], restWorld[v * 3 + 2]);
+  };
+  const area = new Map<number, number>(),
+    centroid = new Map<number, Vec3>();
+  left.forEach((face, i) => {
+    const t = regionTriangleOf(region, face);
+    corner(t, 0, triangle.a);
+    corner(t, 1, triangle.b);
+    corner(t, 2, triangle.c);
+    const weight = triangle.getArea();
+    const mid = triangle.getMidpoint(new Vector3());
+    const r = root(i);
+    area.set(r, (area.get(r) ?? 0) + weight);
+    const sum = centroid.get(r) ?? [0, 0, 0];
+    sum[0] += weight * mid.x;
+    sum[1] += weight * mid.y;
+    sum[2] += weight * mid.z;
+    centroid.set(r, sum);
+  });
+  let largest = -1;
+  for (const [r, a] of area) if (largest < 0 || a > area.get(largest)!) largest = r;
+  const piece = new Set(left.filter((_, i) => root(i) === largest));
+  const kept = samples.filter(({ face }) => piece.has(face));
+  if (!kept.length) return null;
+  const mean = centroid.get(largest)!.map((value) => value / (area.get(largest) || 1));
+  let middle = kept[0];
+  for (const sample of kept)
+    if (distance(sample.restWorld, mean) < distance(middle.restWorld, mean)) middle = sample;
+  return {
+    ...handle,
+    samples: kept,
+    faces: faces.filter((face) => piece.has(face)),
+    ...recentred(handle, middle.pin),
+  };
 }
