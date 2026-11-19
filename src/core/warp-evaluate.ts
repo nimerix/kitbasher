@@ -220,16 +220,19 @@ export function skinnedWorldPositions(
 
 /**
  * Mesh-local positions of the listed welded vertices exactly as `evaluateWarp` writes them for
- * `state`, without writing a whole mesh. A vertex the warp does not move keeps the bits of
- * `first[v]`, the geometry vertex given for it.
+ * `state` and `detail`, without writing a whole mesh. A vertex the warp does not move keeps the
+ * bits of `first[v]`, the geometry vertex given for it.
  */
 export function writtenLocalPositions(
   model: WarpModel,
   state: WarpState,
   vertices: ArrayLike<number>,
   first: ArrayLike<number>,
+  detail?: WarpDetail,
 ): Float32Array {
   const { region, restWorld, blend, inverse: inv } = model;
+  const slots = new Map<number, number>();
+  detail?.vertices.forEach((v, i) => slots.set(v, i));
   const rotation = new Float64Array(model.grid.nodes.length * 9),
     skin = new Float64Array(model.grid.nodes.length * 9),
     shift = new Float64Array(model.grid.nodes.length * 3);
@@ -249,6 +252,12 @@ export function writtenLocalPositions(
     let x = world[0],
       y = world[1],
       z = world[2];
+    const slot = slots.get(v);
+    if (slot !== undefined) {
+      x += detail!.delta[slot * 3];
+      y += detail!.delta[slot * 3 + 1];
+      z += detail!.delta[slot * 3 + 2];
+    }
     if (blend && blend[v] < 1) {
       const b = blend[v];
       x = restWorld[v * 3] + b * (x - restWorld[v * 3]);

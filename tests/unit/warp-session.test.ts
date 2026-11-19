@@ -42,7 +42,7 @@ import {
 import { useXR } from '../../src/core/xr-session';
 import { readFace } from '../../src/core/surfaces';
 import { activeTransformTool, transformSelection } from '../../src/core/transform-selection';
-import { bindPoint, bindTrianglePoint } from '../../src/core/warp-bind';
+import { bindPoint } from '../../src/core/warp-bind';
 import { deformPoint } from '../../src/core/warp-evaluate';
 import { defaultWarpDensity } from '../../src/core/warp-grid';
 import {
@@ -3115,26 +3115,23 @@ describe('line and area handles through a session', () => {
   }
 
   const current = (id: string) => session().points.find((point) => point.id === id)!;
-  /** Lowest and highest written height over a handle's samples and its probe spots. */
+  /** Height of the mesh shown at a spot on a face, from its face's displayed corners. */
+  function displayedHeight(face: number, barycentric: ArrayLike<number>) {
+    const { positions } = session().output!;
+    const index = partOf('a').geometry.index!;
+    let z = 0;
+    for (let c = 0; c < 3; c++) z += barycentric[c] * positions[index.getX(face * 3 + c) * 3 + 2];
+    return z;
+  }
+  /** Lowest and highest displayed height over a handle's samples and its probe spots. */
   function heights(handle: WarpPoint, probes: [number, number][]) {
-    const model = session().model!;
-    const zs = handle.samples.map(
-      ({ binding, restWorld }) => deformPoint(model, session().state!, binding, restWorld)[2],
-    );
+    const zs = handle.samples.map(({ face, barycentric }) => displayedHeight(face, barycentric));
     for (const [x, y] of probes) {
       const face = faceAt(partOf('a').geometry, x, y);
-      const triangle = regionTriangleOf(model.region, face);
       const barycentric = readFace(partOf('a').geometry, face)
         .getBarycoord(new Vector3(x, y, 0), new Vector3())!
         .toArray();
-      const binding = bindTrianglePoint(
-        model.region,
-        model.binding,
-        model.restWorld,
-        triangle,
-        barycentric,
-      );
-      zs.push(deformPoint(model, session().state!, binding, [x, y, 0])[2]);
+      zs.push(displayedHeight(face, barycentric));
     }
     return [Math.min(...zs), Math.max(...zs)];
   }
