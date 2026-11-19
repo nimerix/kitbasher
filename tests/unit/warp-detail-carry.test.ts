@@ -229,6 +229,32 @@ describe('Close gap on a surface with detail', () => {
     );
   });
 
+  it('closes every target facing a parallel plate after a long point pull', async () => {
+    const source = plate('a', 40, 80);
+    const z = 4;
+    const neighbour: Part = { ...plate('b', 80, 10, [0, 0, z]), quaternion: [0, 1, 0, 0] };
+    begin([source, neighbour]);
+    editor().setWarpOptions({ autoPoints: false });
+    editor().setWarpFeather({ enabled: false });
+    await editor().layWarpGrid();
+    editor().setWarpPointSettings({ falloff: 0, radius: 4 }, 'end');
+    pull(source.geometry, [0, 0, 0], [0, 0, 1], [0, 0, 12]);
+    const { model, output, overlap } = session();
+    const expected: number[] = [];
+    // The neighbour covers the entire plate, faces -Z, and is within 5 mm of
+    // its base. Read positions and normals directly from the visible preview.
+    model!.region.weldOf.forEach((v, g) => {
+      const n = model!.grid.nodeOf[v];
+      if (n === 0xffffffff || model!.grid.fixed[n]) return;
+      const gap = z - output!.positions[g * 3 + 2];
+      if (Math.abs(gap) <= 5 && gap > -overlap && output!.normals![g * 3 + 2] > 0.5)
+        expected.push(n);
+    });
+    expect(expected.length).toBeGreaterThan(2000);
+    editor().closeWarpGap();
+    expect(session().gapTargets.map((t) => t.node)).toEqual(expected.sort((a, b) => a - b));
+  });
+
   it('judges a held point by where it is written before and after closing', async () => {
     // Facing the plate 4 mm in front, over the side away from the held point.
     const b: Part = { ...plate('b', 40, 32, [24, 0, 4]), quaternion: [0, 1, 0, 0] };

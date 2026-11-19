@@ -218,6 +218,19 @@ export function skinnedWorldPositions(
   return out;
 }
 
+const slotsByVertices = new WeakMap<Uint32Array, Map<number, number>>();
+
+/** Offsets in a detail field, shared across frames with the same affected vertices. */
+export function detailVertexSlots(vertices: Uint32Array) {
+  let slots = slotsByVertices.get(vertices);
+  if (!slots) {
+    slots = new Map();
+    for (let i = 0; i < vertices.length; i++) slots.set(vertices[i], i);
+    slotsByVertices.set(vertices, slots);
+  }
+  return slots;
+}
+
 /**
  * Mesh-local positions of the listed welded vertices exactly as `evaluateWarp` writes them for
  * `state` and `detail`, without writing a whole mesh. A vertex the warp does not move keeps the
@@ -231,8 +244,7 @@ export function writtenLocalPositions(
   detail?: WarpDetail,
 ): Float32Array {
   const { region, restWorld, blend, inverse: inv } = model;
-  const slots = new Map<number, number>();
-  detail?.vertices.forEach((v, i) => slots.set(v, i));
+  const slots = detail && detailVertexSlots(detail.vertices);
   const rotation = new Float64Array(model.grid.nodes.length * 9),
     skin = new Float64Array(model.grid.nodes.length * 9),
     shift = new Float64Array(model.grid.nodes.length * 3);
@@ -252,7 +264,7 @@ export function writtenLocalPositions(
     let x = world[0],
       y = world[1],
       z = world[2];
-    const slot = slots.get(v);
+    const slot = slots?.get(v);
     if (slot !== undefined) {
       x += detail!.delta[slot * 3];
       y += detail!.delta[slot * 3 + 1];
@@ -573,24 +585,31 @@ export function joinedRanges(items: ArrayLike<number>, size: number) {
 }
 
 /**
- * World position of each grid node where the surface is written: its solved position, blended
- * toward rest across a feather band. Writes into `out` and returns it.
+ * World position of each grid node where the surface is written: its solved position plus the
+ * local shoulder correction, blended toward rest across a feather band. Writes into `out` and returns it.
  */
 export function writtenNodePositions(
   model: WarpModel,
   state: WarpState,
   out: Float32Array | Float64Array = new Float32Array(state.positions.length),
+  detail?: WarpDetail,
 ) {
   const { blend, restNodes, grid } = model;
   const positions = state.positions;
-  if (!blend) {
+  if (!blend && !detail) {
     out.set(positions);
     return out;
   }
+  const slots = detail && detailVertexSlots(detail.vertices);
   for (let n = 0; n < grid.nodes.length; n++) {
-    const b = blend[grid.nodes[n]];
-    for (let a = n * 3; a < n * 3 + 3; a++)
-      out[a] = b === 1 ? positions[a] : restNodes[a] + b * (positions[a] - restNodes[a]);
+    const v = grid.nodes[n];
+    const b = blend?.[v] ?? 1;
+    const slot = slots?.get(v);
+    for (let k = 0; k < 3; k++) {
+      const a = n * 3 + k;
+      const value = positions[a] + (slot === undefined ? 0 : detail!.delta[slot * 3 + k]);
+      out[a] = b === 1 ? value : restNodes[a] + b * (value - restNodes[a]);
+    }
   }
   return out;
 }

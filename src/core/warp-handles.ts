@@ -4,7 +4,12 @@ import type { WarpGrid } from './warp-grid';
 import { isPaintedNode, type WarpModel } from './warp-model';
 import { regionTriangleOf } from './warp-region';
 import { flatPointPatch } from './warp-point-surface';
-import { deformPoint, skinnedWorldPositions, type WarpOutput } from './warp-evaluate';
+import {
+  detailVertexSlots,
+  deformPoint,
+  skinnedWorldPositions,
+  type WarpOutput,
+} from './warp-evaluate';
 import {
   modelledResponse,
   responseShrink,
@@ -1681,8 +1686,6 @@ export function writeSnapshotDetail(snapshot: WarpSnapshot, detail: WarpDetail |
 /** The detail a snapshot's surface was written with, if any. */
 export const snapshotDetail = (snapshot: WarpSnapshot) => snapshotDetails.get(snapshot);
 
-const detailSlots = new WeakMap<Uint32Array, Map<number, number>>();
-
 /** The detail at a surface point: the blend of its face corners' by `barycentric`, world. */
 export function detailAt(
   model: WarpModel,
@@ -1692,12 +1695,7 @@ export function detailAt(
 ): Vec3 {
   const out: Vec3 = [0, 0, 0];
   if (!detail?.vertices.length) return out;
-  let slots = detailSlots.get(detail.vertices);
-  if (!slots) {
-    slots = new Map();
-    for (let i = 0; i < detail.vertices.length; i++) slots.set(detail.vertices[i], i);
-    detailSlots.set(detail.vertices, slots);
-  }
+  const slots = detailVertexSlots(detail.vertices);
   for (let c = 0; c < 3; c++) {
     const corner = model.index ? model.index[face * 3 + c] : face * 3 + c;
     const i = slots.get(model.region.weldOf[corner]);

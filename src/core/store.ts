@@ -87,7 +87,13 @@ import { captureComponents, instantiateComponents } from './clipboard';
 import type { ComponentClipboard } from './clipboard';
 import { referencePlanes, resolvePart } from './references';
 import { bindTrianglePoint } from './warp-bind';
-import { createWarpOutput, evaluateWarp, warpUpdateRanges, type WarpOutput } from './warp-evaluate';
+import {
+  createWarpOutput,
+  evaluateWarp,
+  warpUpdateRanges,
+  writtenNodePositions,
+  type WarpOutput,
+} from './warp-evaluate';
 import { defaultWarpDensity, warpDensityNodes, type WarpGrid } from './warp-grid';
 import {
   distributionNodes,
@@ -1146,11 +1152,10 @@ function solveInputOf(warp: WarpSolveInput, drag: boolean) {
 }
 
 /** World box around the grid as it is now deformed. */
-function warpBounds(state: WarpState) {
+function warpBounds(positions: ArrayLike<number>) {
   const box = new Box3(),
     point = new Vector3();
-  for (let i = 0; i < state.positions.length; i += 3)
-    box.expandByPoint(point.fromArray(state.positions, i));
+  for (let i = 0; i < positions.length; i += 3) box.expandByPoint(point.fromArray(positions, i));
   return box;
 }
 
@@ -1158,7 +1163,11 @@ let seamTimer: ReturnType<typeof setTimeout> | undefined;
 
 function warpSeam(scene: SceneDocument, warp: WarpSession) {
   clearTimeout(seamTimer);
-  const { neighbours, indexing } = warpNeighbours(scene, warp.partId, warpBounds(warp.state!));
+  const { neighbours, indexing } = warpNeighbours(
+    scene,
+    warp.partId,
+    warpBounds(warp.state!.positions),
+  );
   noticePreparing(warp, indexing);
   if (!neighbours.length) return null;
   const { model, output, preview } = warp;
@@ -1210,14 +1219,28 @@ function noticePreparing(warp: WarpSession, indexing: string[]) {
   useEditor.getState().notify(`Still preparing ${names}. Try again when it finishes.`, 'info');
 }
 
+/** The shoulder profile is written on a points-only surface. Exact seam targets take priority. */
+function surfaceDetail(
+  model: WarpModel,
+  state: WarpState,
+  points: WarpPoint[],
+  guided: WarpDetail | undefined,
+  closing: boolean,
+) {
+  return closing ? guided : (planarPointDetail(model, state, points, guided) ?? guided);
+}
+
 /** Deforms the preview from the solved grid, and returns the region triangles that folded. */
 function deformWarpPreview(warp: WarpSession, gesture: 'drag' | 'end') {
   const { model, state, output, preview, source } = warp;
   const input = warpSolveInput(warp, gesture === 'drag');
-  const planar = warp.gapTargets.length
-    ? undefined
-    : planarPointDetail(model!, state!, warp.points, input.detail);
-  const detail = planar ?? input.detail;
+  const detail = surfaceDetail(
+    model!,
+    state!,
+    warp.points,
+    input.detail,
+    warp.gapTargets.length > 0,
+  );
   showDetail(output!, detail);
   // A drag frame leaves folds to the end of the gesture.
   const folds = evaluateWarp(model!, state!, output!, gesture === 'end', detail);
@@ -1479,12 +1502,11 @@ function restoreWarp(scene: SceneDocument, warp: WarpSession, step: WarpEdit): W
  */
 function closingSurface(
   model: WarpModel,
-  state: WarpState,
+  p: ArrayLike<number>,
   gapTargets: { node: number; target: Vec3 }[],
 ) {
   const { edgeStart, edges, triangles } = model.grid;
   const count = model.grid.nodes.length;
-  const p = state.positions;
   const normals = new Float64Array(count * 3);
   for (let t = 0; t < triangles.length; t += 3) {
     const a = triangles[t] * 3,
@@ -1614,9 +1636,10 @@ function yieldingGapTargets(
       for (let i = 0; i < gapTrialIterations; i++)
         if (solveWarp(model.grid, model.restNodes, constraints, trial, 1, guides) < gapTrialMove)
           break;
+    const writtenDetail = surfaceDetail(model, trial, points, detail, kept.length > 0);
     let moved = false;
     samples.forEach((sample, s) => {
-      const at = writtenSample(model, trial, sample, detail);
+      const at = writtenSample(model, trial, sample, writtenDetail);
       if (Math.hypot(...at.map((value, a) => value - now[s][a])) > warpPinHold) {
         ring[s]++;
         moved = true;
@@ -1627,7 +1650,7 @@ function yieldingGapTargets(
   return { gapTargets: kept, held: gapTargets.length - kept.length, trial };
 }
 
-const distanceTo = (positions: Float64Array, node: number, target: Vec3) =>
+const distanceTo = (positions: ArrayLike<number>, node: number, target: Vec3) =>
   Math.hypot(
     positions[node * 3] - target[0],
     positions[node * 3 + 1] - target[1],
@@ -1640,7 +1663,7 @@ function snapWarpTargets(
   warp: WarpSession,
   moves: { id: string; target: Vec3 }[],
 ) {
-  const bounds = warpBounds(warp.state!);
+  const bounds = warpBounds(warp.state!.positions);
   for (const { target } of moves) bounds.expandByPoint(new Vector3(...target));
   const { neighbours, indexing } = warpNeighbours(scene, warp.partId, bounds);
   noticePreparing(warp, indexing);
@@ -2849,9 +2872,20 @@ export const useEditor = create<EditorState>((set, get) => ({
     // Found on the surface the points alone hold, so pressing again or changing the overlap keeps
     // the nodes earlier targets pulled in.
     const held = createWarpState(model.restNodes);
-    const { guides, constraints, detail } = warpSolveInput({ ...warp, gapTargets: [] });
+    const {
+      guides,
+      constraints,
+      detail: guidedDetail,
+    } = warpSolveInput({ ...warp, gapTargets: [] });
     if (constraints.length) settleGrid(model, constraints, held, guides);
-    const { neighbours, indexing } = warpNeighbours(state.scene, warp.partId, warpBounds(held));
+    const detail = surfaceDetail(model, held, warp.points, guidedDetail, false);
+    const nodes = writtenNodePositions(
+      model,
+      held,
+      new Float64Array(held.positions.length),
+      detail,
+    );
+    const { neighbours, indexing } = warpNeighbours(state.scene, warp.partId, warpBounds(nodes));
     if (indexing.length) {
       state.notify(
         `Still preparing ${indexing.join(', ')}. Try Close gap again when it finishes.`,
@@ -2867,10 +2901,10 @@ export const useEditor = create<EditorState>((set, get) => ({
       return;
     }
     // Faced by the surface as it is written there, detail and all.
-    const gapTargets = closeGapTargets(model, held, neighbours, warp.overlap, detail);
+    const gapTargets = closeGapTargets(model, held, neighbours, warp.overlap, detail, nodes);
     // Untouched automatic points on the closing surface that the seam would move are holding it
     // open, so they go in the same step. Points the user placed or moved stay.
-    const surface = closingSurface(model, held, gapTargets);
+    const surface = closingSurface(model, nodes, gapTargets);
     const candidate = (point: WarpPoint) =>
       point.auto &&
       point.target === null &&
@@ -2890,7 +2924,7 @@ export const useEditor = create<EditorState>((set, get) => ({
       settleGrid(model, input.constraints, trial, input.guides);
       let pull = 0;
       for (const { node, target } of gapTargets)
-        pull = Math.max(pull, distanceTo(held.positions, node, target));
+        pull = Math.max(pull, distanceTo(nodes, node, target));
       // Measured from where each is written now, so a point that has ridden with a bump is
       // judged by what closing the seam would do to it. Both surfaces carry their detail.
       const shown = shownDetail(warp);
