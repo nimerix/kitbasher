@@ -28,7 +28,7 @@ import { writtenNodePositions } from '../core/warp-evaluate';
 import type { WarpModel } from '../core/warp-model';
 import {
   traceWarpGridPath,
-  typicalLength,
+  warpGridCell,
   warpGridChords,
   warpGridLevels,
   warpGridShiftWidth,
@@ -421,7 +421,7 @@ function SurfaceWarpGrid({ warp }: { warp: WarpSession }) {
     shifts.needsUpdate = true;
     const uniforms = {
       resolution: { value: new Vector2(1, 1) },
-      cell: { value: typicalLength(path.length) },
+      cell: { value: warpGridCell(path) },
       shifted: { value: false },
       shifts: { value: shifts },
     };
