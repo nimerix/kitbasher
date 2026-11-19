@@ -801,6 +801,13 @@ test('choosing the least value on a mixed slider sets it on every selected point
         await page.mouse.click(box.x + 1, box.y + box.height / 2);
       },
     };
+    // Only the primary button chooses a value.
+    for (const button of ['right', 'middle'] as const) {
+      const box = (await slider.boundingBox())!;
+      await page.mouse.click(box.x + 1, box.y + box.height / 2, { button });
+      await page.keyboard.press('Escape');
+      expect(await pointSettings(page), `${setting} after a ${button} click`).toEqual(mixed);
+    }
     for (const [gesture, act] of Object.entries(gestures)) {
       await expect(slider, gesture).toHaveAttribute('aria-valuetext', 'Mixed');
       await act();
