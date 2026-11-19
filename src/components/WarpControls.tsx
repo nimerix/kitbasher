@@ -103,9 +103,21 @@ function PointSettingsControls({ warp, part }: { warp: WarpSession; part: Part |
   const shown = selected[0];
   const radius = shown ? shown.radius : warpPointRadius(warp, part);
   const falloff = shown ? shown.falloff : warp.pointFalloff;
+  // Selected points that differ show neither value.
+  const mixedRadius = selected.some((point) => point.radius !== radius);
+  const mixedFalloff = selected.some((point) => point.falloff !== falloff);
   const { max } = fittedSizeRange(part ? partSize(part) : 40);
   const coarse = selected.some((point) => point.radius > 0 && !handleGuides(point));
-  const fade = shown && handleGuides(shown) ? fadeWidth(shown) : null;
+  const fade =
+    shown && !mixedRadius && !mixedFalloff && handleGuides(shown) ? fadeWidth(shown) : null;
+  const percent = (value: number) => `${Math.round(value * 100)}%`;
+  // What a new point gets.
+  const newPoints =
+    !mixedRadius && !mixedFalloff && warp.pointRadius === radius && warp.pointFalloff === falloff
+      ? 'New points use the same settings.'
+      : warp.pointRadius === null
+        ? `New points use ${percent(warp.pointFalloff)} falloff, and reach a few grid spacings where you click until you set a radius.`
+        : `New points use a ${Number(warp.pointRadius.toPrecision(3))} mm radius and ${percent(warp.pointFalloff)} falloff.`;
   const shortfall = warpShortfall(warp);
   const drift = warpPinDrift(warp);
   const commit = (patch: PointSettings) => useEditor.getState().setWarpPointSettings(patch, 'end');
@@ -144,6 +156,7 @@ function PointSettingsControls({ warp, part }: { warp: WarpSession; part: Part |
           min={0.1}
           max={max}
           zero
+          mixed={mixedRadius}
           onChange={(value) => gesture.change('radius', { radius: value })}
         />
         <NumericInput
@@ -152,6 +165,7 @@ function PointSettingsControls({ warp, part }: { warp: WarpSession; part: Part |
           min={0}
           max={100}
           step={0.1}
+          mixed={mixedRadius}
           onCommit={(value) => commit({ radius: value })}
         />
         <small>mm</small>
@@ -160,11 +174,13 @@ function PointSettingsControls({ warp, part }: { warp: WarpSession; part: Part |
         <span>Falloff</span>
         <input
           type="range"
+          className={mixedFalloff ? 'mixed' : undefined}
           aria-label="Point falloff slider"
+          aria-valuetext={mixedFalloff ? 'Mixed' : undefined}
           min={0}
           max={100}
           step={1}
-          value={Math.round(falloff * 100)}
+          value={mixedFalloff ? 0 : Math.round(falloff * 100)}
           onChange={(event) =>
             gesture.change('falloff', { falloff: Number(event.target.value) / 100 })
           }
@@ -174,15 +190,18 @@ function PointSettingsControls({ warp, part }: { warp: WarpSession; part: Part |
           value={Math.round(falloff * 100)}
           min={0}
           max={100}
+          mixed={mixedFalloff}
           onCommit={(value) => commit({ falloff: value / 100 })}
         />
         <small>%</small>
       </label>
       <p className="anchor-help">
         {selected.length
-          ? radius > 0
-            ? `Moves the surface within ${Number(radius.toPrecision(3))} mm of the selected ${selected.length === 1 ? 'point' : 'points'}${fade !== null ? `, fading over the outer ${Number(fade.toPrecision(2))} mm` : ''}. New points use the same settings.`
-            : `The selected ${selected.length === 1 ? 'point moves' : 'points move'} the surface at the point only.`
+          ? mixedRadius
+            ? `The selected points move the surface within their own radii. ${newPoints}`
+            : radius > 0
+              ? `Moves the surface within ${Number(radius.toPrecision(3))} mm of the selected ${selected.length === 1 ? 'point' : 'points'}${fade !== null ? `, fading over the outer ${Number(fade.toPrecision(2))} mm` : ''}. ${newPoints}`
+              : `The selected ${selected.length === 1 ? 'point moves' : 'points move'} the surface at the point only.`
           : warp.pointRadius === null
             ? 'New points use this falloff, and reach a few grid spacings where you click until you set a radius.'
             : 'New points use this radius and falloff.'}
