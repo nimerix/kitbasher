@@ -565,11 +565,12 @@ async function sliderState(page: Page) {
 
 /** Presses on a slider at a share of its width and drags it to another, leaving the button down. */
 async function pressSlider(page: Page, name: string, from: number, to: number) {
-  const box = (await page.getByRole('slider', { name, exact: true }).boundingBox())!;
-  const y = box.y + box.height / 2;
-  await page.mouse.move(box.x + from * box.width, y);
+  const slider = page.getByRole('slider', { name, exact: true });
+  const size = (await slider.boundingBox())!;
+  await slider.hover({ position: { x: from * size.width, y: size.height / 2 } });
   await page.mouse.down();
-  await page.mouse.move(box.x + to * box.width, y, { steps: 6 });
+  const box = (await slider.boundingBox())!;
+  await page.mouse.move(box.x + to * box.width, box.y + box.height / 2, { steps: 6 });
 }
 
 test('each radius or falloff gesture is one undo step and ends exactly once', async ({ page }) => {
