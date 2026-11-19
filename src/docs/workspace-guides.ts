@@ -543,7 +543,7 @@ export const workspaceGuides: DocArticle[] = [
         title: 'Understand voxel remeshing',
         paragraphs: [
           `Voxel remesh rebuilds a closed mesh on a voxel grid. Resolution ranges from ${MIN_REMESH_RESOLUTION} to ${MAX_REMESH_RESOLUTION} and defaults to ${DEFAULT_REMESH_RESOLUTION}. It sets the grid size along the longest dimension of the mesh. Higher values use smaller voxels and can preserve finer details.`,
-          'Lower the resolution if the remesh reaches the voxel memory or one-million-triangle limit.',
+          'Above 256, the remesh fits each vertex to the original surface, which keeps the fine detail of dense scans. A remesh can produce at most one million triangles at 256 or lower and ten million above it. Lower the resolution if it reaches that limit or the voxel memory limit.',
           'Remeshing changes mating surfaces, can remove thin features, and removes vertex colors while retaining material tint. Use it for a deliberate new surface rather than a lossless file-size reduction. Prepare the mesh first, then apply and review; no geometry is changed merely by opening the dialog.',
         ],
         note: {

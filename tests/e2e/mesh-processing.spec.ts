@@ -139,7 +139,7 @@ test('remeshes and cancels without modifying the scene', async ({ page }) => {
   const resolution = page.getByLabel('Voxel resolution');
   const prepare = page.getByRole('button', { name: 'Prepare mesh' });
   await expect(resolution).toHaveValue('128');
-  await resolution.fill('257');
+  await resolution.fill('1025');
   await expect(prepare).toBeDisabled();
   await resolution.fill('256');
   await prepare.click();

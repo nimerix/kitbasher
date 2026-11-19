@@ -2,10 +2,14 @@ import { MeshoptSimplifier } from '../vendor/meshoptimizer/simplifier';
 import { deserializeGeometry } from './geometry';
 import type { BinaryGeometry } from './types';
 import { hasClosedEdges } from './mesh-topology';
+import { RemeshLimitError, sparseRemesh } from './sparse-remesh';
 import {
+  DENSE_REMESH_RESOLUTION,
   isRemeshResolution,
   MAX_REMESH_RESOLUTION,
   MIN_REMESH_RESOLUTION,
+  SPARSE_REMESH_MAX_TRIANGLES,
+  SPARSE_REMESH_MAX_VOXELS,
 } from './remesh-settings';
 
 export type MeshProcessOptions =
@@ -78,6 +82,29 @@ function compact(data: BinaryGeometry, indices: Uint32Array): BinaryGeometry {
   };
 }
 
+/** Above the dense grid, remesh sparsely with quadric vertex placement so fine detail
+ * stays within a small fraction of a voxel. The result is indexed. */
+function sparse(data: BinaryGeometry, resolution: number): BinaryGeometry {
+  try {
+    const mesh = sparseRemesh(data.indices as Uint32Array, data.positions, resolution, {
+      solve: true,
+      maxVoxels: SPARSE_REMESH_MAX_VOXELS,
+      maxTriangles: SPARSE_REMESH_MAX_TRIANGLES,
+    });
+    if (!mesh.indices.length)
+      throw new Error('No surface survived at this resolution. Increase voxel resolution.');
+    return { positions: mesh.positions, indices: mesh.indices };
+  } catch (error) {
+    if (error instanceof RemeshLimitError)
+      throw new Error(
+        error.limit === 'voxels'
+          ? 'The remesh exceeded the voxel memory limit. Lower voxel resolution.'
+          : 'The remesh exceeded ten million triangles. Lower voxel resolution.',
+      );
+    throw error;
+  }
+}
+
 /** Owns one immutable source snapshot and reuses its welded topology across attempts. */
 export class MeshProcessor {
   private prepared?: BinaryGeometry;
@@ -137,6 +164,8 @@ export class MeshProcessor {
         'Voxel remeshing requires a closed, manifold mesh. Repair open edges first, or use Decimate.',
       );
     onProgress?.('Rebuilding surface on voxel grid');
+    if (options.resolution > DENSE_REMESH_RESOLUTION)
+      return { mesh: sparse(data, options.resolution), error: null };
     const positions = await this.kernels.remesh(data, options.resolution);
     if (!positions.length)
       throw new Error('No surface survived at this resolution. Increase voxel resolution.');

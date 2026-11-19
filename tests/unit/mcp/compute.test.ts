@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { BoxGeometry, SphereGeometry, Float32BufferAttribute } from 'three';
 import { binaryGeometry } from '../../../src/core/geometry';
 import { MeshProcessor } from '../../../src/core/mesh-processing';
-import { MAX_REMESH_RESOLUTION } from '../../../src/core/remesh-settings';
+import { DENSE_REMESH_RESOLUTION } from '../../../src/core/remesh-settings';
 import { restoreGeometry } from '../../../src/core/geometry-transfer';
 import { nativeMeshExecutable, runNativeKernel } from '../../../mcp/native-mesh';
 import { releaseComputeWorkers, runCompute } from '../../../mcp/compute';
@@ -52,7 +52,8 @@ describe.skipIf(!nativeMeshExecutable())('native kernels', () => {
       const mesh = binaryGeometry(sphere);
       for (const options of [
         { mode: 'decimate', ratio: 0.5, error: 0.05, lockBorder: true },
-        { mode: 'remesh', resolution: MAX_REMESH_RESOLUTION },
+        // The native helper runs the dense kernel; higher resolutions remesh sparsely in JS.
+        { mode: 'remesh', resolution: DENSE_REMESH_RESOLUTION },
       ] as const) {
         if (colored && options.mode === 'remesh') continue;
         const source = options.mode === 'remesh' ? binaryGeometry(new BoxGeometry(32, 6, 3)) : mesh;
