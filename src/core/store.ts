@@ -1099,34 +1099,34 @@ const sessionGuides = ({ model, points, gapTargets }: WarpSolveInput) =>
  * back carrying only the share of its offset it can. A drag frame solves without priority.
  */
 function warpSolveInput(warp: WarpSolveInput, drag = false) {
-  const last = lastSolveInput;
+  const last = lastSolveInputs.get(warp.model!);
   if (
     last &&
-    last.model === warp.model &&
     last.points === warp.points &&
     last.gapTargets === warp.gapTargets &&
     last.drag === drag
   )
     return last.input;
   const input = solveInputOf(warp, drag);
-  lastSolveInput = {
-    model: warp.model,
+  lastSolveInputs.set(warp.model!, {
     points: warp.points,
     gapTargets: warp.gapTargets,
     drag,
     input,
-  };
+  });
   return input;
 }
 
 // The last solve input, which the preview reads again for the same points.
-let lastSolveInput: {
-  model: WarpSolveInput['model'];
-  points: WarpSolveInput['points'];
-  gapTargets: WarpSolveInput['gapTargets'];
-  drag: boolean;
-  input: ReturnType<typeof solveInputOf>;
-} | null = null;
+const lastSolveInputs = new WeakMap<
+  WarpModel,
+  {
+    points: WarpSolveInput['points'];
+    gapTargets: WarpSolveInput['gapTargets'];
+    drag: boolean;
+    input: ReturnType<typeof solveInputOf>;
+  }
+>();
 
 function solveInputOf(warp: WarpSolveInput, drag: boolean) {
   const exact = warp.gapTargets.map(({ node }) => node);
@@ -1139,7 +1139,8 @@ function solveInputOf(warp: WarpSolveInput, drag: boolean) {
   const carry = handleCarry(warp.model!, warp.points, constraints, guides, exact);
   if (carry.size) guides = warpGuides(warp.model!, warp.points, exact, carry);
   // What the moved handles bend between grid nodes, written over what the nodes carry.
-  const detail = warpDetail(warp.model!, warp.points, exact, carry);
+  const samplesOnly = drag && warp.model!.region.interiorCount > warpDragVertices;
+  const detail = warpDetail(warp.model!, warp.points, exact, carry, samplesOnly);
   if (carry.size || detail) constraints = plain(warpConstraints(warp, guides, carry, detail));
   return { guides, constraints, detail };
 }
