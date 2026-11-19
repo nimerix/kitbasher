@@ -29,7 +29,7 @@ export const releases: Release[] = [
       },
       {
         kind: 'improved',
-        text: 'Voxel remesh now uses a default resolution of 128. Increase it to 256 to preserve smaller features.',
+        text: 'Voxel remesh now uses a default resolution of 128 and goes up to 1024. Above 256 it fits each vertex to the original surface, so dense scans keep their detail.',
       },
     ],
   },

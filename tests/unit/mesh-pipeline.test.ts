@@ -24,6 +24,7 @@ import { hasClosedEdges, weldedPositionIndex } from '../../src/core/mesh-topolog
 import { exportStl } from '../../src/core/files';
 import type { Part } from '../../src/core/types';
 import { evaluateBoolean } from '../../src/core/boolean';
+import { MAX_REMESH_RESOLUTION } from '../../src/core/remesh-settings';
 
 const part = (geometry: BufferGeometry, mirrored = false): Part => ({
   id: geometry.uuid,
@@ -228,8 +229,8 @@ describe('prepared mesh reuse', () => {
     await expect(
       processor.process({ mode: 'decimate', ratio: 0.5, error: 0.01, lockBorder: true }),
     ).resolves.toHaveProperty('mesh');
-    await expect(processor.process({ mode: 'remesh', resolution: 512 })).rejects.toThrow(
-      'resolution',
-    );
+    await expect(
+      processor.process({ mode: 'remesh', resolution: MAX_REMESH_RESOLUTION + 1 }),
+    ).rejects.toThrow('resolution');
   });
 });

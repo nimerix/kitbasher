@@ -3,7 +3,9 @@ import {
   BoxGeometry,
   BufferAttribute,
   type BufferGeometry,
+  CylinderGeometry,
   ExtrudeGeometry,
+  IcosahedronGeometry,
   Mesh,
   MeshBasicMaterial,
   PlaneGeometry,
@@ -16,8 +18,11 @@ import {
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import { binaryGeometry, deserializeGeometry, triangleCount } from '../../src/core/geometry';
 import { decimateMesh, MeshProcessor, remeshMesh } from '../../src/core/mesh-processing';
+import { sparseRemesh } from '../../src/core/sparse-remesh';
+import { MeshoptSimplifier } from '../../src/vendor/meshoptimizer/simplifier';
 import {
   DEFAULT_REMESH_RESOLUTION,
+  DENSE_REMESH_RESOLUTION,
   MAX_REMESH_RESOLUTION,
   MIN_REMESH_RESOLUTION,
 } from '../../src/core/remesh-settings';
@@ -162,24 +167,164 @@ describe('mesh processing', () => {
   });
 
   it.each([
-    [8, 'one million triangles'],
-    [18, 'voxel memory limit'],
+    [8, DENSE_REMESH_RESOLUTION, 'one million triangles'],
+    [18, DENSE_REMESH_RESOLUTION, 'voxel memory limit'],
+    [3, MAX_REMESH_RESOLUTION, 'voxel memory limit'],
   ])(
-    'rejects an over-budget remesh of %i stacked slabs and allows a coarser retry',
-    async (count, limit) => {
+    'rejects an over-budget remesh of %i stacked slabs at %i and allows a coarser retry',
+    async (count, resolution, limit) => {
       const slabs = mergeGeometries(
         Array.from({ length: count }, (_, i) =>
           new BoxGeometry(32, 32, 0.5).translate(0, 0, i * 1.5),
         ),
       );
       const processor = new MeshProcessor(binaryGeometry(slabs));
-      await expect(
-        processor.process({ mode: 'remesh', resolution: MAX_REMESH_RESOLUTION }),
-      ).rejects.toThrow(limit);
+      await expect(processor.process({ mode: 'remesh', resolution })).rejects.toThrow(limit);
       const retry = await processor.process({ mode: 'remesh', resolution: 64 });
       expect(retry.mesh.positions.length).toBeGreaterThan(0);
     },
   );
+});
+
+describe('sparse remeshing', () => {
+  const welded = (geometry: BufferGeometry) => {
+    const data = binaryGeometry(geometry);
+    const remap = MeshoptSimplifier.generatePositionRemap(data.positions, 3);
+    const count = data.indices?.length ?? data.positions.length / 3;
+    const indices = new Uint32Array(count);
+    for (let i = 0; i < count; i++) indices[i] = remap[data.indices?.[i] ?? i];
+    return { positions: data.positions, indices };
+  };
+
+  it('reproduces the dense kernel on its grid when quadric placement is off', async () => {
+    await MeshoptSimplifier.ready;
+    // Well-shaped triangles take the same square sampling grid in both kernels.
+    const { positions, indices } = welded(new IcosahedronGeometry(10, 16).translate(3, -2, 5));
+    for (const resolution of [32, DENSE_REMESH_RESOLUTION]) {
+      const dense = MeshoptSimplifier.remesh(indices, positions, 3, resolution);
+      const sparse = sparseRemesh(indices, positions, resolution);
+      expect(sparse.indices.length * 3).toBe(dense.length);
+      // Identify vertices within 0.0001 mm as one; the dense soup repeats voxels with float noise.
+      const cell = (value: number) => Math.floor(value * 1000);
+      const grid = new Map<string, number[]>();
+      const points: number[] = [];
+      const identify = (p: ArrayLike<number>, add: boolean) => {
+        for (const dx of [-1, 0, 1])
+          for (const dy of [-1, 0, 1])
+            for (const dz of [-1, 0, 1])
+              for (const id of grid.get(
+                [cell(p[0]) + dx, cell(p[1]) + dy, cell(p[2]) + dz].join(),
+              ) ?? [])
+                if (
+                  Math.hypot(
+                    points[id * 3] - p[0],
+                    points[id * 3 + 1] - p[1],
+                    points[id * 3 + 2] - p[2],
+                  ) < 1e-4
+                )
+                  return id;
+        if (!add) return -1;
+        const id = points.length / 3;
+        points.push(p[0], p[1], p[2]);
+        const key = [cell(p[0]), cell(p[1]), cell(p[2])].join();
+        grid.set(key, [...(grid.get(key) ?? []), id]);
+        return id;
+      };
+      const ids: number[] = [];
+      for (let i = 0; i < dense.length; i += 3) ids.push(identify(dense.subarray(i, i + 3), true));
+      const match = (p: ArrayLike<number>) => identify(p, false);
+      const canonical = (a: number, b: number, c: number) => {
+        const first = Math.min(a, b, c);
+        return first === a ? `${a},${b},${c}` : first === b ? `${b},${c},${a}` : `${c},${a},${b}`;
+      };
+      const expected = new Set<string>();
+      for (let t = 0; t < ids.length; t += 3)
+        expected.add(canonical(ids[t], ids[t + 1], ids[t + 2]));
+      const vertex = Array.from({ length: sparse.positions.length / 3 }, (_, v) =>
+        match(sparse.positions.subarray(v * 3, v * 3 + 3)),
+      );
+      expect(vertex).not.toContain(-1);
+      for (let t = 0; t < sparse.indices.length; t += 3)
+        expect(
+          expected.has(
+            canonical(
+              vertex[sparse.indices[t]],
+              vertex[sparse.indices[t + 1]],
+              vertex[sparse.indices[t + 2]],
+            ),
+          ),
+        ).toBe(true);
+    }
+  }, 30_000);
+
+  it('rebuilds a closed, manifold surface at maximum resolution within a small fraction of a voxel', async () => {
+    // A 2 x 30 mm rod: sharp rims, a curved side and flat caps.
+    const source = new CylinderGeometry(1, 1, 30, 256, 1).translate(4, 5, 6);
+    const data = binaryGeometry(source);
+    const result = await new MeshProcessor(data).process({
+      mode: 'remesh',
+      resolution: MAX_REMESH_RESOLUTION,
+    });
+    const { positions } = result.mesh;
+    const indices = result.mesh.indices as Uint32Array;
+    expect(indices).toBeInstanceOf(Uint32Array);
+    const voxel = 30 / (MAX_REMESH_RESOLUTION - 2);
+    const vertices = positions.length / 3;
+
+    // Every edge is shared by exactly two triangles.
+    const edges = new Map<number, number>();
+    for (let t = 0; t < indices.length; t += 3)
+      for (let k = 0; k < 3; k++) {
+        const a = indices[t + k],
+          b = indices[t + ((k + 1) % 3)];
+        const key = Math.min(a, b) * vertices + Math.max(a, b);
+        edges.set(key, (edges.get(key) ?? 0) + 1);
+      }
+    expect([...edges.values()].every((n) => n === 2)).toBe(true);
+
+    // The surface is rebuilt: no source vertex survives, and edges follow the voxel size.
+    const sourceVertices = new Set<string>();
+    for (let i = 0; i < data.positions.length; i += 3)
+      sourceVertices.add(data.positions.subarray(i, i + 3).join(','));
+    let shared = 0,
+      worst = 0,
+      edgeLength = 0;
+    for (let v = 0; v < vertices; v++) {
+      const [x, y, z] = positions.subarray(v * 3, v * 3 + 3);
+      if (sourceVertices.has(`${x},${y},${z}`)) shared++;
+      // Distance to the ideal rod; the 256-sided source is within 0.0001 mm of it.
+      const radial = Math.hypot(x - 4, z - 6) - 1,
+        axial = Math.abs(y - 5) - 15;
+      const distance =
+        Math.hypot(Math.max(radial, 0), Math.max(axial, 0)) + Math.min(Math.max(radial, axial), 0);
+      worst = Math.max(worst, Math.abs(distance));
+    }
+    for (let t = 0; t < indices.length; t += 3) {
+      const a = indices[t] * 3,
+        b = indices[t + 1] * 3;
+      edgeLength += Math.hypot(
+        positions[a] - positions[b],
+        positions[a + 1] - positions[b + 1],
+        positions[a + 2] - positions[b + 2],
+      );
+    }
+    edgeLength /= indices.length / 3;
+    expect(shared).toBe(0);
+    expect(edgeLength).toBeGreaterThan(voxel * 0.7);
+    expect(edgeLength).toBeLessThan(voxel * 1.6);
+    expect(worst).toBeLessThan(voxel * 0.25);
+
+    // Both rims stay sharp: some vertices sit within a tenth of a voxel of each rim.
+    for (const rim of [-15, 15])
+      expect(
+        Array.from({ length: vertices }, (_, v) =>
+          Math.hypot(
+            Math.hypot(positions[v * 3] - 4, positions[v * 3 + 2] - 6) - 1,
+            positions[v * 3 + 1] - 5 - rim,
+          ),
+        ).some((d) => d < voxel * 0.1),
+      ).toBe(true);
+  });
 });
 
 describe('display geometry and editing', () => {
