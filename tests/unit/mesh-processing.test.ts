@@ -2,15 +2,25 @@ import { afterEach, describe, expect, it } from 'vitest';
 import {
   BoxGeometry,
   BufferAttribute,
+  type BufferGeometry,
+  ExtrudeGeometry,
   Mesh,
   MeshBasicMaterial,
   PlaneGeometry,
   Raycaster,
+  Shape,
   SphereGeometry,
+  Vector2,
   Vector3,
 } from 'three';
+import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import { binaryGeometry, deserializeGeometry, triangleCount } from '../../src/core/geometry';
-import { decimateMesh, remeshMesh } from '../../src/core/mesh-processing';
+import { decimateMesh, MeshProcessor, remeshMesh } from '../../src/core/mesh-processing';
+import {
+  DEFAULT_REMESH_RESOLUTION,
+  MAX_REMESH_RESOLUTION,
+  MIN_REMESH_RESOLUTION,
+} from '../../src/core/remesh-settings';
 import { shouldDrawProxy, sourceRaycast } from '../../src/core/display-performance';
 import { useEditor } from '../../src/core/store';
 import type { Part } from '../../src/core/types';
@@ -101,11 +111,75 @@ describe('mesh processing', () => {
     await expect(remeshMesh(binaryGeometry(new PlaneGeometry(10, 10)), 32)).rejects.toThrow(
       'closed',
     );
-    await expect(remeshMesh(binaryGeometry(new BoxGeometry()), 512)).rejects.toThrow('resolution');
+    const box = binaryGeometry(new BoxGeometry());
+    for (const resolution of [MIN_REMESH_RESOLUTION - 1, MAX_REMESH_RESOLUTION + 1, 128.5])
+      await expect(remeshMesh(box, resolution)).rejects.toThrow('resolution');
     await expect(decimateMesh(binaryGeometry(new BoxGeometry()), NaN, 0.1)).rejects.toThrow(
       'percentage',
     );
   });
+
+  it('retains a 0.3 mm groove between raised details on a 32 mm part at maximum resolution', async () => {
+    // Extrude two ridges and their shared base as one closed mesh.
+    const outline = new Shape([
+      new Vector2(-16, 0),
+      new Vector2(16, 0),
+      new Vector2(16, 2),
+      new Vector2(0.8, 2),
+      new Vector2(0.8, 3),
+      new Vector2(0.15, 3),
+      new Vector2(0.15, 2),
+      new Vector2(-0.15, 2),
+      new Vector2(-0.15, 3),
+      new Vector2(-0.8, 3),
+      new Vector2(-0.8, 2),
+      new Vector2(-16, 2),
+    ]);
+    const source = new ExtrudeGeometry(outline, { depth: 6, bevelEnabled: false }).translate(
+      0,
+      0,
+      -3,
+    );
+    const processor = new MeshProcessor(binaryGeometry(source));
+    const material = new MeshBasicMaterial();
+    const heightAt = (geometry: BufferGeometry, x: number) =>
+      new Raycaster(new Vector3(x, 4, 0), new Vector3(0, -1, 0)).intersectObject(
+        new Mesh(geometry, material),
+      )[0]?.point.y;
+    expect(heightAt(source, 0)).toBeCloseTo(2);
+
+    const rebuild = async (resolution: number) =>
+      deserializeGeometry((await processor.process({ mode: 'remesh', resolution })).mesh);
+    const previousDefault = await rebuild(64);
+    const currentDefault = await rebuild(DEFAULT_REMESH_RESOLUTION);
+    const fine = await rebuild(MAX_REMESH_RESOLUTION);
+    expect(heightAt(previousDefault, -0.45)).toBeLessThan(2.9);
+    expect(heightAt(currentDefault, -0.45)).toBeCloseTo(3);
+    expect(heightAt(currentDefault, 0)).toBeGreaterThan(2.8);
+    expect(heightAt(fine, 0)).toBeCloseTo(2);
+    expect(heightAt(fine, -0.45)).toBeCloseTo(3);
+    expect(heightAt(fine, 0.45)).toBeCloseTo(3);
+  });
+
+  it.each([
+    [8, 'one million triangles'],
+    [18, 'voxel memory limit'],
+  ])(
+    'rejects an over-budget remesh of %i stacked slabs and allows a coarser retry',
+    async (count, limit) => {
+      const slabs = mergeGeometries(
+        Array.from({ length: count }, (_, i) =>
+          new BoxGeometry(32, 32, 0.5).translate(0, 0, i * 1.5),
+        ),
+      );
+      const processor = new MeshProcessor(binaryGeometry(slabs));
+      await expect(
+        processor.process({ mode: 'remesh', resolution: MAX_REMESH_RESOLUTION }),
+      ).rejects.toThrow(limit);
+      const retry = await processor.process({ mode: 'remesh', resolution: 64 });
+      expect(retry.mesh.positions.length).toBeGreaterThan(0);
+    },
+  );
 });
 
 describe('display geometry and editing', () => {

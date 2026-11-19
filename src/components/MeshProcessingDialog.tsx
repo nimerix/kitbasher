@@ -2,6 +2,12 @@ import { useEffect, useRef, useState } from 'react';
 import type { BufferGeometry } from 'three';
 import { triangleCount } from '../core/geometry';
 import { processMeshInWorker } from '../core/mesh-job';
+import {
+  DEFAULT_REMESH_RESOLUTION,
+  isRemeshResolution,
+  MAX_REMESH_RESOLUTION,
+  MIN_REMESH_RESOLUTION,
+} from '../core/remesh-settings';
 import { useActivity } from '../core/activity';
 import { useEditor } from '../core/store';
 import { Modal, RadioGroup } from './ui';
@@ -17,7 +23,7 @@ export function MeshProcessingDialog() {
   const [mode, setMode] = useState<'decimate' | 'remesh'>('decimate');
   const [percent, setPercent] = useState(25);
   const [errorLimit, setErrorLimit] = useState(0.1);
-  const [resolution, setResolution] = useState(64);
+  const [resolution, setResolution] = useState(DEFAULT_REMESH_RESOLUTION);
   const [lockBorder, setLockBorder] = useState(true);
   const [keepOriginal, setKeepOriginal] = useState(true);
   const [busy, setBusy] = useState(false);
@@ -114,7 +120,7 @@ export function MeshProcessingDialog() {
   const valid =
     mode === 'decimate'
       ? percent > 0 && percent <= 100 && errorLimit >= 0 && errorLimit <= 100
-      : Number.isInteger(resolution) && resolution >= 24 && resolution <= 128;
+      : isRemeshResolution(resolution);
   return (
     <Modal
       title="Decimate or remesh"
@@ -186,20 +192,22 @@ export function MeshProcessingDialog() {
           </>
         ) : (
           <label className="field-label">
-            <span>Voxel resolution (24–128)</span>
+            <span>
+              Voxel resolution ({MIN_REMESH_RESOLUTION}–{MAX_REMESH_RESOLUTION})
+            </span>
             <input
               aria-label="Voxel resolution"
               type="number"
-              min="24"
-              max="128"
-              step="8"
+              min={MIN_REMESH_RESOLUTION}
+              max={MAX_REMESH_RESOLUTION}
+              step="1"
               value={resolution}
               onChange={(e) => {
                 clearResult();
                 setResolution(Number(e.target.value));
               }}
             />
-            <small>Higher resolution retains smaller features and takes more memory.</small>
+            <small>Higher resolution can retain smaller features and takes more memory.</small>
           </label>
         )}
         <label className="mesh-check">

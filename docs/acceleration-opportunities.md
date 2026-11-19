@@ -102,4 +102,4 @@ Run `npm test`, `npm run build`, `npm run test:e2e:acceleration`, and the mesh-p
 
 ## Further work
 
-No SIMD speedup is claimed. The vendored simplifier's embedded WASM is unchanged; only its remesh binding is patched. A SIMD build needs separate profiling and equivalence checks. Native adjacency kernels, GPU solid operations, inspection surface-band batching and a GPU MCP snapshot renderer remain separate projects. The previous Manifold experiment changed triangulation and did not consistently beat the existing engine, so the Boolean engine is retained.
+The vendored simplifier's WASM includes the same 128 MiB occupied-voxel limit as the native remesher. A SIMD build needs separate profiling and equivalence checks. Native adjacency kernels, GPU solid operations, inspection surface-band batching and a GPU MCP snapshot renderer remain separate projects. The previous Manifold experiment changed triangulation and did not consistently beat the existing engine, so the Boolean engine is retained.
