@@ -2091,6 +2091,35 @@ describe('warp handles', () => {
     }
   });
 
+  it('close gap says why when a point the user placed holds back every target', async () => {
+    const a = plate('a', 0, 64);
+    const small = new PlaneGeometry(1.5, 1.5, 3, 3);
+    small.setAttribute(
+      'color',
+      new BufferAttribute(new Float32Array(small.getAttribute('position').count * 3).fill(0.5), 3),
+    );
+    // A small part facing the plate 1 mm in front of a point the user placed.
+    const b: Part = {
+      ...plate('b'),
+      geometry: small,
+      position: [3, 2, 1],
+      quaternion: [0, 1, 0, 0],
+    };
+    setup([a, b], ['a']);
+    await warpDisc(a, 0, 0, 14);
+    editor().setWarpPointSettings({ radius: 0 }, 'end');
+    addAt(a, 3, 2);
+    finishWarpSettling();
+    const { undo, state } = session();
+    const positions = Array.from(state!.positions);
+    editor().closeWarpGap();
+    expect(session().gapTargets).toEqual([]);
+    expect(session().gapHeld).toBeGreaterThan(0);
+    expect(session().seam!.largestGap).toBeGreaterThan(0);
+    expect(session().undo).toBe(undo);
+    expect(Array.from(session().state!.positions)).toEqual(positions);
+  });
+
   it('names Close gap or a moved handle as what pulls a held point, whichever is nearer', async () => {
     const a = plate('a', 0, 32);
     setup([a], ['a']);

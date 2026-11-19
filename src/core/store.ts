@@ -2816,7 +2816,11 @@ export const useEditor = create<EditorState>((set, get) => ({
     const points = warp.points.filter((point) => !released.has(point.id));
     // Samples the user holds still keep their place: the seam stays open around them.
     const yielded = yieldingGapTargets(warp, points, gapTargets);
-    if (same(yielded.gapTargets, warp.gapTargets) && points.length === warp.points.length) return;
+    if (same(yielded.gapTargets, warp.gapTargets) && points.length === warp.points.length) {
+      // Nothing moves, but the panel still says why the seam stays open.
+      if (yielded.held !== (warp.gapHeld ?? 0)) set({ warp: { ...warp, gapHeld: yielded.held } });
+      return;
+    }
     const kept = new Set(points.map((point) => point.id));
     set({
       warp: solveWarpSession(

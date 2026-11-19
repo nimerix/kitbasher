@@ -212,8 +212,9 @@ it withholds the targets on each sample's nodes and those beside them, settles a
 surface as shown, and for each sample the trial moves by more than 0.005 mm, the pin-hold rule's
 limit, withholds the next ring of grid edges around it, up to twelve rounds. The seam readout then
 reports the gap left there, and the panel says that Close gap leaves the seam open around points
-the user placed. On two plates 1 mm apart, laid whole (2,129 nodes), a held point moved 0.00007 mm
-and a held line's samples at most 0.0027 mm, where the seam had moved them 0.78 and 0.72 mm.
+the user placed, also when it withholds every target and so changes nothing and adds no step. On
+two plates 1 mm apart, laid whole (2,129 nodes), a held point moved 0.00007 mm and a held line's
+samples at most 0.0027 mm, where the seam had moved them 0.78 and 0.72 mm.
 
 ### 4. Radius and falloff
 
