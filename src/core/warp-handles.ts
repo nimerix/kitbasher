@@ -3,6 +3,7 @@ import { bindTrianglePoint, warpBindingNodes, type WarpPointBinding } from './wa
 import type { WarpGrid } from './warp-grid';
 import { isPaintedNode, type WarpModel } from './warp-model';
 import { regionTriangleOf } from './warp-region';
+import { flatPointPatch } from './warp-point-surface';
 import { deformPoint, skinnedWorldPositions, type WarpOutput } from './warp-evaluate';
 import {
   modelledResponse,
@@ -67,6 +68,8 @@ export interface WarpReach {
   spacing: number;
   /** 0 up to one spacing of radius, rising smoothly to 1 at two: what share of the guides apply. */
   activation: number;
+  /** Point reach on a curved surface uses the edge-path profile and grid skinning. */
+  curvedPoint?: boolean;
   /** Footprint nodes first, then the others in node order. */
   node: Uint32Array;
   /** How many of `node`, from the start, are the footprint's own. */
@@ -874,6 +877,7 @@ export function footprintReach(
   footprint: WarpFootprint,
   radius: number,
   key: unknown = footprint,
+  curvedPoint = false,
 ): WarpReach {
   const { grid, restNodes } = model;
   const eligible = warpEligibleNodes(model);
@@ -914,11 +918,16 @@ export function footprintReach(
   const path = new Float64Array(grid.nodes.length).fill(Infinity);
   if (activation > 0) {
     const band = bandWidth(0, spacing) + warpTailSpacings * spacing;
-    const settled = march(model, seeds, path, eligible, radius + band);
+    const limit = radius + band;
+    const settled = curvedPoint
+      ? relax(model, seeds, path, eligible, limit * warpPathStretch)
+      : march(model, seeds, path, eligible, limit);
     for (const n of settled.sort((a, b) => a - b)) {
       if (ownSet.has(n)) continue;
       const line = straight(n);
-      const d = line + Math.max(0, path[n] - (1 + warpChordSlack) * line);
+      const d = curvedPoint
+        ? Math.max(line, path[n] / warpPathStretch)
+        : line + Math.max(0, path[n] - (1 + warpChordSlack) * line);
       if (d >= radius + band && !share.has(n)) continue;
       node.push(n);
       distance.push(d);
@@ -941,6 +950,7 @@ export function footprintReach(
     key,
     spacing,
     activation,
+    curvedPoint,
     node: Uint32Array.from(node),
     own: own.length,
     distance: Float64Array.from(distance),
@@ -963,7 +973,12 @@ export function reachHandle(model: WarpModel, handle: WarpHandle): WarpHandle {
     sameFootprint(reach.key as WarpFootprint, footprint)
   )
     return handle;
-  return { ...handle, reach: footprintReach(model, footprint, handle.radius) };
+  const curvedPoint =
+    handle.kind === 'point' && !flatPointPatch(model, handle.samples[0], handle.radius);
+  return {
+    ...handle,
+    reach: footprintReach(model, footprint, handle.radius, footprint, curvedPoint),
+  };
 }
 
 /** Whether the handle guides any node beyond its samples' exact constraints. */
@@ -1285,6 +1300,7 @@ export function warpDetail(
       handle.target !== null &&
       handle.reach?.grid === grid &&
       handle.baseline.grid === grid &&
+      !handle.reach?.curvedPoint &&
       handleGuides(handle),
   );
   if (!guiding.length) return undefined;

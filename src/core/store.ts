@@ -123,6 +123,7 @@ import {
   type WarpSnapshot,
 } from './warp-handles';
 import { buildWarpModelJob } from './warp-job';
+import { planarPointDetail } from './warp-point-surface';
 import { isPaintedFace, type WarpModel, type WarpModelInput } from './warp-model';
 import {
   areaSamples,
@@ -1213,7 +1214,11 @@ function noticePreparing(warp: WarpSession, indexing: string[]) {
 /** Deforms the preview from the solved grid, and returns the region triangles that folded. */
 function deformWarpPreview(warp: WarpSession, gesture: 'drag' | 'end') {
   const { model, state, output, preview, source } = warp;
-  const { detail } = warpSolveInput(warp, gesture === 'drag');
+  const input = warpSolveInput(warp, gesture === 'drag');
+  const planar = warp.gapTargets.length
+    ? undefined
+    : planarPointDetail(model!, state!, warp.points, input.detail);
+  const detail = planar ?? input.detail;
   showDetail(output!, detail);
   // A drag frame leaves folds to the end of the gesture.
   const folds = evaluateWarp(model!, state!, output!, gesture === 'end', detail);
