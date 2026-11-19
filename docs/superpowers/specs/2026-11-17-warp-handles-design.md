@@ -220,7 +220,8 @@ Radius adds soft per-node **guides** around them.
   surface exactly as shown, settling on from there if it was. Apply bakes the preview as shown,
   and only a settled one: pressed while settling, the button shows it is applying and the settle
   finishes in the same idle steps, so input goes on, then bakes. Any edit before then (another
-  drag, undo, a density change, Edit region), Cancel or leaving the tool drops the waiting Apply.
+  drag, undo, a density change, Edit region), a stroke starting, Cancel or leaving the tool drops
+  the waiting Apply.
   Apply and Cancel let go of the session the idle steps were settling. An edit that changes
   nothing settles nothing.
 
@@ -307,7 +308,8 @@ surface makes, and says so in a line:
   stroke.
 
 **Input.** A stroke is a draft owned by one pointer (`WarpStroke.tsx`). It starts only on an
-unmodified primary press on a painted face of the warped part, when no camera navigation (middle
+unmodified primary press on a painted face of the warped part, where no other part is nearer the eye
+at the press, when no camera navigation (middle
 and right buttons, Space, the orbit and pan tools), pivot picking, free transform or exploded view
 is in force; a point marker stops the press before it reaches the surface. The camera's controls
 are switched off for that press, so a stroke never orbits, and a primary drag that begins off the
@@ -315,7 +317,8 @@ region still does. A gizmo handle hears the press after the surface does, so the
 or the release after a gizmo press discards the draft. The pointer's path is sampled every 2 screen
 pixels, whatever the pointer's speed, by a raycast on the warped preview that another part in front
 blocks. Release commits once; Escape, pointer cancel, lost pointer capture, window blur, camera
-navigation starting and the session changing discard. The click that ends a stroke adds no point
+navigation starting, another Add mode being chosen and the session changing discard. A stroke that
+starts drops an Apply waiting for the surface to settle. The click that ends a stroke adds no point
 and changes no selection, also when a line is rejected; in Line and Area mode a click adds nothing.
 A line shorter than 4 px makes nothing; an area from a press alone is the one dab.
 
@@ -345,9 +348,12 @@ its default radius from the spacing at its samples' nodes.
 
 It is drawn as its line on the written surface, or its faces hatched in diagonal stripes of the
 handle colour and a dark tone with their outline, and one marker at the centre. Lines are a dark
-5 px casing under a 2.5 px core in the point markers' colours (selected and idle), drawn 4 px
-nearer the eye so a line's width does not sink into a surface sloping across it; the stripes leave
-the surface showing between them. Shapes are built when a handle's path or faces change; a solve
+5 px casing under a 2.5 px core in the point markers' colours (selected and idle). Each corner of a
+line's width lies where its view ray meets the surface's tangent plane at the line, as the grid's
+do, so the width does not sink into a surface sloping across it, then nearer by a pixel or 0.05 mm,
+whichever is less, measured across the surface (up to twice that along the ray where the surface
+turns away). A surface 0.2 mm or more in front, or the other side of a 0.2 mm wall, hides it. The
+stripes leave the surface showing between them. Shapes are built when a handle's path or faces change; a solve
 only rewrites their positions, read from the preview. While drawing, the line so far or the faces
 painted so far are drawn the same way on the warped surface, appended in place.
 
