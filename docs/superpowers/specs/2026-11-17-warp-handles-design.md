@@ -338,12 +338,27 @@ target per handle.
 Each session undo step holds the points, gap targets, the settled grid they held and the
 settings new points take, so undo restores the surface exactly without solving. Laying the
 same region at the same density and feather keeps the model. A real rebuild carries each
-distinct snapshot to the new grid once, through the old binding of each new node's scan vertex,
-rebinds samples, dropping those bound exactly as another and an area's faces no longer painted,
-and drops handles whose samples are bound only to fixed nodes, from the session and its undo
-steps; undo across it settles from the carried grid. A vertex in the old feather band that the
-new region paints is carried at the position it was written at; where a feather still applies,
-it stays unblended so the blend applies once.
+distinct snapshot to the new grid once, writing each new node where the preview's own skinning
+wrote its scan vertex, and rebinds samples, dropping those bound exactly as another and an area's
+faces no longer painted. A vertex in the old feather band that the new region paints is carried
+at the position it was written at; where a feather still applies, it stays unblended so the blend
+applies once.
+
+A density change that would drop any handle, because every node its samples would be bound to on
+the new grid is fixed, is not made: the session keeps its grid and density and says that grid is
+too coarse for the points on this region. Laying a new region is not made either when it would
+leave a moved handle bound only to fixed nodes; a handle the repaint leaves outside the paint is
+dropped with a notice, and so is an unmoved one left on the new region's edge.
+
+A density change is one session undo step. The steps before it stay on the grid they were
+recorded on: their snapshots name a stand-in for it, their points let go of their reach and of
+binding arrays the solver caches against the old grid, and the step the change records keeps the
+region, density and feather that grid was laid from, with a hash of the model built. Undoing it
+rebuilds that grid (the build is deterministic, one build's time), checks the hash, puts every
+step recorded on it back on the rebuilt grid and restores the surface exactly; undoing further
+restores each earlier step exactly. A rebuild that hashed differently would settle those steps
+again from rest and say so. Laying a new region still carries every step to the new grid and
+settles undo across it from there.
 
 A pure module, `warp-handles.ts`, turns handles and a model into solver input: reach, weights,
 guides, snapshots and their transfer, and distribution. It is unit-tested without the store.

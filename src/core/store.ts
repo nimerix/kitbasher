@@ -94,7 +94,7 @@ import {
   warpUpdateRanges,
   type WarpOutput,
 } from './warp-evaluate';
-import { defaultWarpDensity, warpDensityNodes } from './warp-grid';
+import { defaultWarpDensity, warpDensityNodes, type WarpGrid } from './warp-grid';
 import {
   distributionNodes,
   handleCarry,
@@ -280,8 +280,25 @@ export interface WarpSession {
 type WarpEdit = Pick<
   WarpSession,
   'points' | 'gapTargets' | 'surface' | 'pointRadius' | 'pointFalloff'
->;
+> & {
+  /** On the step a density change records: the grid it undoes to, rebuilt when it is undone. */
+  grid?: WarpGridStep;
+};
 type WarpLaid = { faces: number[] | null; density: number; feather: number };
+/**
+ * The grid a density change left. Its steps' snapshots name `token` instead of the grid, so the old
+ * model can be let go; undoing rebuilds it from `laid` and puts them back on it.
+ */
+interface WarpGridStep {
+  laid: WarpLaid;
+  region: WarpSession['region'];
+  faces: number[];
+  seed: WarpSession['seed'];
+  densityChosen: boolean;
+  token: WarpGrid;
+  /** Of the old model, to tell that the rebuild is the same grid. */
+  fingerprint: number;
+}
 
 export interface WarpFeatherOption {
   enabled: boolean;
@@ -447,7 +464,8 @@ interface EditorState {
   distributeWarpPoints: () => void;
   /** Pulls the grid nodes that face a nearby part onto its surface, at the overlap depth. */
   closeWarpGap: () => void;
-  undoWarpEdit: () => void;
+  /** Undoes a session step. Undoing a density change rebuilds the grid it left, which this awaits. */
+  undoWarpEdit: () => Promise<void>;
   /**
    * Bakes the warp into the part as one undo step, then starts again on the result. A surface
    * still settling settles first: in the browser in idle steps, baking once it settles and
@@ -645,7 +663,10 @@ export function warpPointRadius(
   return radius > 0 ? Number(radius.toPrecision(2)) : 0;
 }
 
-type WarpSettled = Pick<WarpSession, 'feather'> & { stage: 'region' | 'warp'; density: number };
+type WarpSettled = Pick<WarpSession, 'feather' | 'densityChosen'> & {
+  stage: 'region' | 'warp';
+  density: number;
+};
 // The grid build in flight, and the stage, density and feather to return to if it is cancelled or
 // fails.
 let warpBuild: { controller: AbortController; from: WarpSettled } | null = null;
@@ -653,8 +674,18 @@ let warpBuild: { controller: AbortController; from: WarpSettled } | null = null;
 /** The session before this build, or before the build in flight that it replaces. */
 const settledWarp = (warp: WarpSession): WarpSettled =>
   warp.stage === 'building'
-    ? (warpBuild?.from ?? { stage: 'region', density: warp.density, feather: warp.feather })
-    : { stage: warp.stage, density: warp.density, feather: warp.feather };
+    ? (warpBuild?.from ?? {
+        stage: 'region',
+        density: warp.density,
+        feather: warp.feather,
+        densityChosen: warp.densityChosen,
+      })
+    : {
+        stage: warp.stage,
+        density: warp.density,
+        feather: warp.feather,
+        densityChosen: warp.densityChosen,
+      };
 
 function abortWarpBuild() {
   const build = warpBuild;
@@ -720,6 +751,23 @@ function warpBinding(model: WarpModel, triangle: number, barycentric: Vec3) {
     binding: bindTrianglePoint(model.region, model.binding, model.restWorld, triangle, barycentric),
     restWorld,
   };
+}
+
+/**
+ * Why a new model would drop a handle: none of its samples is painted there, or every node they are
+ * bound to is fixed, so it could not move the surface. Null when it stays.
+ */
+function droppedBy(model: WarpModel, handle: WarpPoint): 'unpainted' | 'fixed' | null {
+  const painted = handle.samples.filter(({ face }) => isPaintedFace(model, face));
+  if (!painted.length) return 'unpainted';
+  const { fixed } = model.grid;
+  return painted.every(({ face, barycentric }) =>
+    warpBinding(model, regionTriangleOf(model.region, face), barycentric).binding.node.every(
+      (node) => fixed[node],
+    ),
+  )
+    ? 'fixed'
+    : null;
 }
 
 /**
@@ -2164,7 +2212,7 @@ export const useEditor = create<EditorState>((set, get) => ({
   },
   layWarpGrid: async () => {
     const { warp } = get();
-    if (warp) await layWarp(settledWarp(warp), true);
+    if (warp) await layWarp(settledWarp(warp), 'region');
   },
   setWarpDensity: async (density) => {
     const { warp } = get();
@@ -2176,7 +2224,7 @@ export const useEditor = create<EditorState>((set, get) => ({
     }
     const from = settledWarp(warp);
     set({ warp: { ...warp, density: level, densityChosen: true } });
-    if (warp.stage !== 'region') await layWarp(from);
+    if (warp.stage !== 'region') await layWarp(from, 'density');
   },
   setWarpFeather: (patch) =>
     set((state) => {
@@ -2535,9 +2583,12 @@ export const useEditor = create<EditorState>((set, get) => ({
     const state = get(),
       warp = state.warp,
       step = warp?.undo.at(-1);
-    if (!warp || !step) return;
+    // A grid being built finishes or is cancelled first.
+    if (!warp || !step || warp.stage === 'building') return Promise.resolve();
     warpDrag = null;
+    if (step.grid) return layWarp(settledWarp(warp), step.grid);
     set({ warp: restoreWarp(state.scene, { ...warp, undo: warp.undo.slice(0, -1) }, step) });
+    return Promise.resolve();
   },
   applyWarp: () => {
     const state = get(),
@@ -3634,29 +3685,125 @@ const sameLaid = (a: WarpLaid, b: WarpLaid) =>
       a.faces.length === b.faces.length &&
       a.faces.every((face, i) => face === b.faces![i])));
 
+/** A hash of what a grid build makes, to tell that a rebuild made the same model. */
+function warpFingerprint(model: WarpModel) {
+  let hash = 0x811c9dc5;
+  const { grid, binding } = model;
+  for (const array of [
+    grid.nodes,
+    grid.fixed,
+    grid.edgeStart,
+    grid.edges,
+    model.restNodes,
+    binding.node,
+    binding.weight,
+    model.blend,
+  ]) {
+    if (!array) continue;
+    const words =
+      array.byteOffset % 4 === 0 && array.byteLength % 4 === 0
+        ? new Uint32Array(array.buffer, array.byteOffset, array.byteLength / 4)
+        : new Uint8Array(array.buffer, array.byteOffset, array.byteLength);
+    hash = Math.imul(hash ^ words.length, 0x01000193);
+    for (let i = 0; i < words.length; i++) hash = Math.imul(hash ^ words[i], 0x01000193);
+  }
+  return hash >>> 0;
+}
+
+/** A grid that stands for one no model holds any more, in the steps recorded on it. */
+const detachedGrid = (): WarpGrid => ({
+  nodes: new Uint32Array(0),
+  nodeOf: new Uint32Array(0),
+  fixed: new Uint8Array(0),
+  triangles: new Uint32Array(0),
+  edgeStart: new Uint32Array(1),
+  edges: new Uint32Array(0),
+});
+
+/**
+ * Steps with every snapshot on grid `from` moved to grid `to`, sharing what they shared. Points
+ * moved off a model lose their reach and their bindings' caches; points moved onto `model` measure
+ * their reach on it.
+ */
+function moveSteps(steps: WarpEdit[], from: WarpGrid, to: WarpGrid, model?: WarpModel) {
+  const snapshots = new Map<WarpSnapshot, WarpSnapshot>();
+  const snapshot = (value: WarpSnapshot) => {
+    if (value.grid !== from) return value;
+    let moved = snapshots.get(value);
+    if (!moved) snapshots.set(value, (moved = { ...value, grid: to }));
+    return moved;
+  };
+  const points = new Map<WarpPoint, WarpPoint>();
+  const point = (value: WarpPoint) => {
+    if (value.baseline.grid !== from) return value;
+    let moved = points.get(value);
+    if (!moved) {
+      moved = model
+        ? reachHandle(model, { ...value, baseline: snapshot(value.baseline), reach: null })
+        : {
+            ...value,
+            baseline: snapshot(value.baseline),
+            reach: null,
+            // New arrays, so nothing cached for the old grid stays reachable through them.
+            samples: value.samples.map((sample) => ({
+              ...sample,
+              binding: {
+                ...sample.binding,
+                node: [...sample.binding.node],
+                weight: [...sample.binding.weight],
+              },
+            })),
+          };
+      points.set(value, moved);
+    }
+    return moved;
+  };
+  return steps.map((step) => ({
+    ...step,
+    points: step.points.map(point),
+    surface: step.surface && snapshot(step.surface),
+  }));
+}
+
 /**
  * Lays the session's grid. A build that stops returns the session to `from`. Laying from the region
- * stage takes the page's feather option; a rebuild keeps the feather the session was laid with.
+ * stage takes the page's feather option; a rebuild keeps the feather the session was laid with. A
+ * density change is one session undo step, and undoing it, given its grid step, rebuilds the grid
+ * it left and restores that step on it exactly. A density change that would drop a handle, or a new
+ * region that would leave a moved one on its fixed edge rather than outside the paint, is not made.
  */
-async function layWarp(from: WarpSettled, fromRegion = false) {
+async function layWarp(from: WarpSettled, kind: 'region' | 'density' | WarpGridStep) {
   const state = useEditor.getState(),
     warp = state.warp;
   const part = warp && state.scene.parts.find((p) => p.id === warp.partId);
   if (!warp || part?.geometry !== warp.source) return;
   abortWarpBuild();
+  const restore = typeof kind === 'object' ? kind : null;
   // An empty painted region would leave the grid nothing to simplify, so it means the whole part.
-  const faces = warp.region === 'painted' && warp.faces.length ? warp.faces : null;
-  const feather = !faces
-    ? 0
-    : !fromRegion
-      ? (warp.feather ?? 0)
-      : state.warpFeather.enabled
-        ? (state.warpFeather.width ?? warpBrushRadius(state))
-        : 0;
-  const density = warp.densityChosen ? warp.density : faces ? defaultWarpDensity : warpWholeDensity;
+  const faces = restore
+    ? restore.laid.faces
+    : warp.region === 'painted' && warp.faces.length
+      ? warp.faces
+      : null;
+  const feather = restore
+    ? restore.laid.feather
+    : !faces
+      ? 0
+      : kind === 'density'
+        ? (warp.feather ?? 0)
+        : state.warpFeather.enabled
+          ? (state.warpFeather.width ?? warpBrushRadius(state))
+          : 0;
+  const density = restore
+    ? restore.laid.density
+    : warp.densityChosen
+      ? warp.density
+      : faces
+        ? defaultWarpDensity
+        : warpWholeDensity;
   const laid: WarpLaid = { faces, density, feather };
   // The same region at the same density keeps its grid, so nothing moves.
-  if (warp.model && warp.laid && sameLaid(warp.laid, laid)) {
+  if (!restore && warp.model && warp.laid && sameLaid(warp.laid, laid)) {
     if (warp.settling) scheduleWarpSettle();
     useEditor.setState({
       painting: false,
@@ -3703,9 +3850,80 @@ async function layWarp(from: WarpSettled, fromRegion = false) {
   const current = useEditor.getState().warp;
   if (warpBuild !== build || !current) return;
   warpBuild = null;
+  const { scene, notify } = useEditor.getState();
+  const old = current.model;
+
+  if (restore) {
+    const output = createWarpOutput(model);
+    disposeWarpPreview(current.preview);
+    const same = warpFingerprint(model) === restore.fingerprint;
+    const rest = { ...snapshotOf(model.grid, createWarpState(model.restNodes)), settled: false };
+    // Rebuilt the same, every step recorded on that grid goes back on it as it was. Otherwise
+    // each settles again from rest on the new one.
+    const recorded = current.undo.map((step) => step.surface?.grid === restore.token);
+    const steps = moveSteps(current.undo, restore.token, model.grid, model).map((step, i) =>
+      same || !recorded[i]
+        ? step
+        : {
+            ...step,
+            points: step.points.flatMap((point) => {
+              const handle = rebindHandle(model, point);
+              return handle ? [{ ...handle, baseline: rest }] : [];
+            }),
+            gapTargets: [],
+            surface: rest,
+          },
+    );
+    const { grid: _, ...edit } = steps.at(-1)!;
+    void _;
+    const next: WarpSession = {
+      ...current,
+      stage: 'warp',
+      region: restore.region,
+      faces: restore.faces,
+      seed: restore.seed,
+      density,
+      densityChosen: restore.densityChosen,
+      feather,
+      laid,
+      model,
+      state: createWarpState(model.restNodes),
+      surface: null,
+      output,
+      preview: warpPreview(current.source, output),
+      folds: new Uint32Array(0),
+      seam: null,
+      settling: false,
+      undo: steps.slice(0, -1),
+    };
+    useEditor.setState({ paintHistory: [], warp: restoreWarp(scene, next, edit) });
+    completeTask(taskId, `${model.grid.nodes.length.toLocaleString()} grid nodes`);
+    if (!same)
+      notify('The earlier grid came out different, so its surface was solved again.', 'info');
+    return;
+  }
+
+  // A density change keeps every handle, and a new region every moved handle it still paints.
+  const dropped = current.points.map((point) => droppedBy(model, point));
+  const refused =
+    kind === 'density'
+      ? dropped.some((reason) => reason)
+      : dropped.some((reason, i) => reason === 'fixed' && current.points[i].target !== null);
+  if (refused) {
+    cancelTask(taskId, 'Grid not changed.');
+    useEditor.setState({ warp: { ...current, ...from } });
+    if (current.settling) scheduleWarpSettle();
+    notify(
+      kind === 'density'
+        ? 'That grid is too coarse for the points on this region, so the density stays as it was.'
+        : 'Points you moved would be held by the edge of the new region, so the grid was not laid. Paint farther around them, or delete them first.',
+      'info',
+    );
+    return;
+  }
+
   // Each settled grid the session keeps is carried to the new grid once, so every version of a
   // handle and every undo step goes on sharing it.
-  const old = current.model;
   const carried = new Map<WarpSnapshot, WarpSnapshot>();
   const carry = (snapshot: WarpSnapshot) => {
     let next = carried.get(snapshot);
@@ -3730,6 +3948,42 @@ async function layWarp(from: WarpSettled, fromRegion = false) {
   const points = rebind(current.points);
   const kept = new Set(points.map((point) => point.id));
   const start = current.surface ? carry(current.surface) : null;
+  // A density change is a step of its own. The steps before it stay on the grid they were
+  // recorded on, which undoing it rebuilds.
+  let undo: WarpEdit[];
+  if (kind === 'density' && old && current.laid) {
+    const token = detachedGrid();
+    const [step, ...earlier] = moveSteps(
+      [warpEdit(current), ...current.undo.slice(-(warpUndoLimit - 1))],
+      old.grid,
+      token,
+    );
+    undo = [
+      ...earlier,
+      {
+        ...step,
+        grid: {
+          laid: current.laid,
+          region: current.region,
+          faces: current.faces,
+          seed: current.seed,
+          densityChosen: from.densityChosen,
+          token,
+          fingerprint: warpFingerprint(old),
+        },
+      },
+    ];
+  } else
+    // Steps must bind to the same grid as the session; gap targets name old nodes.
+    undo = current.undo.map(({ grid, ...step }) => {
+      void grid;
+      return {
+        ...step,
+        points: rebind(step.points),
+        gapTargets: [],
+        surface: step.surface && carry(step.surface),
+      };
+    });
   const output = createWarpOutput(model);
   disposeWarpPreview(current.preview);
   let next: WarpSession = {
@@ -3751,13 +4005,7 @@ async function layWarp(from: WarpSettled, fromRegion = false) {
     folds: new Uint32Array(0),
     seam: null,
     settling: false,
-    // Steps must bind to the same grid as the session; gap targets name old nodes.
-    undo: current.undo.map((step) => ({
-      ...step,
-      points: rebind(step.points),
-      gapTargets: [],
-      surface: step.surface && carry(step.surface),
-    })),
+    undo,
   };
   // A grid nothing holds rests, and its preview keeps the source's bits.
   const resting = !next.points.some(holdsWarp);
@@ -3768,18 +4016,21 @@ async function layWarp(from: WarpSettled, fromRegion = false) {
   // Without a fixed border, unmoved points are what stop a drag moving the whole part.
   if (current.firstLay && current.autoPoints && !faces)
     next = { ...next, points: [...points, ...distributedPoints(next, current.distributeCount)] };
-  const { scene } = useEditor.getState();
   useEditor.setState({
     // Stroke undo stays available until a grid replaces the region it painted.
     paintHistory: [],
     warp: resting ? { ...next, seam: warpSeam(scene, next) } : solveWarpSession(scene, next, 'end'),
   });
   completeTask(taskId, `${model.grid.nodes.length.toLocaleString()} grid nodes`);
-  const { notify } = useEditor.getState();
   if (current.gapTargets.length)
     notify('Close gap again to close the seam at this density.', 'info');
-  if (points.length < current.points.length)
+  if (dropped.includes('unpainted'))
     notify('Some control points were outside the new region and were removed.', 'info');
+  if (dropped.includes('fixed'))
+    notify(
+      'Some unmoved control points were on the edge of the new region and were removed.',
+      'info',
+    );
 }
 
 // A warp is built from one geometry of one scene. Undo, another editor, opening a file
