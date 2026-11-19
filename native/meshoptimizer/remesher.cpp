@@ -738,6 +738,10 @@ size_t meshopt_remesh(float* destination, size_t max_triangle_count, const unsig
 
 	if (destination)
 	{
+		// Kitbasher: bound occupied-voxel scratch before allocating it.
+		if (voxel_count > (128u * 1024u * 1024u) / sizeof(Voxel))
+			return size_t(-1);
+
 		voxels = allocator.allocate<Voxel>(voxel_count);
 		memset(voxels, 0, voxel_count * sizeof(Voxel));
 	}

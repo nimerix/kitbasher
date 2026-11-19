@@ -136,8 +136,13 @@ test('remeshes and cancels without modifying the scene', async ({ page }) => {
   const original = await parts(page);
   await page.getByRole('button', { name: 'Decimate or remesh…' }).click();
   await page.getByRole('radio', { name: 'Voxel remesh' }).click();
-  await page.getByLabel('Voxel resolution').fill('32');
-  await page.getByRole('button', { name: 'Prepare mesh' }).click();
+  const resolution = page.getByLabel('Voxel resolution');
+  const prepare = page.getByRole('button', { name: 'Prepare mesh' });
+  await expect(resolution).toHaveValue('128');
+  await resolution.fill('257');
+  await expect(prepare).toBeDisabled();
+  await resolution.fill('256');
+  await prepare.click();
   await expect(page.getByRole('button', { name: 'Add processed copy' })).toBeEnabled();
   await page.getByRole('button', { name: 'Cancel', exact: true }).click();
   expect(await parts(page)).toEqual(original);

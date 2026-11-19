@@ -1,14 +1,15 @@
 # Optional native mesh kernels
 
-`meshoptimizer/` contains unmodified source files from `zeux/meshoptimizer` tag
-`v1.3`, commit `9e1f07b159d3cb777f1c67ed31fc11fd117986f4`, under its included MIT
-license. Keep these aligned with `src/vendor/meshoptimizer/`.
+`meshoptimizer/` contains source files from `zeux/meshoptimizer` tag `v1.3`,
+commit `9e1f07b159d3cb777f1c67ed31fc11fd117986f4`, under its included MIT license.
+The remesher has a Kitbasher patch that caps occupied-voxel storage at 128 MiB
+before allocation. Keep this patch aligned with `src/vendor/meshoptimizer/`.
 
 `mesh-kernel.cpp` is Kitbasher's bounded, one-job binary stdin/stdout adapter.
 It reduces indexed meshes, including colors and locked borders, or remeshes into
-an arena of at most one million triangles. It validates dimensions, finite data
-and index bounds before entering the kernel. It reads no scene files and opens
-no network connections.
+an arena of at most one million triangles at resolutions 24 through 256. It
+validates dimensions, finite data and index bounds before entering the kernel.
+It reads no scene files and opens no network connections.
 
 Build with `npm run build:native`. Use `KITBASHER_NATIVE_MESH=1` when launching the
 local host to opt into native reduction; `all` additionally enables remeshing

@@ -25,7 +25,7 @@ int main() {
        count<3 || count>30000000 || count%3 || colors>1 || lock>1 ||
        !std::isfinite(error) || error<0 || error>1 ||
        (mode==0 && (target<3 || target>count || target%3)) ||
-       (mode==1 && (resolution<24 || resolution>128))) return fail("Invalid mesh kernel request.");
+       (mode==1 && (resolution<24 || resolution>256))) return fail("Invalid mesh kernel request.");
     const size_t bytes=size_t(vertices)*12*(colors?2:1)+size_t(count)*4;
     if(bytes>512u*1024u*1024u) return fail("Native mesh request exceeds the memory limit.");
     std::vector<float> positions(size_t(vertices)*3), attributes(colors?size_t(vertices)*3:0);
@@ -49,6 +49,7 @@ int main() {
       const size_t capacity=1000000;
       surface.resize(capacity*9);
       result=meshopt_remesh(surface.data(),capacity,indices.data(),count,positions.data(),vertices,12,resolution,0);
+      if(result==size_t(-1)) return fail("The remesh exceeded the voxel memory limit. Lower voxel resolution.");
       if(result>capacity) return fail("The remesh exceeded one million triangles. Lower voxel resolution.");
       result*=9;
     }

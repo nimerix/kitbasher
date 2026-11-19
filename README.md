@@ -307,8 +307,10 @@ to change geometry explicitly:
 - **Decimate** reduces triangles toward a percentage target within an approximate error limit
   expressed as a percentage of mesh size. Open borders are preserved by default. Vertex colors
   are retained, but this is not a guarantee that a precision mating surface remains unchanged.
-- **Voxel remesh** rebuilds a closed, manifold mesh at a resolution of 24–128. It can remove thin
-  details and change mating surfaces. Vertex colors are removed; material tint remains.
+- **Voxel remesh** rebuilds a closed, manifold mesh at a resolution of 24–256 (default 128).
+  Higher values use smaller voxels and can preserve finer features. Lower the resolution if the
+  job reaches the voxel memory or one-million-triangle limit. Remeshing can remove thin details
+  and change mating surfaces. It removes vertex colors and retains material tint.
 
 **Prepare mesh** processes in a worker and reports the actual triangle count before applying.
 Cancel stops the worker. By default, applying creates an independent part in the same position

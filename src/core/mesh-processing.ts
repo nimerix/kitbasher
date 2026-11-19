@@ -2,6 +2,11 @@ import { MeshoptSimplifier } from '../vendor/meshoptimizer/simplifier';
 import { deserializeGeometry } from './geometry';
 import type { BinaryGeometry } from './types';
 import { hasClosedEdges } from './mesh-topology';
+import {
+  isRemeshResolution,
+  MAX_REMESH_RESOLUTION,
+  MIN_REMESH_RESOLUTION,
+} from './remesh-settings';
 
 export type MeshProcessOptions =
   | { mode: 'decimate'; ratio: number; error: number; lockBorder: boolean }
@@ -90,12 +95,10 @@ export class MeshProcessor {
         throw new Error(
           'Choose a triangle percentage above 0 and at most 100, and a valid error limit.',
         );
-    } else if (
-      !Number.isInteger(options.resolution) ||
-      options.resolution < 24 ||
-      options.resolution > 128
-    ) {
-      throw new Error('Voxel resolution must be between 24 and 128.');
+    } else if (!isRemeshResolution(options.resolution)) {
+      throw new Error(
+        `Voxel resolution must be a whole number from ${MIN_REMESH_RESOLUTION} to ${MAX_REMESH_RESOLUTION}.`,
+      );
     }
     if (!this.prepared) {
       onProgress?.('Validating mesh');
