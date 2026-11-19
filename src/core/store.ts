@@ -2264,7 +2264,7 @@ export const useEditor = create<EditorState>((set, get) => ({
       ...(stroke.kind === 'area'
         ? { faces: faces.sort((a, b) => a - b) }
         : { path: thinPath(stroke.points.filter(({ face }) => isPaintedFace(model, face))) }),
-      pin: made.samples[made.centre].pin,
+      pin: made.pin,
       target: null,
       radius: warpPointRadius(warp, part, spacingAt(model, nodes)),
       falloff: warp.pointFalloff,

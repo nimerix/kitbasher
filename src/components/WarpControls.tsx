@@ -212,6 +212,60 @@ function PointSettingsControls({ warp, part }: { warp: WarpSession; part: Part |
   );
 }
 
+const addHelp = {
+  point: 'Click the surface to add a control point.',
+  line: 'Drag on the surface to draw a line. It moves as one handle.',
+  area: 'Drag on the surface to paint an area. It moves as one handle.',
+} as const;
+
+/** What a press on the surface makes, and for an area, Warp's brush size. */
+function AddControls({ part }: { part: Part | undefined }) {
+  const mode = useEditor((s) => s.warpAdd);
+  const radius = useEditor(warpBrushRadius);
+  const range = fittedSizeRange(part ? partSize(part) : 0);
+  const setRadius = (value: number) => useEditor.getState().setWarpBrushRadius(value);
+  return (
+    <div className="warp-add">
+      <RadioGroup
+        label="Add"
+        className="display-segmented warp-add-mode"
+        value={mode}
+        options={[
+          { id: 'point', label: 'Point' },
+          { id: 'line', label: 'Line' },
+          { id: 'area', label: 'Area' },
+        ]}
+        onChange={(value) => useEditor.getState().setWarpAdd(value)}
+      />
+      <p className="anchor-help">{addHelp[mode]}</p>
+      {mode === 'area' ? (
+        <>
+          <label className="brush-radius">
+            <span>Brush radius</span>
+            <NumericInput
+              label="Brush radius"
+              value={radius}
+              min={0.05}
+              max={100}
+              step={0.1}
+              onCommit={setRadius}
+            />
+            <small>mm</small>
+          </label>
+          <LogRangeInput
+            className="brush-radius-slider"
+            label="Brush radius slider"
+            value={radius}
+            min={range.min}
+            max={range.max}
+            onChange={setRadius}
+          />
+        </>
+      ) : null}
+    </div>
+  );
+}
+
 /** Ends the session without a notice and leaves the tool. */
 function cancel() {
   const state = useEditor.getState();
@@ -441,10 +495,11 @@ export function WarpControls() {
       </Section>
       {building ? null : (
         <Section title="Control points">
+          <AddControls part={part} />
           <p className="anchor-help">
             {warp.points.length
               ? `${warp.points.length} ${warp.points.length === 1 ? 'point' : 'points'}, ${selected} selected. Shift+click a point to add it to the selection. Delete removes the selected points.`
-              : 'Click the surface to add a control point. A point holds the surface where it is until you move it.'}
+              : 'A control point holds the surface where it is until you move it.'}
           </p>
           <PointSettingsControls warp={warp} part={part} />
           <TransformAdjustments />

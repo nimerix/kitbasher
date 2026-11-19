@@ -149,14 +149,14 @@ export function strokeConnected(model: WarpModel, a: WarpSample, b: WarpSample) 
 /**
  * A drawn line's samples: its hits taken about every half node spacing along the surface at rest,
  * keeping the first and the last, then one sample for each set of grid nodes they are bound to, so
- * pointer speed does not change how firmly the line holds. `centre` is the sample nearest halfway
+ * pointer speed does not change how firmly the line holds. `pin` is where the surface is halfway
  * along it.
  */
 export function lineSamples(
   model: WarpModel,
   state: Pick<WarpState, 'positions' | 'rotations'>,
   points: readonly WarpStrokePoint[],
-): { samples: WarpSample[]; centre: number; length: number } | null {
+): { samples: WarpSample[]; pin: Vec3; length: number } | null {
   const hits = points.flatMap((point) => strokeSample(model, state, point) ?? []);
   if (!hits.length) return null;
   const along = [0];
@@ -189,11 +189,10 @@ export function lineSamples(
     if (!kept.has(key)) kept.set(key, i);
   }
   const order = [...kept.values()].sort((a, b) => a - b);
-  let centre = 0;
-  for (let k = 1; k < order.length; k++)
-    if (Math.abs(along[order[k]] - length / 2) < Math.abs(along[order[centre]] - length / 2))
-      centre = k;
-  return { samples: order.map((i) => hits[i]), centre, length };
+  let middle = 0;
+  for (let i = 1; i < hits.length; i++)
+    if (Math.abs(along[i] - length / 2) < Math.abs(along[middle] - length / 2)) middle = i;
+  return { samples: order.map((i) => hits[i]), pin: hits[middle].pin, length };
 }
 
 /** At most `limit` points spread evenly along a path, keeping its ends. */
@@ -316,14 +315,14 @@ const third: Vec3 = [1 / 3, 1 / 3, 1 / 3];
  * An area's samples: face centres spread by farthest-point sampling at rest from the first hit, up
  * to a few dozen, about half a node spacing apart. An area of fewer faces than that also takes
  * spots toward each face's corners, so even one face holds several samples and lifts as a small
- * plateau. `centre` is the sample nearest the area's centroid.
+ * plateau. `pin` is where the surface is at the face centre nearest the area's centroid.
  */
 export function areaSamples(
   model: WarpModel,
   state: Pick<WarpState, 'positions' | 'rotations'>,
   faces: readonly number[],
   first: WarpStrokePoint,
-): { samples: WarpSample[]; centre: number } | null {
+): { samples: WarpSample[]; pin: Vec3 } | null {
   const start = strokeSample(model, state, first);
   const painted = faces.filter((face) => isPaintedFace(model, face));
   if (!painted.length) return null;
@@ -384,9 +383,9 @@ export function areaSamples(
     else near[best] = 0;
   }
   if (!chosen.length) return null;
-  let centre = 0;
-  for (let k = 1; k < chosen.length; k++)
-    if (distance(chosen[k].restWorld, centroid) < distance(chosen[centre].restWorld, centroid))
-      centre = k;
-  return { samples: chosen, centre };
+  let middle = -1;
+  for (let i = 0; i < candidates.length; i++)
+    if (middle < 0 || distance(at[i], centroid) < distance(at[middle], centroid)) middle = i;
+  const pin = strokeSample(model, state, candidates[middle])?.pin ?? chosen[0].pin;
+  return { samples: chosen, pin };
 }

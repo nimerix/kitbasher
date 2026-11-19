@@ -370,8 +370,8 @@ function segmentDistance(p: ArrayLike<number>, a: Vec3, b: Vec3) {
  * moves as one the free nodes on it: within `warpFootprintSpacings` of the line through its
  * samples in order, or of an area's samples, found along the grid from the nodes the samples are
  * bound to. A sample with none of its own nodes among them adds its most heavily bound one. An area
- * also moves the free nodes on its faces still in the region. Paths start at every free node the
- * samples are bound to.
+ * also moves the free nodes on its faces still in the region, and straight-line distance is also
+ * measured from its outline. Paths start at every free node the samples are bound to.
  */
 export function handleFootprint(model: WarpModel, handle: WarpFootprintOf): WarpFootprint {
   const eligible = warpEligibleNodes(model);
@@ -422,16 +422,27 @@ export function handleFootprint(model: WarpModel, handle: WarpFootprintOf): Warp
   }
   if (handle.kind === 'area' && handle.faces) {
     const { region, grid, restWorld } = model;
+    const { weldedCount } = region;
+    // Straight-line distance from outside an area is to its outline, so the outline's vertices
+    // are its sources: all of its corners would cost a measure each per node reached.
+    const edges = new Map<number, number>();
     for (const face of handle.faces) {
       const triangle = regionTriangleOf(region, face);
       if (triangle < 0) continue;
       for (let c = 0; c < 3; c++) {
-        const v = region.triangles[triangle * 3 + c];
-        sources.push([restWorld[v * 3], restWorld[v * 3 + 1], restWorld[v * 3 + 2]]);
+        const v = region.triangles[triangle * 3 + c],
+          w = region.triangles[triangle * 3 + ((c + 1) % 3)];
         const n = grid.nodeOf[v];
         if (n !== 0xffffffff && eligible[n]) nodes.add(n);
+        const key = v < w ? v * weldedCount + w : w * weldedCount + v;
+        edges.set(key, (edges.get(key) ?? 0) + 1);
       }
     }
+    const outline = new Set<number>();
+    for (const [key, count] of edges)
+      if (count === 1) outline.add(Math.floor(key / weldedCount)).add(key % weldedCount);
+    for (const v of [...outline].sort((a, b) => a - b))
+      sources.push([restWorld[v * 3], restWorld[v * 3 + 1], restWorld[v * 3 + 2]]);
   }
   const sorted = (set: Set<number>) => [...set].sort((a, b) => a - b);
   for (const n of nodes) seeds.add(n);

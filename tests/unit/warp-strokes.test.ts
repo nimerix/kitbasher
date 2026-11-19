@@ -341,3 +341,108 @@ describe('area handles', () => {
       expect(readFace(part.geometry, face).getMidpoint(new Vector3()).z).toBeGreaterThan(0);
   });
 });
+
+describe('handles made by strokes through a session', () => {
+  for (const kind of ['line', 'area'] as const)
+    it(`keep a ${kind} whole through edits, a re-lay, undo, a live refusal and Apply`, async () => {
+      const part = await lay(surfaces.plate);
+      const surface = surfaces.plate;
+      if (kind === 'line')
+        editor().addWarpStroke({
+          kind,
+          points: stroke(part, surface, [-3, -1, 0], [3, 1.5, 0], 0.03),
+        });
+      else {
+        const first = surfaceAt(part, [1, -1, 0]);
+        editor().addWarpStroke({
+          kind,
+          faces: areaBrushFaces(session().model!, session().output!.positions, first, 1.5),
+          first,
+        });
+      }
+      const made = latest();
+      const id = made.id;
+      const current = () => session().points.find((point) => point.id === id)!;
+      /** The handle is there, with its faces, and its footprint measured on the current grid. */
+      const whole = () => {
+        const handle = current();
+        expect(handle.kind).toBe(kind);
+        expect(handle.faces).toEqual(made.faces);
+        expect(handle.path).toEqual(made.path);
+        expect(handle.samples.length).toBeGreaterThan(1);
+        expect(handle.reach!.grid).toBe(session().model!.grid);
+        expect(handle.reach!.own).toBeGreaterThan(2);
+      };
+      /** The handle's spots stand at its lift. */
+      const holds = (h: number) => {
+        finishWarpSettling();
+        const handle = current();
+        for (const { face, barycentric } of handle.samples) {
+          const model = session().model!;
+          const rise =
+            facePoint(model, session().output!.positions, { face, barycentric })[2] -
+            facePoint(model, model.positions, { face, barycentric })[2];
+          expect(Math.abs(rise - h)).toBeLessThan(0.1 * Math.max(h, 1));
+        }
+      };
+      whole();
+      const steps: number[] = [session().undo.length];
+      lift(current(), h);
+      steps.push(session().undo.length);
+      whole();
+      holds(h);
+      editor().selectWarpPoints([id]);
+      editor().setWarpPointSettings({ radius: 4 }, 'end');
+      editor().setWarpPointSettings({ falloff: 0.3 }, 'end');
+      steps.push(session().undo.length);
+      expect(current()).toMatchObject({ radius: 4, falloff: 0.3 });
+      whole();
+      holds(h);
+      await editor().setWarpDensity(defaultWarpDensity + 1);
+      whole();
+      holds(h);
+      // Edit region, paint more, and lay the grid again.
+      editor().setWarpRegion('painted');
+      editor().paintWarpRegion(
+        { partId: part.id, point: [10, 0, 0], normal: [0, 0, 1] },
+        surfaceAt(part, [10, 0, 0]).face,
+        false,
+        true,
+      );
+      editor().endPaintStroke();
+      await editor().layWarpGrid();
+      expect(session().stage).toBe('warp');
+      whole();
+      holds(h);
+      // Undo steps back through the falloff, the radius and the move, keeping the handle.
+      editor().undoWarpEdit();
+      expect(current().falloff).toBe(1);
+      expect(current().radius).toBe(4);
+      editor().undoWarpEdit();
+      expect(current().radius).toBe(made.radius);
+      whole();
+      holds(h);
+      editor().undoWarpEdit();
+      expect(current().target).toBeNull();
+      whole();
+      lift(current(), h);
+      // A refused live Apply reopens the session with the handle as it was.
+      useEditor.setState({ liveStatus: 'connected' });
+      const confirmed = editor().scene;
+      const shown = Array.from(session().preview!.getAttribute('position').array);
+      expect(editor().applyWarp()).toBe(true);
+      expect(Array.from(editor().scene.parts[0].geometry.getAttribute('position').array)).toEqual(
+        shown,
+      );
+      editor().receiveScene(confirmed);
+      useEditor.setState({ tool: 'select' });
+      editor().settleWarp(false);
+      whole();
+      expect(current().target).not.toBeNull();
+      holds(h);
+      useEditor.setState({ liveStatus: 'disconnected' });
+      expect(editor().applyWarp()).toBe(true);
+      // Apply starts again on the result.
+      expect(session().points.some((point) => point.id === id)).toBe(false);
+    });
+});

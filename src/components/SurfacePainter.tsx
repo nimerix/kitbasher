@@ -1,11 +1,12 @@
 import { useEffect, useMemo } from 'react';
 import { DoubleSide, MeshBasicMaterial, Quaternion, Vector3 } from 'three';
-import { paintingWarpRegion, useEditor, warpBrushRadius } from '../core/store';
+import { paintingWarpArea, paintingWarpRegion, useEditor, warpBrushRadius } from '../core/store';
 import { contactColors, patchGeometry } from '../core/surfaces';
 import { worldNormal, worldPoint } from '../core/geometry';
 import { solveAlignment } from '../core/alignment';
 import { partDisplay } from '../core/alignment-visibility';
 import type { Part, SurfacePatch, SurfacePoint } from '../core/types';
+import { pointAccent } from './WarpStroke';
 
 export const warpRegionColor = '#80cbc4';
 
@@ -123,15 +124,18 @@ function FlushPreview() {
 }
 
 export function PaintCursor({ part, hit }: { part: Part; hit: SurfacePoint | null }) {
-  const radius = useEditor((s) => (paintingWarpRegion(s) ? warpBrushRadius(s) : s.brushRadius)),
+  const radius = useEditor((s) =>
+      paintingWarpRegion(s) || paintingWarpArea(s) ? warpBrushRadius(s) : s.brushRadius,
+    ),
     erase = useEditor((s) => s.brushErase),
     op = useEditor((s) => s.operation),
     tool = useEditor((s) => s.tool),
     navigationMode = useEditor((s) => (s.temporaryOrbit ? 'orbit' : s.navigationMode)),
     pivotPicking = useEditor((s) => s.pivotPicking);
   const warpRegion = useEditor((s) => paintingWarpRegion(s) && s.warp!.partId === part.id);
+  const warpArea = useEditor((s) => paintingWarpArea(s) && s.warp!.partId === part.id);
   const contact = tool === 'align' && op.mode === 'surface' && !!op.activeSurface;
-  if (!hit || (!contact && !warpRegion) || navigationMode || pivotPicking) return null;
+  if (!hit || (!contact && !warpRegion && !warpArea) || navigationMode || pivotPicking) return null;
   const index = op.surfacePairs.findIndex((pair) => pair.id === op.activeSurface?.pairId);
   const normal = worldNormal(part, hit),
     position = worldPoint(part, hit).addScaledVector(normal, 0.03);
@@ -142,11 +146,13 @@ export function PaintCursor({ part, hit }: { part: Part; hit: SurfacePoint | nul
         <ringGeometry args={[radius, radius + Math.max(radius * 0.025, 0.035), 64]} />
         <meshBasicMaterial
           color={
-            erase
-              ? '#f18c8c'
-              : warpRegion
-                ? warpRegionColor
-                : contactColors[index % contactColors.length]
+            warpArea
+              ? pointAccent
+              : erase
+                ? '#f18c8c'
+                : warpRegion
+                  ? warpRegionColor
+                  : contactColors[index % contactColors.length]
           }
           side={DoubleSide}
           depthTest={false}

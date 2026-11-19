@@ -3,6 +3,7 @@ import { joinLiveSession } from '../core/live';
 import {
   committedScene,
   liveSession,
+  paintingWarpArea,
   paintingWarpRegion,
   useEditor,
   warpBrushRadius,
@@ -180,7 +181,7 @@ export function useKeyboard(openScene: () => void, searchParts: () => void) {
           return;
         case 'brushSmaller':
         case 'brushLarger': {
-          const warping = paintingWarpRegion(state);
+          const warping = paintingWarpRegion(state) || paintingWarpArea(state);
           if (!paintingSurface && !warping) return;
           event.preventDefault();
           const radius = Number(
