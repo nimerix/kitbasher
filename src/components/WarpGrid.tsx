@@ -50,22 +50,33 @@ export function gridNodePositions(warp: WarpSession) {
 }
 
 /**
- * How grid lines are drawn, in CSS pixels against the cell's length on screen. The dark core is
- * what makes the grid stand out: full width and opaque down to `coreFull`, then thinner to
- * `coreThin` px and fading out to `coreGone`, by cells shrunk as the surface turns away. The
- * light casing lifts only what is darker than it, so it shows on dark parts and leaves light ones
- * alone, and fades out from `casingFull` to `casingGone`.
+ * How grid lines are drawn, in CSS pixels against the cell's length on screen. Each line carries
+ * ink in proportion to its cell's size, so the grid puts about as much ink on the part however
+ * fine it is or however far away: full width and opacity from `inkFull` px cells; below that, an
+ * opacity of the ink's power `inkCurve` (blending in sRGB darkens faster than opacity grows) but
+ * never below `inkFloor` (`casingFloor` for the casing) while the line shows, and thinner below
+ * `inkWide`. The dark core makes the grid stand out on light parts; the light casing lifts only
+ * what is darker than it, so it shows on dark parts and leaves light ones alone. A grid's own
+ * lines fade out from `coreFull` to `coreGone` px cells, by cells shrunk as the surface turns
+ * away, and its casing from `casingFull` to `casingGone`.
  */
 export const warpGridStyle = {
   core: '#0e1114',
   coreWidth: 1.5,
   coreThin: 1,
-  coreFull: 13,
-  coreGone: 6,
+  coreFull: 11,
+  coreGone: 5,
   casing: '#b0b5b8',
   casingWidth: 4,
-  casingFull: 22,
-  casingGone: 12,
+  casingThin: 2.5,
+  casingFull: 12,
+  casingGone: 6,
+  inkFull: 40,
+  inkCurve: 1.5,
+  casingCurve: 1,
+  inkFloor: 0.25,
+  casingFloor: 0.35,
+  inkWide: 0.5,
   /**
    * Coarser nets of the grid's own edges, for when its cells are too small to show: each comes in
    * over an octave of its own cells, from `coarseGone` to `coarseFull` px, as the net below it
@@ -73,9 +84,8 @@ export const warpGridStyle = {
    */
   coarseFull: 20,
   coarseGone: 10,
-  /** The same for their casing, which shows only on dark parts: about a default grid's cells. */
-  coarseCasingFull: 48,
-  coarseCasingGone: 24,
+  /** Their cells count as this share of their size for ink: their lines wind, so lie closer. */
+  coarseInk: 0.5,
   /** How far a line may sit behind the surface and still show: pixels, and at most mm. */
   tolerance: 1,
   toleranceMax: 0.05,
@@ -114,17 +124,28 @@ float fadeIn( float level, float pixels, vec2 own, vec2 coarse ) {
   return clamp( ( pixels * exp2( level ) - range.x ) / ( range.y - range.x ), 0.0, 1.0 );
 }
 
+// How strongly a line shows, as far as its net has come in, for cells of so many px: all of it
+// from inkFull px, and less as they shrink, though never below the floor.
+float strength( float shown, float pixels ) {
+  float ink = clamp( pixels / ${glsl(style.inkFull)}, 0.0, 1.0 );
+#ifdef CASING
+  return shown * max( pow( ink, ${glsl(style.casingCurve)} ), ${glsl(style.casingFloor)} );
+#else
+  return shown * max( pow( ink, ${glsl(style.inkCurve)} ), ${glsl(style.inkFloor)} );
+#endif
+}
+
 // How strongly this edge shows as part of the coarser nets it is in, each of which comes in as
-// the one below it goes, or, when late, only as the grid's own is nearly gone.
-float coarseStrength( float pixels, vec2 own, vec2 coarse, bool late ) {
-  float strength = 0.0;
+// the one below it goes. They add up, so an edge of both nets stays whole as one hands over.
+float coarseStrength( float pixels, vec2 own, vec2 coarse ) {
+  float sum = 0.0;
   for ( int level = 1; level <= 3; level++ ) {
     if ( exp2( float( level ) ) > instanceCell + 0.5 ) break;
     float below = 1.0 - fadeIn( float( level - 1 ), pixels, own, coarse );
-    if ( late && level == 1 ) below *= below;
-    strength = max( strength, min( below, fadeIn( float( level ), pixels, own, coarse ) ) );
+    float shown = min( below, fadeIn( float( level ), pixels, own, coarse ) );
+    sum += strength( shown, pixels * exp2( float( level ) ) * ${glsl(style.coarseInk)} );
   }
-  return strength;
+  return sum;
 }
 
 // As three's LineMaterial: a segment crossing the camera plane ends at the near plane.
@@ -166,28 +187,26 @@ void main() {
     facing = abs( dot( normalize( normal ), perspective ? normalize( - centre ) : vec3( 0.0, 0.0, 1.0 ) ) );
   float cellPixels = cell / pixel * max( facing, 0.04 );
   float openPixels = cell / pixel;
+  // Ink follows cells as they crowd where the surface turns away, down to half.
+  float inkPixels = cell / pixel * max( facing, 0.5 );
   // An edge of a coarser net also shows as part of it once the grid's own cells are too small, by
   // zoom alone: where the surface turns away the coarse nets would crowd as the grid does.
   bool coarse = instanceCell > 1.5;
+  vec2 coarseRange = vec2( ${glsl(style.coarseGone)}, ${glsl(style.coarseFull)} );
 #ifdef CASING
-  vHalf = 0.5 * ${glsl(style.casingWidth)};
   // Where the surface turns away, the casing still edges the core: it lifts only dark parts.
   vec2 own = vec2( ${glsl(style.casingGone)}, ${glsl(style.casingFull)} );
-  vAlpha = smoothstep( own.x, own.y, openPixels );
-  if ( coarse )
-    vAlpha = max( vAlpha, smoothstep( 0.0, 1.0, coarseStrength( openPixels, own,
-      vec2( ${glsl(style.coarseCasingGone)}, ${glsl(style.coarseCasingFull)} ), false ) ) );
+  vAlpha = strength( smoothstep( own.x, own.y, openPixels ), inkPixels );
+  if ( coarse ) vAlpha = min( 1.0, vAlpha + coarseStrength( openPixels, own, coarseRange ) );
+  vHalf = 0.5 * mix( ${glsl(style.casingThin)}, ${glsl(style.casingWidth)},
+    smoothstep( ${glsl(style.inkWide)}, 1.0, vAlpha ) );
   float cap = 0.0;
 #else
-  // The first coarse net's core comes in late, so on a light part the grid covers no more than
-  // at its default density.
   vec2 own = vec2( ${glsl(style.coreGone)}, ${glsl(style.coreFull)} );
-  float strength = fadeIn( 0.0, cellPixels, own, own );
-  if ( coarse )
-    strength = max( strength, coarseStrength( openPixels, own,
-      vec2( ${glsl(style.coarseGone)}, ${glsl(style.coarseFull)} ), true ) );
-  vHalf = 0.5 * mix( ${glsl(style.coreThin)}, ${glsl(style.coreWidth)}, strength );
-  vAlpha = smoothstep( 0.0, 1.0, strength );
+  vAlpha = strength( smoothstep( 0.0, 1.0, fadeIn( 0.0, cellPixels, own, own ) ), inkPixels );
+  if ( coarse ) vAlpha = min( 1.0, vAlpha + coarseStrength( openPixels, own, coarseRange ) );
+  vHalf = 0.5 * mix( ${glsl(style.coreThin)}, ${glsl(style.coreWidth)},
+    smoothstep( ${glsl(style.inkWide)}, 1.0, vAlpha ) );
   float cap = vHalf;
 #endif
   // A pixel beyond the line's edge, for antialiasing.
@@ -652,7 +671,7 @@ function SurfaceWarpGrid({ warp }: { warp: WarpSession }) {
         if (largest * 2 ** level > (level ? coarseGone : gone)) return drawing.levelEnd[level];
       return 0;
     };
-    counts.casing = shown(style.casingGone, style.coarseCasingGone);
+    counts.casing = shown(style.casingGone, style.coarseGone);
     counts.core = shown(style.coreGone, style.coarseGone);
     casing.visible = counts.casing > 0;
     core.visible = counts.core > 0;
