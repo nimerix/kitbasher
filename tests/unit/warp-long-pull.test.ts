@@ -1,10 +1,11 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { BoxGeometry, BufferGeometry, PlaneGeometry, Vector3 } from 'three';
+import { BoxGeometry, BufferGeometry, PlaneGeometry, SphereGeometry, Vector3 } from 'three';
 import { mergeGeometries, mergeVertices } from 'three/addons/utils/BufferGeometryUtils.js';
 import { triangleCount } from '../../src/core/geometry';
 import { finishWarpSettling, useEditor, writtenWarpSample } from '../../src/core/store';
 import { readFace } from '../../src/core/surfaces';
 import type { Part, Vec3 } from '../../src/core/types';
+import { planarPointDetail } from '../../src/core/warp-point-surface';
 
 const editor = () => useEditor.getState();
 const session = () => useEditor.getState().warp!;
@@ -16,7 +17,7 @@ const random = () => {
 };
 
 /** A 20 × 8 × 20 mm block, top at y = 4, with its top face's vertices jittered by half a cell. */
-function block() {
+function block(height = (_x: number, _z: number) => 0) {
   const seg = 80;
   const box = new BoxGeometry(20, 8, 20, seg, 32, seg);
   box.deleteAttribute('uv');
@@ -32,7 +33,7 @@ function block() {
     const key = `${Math.round(x / step)},${Math.round(z / step)}`;
     let d = moved.get(key);
     if (!d) moved.set(key, (d = [(random() - 0.5) * 0.5 * step, (random() - 0.5) * 0.5 * step]));
-    position.setXYZ(i, x + d[0], y, z + d[1]);
+    position.setXYZ(i, x + d[0], y + height(x, z), z + d[1]);
   }
   const out = box.toNonIndexed();
   out.computeVertexNormals();
@@ -65,21 +66,23 @@ function topFace(geometry: BufferGeometry, x: number, z: number) {
   let best = -1,
     distance = Infinity;
   const mid = new Vector3();
+  const normal = new Vector3();
   for (let f = 0; f < triangleCount(geometry); f++) {
-    readFace(geometry, f).getMidpoint(mid);
-    if (Math.abs(mid.y - 4) > 1e-4) continue;
+    const triangle = readFace(geometry, f);
+    triangle.getMidpoint(mid);
+    if (mid.y < 3.5 || triangle.getNormal(normal).y < 0.9) continue;
     const d = Math.hypot(mid.x - x, mid.z - z);
     if (d < distance) [best, distance] = [f, d];
   }
   return { face: best, centre: readFace(geometry, best).getMidpoint(new Vector3()) };
 }
 
-/** Adds a point on the top face at (x, z) and pulls it straight up by `h`. */
-function pull(geometry: BufferGeometry, x: number, z: number, h: number) {
+/** Adds a point on the top face at (x, z) and pulls it up by `h` and sideways by `side`. */
+function pull(geometry: BufferGeometry, x: number, z: number, h: number, side = 0) {
   const { face, centre } = topFace(geometry, x, z);
   editor().addWarpPoint({ partId: 'a', point: centre.toArray(), normal: [0, 1, 0] }, face);
   const point = session().points.at(-1)!;
-  const target: Vec3 = [point.pin[0], point.pin[1] + h, point.pin[2]];
+  const target: Vec3 = [point.pin[0] + side, point.pin[1] + h, point.pin[2]];
   editor().moveWarpPoints([{ id: point.id, target }], 'end');
   return { id: point.id, centre, target };
 }
@@ -95,12 +98,12 @@ function relief(geometry: BufferGeometry, centre: Vector3, from: number) {
   const top: { r: number; lift: number }[] = [];
   const seen = new Set<string>();
   for (let g = 0; g < rest.length / 3; g++) {
-    if (Math.abs(rest[g * 3 + 1] - 4) > 1e-5) continue;
+    if (rest[g * 3 + 1] < 3.5) continue;
     const key = `${rest[g * 3]},${rest[g * 3 + 2]}`;
     if (seen.has(key)) continue;
     seen.add(key);
     const r = Math.hypot(rest[g * 3] - centre.x, rest[g * 3 + 2] - centre.z);
-    if (r < 9) top.push({ r, lift: out[g * 3 + 1] - 4 });
+    if (r < 9) top.push({ r, lift: out[g * 3 + 1] - rest[g * 3 + 1] });
   }
   top.sort((a, b) => a.r - b.r);
   const half = 14;
@@ -176,6 +179,43 @@ describe('a long pull on a flat face', () => {
       expect(Array.from(part.geometry.getAttribute('position').array)).toEqual(shown);
     }, 60_000);
 
+  it.each([
+    { name: 'a near-flat scan', side: 0 },
+    { name: 'an oblique pull on a near-flat scan', side: 1.8 },
+  ])(
+    'keeps the shoulder smooth on $name',
+    async ({ side }) => {
+      // Low-frequency curvature and fine relief on uneven triangles, in mm.
+      const geometry = block(
+        (x, z) => 0.0015 * (x * x + 0.7 * z * z) + 0.008 * Math.sin(4 * x) * Math.cos(5 * z),
+      );
+      await open(geometry);
+      const radius = 5;
+      editor().setWarpPointSettings({ radius, falloff: 0 }, 'end');
+      const { id, centre, target } = pull(geometry, 0, 0, 25, side);
+      finishWarpSettling();
+      const point = session().points.find((p) => p.id === id)!;
+      expect(distance(writtenWarpSample(point.samples[0]), target)).toBeLessThan(0.01);
+      expect(session().folds).toHaveLength(0);
+      const { teeth, dip } = relief(geometry, centre, radius);
+      expect(teeth).toBeLessThan(0.24);
+      expect(dip).toBeGreaterThan(-0.025);
+      const rest = geometry.getAttribute('position').array;
+      const written = session().output!.positions;
+      let shoulder = 0;
+      for (let i = 0; i < rest.length; i += 3) {
+        const r = Math.hypot(rest[i] - centre.x, rest[i + 2] - centre.z);
+        if (rest[i + 1] > 3.5 && r >= radius && r < radius + 0.4)
+          shoulder = Math.max(
+            shoulder,
+            distance(rest.subarray(i, i + 3), written.subarray(i, i + 3)),
+          );
+      }
+      expect(shoulder).toBeLessThan(0.025);
+    },
+    60_000,
+  );
+
   it('lands two overlapping points pulled at 0 % falloff and rises cleanly between them', async () => {
     const geometry = block();
     await open(geometry);
@@ -205,6 +245,26 @@ describe('a long pull on a flat face', () => {
     }
     expect(dip).toBeGreaterThan(-0.15);
   }, 60_000);
+});
+
+describe('a long pull near a crease or on a curved surface', () => {
+  it.each([
+    { name: 'a crease in the footprint', geometry: () => block(), x: 7, z: 0 },
+    { name: 'a curved footprint', geometry: () => new SphereGeometry(6, 128, 96), x: 0, z: 0 },
+  ])(
+    'leaves $name to the grid solve',
+    async ({ geometry, x, z }) => {
+      const surface = geometry();
+      await open(surface);
+      editor().setWarpPointSettings({ radius: 4, falloff: 0 }, 'end');
+      pull(surface, x, z, 12);
+      finishWarpSettling();
+      const { model, state, points } = session();
+      expect(points.at(-1)?.reach?.activation).toBe(1);
+      expect(planarPointDetail(model!, state!, points, undefined)).toBeUndefined();
+    },
+    60_000,
+  );
 });
 
 describe('a long pull on one sheet of a fold', () => {
