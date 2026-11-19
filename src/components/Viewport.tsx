@@ -56,6 +56,7 @@ import {
 import {
   isWarpDragging,
   measureDistance,
+  paintingWarpArea,
   paintingWarpRegion,
   sceneLighting,
   refitWarpTree,
@@ -66,6 +67,7 @@ import { FreeTransformController, FreeTransformPrompt } from './FreeTransform';
 import { CombinedTransform } from './CombinedTransform';
 import { ManagedTransformControls } from './ManagedTransformControls';
 import { WarpOverlay, shownWarpPreview } from './WarpOverlay';
+import { beginWarpStroke, endingWarpStroke, WarpStrokeController } from './WarpStroke';
 import { transformSelection } from '../core/transform-selection';
 import { referencePlanes, resolvePart } from '../core/references';
 import type { Part, SurfacePoint, FitAnchor, SceneDocument, SceneLight } from '../core/types';
@@ -118,6 +120,7 @@ class ViewportBoundary extends Component<{ children: ReactNode }, { error: strin
 const noRaycast = () => {};
 // A press on a gizmo handle also reaches whatever lies under it, but it is not a selection click.
 let gizmoPressed = false;
+const gizmoWasPressed = () => gizmoPressed;
 
 const PartMesh = memo(function PartMesh({
   part,
@@ -244,6 +247,8 @@ const PartMesh = memo(function PartMesh({
         state.notify('Reset the exploded view before adding control points.', 'info');
         return;
       }
+      // Lines and areas are made by their strokes.
+      if (state.warpAdd !== 'point') return;
       state.addWarpPoint(toSurface(event), event.faceIndex);
       return;
     }
@@ -308,13 +313,13 @@ const PartMesh = memo(function PartMesh({
             } else if (paintingWarpRegion(state)) {
               event.stopPropagation();
               state.paintWarpRegion(toSurface(event), event.faceIndex, event.altKey, true);
-            }
+            } else if (beginWarpStroke(event, part.id)) event.stopPropagation();
           }}
           onPointerMove={(event) => {
             const state = useEditor.getState();
             const contact = state.tool === 'align' && state.operation.mode === 'surface';
             if (
-              (!contact && !paintingWarpRegion(state)) ||
+              (!contact && !paintingWarpRegion(state) && !paintingWarpArea(state)) ||
               state.navigationMode ||
               state.temporaryOrbit ||
               state.pivotPicking ||
@@ -1143,6 +1148,7 @@ function Scene({
             }}
             pressed={() => gizmoPressed}
           />
+          <WarpStrokeController pressed={gizmoWasPressed} />
           <PinOverlay />
           <LightHandles />
           <AssemblyAnnotations />
@@ -1259,6 +1265,7 @@ export function Viewport() {
                 event.type !== 'click' ||
                 event.button !== 0 ||
                 gizmoPressed ||
+                endingWarpStroke() ||
                 state.temporaryOrbit ||
                 state.navigationMode ||
                 state.pivotPicking ||

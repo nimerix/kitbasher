@@ -297,49 +297,95 @@ mirrored, non-uniformly scaled part.
 
 ### 6. Line and area handles
 
-In the Warp stage an **Add** selector chooses what a press on the surface makes:
+In the Warp stage an **Add** selector in the Control points section chooses what a press on the
+surface makes, and says so in a line:
 
 - **Point**: a click adds a control point (today).
 - **Line**: press and drag draws a line; release makes one line handle.
-- **Area**: press and drag paints with Warp's brush; release makes one area handle from the
-  faces painted in that stroke.
+- **Area**: press and drag paints with Warp's brush (its radius, cursor and size shortcuts, and a
+  radius field under the selector); release makes one area handle from the faces painted in that
+  stroke.
 
-**Input.** A stroke is a draft owned by one pointer. On press, camera navigation, pivot
-picking, free transform, gizmo handles and point markers take priority over starting one.
-An unmodified primary drag on the region draws; middle, right and Space navigation still
-work. Release commits once; Escape, pointer cancel and window blur discard. The click that
-ends a stroke adds no point, also when a short line is rejected. Hits come from the warped
-preview. A line breaks where the pointer leaves the surface or jumps to a disconnected
-spot, and only its longest run is kept. Area painting measures distance on the warped
-preview and connectivity on the source mesh, and does not touch the region or its paint
-history.
+**Input.** A stroke is a draft owned by one pointer (`WarpStroke.tsx`). It starts only on an
+unmodified primary press on a painted face of the warped part, when no camera navigation (middle
+and right buttons, Space, the orbit and pan tools), pivot picking, free transform or exploded view
+is in force; a point marker stops the press before it reaches the surface. The camera's controls
+are switched off for that press, so a stroke never orbits, and a primary drag that begins off the
+region still does. A gizmo handle hears the press after the surface does, so the first pointer move
+or the release after a gizmo press discards the draft. The pointer's path is sampled every 2 screen
+pixels, whatever the pointer's speed, by a raycast on the warped preview that another part in front
+blocks. Release commits once; Escape, pointer cancel, lost pointer capture, window blur, camera
+navigation starting and the session changing discard. The click that ends a stroke adds no point
+and changes no selection, also when a line is rejected; in Line and Area mode a click adds nothing.
+A line shorter than 4 px makes nothing; an area from a press alone is the one dab.
 
-**Handle.** One selectable object: `kind`, immutable samples (each a surface binding with
-its pin), for an area its source faces, shared radius and falloff, and one target for its
-centre. It is selected, moved, deleted and undone as one; all its samples move by the same
-translation. In a multiple selection, rotate and scale move handle centres about the pivot,
-as for points. Snap to neighbour snaps the centre and carries the rest with it. It is drawn
-as its line or its tinted area with one marker at the centre.
+A line breaks where the pointer leaves the paint or jumps to a disconnected spot: two successive
+hits are joined when they share a bound node, or when the grid joins their nodes by a path no
+longer than 1.5 times the straight line between them plus 2.5 node spacings. Only the longest run,
+by length at rest, is kept.
 
-**Samples.** A line is resampled by arc length to half the local node spacing; an area
-takes up to a few dozen face centres spread by farthest-point sampling, always including
-the first hit. Samples with the same bound nodes are merged, so pointer speed does not
-change stiffness. An area smaller than a grid cell still has several samples, so it lifts a
-small plateau rather than a peak.
+Area painting measures distance on the warped preview, in world space, from the hit to each
+triangle, and connectivity on the source mesh: it walks the warp region's own welded triangles
+from the hit face through painted faces turned within about 78° of the hit face, as region
+painting picks them. It never touches the region or its paint history. The region's triangles
+around each welded vertex are listed once per grid: on a 4.2-million-triangle part the first dab
+costs 36 ms, where the first region dab builds whole-mesh face adjacency in 4.0 s; later dabs cost
+under a millisecond. Dabs are a quarter of the brush radius apart along the stroke.
 
-**Reach.** The footprint is the nodes bound to the samples, plus for an area the nodes on
-its faces. Section 4 applies with distance measured from the footprint: radius 0 gives a
-continuous ridge or a rigid patch, and a radius above 0 adds the smooth skirt.
+**Handle.** One selectable object: `kind`, immutable samples (each a surface binding with its pin),
+for an area its source `faces`, for a line its drawn `path` (up to 512 spots on faces, for drawing
+only), shared radius and falloff, and one target for its centre. A line's `pin` is the surface
+halfway along the stroke; an area's is the surface at the face centre nearest its area-weighted
+centroid; both are pinned where the surface is shown, as a clicked point is. It is selected,
+moved, deleted and undone as one; all its samples move by the same translation. In a multiple
+selection, rotate and scale move handle centres about the pivot, as for points, and a single line
+or area ignores them. Snap to neighbour snaps the centre and carries the rest with it. Making one
+is one session undo step and selects it; a new line or area takes the panel's radius and falloff,
+its default radius from the spacing at its samples' nodes.
 
-Acceptance: along a line handle moved by `h`, the written surface between samples stays
-within `0.1 h` of `h`; several interior points of an area do the same, including an area
-smaller than a cell and a 60-node grid.
+It is drawn as its line on the written surface, or its faces hatched in diagonal stripes of the
+handle colour and a dark tone with their outline, and one marker at the centre. Lines are a dark
+5 px casing under a 2.5 px core in the point markers' colours (selected and idle), drawn 4 px
+nearer the eye so a line's width does not sink into a surface sloping across it; the stripes leave
+the surface showing between them. Shapes are built when a handle's path or faces change; a solve
+only rewrites their positions, read from the preview. While drawing, the line so far or the faces
+painted so far are drawn the same way on the warped surface, appended in place.
+
+**Samples.** A line's hits are taken about every half local node spacing along the surface at
+rest, keeping the first and the last, then one sample is kept for each set of grid nodes the
+inner ones are bound to, so pointer speed does not change stiffness; both ends are always kept.
+An area takes up to 32 face centres spread by farthest-point sampling at rest from the first hit,
+at least 4 and about half a node spacing apart; an area of fewer than 4 faces also offers a spot
+toward each corner of each face, so even one face has several samples and lifts a small plateau
+rather than a peak. On the 32 mm torso scan, a line drawn across the chest took 35 samples and one
+across the shoulder 10; an area painted on the chest took 3,300 to 3,500 faces and 32 samples, and one on
+the shoulder 1,501 faces and 13.
+
+**Footprint.** A line or an area moves as one the free nodes within 0.75 node spacings (each
+node's own) of the line through its samples in order, or of an area's samples, found by walking
+the grid from the nodes the samples are bound to; a sample with none of its nodes among them adds
+its most heavily bound one; an area also moves the free nodes on its faces. Every bound free node
+seeds the reach's paths, and straight-line distance is measured from the samples and an area's
+outline. Taking every node a sample is bound to, as first written, made the ridge's width depend on
+which triangles the samples fell in: a binding reaches one to one and a half spacings, unevenly to
+either side, and two samplings of one stroke differed by a quarter of the lift. Section 4 applies
+with distance measured from the footprint: radius 0 gives a continuous ridge or a rigid patch, and a
+radius above 0 adds the smooth skirt.
+
+Acceptance: along a line handle moved by `h`, the written surface between samples stays within
+`0.1 h` of `h`, and no local maximum stands more than `0.05 h` above its neighbours; several interior
+points of an area do the same, including an area smaller than a cell and a 60-node grid; the same
+stroke drawn slowly and quickly gives results within `0.02 h`. Measured: a line within 0.017 h
+(radius 0: 0.005 h) with no peak above 0.011 h at default density, within 0.012 h on a 60-node
+ball; areas within 0.01 h; slow and quick within 0.002 h. On the 32 mm torso scan, lifted 1.92 mm,
+a line across the chest stays between 1.912 and 1.921 mm (default radius: 1.901 and 1.927), where
+points placed along the same path range from 0.71 to 2.03 mm.
 
 ### Data model
 
-`WarpPoint` is a `WarpHandle`: `kind` (`point`; `line` and `area` are reserved), immutable
-samples, for an area its source `faces`, `radius`, `falloff`, `auto`, one `target` (null while
-unmoved), `baseline` (a shared snapshot) and a cached `reach`. `moveWarpPoints` keeps taking one
+`WarpPoint` is a `WarpHandle`: `kind` (`point`, `line` or `area`), immutable samples, for an area
+its source `faces`, for a line its drawn `path`, `radius`, `falloff`, `auto`, one `target` (null
+while unmoved), `baseline` (a shared snapshot) and a cached `reach`. `moveWarpPoints` keeps taking one
 target per handle.
 
 Each session undo step holds the points, gap targets, the settled grid they held and the
@@ -369,6 +415,8 @@ settles undo across it from there.
 
 A pure module, `warp-handles.ts`, turns handles and a model into solver input: reach, weights,
 guides, snapshots and their transfer, and distribution. It is unit-tested without the store.
+`warp-strokes.ts` turns a stroke into samples: line resampling and merging, break detection, the
+area brush and area sampling; `addWarpStroke` in the store builds the handle.
 
 ## Approaches considered
 
