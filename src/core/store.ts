@@ -110,6 +110,7 @@ import {
   untouchedAuto,
   warpEligibleNodes,
   warpGuides,
+  warpPinHold,
   warpPriorityStrength,
   writtenCentre,
   type WarpHandle,
@@ -118,7 +119,13 @@ import {
 } from './warp-handles';
 import { buildWarpModelJob } from './warp-job';
 import { isPaintedFace, type WarpModel, type WarpModelInput } from './warp-model';
-import { areaSamples, lineSamples, thinPath, type WarpStrokePoint } from './warp-strokes';
+import {
+  areaSamples,
+  lineSamples,
+  survivingStroke,
+  thinPath,
+  type WarpStrokePoint,
+} from './warp-strokes';
 import {
   closeGapTargets,
   measureSeam,
@@ -258,6 +265,8 @@ export interface WarpSession {
   points: WarpPoint[];
   selectedPoints: string[];
   gapTargets: { node: number; target: Vec3 }[];
+  /** How many targets the last Close gap withheld because points the user placed hold the surface. */
+  gapHeld?: number;
   snap: boolean;
   overlap: number;
   gizmo: WarpGizmo;
@@ -285,21 +294,24 @@ export interface WarpSession {
  */
 type WarpEdit = Pick<
   WarpSession,
-  'points' | 'gapTargets' | 'surface' | 'pointRadius' | 'pointFalloff'
+  'points' | 'gapTargets' | 'gapHeld' | 'surface' | 'pointRadius' | 'pointFalloff'
 > & {
-  /** On the step a density change records: the grid it undoes to, rebuilt when it is undone. */
+  /** On the step a new grid records: the grid it undoes to, rebuilt when it is undone. */
   grid?: WarpGridStep;
 };
-type WarpLaid = { faces: number[] | null; density: number; feather: number };
+type WarpLaid = {
+  faces: number[] | null;
+  density: number;
+  feather: number;
+  /** The region as painted when the grid was laid, which undoing a later grid paints again. */
+  painted: Pick<WarpSession, 'region' | 'faces' | 'seed'>;
+};
 /**
- * The grid a density change left. Its steps' snapshots name `token` instead of the grid, so the old
- * model can be let go; undoing rebuilds it from `laid` and puts them back on it.
+ * The grid a density change or a new region left. Its steps' snapshots name `token` instead of the
+ * grid, so the old model can be let go; undoing rebuilds it from `laid` and puts them back on it.
  */
 interface WarpGridStep {
   laid: WarpLaid;
-  region: WarpSession['region'];
-  faces: number[];
-  seed: WarpSession['seed'];
   densityChosen: boolean;
   token: WarpGrid;
   /** Of the old model, to tell that the rebuild is the same grid. */
@@ -769,7 +781,9 @@ function warpBinding(model: WarpModel, triangle: number, barycentric: Vec3) {
  * bound to is fixed, so it could not move the surface. Null when it stays.
  */
 function droppedBy(model: WarpModel, handle: WarpPoint): 'unpainted' | 'fixed' | null {
-  const painted = handle.samples.filter(({ face }) => isPaintedFace(model, face));
+  const left = survivingStroke(model, handle);
+  if (!left) return 'unpainted';
+  const painted = left.samples.filter(({ face }) => isPaintedFace(model, face));
   if (!painted.length) return 'unpainted';
   const { fixed } = model.grid;
   return painted.every(({ face, barycentric }) =>
@@ -782,13 +796,16 @@ function droppedBy(model: WarpModel, handle: WarpPoint): 'unpainted' | 'fixed' |
 }
 
 /**
- * Binds a handle to a new model, dropping samples and an area's faces that are no longer painted
- * in its region, and samples the new grid binds exactly as another. Null when no sample is left,
- * or when every node the samples are bound to is fixed, so it could not move the surface.
+ * Binds a handle to a new model, keeping what is left of a line or an area on its paint, and
+ * dropping samples the new grid binds exactly as another. Null when no sample is left, when too
+ * little of a line is, or when every node the samples are bound to is fixed, so it could not move
+ * the surface.
  */
 function rebindHandle(model: WarpModel, handle: WarpPoint): WarpPoint | null {
+  const left = survivingStroke(model, handle);
+  if (!left) return null;
   const samples = uniqueSamples(
-    handle.samples.flatMap((sample) => {
+    left.samples.flatMap((sample) => {
       const triangle = isPaintedFace(model, sample.face)
         ? regionTriangleOf(model.region, sample.face)
         : -1;
@@ -799,8 +816,8 @@ function rebindHandle(model: WarpModel, handle: WarpPoint): WarpPoint | null {
   );
   const { fixed } = model.grid;
   if (samples.every(({ binding }) => binding.node.every((node) => fixed[node]))) return null;
-  const faces = handle.faces?.filter((face) => isPaintedFace(model, face));
-  return reachHandle(model, { ...handle, samples, ...(faces ? { faces } : {}), reach: null });
+  const faces = left.faces?.filter((face) => isPaintedFace(model, face));
+  return reachHandle(model, { ...left, samples, ...(faces ? { faces } : {}), reach: null });
 }
 
 /** The session's settled grid as a snapshot, or the grid as shown while it is still settling. */
@@ -850,6 +867,7 @@ export const isWarpDragging = () =>
 const warpEdit = (warp: WarpSession): WarpEdit => ({
   points: warp.points,
   gapTargets: warp.gapTargets,
+  gapHeld: warp.gapHeld ?? 0,
   surface: warp.model && warp.state ? settledOf(warp) : warp.surface,
   pointRadius: warp.pointRadius,
   pointFalloff: warp.pointFalloff,
@@ -912,6 +930,97 @@ export function warpPinDrift(warp: WarpSession) {
       );
     }
   return worst;
+}
+
+/** The nodes a handle's samples are bound to and those beside them. */
+function nodesAround(model: WarpModel, handle: WarpPoint) {
+  const { edgeStart, edges } = model.grid;
+  const near = new Set<number>();
+  for (const { binding } of handle.samples)
+    for (const n of binding.node) {
+      near.add(n);
+      for (let e = edgeStart[n]; e < edgeStart[n + 1]; e++) near.add(edges[e]);
+    }
+  return near;
+}
+
+/**
+ * What holds back the selected moved handle that stops farthest short: a stationary point the user
+ * placed on or beside its nodes, the fixed edge its samples are partly bound to, or Close gap's
+ * targets beside it. Null when none of these is there.
+ */
+export function warpShortfallCause(warp: WarpSession): 'pin' | 'edge' | 'gap' | null {
+  const { model, state } = warp;
+  if (!model || !state) return null;
+  let worst: WarpPoint | null = null,
+    far = 0;
+  for (const point of warp.points)
+    if (point.target && warp.selectedPoints.includes(point.id)) {
+      const at = writtenCentre(model, state, point);
+      const d = Math.hypot(...at.map((value, a) => value - point.target![a]));
+      if (d > far) [worst, far] = [point, d];
+    }
+  if (!worst) return null;
+  const near = nodesAround(model, worst);
+  const { fixed } = model.grid;
+  if (
+    warp.points.some(
+      (point) =>
+        point.target === null &&
+        !point.auto &&
+        point.samples.some(({ binding }) => binding.node.some((n) => near.has(n))),
+    )
+  )
+    return 'pin';
+  // A binding's fixed corners carry the rest of its weight.
+  const free = (binding: WarpPoint['samples'][number]['binding']) =>
+    binding.node.reduce((sum, n, k) => sum + (fixed[n] ? 0 : binding.weight[k]), 0);
+  if (worst.samples.some(({ binding }) => free(binding) < 1 - 1e-9)) return 'edge';
+  if (warp.gapTargets.some(({ node }) => near.has(node))) return 'gap';
+  return null;
+}
+
+/**
+ * What moves the selected stationary point that has drifted farthest from its pin: Close gap's
+ * targets or a moved handle, whichever the grid reaches first from its nodes.
+ */
+export function warpPinDriftCause(warp: WarpSession): 'gap' | 'moved' {
+  const { model, state } = warp;
+  if (!model || !state || !warp.gapTargets.length) return 'moved';
+  let worst: WarpPoint | null = null,
+    far = 0;
+  for (const point of warp.points)
+    if (point.target === null && !point.auto && warp.selectedPoints.includes(point.id)) {
+      const at = writtenCentre(model, state, point);
+      const d = Math.hypot(...at.map((value, a) => value - point.pin[a]));
+      if (d > far) [worst, far] = [point, d];
+    }
+  if (!worst) return 'moved';
+  const gap = new Set(warp.gapTargets.map(({ node }) => node));
+  const moved = new Set<number>();
+  for (const point of warp.points)
+    if (point.target !== null)
+      for (const { binding } of point.samples) for (const n of binding.node) moved.add(n);
+  const { edgeStart, edges } = model.grid;
+  const seen = new Set<number>();
+  const queue: number[] = [];
+  for (const { binding } of worst.samples)
+    for (const n of binding.node)
+      if (!seen.has(n)) {
+        seen.add(n);
+        queue.push(n);
+      }
+  for (let q = 0; q < queue.length; q++) {
+    const n = queue[q];
+    if (moved.has(n)) return 'moved';
+    if (gap.has(n)) return 'gap';
+    for (let e = edgeStart[n]; e < edgeStart[n + 1]; e++)
+      if (!seen.has(edges[e])) {
+        seen.add(edges[e]);
+        queue.push(edges[e]);
+      }
+  }
+  return 'moved';
 }
 
 /** Whether Apply would change the mesh. */
@@ -1360,6 +1469,79 @@ const gapAwayCosine = 0.25;
 // An automatic point the closing seam would move by more than this share of its largest pull
 // holds the seam open.
 const gapHoldShare = 0.05;
+
+// Close gap settles a trial this many times at most, each time withholding more of its targets
+// around the samples the user holds that it still moves.
+const gapYieldRounds = 12;
+// A trial settles until an iteration moves no node by more than this, or for this many iterations.
+const gapTrialMove = 1e-5;
+const gapTrialIterations = 4000;
+
+/**
+ * The gap targets without those that would move a sample of a stationary handle the user placed:
+ * around each such sample, targets within a ring of grid edges are withheld, and the ring grows
+ * until a settled trial keeps it within `warpPinHold` of where it is written now. Returns the
+ * targets kept, how many were withheld, and the settled trial to start the solve from.
+ */
+function yieldingGapTargets(
+  warp: WarpSession,
+  points: WarpPoint[],
+  gapTargets: { node: number; target: Vec3 }[],
+) {
+  const model = warp.model!,
+    state = warp.state!;
+  const samples = points.flatMap((point) =>
+    point.target === null && !point.auto ? point.samples : [],
+  );
+  if (!samples.length || !gapTargets.length) return { gapTargets, held: 0, trial: null };
+  const { edgeStart, edges, fixed } = model.grid;
+  const count = model.grid.nodes.length;
+  // Grid edges from each sample's nodes, out as far as any ring could grow.
+  const hops = samples.map(({ binding }) => {
+    const hop = new Uint16Array(count).fill(0xffff);
+    const queue: number[] = [];
+    for (const n of binding.node)
+      if (!fixed[n] && hop[n]) {
+        hop[n] = 0;
+        queue.push(n);
+      }
+    for (let q = 0; q < queue.length; q++) {
+      const i = queue[q];
+      if (hop[i] >= gapYieldRounds + 1) continue;
+      for (let e = edgeStart[i]; e < edgeStart[i + 1]; e++)
+        if (hop[edges[e]] === 0xffff) {
+          hop[edges[e]] = hop[i] + 1;
+          queue.push(edges[e]);
+        }
+    }
+    return hop;
+  });
+  const now = samples.map(({ binding, restWorld }) =>
+    deformPoint(model, state, binding, restWorld),
+  );
+  // A sample's own nodes and those beside them carry its skin map, so they are never pulled.
+  const ring = samples.map(() => 1);
+  const trial = { positions: state.positions.slice(), rotations: state.rotations.slice() };
+  let kept = gapTargets;
+  for (let round = 0; round < gapYieldRounds; round++) {
+    kept = gapTargets.filter(({ node }) => hops.every((hop, s) => hop[node] > ring[s]));
+    const { guides, constraints } = warpSolveInput({ model, points, gapTargets: kept });
+    if (constraints.length)
+      for (let i = 0; i < gapTrialIterations; i++)
+        if (solveWarp(model.grid, model.restNodes, constraints, trial, 1, guides) < gapTrialMove)
+          break;
+    let moved = false;
+    samples.forEach(({ binding, restWorld }, s) => {
+      const at = deformPoint(model, trial, binding, restWorld);
+      if (Math.hypot(...at.map((value, a) => value - now[s][a])) > warpPinHold) {
+        ring[s]++;
+        moved = true;
+      }
+    });
+    if (!moved) break;
+  }
+  return { gapTargets: kept, held: gapTargets.length - kept.length, trial };
+}
 
 const distanceTo = (positions: Float64Array, node: number, target: Vec3) =>
   Math.hypot(
@@ -2340,7 +2522,9 @@ export const useEditor = create<EditorState>((set, get) => ({
       state.notify(
         stroke.kind === 'line'
           ? 'Draw a longer line on the painted area.'
-          : 'Paint on the painted area.',
+          : stroke.faces.some((face) => isPaintedFace(model, face))
+            ? 'This spot is fixed. Paint farther inside the warp region.'
+            : 'Paint on the painted area.',
         'info',
       );
       return false;
@@ -2630,16 +2814,20 @@ export const useEditor = create<EditorState>((set, get) => ({
           released.add(point.id);
     }
     const points = warp.points.filter((point) => !released.has(point.id));
-    if (same(gapTargets, warp.gapTargets) && points.length === warp.points.length) return;
+    // Samples the user holds still keep their place: the seam stays open around them.
+    const yielded = yieldingGapTargets(warp, points, gapTargets);
+    if (same(yielded.gapTargets, warp.gapTargets) && points.length === warp.points.length) return;
     const kept = new Set(points.map((point) => point.id));
     set({
       warp: solveWarpSession(
         state.scene,
         {
           ...warp,
+          ...(yielded.trial ? { state: yielded.trial } : {}),
           points,
           selectedPoints: warp.selectedPoints.filter((id) => kept.has(id)),
-          gapTargets,
+          gapTargets: yielded.gapTargets,
+          gapHeld: yielded.held,
           undo: withUndo(warp),
         },
         'end',
@@ -3843,9 +4031,10 @@ function moveSteps(steps: WarpEdit[], from: WarpGrid, to: WarpGrid, model?: Warp
 /**
  * Lays the session's grid. A build that stops returns the session to `from`. Laying from the region
  * stage takes the page's feather option; a rebuild keeps the feather the session was laid with. A
- * density change is one session undo step, and undoing it, given its grid step, rebuilds the grid
- * it left and restores that step on it exactly. A density change that would drop a handle, or a new
- * region that would leave a moved one on its fixed edge rather than outside the paint, is not made.
+ * density change or a new region is one session undo step, and undoing it, given its grid step,
+ * rebuilds the grid it left and restores that step on it exactly. A density change that would drop
+ * a handle, or a new region that would leave a moved one on its fixed edge rather than outside the
+ * paint, is not made.
  */
 async function layWarp(from: WarpSettled, kind: 'region' | 'density' | WarpGridStep) {
   const state = useEditor.getState(),
@@ -3876,7 +4065,12 @@ async function layWarp(from: WarpSettled, kind: 'region' | 'density' | WarpGridS
       : faces
         ? defaultWarpDensity
         : warpWholeDensity;
-  const laid: WarpLaid = { faces, density, feather };
+  const laid: WarpLaid = restore?.laid ?? {
+    faces,
+    density,
+    feather,
+    painted: { region: warp.region, faces: warp.faces, seed: warp.seed },
+  };
   // The same region at the same density keeps its grid, so nothing moves.
   if (!restore && warp.model && warp.laid && sameLaid(warp.laid, laid)) {
     if (warp.settling) scheduleWarpSettle();
@@ -3947,6 +4141,7 @@ async function layWarp(from: WarpSettled, kind: 'region' | 'density' | WarpGridS
               return handle ? [{ ...handle, baseline: rest }] : [];
             }),
             gapTargets: [],
+            gapHeld: 0,
             surface: rest,
           },
     );
@@ -3955,9 +4150,7 @@ async function layWarp(from: WarpSettled, kind: 'region' | 'density' | WarpGridS
     const next: WarpSession = {
       ...current,
       stage: 'warp',
-      region: restore.region,
-      faces: restore.faces,
-      seed: restore.seed,
+      ...restore.laid.painted,
       density,
       densityChosen: restore.densityChosen,
       feather,
@@ -4024,10 +4217,10 @@ async function layWarp(from: WarpSettled, kind: 'region' | 'density' | WarpGridS
   const points = rebind(current.points);
   const kept = new Set(points.map((point) => point.id));
   const start = current.surface ? carry(current.surface) : null;
-  // A density change is a step of its own. The steps before it stay on the grid they were
-  // recorded on, which undoing it rebuilds.
+  // A density change or a new region is a step of its own. The steps before it stay on the grid
+  // they were recorded on, which undoing it rebuilds.
   let undo: WarpEdit[];
-  if (kind === 'density' && old && current.laid) {
+  if (old && current.laid) {
     const token = detachedGrid();
     const [step, ...earlier] = moveSteps(
       [warpEdit(current), ...current.undo.slice(-(warpUndoLimit - 1))],
@@ -4040,9 +4233,6 @@ async function layWarp(from: WarpSettled, kind: 'region' | 'density' | WarpGridS
         ...step,
         grid: {
           laid: current.laid,
-          region: current.region,
-          faces: current.faces,
-          seed: current.seed,
           densityChosen: from.densityChosen,
           token,
           fingerprint: warpFingerprint(old),
@@ -4057,6 +4247,7 @@ async function layWarp(from: WarpSettled, kind: 'region' | 'density' | WarpGridS
         ...step,
         points: rebind(step.points),
         gapTargets: [],
+        gapHeld: 0,
         surface: step.surface && carry(step.surface),
       };
     });
@@ -4079,6 +4270,7 @@ async function layWarp(from: WarpSettled, kind: 'region' | 'density' | WarpGridS
     points,
     selectedPoints: current.selectedPoints.filter((id) => kept.has(id)),
     gapTargets: [],
+    gapHeld: 0,
     firstLay: false,
     folds: new Uint32Array(0),
     seam: null,

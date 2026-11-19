@@ -14,8 +14,10 @@ import {
   warpChanges,
   warpDistributeCounts,
   warpPinDrift,
+  warpPinDriftCause,
   warpPointRadius,
   warpShortfall,
+  warpShortfallCause,
   warpShortfallShown,
   warpWholePart,
   type WarpSession,
@@ -86,6 +88,13 @@ function usePointSettingsGesture() {
 
 const isSlider = (target: EventTarget) =>
   target instanceof HTMLInputElement && target.type === 'range';
+
+const shortfallCauses = {
+  pin: 'A point you placed beside it holds it back.',
+  edge: 'The fixed edge of the region holds it back, so feather the edge or grab farther inside the paint.',
+  gap: 'Close gap holds the surface beside it.',
+  spot: 'A point on the same spot holds it back.',
+} as const;
 
 /** Radius, falloff and Distribute points, for the selected points or for new ones. */
 function PointSettingsControls({ warp, part }: { warp: WarpSession; part: Part | undefined }) {
@@ -185,16 +194,18 @@ function PointSettingsControls({ warp, part }: { warp: WarpSession; part: Part |
         <p className="warp-warning" role="status">
           <TriangleAlert size={13} aria-hidden="true" />
           The surface stops {shortfall.toFixed(2)} mm short of the{' '}
-          {selected.length === 1 ? "point's target" : "selected points' targets"}. A point on the
-          same spot or the fixed edge holds it back.
+          {selected.length === 1 ? "point's target" : "selected points' targets"}.{' '}
+          {shortfallCauses[warpShortfallCause(warp) ?? 'spot']}
         </p>
       ) : null}
       {drift > warpShortfallShown ? (
         <p className="warp-warning" role="status">
           <TriangleAlert size={13} aria-hidden="true" />
           The surface has moved {drift.toFixed(2)} mm from where the{' '}
-          {selected.length === 1 ? 'selected point holds' : 'selected points hold'} it. A moved
-          point beside it pulls it away.
+          {selected.length === 1 ? 'selected point holds' : 'selected points hold'} it.{' '}
+          {warpPinDriftCause(warp) === 'gap'
+            ? 'Close gap pulls it away.'
+            : 'A moved point beside it pulls it away.'}
         </p>
       ) : null}
       <div className="warp-distribute-row">
@@ -554,6 +565,11 @@ export function WarpControls() {
               {seam.largestGap <= 0 ? 'Closed' : `${seam.largestGap.toFixed(2)} mm`}
             </strong>
           </div>
+        ) : null}
+        {seam && seam.largestGap > 0 && warp.gapHeld ? (
+          <p className="anchor-help">
+            Close gap leaves the seam open around points you placed, so they keep their place.
+          </p>
         ) : null}
       </Section>
       {folds ? (

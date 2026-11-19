@@ -7,12 +7,13 @@ import {
   Color,
   DoubleSide,
   Group,
+  InstancedInterleavedBuffer,
+  InterleavedBufferAttribute,
   Mesh,
   MeshBasicMaterial,
   Raycaster,
   Vector2,
   Vector3,
-  type InstancedInterleavedBuffer,
   type Intersection,
 } from 'three';
 import { LineMaterial } from 'three/addons/lines/LineMaterial.js';
@@ -50,30 +51,69 @@ const shortStroke = 4;
 /** Area dabs are this share of the brush radius apart along the stroke. */
 const dabSpacing = 0.25;
 /**
- * How far a line is drawn toward the eye, in pixels. Its width is screen-aligned at one depth, so
- * without this half of it would sink into a surface sloping across it.
+ * How far a line stands off the surface toward the eye: pixels, and at most mm, measured across the
+ * surface and so up to twice as far along a ray where it turns away. Each corner of its width lies
+ * on the surface's tangent plane at the line, so the width does not sink into a surface sloping
+ * across it, and a surface 0.2 mm or more in front, or the other side of a 0.2 mm wall, hides it.
  */
-const lineLift = 4;
+const lineLift = 1;
+const lineLiftMax = 0.05;
 
-/** A line material whose segments sit `lineLift` pixels nearer the eye than their points. */
+const glsl = (value: number) => (Number.isInteger(value) ? `${value}.0` : `${value}`);
+
+/** A line material whose corners lie on the surface's tangent plane, lifted a little toward the eye. */
 function liftedLine(color: string, width: number) {
   const material = new LineMaterial({ color, linewidth: width });
   material.onBeforeCompile = (shader) => {
-    shader.vertexShader = shader.vertexShader.replace(
-      'vec4 end = modelViewMatrix * vec4( instanceEnd, 1.0 );',
-      `vec4 end = modelViewMatrix * vec4( instanceEnd, 1.0 );
-      {
-        bool eye = projectionMatrix[ 2 ][ 3 ] == - 1.0;
-        float pixel = 2.0 / ( projectionMatrix[ 1 ][ 1 ] * resolution.y );
-        if ( eye ) {
-          start.xyz -= normalize( start.xyz ) * ${lineLift.toFixed(1)} * pixel * - start.z;
-          end.xyz -= normalize( end.xyz ) * ${lineLift.toFixed(1)} * pixel * - end.z;
-        } else {
-          start.z += ${lineLift.toFixed(1)} * pixel;
-          end.z += ${lineLift.toFixed(1)} * pixel;
-        }
-      }`,
-    );
+    shader.vertexShader = shader.vertexShader
+      .replace(
+        'attribute vec3 instanceEnd;',
+        `attribute vec3 instanceEnd;
+        attribute vec3 instanceNormalStart;
+        attribute vec3 instanceNormalEnd;`,
+      )
+      .replace(
+        'gl_Position = clip;',
+        `gl_Position = clip;
+        {
+          vec3 centre = position.y < 0.5 ? start.xyz : end.xyz;
+          vec3 normal = normalMatrix * ( position.y < 0.5 ? instanceNormalStart : instanceNormalEnd );
+          vec2 ndc = clip.xy / clip.w;
+          float depth = perspective ? - centre.z : 1.0;
+          float pixel = 2.0 * depth / ( projectionMatrix[ 1 ][ 1 ] * resolution.y );
+          float limit = 8.0 * ( 0.5 * linewidth + 1.0 ) * pixel;
+          // Along the view ray, so where the surface turns away the line stands as far off it.
+          float facing = dot( normal, normal ) > 1e-24
+            ? abs( dot( normalize( normal ), perspective ? normalize( - centre ) : vec3( 0.0, 0.0, 1.0 ) ) )
+            : 1.0;
+          float lift = min( ${glsl(lineLift)} * pixel, ${glsl(lineLiftMax)} ) / max( facing, 0.5 );
+          float facingLimit = 1e-6 * length( normal );
+          vec3 corner;
+          if ( perspective ) {
+            vec3 ray = vec3(
+              ( ndc.x + projectionMatrix[ 2 ][ 0 ] ) / projectionMatrix[ 0 ][ 0 ],
+              ( ndc.y + projectionMatrix[ 2 ][ 1 ] ) / projectionMatrix[ 1 ][ 1 ],
+              - 1.0 );
+            float toward = dot( normal, ray );
+            float t = abs( toward ) > facingLimit * length( ray ) ? dot( normal, centre ) / toward : depth;
+            t = clamp( t, depth - limit, depth + 16.0 * limit );
+            corner = ray * t;
+            float near = projectionMatrix[ 3 ][ 2 ] / ( projectionMatrix[ 2 ][ 2 ] - 1.0 );
+            corner -= normalize( corner ) * min( lift, max( 0.0, 0.5 * ( t - near ) ) * length( corner ) / t );
+          } else {
+            vec2 xy = vec2(
+              ( ndc.x - projectionMatrix[ 3 ][ 0 ] ) / projectionMatrix[ 0 ][ 0 ],
+              ( ndc.y - projectionMatrix[ 3 ][ 1 ] ) / projectionMatrix[ 1 ][ 1 ] );
+            float z = abs( normal.z ) > facingLimit
+              ? centre.z - dot( normal.xy, xy - centre.xy ) / normal.z
+              : centre.z;
+            z = clamp( z, centre.z - 16.0 * limit, centre.z + limit );
+            float near = ( projectionMatrix[ 3 ][ 2 ] + 1.0 ) / projectionMatrix[ 2 ][ 2 ];
+            corner = vec3( xy, z + min( lift, max( 0.0, 0.5 * ( - near - z ) ) ) );
+          }
+          gl_Position = projectionMatrix * vec4( corner, 1.0 );
+        }`,
+      );
   };
   return material;
 }
@@ -87,6 +127,8 @@ class SurfaceSegments {
   readonly core: LineSegments2;
   readonly casing: LineSegments2;
   private array = new Float32Array(0);
+  /** Each segment's surface normal at its start and end, mesh-local, beside `array`. */
+  normals = new Float32Array(0);
   count = 0;
   constructor(color: string) {
     this.casing = new LineSegments2(this.geometry, liftedLine(casingColor, 5));
@@ -105,22 +147,31 @@ class SurfaceSegments {
   setColor(color: string) {
     (this.core.material as LineMaterial).color.set(color);
   }
-  /** Room for `segments`, keeping those written. */
+  /** Room for `segments`, keeping those written; their normals go in `normals`. */
   reserve(segments: number) {
     if (segments * 6 <= this.array.length) return this.array;
-    const array = new Float32Array(Math.max(segments, 2 * (this.array.length / 6), 16) * 6);
+    const length = Math.max(segments, 2 * (this.array.length / 6), 16) * 6;
+    const array = new Float32Array(length),
+      normals = new Float32Array(length);
     array.set(this.array);
+    normals.set(this.normals);
     this.array = array;
+    this.normals = normals;
     this.geometry.setPositions(array);
+    const buffer = new InstancedInterleavedBuffer(normals, 6, 1);
+    this.geometry.setAttribute('instanceNormalStart', new InterleavedBufferAttribute(buffer, 3, 0));
+    this.geometry.setAttribute('instanceNormalEnd', new InterleavedBufferAttribute(buffer, 3, 3));
     return array;
   }
   /** Shows the first `count` segments written. */
   show(count: number) {
     this.count = count;
     this.geometry.instanceCount = count;
-    const start = this.geometry.getAttribute('instanceStart') as unknown as
-      { data: InstancedInterleavedBuffer } | undefined;
-    if (start) start.data.needsUpdate = true;
+    for (const name of ['instanceStart', 'instanceNormalStart']) {
+      const attribute = this.geometry.getAttribute(name) as unknown as
+        { data: InstancedInterleavedBuffer } | undefined;
+      if (attribute) attribute.data.needsUpdate = true;
+    }
     this.casing.visible = this.core.visible = count > 0;
   }
   dispose() {
@@ -185,6 +236,29 @@ class StripedFaces {
     this.geometry.dispose();
     (this.mesh.material as MeshBasicMaterial).dispose();
   }
+}
+
+/** Writes a face's normal on `positions`, mesh-local and unnormalised, at `offset`. */
+function writeNormal(
+  model: WarpModel,
+  positions: ArrayLike<number>,
+  face: number,
+  out: Float32Array,
+  offset: number,
+) {
+  const v = (c: number) => (model.index?.[face * 3 + c] ?? face * 3 + c) * 3;
+  const a = v(0),
+    b = v(1),
+    c = v(2);
+  const ux = positions[b] - positions[a],
+    uy = positions[b + 1] - positions[a + 1],
+    uz = positions[b + 2] - positions[a + 2],
+    wx = positions[c] - positions[a],
+    wy = positions[c + 1] - positions[a + 1],
+    wz = positions[c + 2] - positions[a + 2];
+  out[offset] = uy * wz - uz * wy;
+  out[offset + 1] = uz * wx - ux * wz;
+  out[offset + 2] = ux * wy - uy * wx;
 }
 
 /** Writes a face's three warped corners, mesh-local, at `offset`. */
@@ -271,7 +345,11 @@ export function WarpStrokeController({ pressed }: { pressed: () => boolean }) {
     const output = () => useEditor.getState().warp?.output?.positions;
 
     /** The spot under a client position on the warped part, or null off it or behind another. */
-    const hitAt = (d: Draft, x: number, y: number): WarpStrokePoint | null => {
+    const hitAt = (
+      d: Pick<Draft, 'partId' | 'model'>,
+      x: number,
+      y: number,
+    ): WarpStrokePoint | null => {
       const own = partMeshes.get(d.partId);
       const positions = output();
       if (!own || !positions) return null;
@@ -307,6 +385,8 @@ export function WarpStrokeController({ pressed }: { pressed: () => boolean }) {
           facePoint(d.model, positions, run.points[i], b);
           array.set(a, s * 6);
           array.set(b, s * 6 + 3);
+          writeNormal(d.model, positions, run.points[i - 1].face, view.line.normals, s * 6);
+          writeNormal(d.model, positions, run.points[i].face, view.line.normals, s * 6 + 3);
         }
       d.drawn = segments;
       view.line.show(segments);
@@ -480,12 +560,12 @@ export function WarpStrokeController({ pressed }: { pressed: () => boolean }) {
         pressed()
       )
         return false;
+      // A press on another part in front reaches this one too; it starts nothing.
+      const first = hitAt({ partId, model }, event.nativeEvent.clientX, event.nativeEvent.clientY);
+      if (!first || !isPaintedFace(model, first.face)) return false;
       const mesh = event.object as Mesh;
-      const local = mesh.worldToLocal(event.point.clone()).toArray() as Vec3;
-      const first = {
-        face,
-        barycentric: faceBarycentric(model, warp.output.positions, face, local),
-      };
+      // A stroke takes the press, so an Apply waiting for the surface to settle no longer bakes.
+      if (warp.applying) useEditor.setState({ warp: { ...warp, applying: false } });
       // The camera's controls see this press after it; a stroke owns it instead.
       const controls = get().controls as { enabled: boolean } | null;
       const owned = controls?.enabled ? controls : null;
@@ -531,6 +611,7 @@ export function WarpStrokeController({ pressed }: { pressed: () => boolean }) {
         if (
           draft === d &&
           (!strokingWarp(s) ||
+            (s.warpAdd === 'area' ? 'area' : 'line') !== d.kind ||
             s.warp?.model !== d.model ||
             s.temporaryOrbit ||
             !!s.navigationMode ||
@@ -642,6 +723,7 @@ function HandleShape({
         ends[i * 3] = positions[v * 3];
         ends[i * 3 + 1] = positions[v * 3 + 1];
         ends[i * 3 + 2] = positions[v * 3 + 2];
+        writeNormal(model, positions, Math.floor(corner / 3), line.normals, i * 3);
       }
       line.show(segments);
     } else if (path && path.length > 1) {
@@ -652,6 +734,8 @@ function HandleShape({
         facePoint(model, positions, path[i], b);
         ends.set(a, (i - 1) * 6);
         ends.set(b, (i - 1) * 6 + 3);
+        writeNormal(model, positions, path[i - 1].face, line.normals, (i - 1) * 6);
+        writeNormal(model, positions, path[i].face, line.normals, (i - 1) * 6 + 3);
         a[0] = b[0];
         a[1] = b[1];
         a[2] = b[2];

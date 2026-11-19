@@ -1,15 +1,30 @@
 import { writeFileSync } from 'node:fs';
 import { afterEach, describe, expect, it } from 'vitest';
-import { BufferAttribute, PlaneGeometry, SphereGeometry, Triangle, Vector3 } from 'three';
+import {
+  BufferAttribute,
+  CylinderGeometry,
+  PlaneGeometry,
+  SphereGeometry,
+  Triangle,
+  Vector3,
+} from 'three';
 import type { BufferGeometry } from 'three';
 import { triangleCount } from '../../src/core/geometry';
-import { finishWarpSettling, useEditor, type WarpPoint } from '../../src/core/store';
+import {
+  finishWarpSettling,
+  useEditor,
+  warpPinDrift,
+  warpShortfallShown,
+  type WarpPoint,
+} from '../../src/core/store';
 import { readFace } from '../../src/core/surfaces';
 import { defaultWarpDensity } from '../../src/core/warp-grid';
+import { isPaintedFace } from '../../src/core/warp-model';
 import {
   areaBrushFaces,
   facePoint,
   lineSamples,
+  strokeSample,
   type WarpStrokePoint,
 } from '../../src/core/warp-strokes';
 import type { Part, SceneDocument, Vec3 } from '../../src/core/types';
@@ -230,6 +245,57 @@ describe('line handles', () => {
       expect(difference).toBeLessThan(0.02 * h);
     });
 
+  for (const span of [25, 45])
+    it(`keep samples along a short line over tight curvature on the coarsest grid, ±${span}°`, async () => {
+      // A 32 mm open half-pipe of radius 0.9 mm along y, laid whole at the coarsest density and
+      // held by two points near its ends. Its grid spacing is several times the line's length.
+      const R = 0.9;
+      const part = partOf(new CylinderGeometry(R, R, 32, 32, 400, true, -Math.PI / 2, Math.PI));
+      editor().setScene({ name: 'Warp', parts: [part], joints: [] });
+      useEditor.setState({ selected: [part.id] });
+      editor().setTool('warp');
+      editor().setWarpOptions({ autoPoints: false });
+      editor().setWarpRegion('whole');
+      await editor().setWarpDensity(0);
+      await editor().layWarpGrid();
+      editor().setWarpPointSettings({ radius: 0 }, 'end');
+      for (const y of [-15, 15]) {
+        const pin = surfaceAt(part, [0, y, R]);
+        editor().addWarpPoint({ partId: part.id, point: [0, y, R], normal: [0, 0, 1] }, pin.face);
+      }
+      // Around the pipe, rising a little along it.
+      const around = (a: number) =>
+        surfaceAt(part, [R * Math.sin(a), 1.3 + 0.2 * a, R * Math.cos(a)]);
+      const a = (span * Math.PI) / 180;
+      const points = Array.from({ length: 120 }, (_, i) => around(-a + (2 * a * i) / 119));
+      expect(editor().addWarpStroke({ kind: 'line', points })).toBe(true);
+      const line = latest();
+      const spacing = line.reach!.spacing;
+      expect(spacing).toBeGreaterThan(2 * R * a);
+      expect(line.samples.length).toBeGreaterThan(3);
+      const lift = 0.5;
+      editor().moveWarpPoints(
+        [{ id: line.id, target: [line.pin[0], line.pin[1], line.pin[2] + lift] }],
+        'end',
+      );
+      finishWarpSettling();
+      const model = session().model!;
+      const rises = points.map(
+        (p) =>
+          facePoint(model, session().output!.positions, p)[2] -
+          facePoint(model, model.positions, p)[2],
+      );
+      figures[`short curved line, ±${span}°`] = {
+        samples: line.samples.length,
+        spacing,
+        ends: [rises[0], rises.at(-1)],
+        highest: Math.max(...rises),
+        lowest: Math.min(...rises),
+      };
+      // Both ends land, and nothing between them stands above or sinks below the lift.
+      for (const rise of rises) expect(Math.abs(rise - lift)).toBeLessThan(0.05 * lift);
+    }, 30_000);
+
   it('take a sample about every half spacing and merge those bound alike, keeping both ends', async () => {
     const surface = { ...surfaces.plate, make: () => partOf(new PlaneGeometry(40, 40, 8, 8)) };
     const part = await lay(surface);
@@ -331,6 +397,64 @@ describe('area handles', () => {
     expect(editor().paintHistory).toBe(history);
   });
 
+  it('refuse a dab whose faces are all held by fixed nodes, and say to paint farther inside', async () => {
+    // A sheet as fine as a scan, painted in a small disc on the coarsest grid: most of the disc
+    // is bound only to its fixed edge.
+    const part = partOf(new PlaneGeometry(16, 16, 320, 320));
+    editor().setScene({ name: 'Warp', parts: [part], joints: [] });
+    useEditor.setState({ selected: [part.id] });
+    editor().setTool('warp');
+    editor().setWarpBrushRadius(1.5);
+    editor().paintWarpRegion(
+      { partId: part.id, point: [0, 0, 0], normal: [0, 0, 1] },
+      surfaceAt(part, [0, 0, 0]).face,
+      false,
+      true,
+    );
+    editor().endPaintStroke();
+    await editor().setWarpDensity(0);
+    await editor().layWarpGrid();
+    const { model, state } = session();
+    const third: Vec3 = [1 / 3, 1 / 3, 1 / 3];
+    const fixed = Array.from(model!.region.faces).filter(
+      (face) =>
+        strokeSample(model!, state!, { face, barycentric: third }) === null &&
+        [
+          [0.6, 0.2, 0.2],
+          [0.2, 0.6, 0.2],
+          [0.2, 0.2, 0.6],
+        ].every(
+          (barycentric) =>
+            strokeSample(model!, state!, { face, barycentric: barycentric as Vec3 }) === null,
+        ),
+    );
+    expect(fixed.length).toBeGreaterThan(10);
+    // Fixed faces alone, and fixed faces first with a free one last.
+    const free = Array.from(model!.region.faces).find(
+      (face) => strokeSample(model!, state!, { face, barycentric: third }) !== null,
+    )!;
+    useEditor.setState({ toast: null });
+    expect(
+      editor().addWarpStroke({
+        kind: 'area',
+        faces: fixed.slice(0, 20),
+        first: { face: fixed[0], barycentric: third },
+      }),
+    ).toBe(false);
+    expect(session().points).toHaveLength(0);
+    expect(useEditor.getState().toast?.message).toBe(
+      'This spot is fixed. Paint farther inside the warp region.',
+    );
+    expect(
+      editor().addWarpStroke({
+        kind: 'area',
+        faces: [...fixed.slice(0, 20), free],
+        first: { face: fixed[0], barycentric: third },
+      }),
+    ).toBe(true);
+    expect(latest().samples.length).toBeGreaterThan(0);
+  });
+
   it('paint only faces turned toward the brush', async () => {
     const part = await lay(surfaces.ball);
     const first = surfaceAt(part, [0, 0, 16]);
@@ -343,6 +467,104 @@ describe('area handles', () => {
 });
 
 describe('handles made by strokes through a session', () => {
+  /** Lays the plate's grid again over the painted faces whose centres pass `keep`. */
+  async function shrink(part: Part, keep: (centre: Vector3) => boolean) {
+    editor().setWarpRegion('painted');
+    const faces = session().faces.filter((face) =>
+      keep(readFace(part.geometry, face).getMidpoint(new Vector3())),
+    );
+    useEditor.setState({ toast: null, warp: { ...session(), faces } });
+    await editor().layWarpGrid();
+    expect(session().stage).toBe('warp');
+  }
+  const offset = (handle: WarpPoint) =>
+    handle.target ? handle.target.map((value, a) => value - handle.pin[a]) : null;
+
+  for (const moved of [false, true])
+    it(`keep the run of a ${moved ? 'moved' : 'still'} line left on a smaller region, centred on it`, async () => {
+      const part = await lay(surfaces.plate);
+      editor().addWarpStroke({
+        kind: 'line',
+        points: stroke(part, surfaces.plate, [-9, 0.3, 0], [9, 1.1, 0], 0.03),
+      });
+      const made = latest();
+      if (moved) lift(made, h);
+      const before = session().points.find(({ id }) => id === made.id)!;
+      // The region now stops at x = 2.5; the samples beyond it are lost.
+      await shrink(part, (centre) => centre.x < 2.5);
+      const line = session().points.find(({ id }) => id === made.id)!;
+      const model = session().model!;
+      expect(line.path!.length).toBeGreaterThan(10);
+      for (const spot of line.path!) expect(isPaintedFace(model, spot.face)).toBe(true);
+      for (const sample of line.samples) expect(isPaintedFace(model, sample.face)).toBe(true);
+      const xs = line.samples.map(({ restWorld }) => restWorld[0]);
+      expect(Math.max(...xs)).toBeLessThan(2.5);
+      expect(Math.max(...xs)).toBeGreaterThan(1);
+      // Centred on what is left, which the gizmo shows, with the same offset as before.
+      const middle = (Math.min(...xs) + Math.max(...xs)) / 2;
+      expect(Math.abs(line.pin[0] - middle)).toBeLessThan(0.5);
+      expect(line.pin[2]).toBeCloseTo(0, 6);
+      if (moved) offset(line)!.forEach((d, a) => expect(d).toBeCloseTo(offset(before)![a], 9));
+      else expect(line.target).toBeNull();
+      editor().selectWarpPoints([line.id]);
+      finishWarpSettling();
+      if (!moved) expect(warpPinDrift(session())).toBeLessThan(warpShortfallShown);
+      // Undo gives the whole line back.
+      await editor().undoWarpEdit();
+      expect(session().points.find(({ id }) => id === made.id)).toMatchObject({
+        pin: before.pin,
+        target: before.target,
+        path: before.path,
+      });
+    });
+
+  it('drop a line with too little left on a smaller region, with the notice', async () => {
+    const part = await lay(surfaces.plate);
+    editor().addWarpStroke({
+      kind: 'line',
+      points: stroke(part, surfaces.plate, [-9, 0.3, 0], [9, 1.1, 0], 0.03),
+    });
+    const made = latest();
+    const xs = made.samples.map(({ restWorld }) => restWorld[0]);
+    // Only the last sample's end of the region is left.
+    const cut = (Math.max(...xs) + [...xs].sort((a, b) => a - b).at(-2)!) / 2;
+    await shrink(part, (centre) => centre.x > cut);
+    expect(session().points.some(({ id }) => id === made.id)).toBe(false);
+    expect(useEditor.getState().toast?.message).toBe(
+      'Some control points were outside the new region and were removed.',
+    );
+  });
+
+  for (const moved of [false, true])
+    it(`keep the largest piece of a ${moved ? 'moved' : 'still'} area left on a smaller region, centred on it`, async () => {
+      const part = await lay(surfaces.plate);
+      const first = surfaceAt(part, [4, 0, 0]);
+      editor().addWarpStroke({
+        kind: 'area',
+        faces: areaBrushFaces(session().model!, session().output!.positions, first, 3),
+        first,
+      });
+      const made = latest();
+      if (moved) lift(made, h);
+      const before = session().points.find(({ id }) => id === made.id)!;
+      await shrink(part, (centre) => centre.x < 4.5);
+      const area = session().points.find(({ id }) => id === made.id)!;
+      const model = session().model!;
+      expect(area.faces!.length).toBeLessThan(made.faces!.length);
+      for (const face of area.faces!) expect(isPaintedFace(model, face)).toBe(true);
+      for (const sample of area.samples) expect(area.faces).toContain(sample.face);
+      const xs = area.faces!.map(
+        (face) => readFace(part.geometry, face).getMidpoint(new Vector3()).x,
+      );
+      expect(area.pin[0]).toBeLessThan(Math.max(...xs));
+      expect(area.pin[0]).toBeGreaterThan(Math.min(...xs));
+      expect(area.pin[0]).toBeLessThan(before.pin[0]);
+      if (moved) offset(area)!.forEach((d, a) => expect(d).toBeCloseTo(offset(before)![a], 9));
+      editor().selectWarpPoints([area.id]);
+      finishWarpSettling();
+      if (!moved) expect(warpPinDrift(session())).toBeLessThan(warpShortfallShown);
+    });
+
   for (const kind of ['line', 'area'] as const)
     it(`keep a ${kind} whole through edits, a re-lay, undo, a live refusal and Apply`, async () => {
       const part = await lay(surfaces.plate);
@@ -385,22 +607,56 @@ describe('handles made by strokes through a session', () => {
           expect(Math.abs(rise - h)).toBeLessThan(0.1 * Math.max(h, 1));
         }
       };
+      /** What each undo step must give back exactly: surface, region, grid and every handle. */
+      const record = () => {
+        finishWarpSettling();
+        const warp = session();
+        return {
+          surface: Array.from(warp.preview!.getAttribute('position').array),
+          normals: Array.from(warp.preview!.getAttribute('normal').array),
+          region: warp.faces,
+          density: warp.density,
+          nodes: Array.from(warp.model!.grid.nodes),
+          undo: warp.undo.length,
+          handles: warp.points.map((handle) => ({
+            id: handle.id,
+            kind: handle.kind,
+            pin: handle.pin,
+            target: handle.target,
+            radius: handle.radius,
+            falloff: handle.falloff,
+            faces: handle.faces,
+            path: handle.path,
+            samples: handle.samples.map(({ face, barycentric, restWorld, pin, binding }) => ({
+              face,
+              barycentric,
+              restWorld,
+              pin,
+              binding,
+            })),
+            baseline: Array.from(handle.baseline.positions),
+          })),
+        };
+      };
       whole();
-      const steps: number[] = [session().undo.length];
+      const history = [record()];
       lift(current(), h);
-      steps.push(session().undo.length);
+      history.push(record());
       whole();
       holds(h);
       editor().selectWarpPoints([id]);
       editor().setWarpPointSettings({ radius: 4 }, 'end');
+      history.push(record());
       editor().setWarpPointSettings({ falloff: 0.3 }, 'end');
-      steps.push(session().undo.length);
+      history.push(record());
       expect(current()).toMatchObject({ radius: 4, falloff: 0.3 });
       whole();
       holds(h);
       await editor().setWarpDensity(defaultWarpDensity + 1);
       whole();
       holds(h);
+      history.push(record());
+      const grid = session().undo.at(-1)!.grid!;
       // Edit region, paint more, and lay the grid again.
       editor().setWarpRegion('painted');
       editor().paintWarpRegion(
@@ -412,21 +668,20 @@ describe('handles made by strokes through a session', () => {
       editor().endPaintStroke();
       await editor().layWarpGrid();
       expect(session().stage).toBe('warp');
+      expect(session().faces).not.toEqual(history.at(-1)!.region);
+      expect(session().undo).toHaveLength(history.at(-1)!.undo + 1);
       whole();
       holds(h);
-      // Undo steps back through the falloff, the radius and the move, keeping the handle.
-      await editor().undoWarpEdit();
-      // The density step was recorded on the region before the re-lay and has nothing to restore.
-      if (current().falloff !== 1) await editor().undoWarpEdit();
-      expect(current().falloff).toBe(1);
-      expect(current().radius).toBe(4);
-      await editor().undoWarpEdit();
-      expect(current().radius).toBe(made.radius);
-      whole();
-      holds(h);
-      await editor().undoWarpEdit();
+      // The density step keeps the grid it rebuilds and its fingerprint through the re-lay.
+      expect(session().undo.at(-2)!.grid).toBe(grid);
+      // Each undo gives back the step before it exactly: the re-lay, the density change, the
+      // falloff, the radius and the move.
+      for (let step = history.length - 1; step >= 0; step--) {
+        await editor().undoWarpEdit();
+        expect(record()).toEqual(history[step]);
+        whole();
+      }
       expect(current().target).toBeNull();
-      whole();
       lift(current(), h);
       // A refused live Apply reopens the session with the handle as it was.
       useEditor.setState({ liveStatus: 'connected' });
