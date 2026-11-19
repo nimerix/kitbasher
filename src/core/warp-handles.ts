@@ -1247,6 +1247,18 @@ export interface WarpDetail {
   delta: Float64Array;
 }
 
+// With one fully engaged point, its unrotated guide field is linear in the drag offset.
+// Each component uses the same scalar vertex response, even when the drag changes direction.
+const pointDetails = new WeakMap<
+  WarpReach,
+  {
+    model: WarpModel;
+    falloff: number;
+    vertices: Uint32Array;
+    gain: Float64Array;
+  }
+>();
+
 /**
  * The bend the moved handles' guides ask for, as the surface between grid nodes should take it.
  * The guides set each node's target from its distance to the handle; skinning then interpolates
@@ -1263,8 +1275,9 @@ export function warpDetail(
   handles: readonly WarpHandle[],
   exact: Iterable<number> = [],
   carry?: ReadonlyMap<WarpHandle, number>,
+  samplesOnly = false,
 ): WarpDetail | undefined {
-  const { grid, restNodes, restWorld, region, binding } = model;
+  const { grid } = model;
   // Only moved handles bend the surface. An unmoved one holds the surface as it was when it was
   // made, detail and all, so making one changes nothing.
   const guiding = handles.filter(
@@ -1274,11 +1287,63 @@ export function warpDetail(
       handle.baseline.grid === grid &&
       handleGuides(handle),
   );
+  if (!guiding.length) return undefined;
+  if (samplesOnly) {
+    // A grid-only drag uses detail just to aim its sample constraints. The surface is
+    // evaluated in full when the gesture ends.
+    const corners = new Set<number>();
+    for (const handle of handles)
+      for (const { face } of handle.samples)
+        for (let c = 0; c < 3; c++)
+          corners.add(model.region.weldOf[model.index?.[face * 3 + c] ?? face * 3 + c]);
+    return buildWarpDetail(model, guiding, exact, carry, false, corners);
+  }
+  const point = guiding[0];
+  if (
+    guiding.length === 1 &&
+    point.kind === 'point' &&
+    motionOf(point) === 1 &&
+    Array.isArray(exact) &&
+    exact.length === 0
+  ) {
+    const reach = point.reach!;
+    const share = carry?.get(point) ?? 1;
+    if (!share) return undefined;
+    let cached = pointDetails.get(reach);
+    if (!cached || cached.model !== model || cached.falloff !== point.falloff) {
+      const unit = buildWarpDetail(model, guiding, exact, carry, true);
+      const vertices = unit?.vertices ?? new Uint32Array();
+      const gain = Float64Array.from(vertices, (_, i) => unit!.delta[i * 3]);
+      cached = { model, falloff: point.falloff, vertices, gain };
+      pointDetails.set(reach, cached);
+    }
+    if (!cached.vertices.length) return undefined;
+    const offset = handleOffset(point);
+    const delta = new Float64Array(cached.vertices.length * 3);
+    for (let i = 0; i < cached.vertices.length; i++) {
+      const gain = share * cached.gain[i];
+      for (let a = 0; a < 3; a++) delta[i * 3 + a] = gain * offset[a];
+    }
+    return { vertices: cached.vertices, delta };
+  }
+  return buildWarpDetail(model, guiding, exact, carry);
+}
+
+function buildWarpDetail(
+  model: WarpModel,
+  guiding: readonly WarpHandle[],
+  exact: Iterable<number>,
+  carry: ReadonlyMap<WarpHandle, number> | undefined,
+  unitPoint = false,
+  candidates: Iterable<number> = model.region.interior,
+): WarpDetail | undefined {
+  const { grid, restNodes, restWorld, binding } = model;
   const border = borderDistance(model);
   // The profile from distance alone: the footprint's and the path's shares are held exactly, and
   // only the distance turns between nodes.
   const profiles = guiding.map((handle) => {
     const p = guideProfile(handle, border, carry);
+    if (unitPoint) p.offset = [1, 0, 0];
     const { reach } = p;
     const share: [number, number] = [0, 0];
     for (let i = 0; i < reach.node.length; i++) {
@@ -1425,7 +1490,7 @@ export function warpDetail(
   const K = warpBindingNodes;
   const { node: bound, weight: bindWeight } = binding;
   const listed: number[] = [];
-  for (const v of region.interior)
+  for (const v of candidates)
     for (let k = 0; k < K; k++) {
       const n = bound[v * K + k];
       if (n !== 0xffffffff && near[n]) {
@@ -1548,7 +1613,7 @@ export function showDetail(output: WarpOutput, detail: WarpDetail | undefined) {
 export const shownDetail = (output: WarpOutput | null | undefined) =>
   output ? shownDetails.get(output) : undefined;
 
-const detailSlots = new WeakMap<WarpDetail, Map<number, number>>();
+const detailSlots = new WeakMap<Uint32Array, Map<number, number>>();
 
 /** The detail at a surface point: the blend of its face corners' by `barycentric`, world. */
 export function detailAt(
@@ -1559,11 +1624,11 @@ export function detailAt(
 ): Vec3 {
   const out: Vec3 = [0, 0, 0];
   if (!detail?.vertices.length) return out;
-  let slots = detailSlots.get(detail);
+  let slots = detailSlots.get(detail.vertices);
   if (!slots) {
     slots = new Map();
     for (let i = 0; i < detail.vertices.length; i++) slots.set(detail.vertices[i], i);
-    detailSlots.set(detail, slots);
+    detailSlots.set(detail.vertices, slots);
   }
   for (let c = 0; c < 3; c++) {
     const corner = model.index ? model.index[face * 3 + c] : face * 3 + c;
