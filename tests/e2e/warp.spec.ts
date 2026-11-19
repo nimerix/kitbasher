@@ -627,3 +627,132 @@ test('each radius or falloff gesture is one undo step and ends exactly once', as
   await page.mouse.up();
   expect((await sliderState(page)).undo).toBe(cancelled.undo);
 });
+
+/** Every point's radius and falloff, which are selected, what new points take, and undo depth. */
+async function pointSettings(page: Page): Promise<{
+  points: { radius: number; falloff: number; selected: boolean }[];
+  pointRadius: number | null;
+  pointFalloff: number;
+  undo: number;
+}> {
+  return page.evaluate(async () => {
+    const urls = performance.getEntriesByType('resource').map((entry) => entry.name);
+    const { useEditor } = await import(
+      urls.find((url) => /\/src\/core\/store\.ts(?:\?.*)?$/.test(url))!
+    );
+    const warp = useEditor.getState().warp;
+    return {
+      points: warp.points.map((point: any) => ({
+        radius: point.radius as number,
+        falloff: point.falloff as number,
+        selected: warp.selectedPoints.includes(point.id) as boolean,
+      })),
+      pointRadius: warp.pointRadius as number | null,
+      pointFalloff: warp.pointFalloff as number,
+      undo: warp.undo.length as number,
+    };
+  });
+}
+
+test('selected points with different radii or falloffs show each field as mixed', async ({
+  page,
+}) => {
+  await open(page);
+  await page.keyboard.press('w');
+  await page.getByRole('radio', { name: 'Whole part', exact: true }).click();
+  await page.getByRole('checkbox', { name: 'Place points automatically' }).uncheck();
+  await page.getByRole('button', { name: 'Lay grid', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'Close gap', exact: true })).toBeEnabled();
+  const radius = page.getByRole('spinbutton', { name: 'Point radius', exact: true });
+  const falloff = page.getByRole('spinbutton', { name: 'Point falloff', exact: true });
+  const radiusSlider = page.getByRole('slider', { name: 'Point radius slider', exact: true });
+  const falloffSlider = page.getByRole('slider', { name: 'Point falloff slider', exact: true });
+  const help = page.locator('.warp-point-settings > .anchor-help');
+  const set = async (field: typeof radius, value: string) => {
+    await field.fill(value);
+    await field.press('Tab');
+  };
+  /** Adds a point at a spot on the front with these settings, which then selects it alone. */
+  const place = async (at: number[], r: string, f: string) => {
+    const spot = await screen(page, at);
+    await page.mouse.click(spot.x, spot.y);
+    await set(radius, r);
+    await set(falloff, f);
+    return spot;
+  };
+  const a = await place([-5, 5, 10], '2.6', '70');
+  await place([5, 15, 10], '3.8', '35');
+  // One selected: its own values, as before.
+  await expect(radius).toHaveValue('3.8');
+  await expect(falloff).toHaveValue('35');
+  await expect(help).toContainText('New points use the same settings.');
+  const single = await pointSettings(page);
+  // Typing the value it already has changes nothing.
+  await set(radius, '3.8');
+  expect((await pointSettings(page)).undo).toBe(single.undo);
+
+  // Both selected: both fields mixed, and the text says what a new point gets.
+  await page.keyboard.down('Shift');
+  await page.mouse.click(a.x, a.y);
+  await page.keyboard.up('Shift');
+  expect((await pointSettings(page)).points.map(({ selected }) => selected)).toEqual([true, true]);
+  for (const field of [radius, falloff]) {
+    await expect(field).toHaveValue('');
+    await expect(field).toHaveAttribute('placeholder', 'Mixed');
+  }
+  for (const slider of [radiusSlider, falloffSlider]) {
+    await expect(slider).toHaveAttribute('aria-valuetext', 'Mixed');
+    await expect(slider).toHaveClass(/mixed/);
+  }
+  await expect(help).toHaveText(
+    'The selected points move the surface within their own radii. New points use a 3.8 mm radius and 35% falloff.',
+  );
+  await expect(help).not.toContainText('the same settings');
+  // A new point gets just that. The gizmo sits between the two selected.
+  const spot = await screen(page, [-5, 15, 10]);
+  await page.mouse.click(spot.x, spot.y);
+  const added = await pointSettings(page);
+  expect(added.points).toHaveLength(3);
+  expect(added.points.at(-1)).toEqual({ radius: 3.8, falloff: 0.35, selected: true });
+  // Undo takes it away and selects the two again.
+  await page.keyboard.press('ControlOrMeta+z');
+  expect((await pointSettings(page)).points).toHaveLength(2);
+
+  // Typing one of the values into the mixed field sets both, as one undo step.
+  const mixed = await pointSettings(page);
+  expect(mixed.points.map(({ selected }) => selected)).toEqual([true, true]);
+  await set(radius, '2.6');
+  const same = await pointSettings(page);
+  expect(same.points.map(({ radius }) => radius)).toEqual([2.6, 2.6]);
+  expect(same.undo).toBe(mixed.undo + 1);
+  // Each field is mixed on its own: the radii now agree and the falloffs do not.
+  await expect(radius).toHaveValue('2.6');
+  await expect(radiusSlider).not.toHaveClass(/mixed/);
+  await expect(falloff).toHaveValue('');
+  await expect(falloffSlider).toHaveAttribute('aria-valuetext', 'Mixed');
+  await set(falloff, '35');
+  const level = await pointSettings(page);
+  expect(level.points.map(({ falloff }) => falloff)).toEqual([0.35, 0.35]);
+  expect(level.undo).toBe(same.undo + 1);
+  await expect(falloff).toHaveValue('35');
+  // Undo gives back each step, and the fields show them mixed again.
+  await page.keyboard.press('ControlOrMeta+z');
+  await expect(falloff).toHaveValue('');
+  await page.keyboard.press('ControlOrMeta+z');
+  expect((await pointSettings(page)).points.map(({ radius }) => radius)).toEqual([2.6, 3.8]);
+  await expect(radius).toHaveValue('');
+
+  // A slider used from mixed sets both.
+  const box = (await radiusSlider.boundingBox())!;
+  await page.mouse.click(box.x + 0.5 * box.width, box.y + box.height / 2);
+  const slid = await pointSettings(page);
+  expect(slid.points[0].radius).toBe(slid.points[1].radius);
+  expect(slid.undo).toBe(mixed.undo + 1);
+
+  // Nothing selected: what new points take, as before.
+  const empty = await screen(page, [0, 27, 0]);
+  await page.mouse.click(empty.x, empty.y);
+  expect((await pointSettings(page)).points.some(({ selected }) => selected)).toBe(false);
+  await expect(radius).not.toHaveValue('');
+  await expect(help).toHaveText('New points use this radius and falloff.');
+});
