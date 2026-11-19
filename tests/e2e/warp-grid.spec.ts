@@ -360,6 +360,70 @@ function gapFromSurface(page: Page) {
 }
 
 /**
+ * Pixels of the view that change when the segments of edges drawn along mesh edges, after their
+ * walks failed, are moved out of sight in both of the grid's passes, and how many segments those
+ * are. The view is then drawn as it was.
+ */
+function reroutedPixels(page: Page) {
+  return page.evaluate(async () => {
+    const urls = performance.getEntriesByType('resource').map((entry) => entry.name);
+    const root = (await import(urls.find((url) => url.includes('/@react-three_fiber.js'))!))._roots
+      .get(document.querySelector('canvas'))
+      .store.getState();
+    const { gl, camera, scene } = root;
+    const drawing = scene.getObjectByName('warp-grid').userData.drawing;
+    const { path } = drawing;
+    const rerouted = (e: number) =>
+      path.start[e + 1] > path.start[e] &&
+      path.from
+        .subarray(path.start[e], path.start[e + 1])
+        .every((from: number, i: number) => from === path.to[path.start[e] + i]);
+    const base = scene
+      .getObjectByName('warp-grid:core')
+      .geometry.getAttribute('instanceStart').data;
+    const canvas = gl.domElement as HTMLCanvasElement,
+      width = canvas.width,
+      height = canvas.height;
+    const context = gl.getContext() as WebGL2RenderingContext;
+    const read = () => {
+      gl.setRenderTarget(null);
+      gl.render(scene, camera);
+      const pixels = new Uint8Array(width * height * 4);
+      context.readPixels(0, 0, width, height, context.RGBA, context.UNSIGNED_BYTE, pixels);
+      return pixels;
+    };
+    const differ = (a: Uint8Array, b: Uint8Array) => {
+      let count = 0;
+      for (let i = 0; i < a.length; i += 4)
+        if (
+          Math.max(
+            Math.abs(a[i] - b[i]),
+            Math.abs(a[i + 1] - b[i + 1]),
+            Math.abs(a[i + 2] - b[i + 2]),
+          ) > 12
+        )
+          count++;
+      return count;
+    };
+    const shown = read();
+    const saved = base.array.slice();
+    let segments = 0;
+    for (let s = 0; s < drawing.segments; s++)
+      if (rerouted(drawing.edgeOf[s])) {
+        segments++;
+        base.array.fill(1e7, s * 6, s * 6 + 6);
+      }
+    base.needsUpdate = true;
+    const without = read();
+    base.array.set(saved);
+    base.needsUpdate = true;
+    const again = read();
+    root.invalidate();
+    return { segments, changed: differ(shown, without), restored: differ(shown, again) };
+  });
+}
+
+/**
  * On a plate laid flat, holds points at its corners and pulls one near its middle 2 mm up, and
  * returns how many points it holds and how far the surface under the pulled one rose.
  */
@@ -609,6 +673,12 @@ test('on a scan-like part, failed walks are drawn along the surface, never acros
     expect(gap.reroutedSamples).toBeGreaterThan(50);
     expect(cover.touched).toBeGreaterThan(0.05);
     expect(gap.worst).toBeLessThan(0.05);
+    // The rerouted segments themselves show: the view changes without them.
+    const alone = await reroutedPixels(page);
+    note(`density ${level}, rerouted`, alone);
+    expect(alone.segments).toBeGreaterThan(0);
+    expect(alone.restored).toBe(0);
+    expect(alone.changed).toBeGreaterThan(50);
   }
 });
 

@@ -212,13 +212,15 @@ it withholds the targets on each sample's nodes and those beside them, settles a
 surface as shown, and for each sample the trial moves by more than 0.005 mm, the pin-hold rule's
 limit, withholds the next ring of grid edges around it, up to twelve rounds. The seam readout then
 reports the gap left there, and the panel says that Close gap leaves the seam open around points
-the user placed. On two plates 1 mm apart, laid whole (2,129 nodes), a held point moved 0.00007 mm
-and a held line's samples at most 0.0027 mm, where the seam had moved them 0.78 and 0.72 mm.
+the user placed, also when it withholds every target and so changes nothing and adds no step. On
+two plates 1 mm apart, laid whole (2,129 nodes), a held point moved 0.00007 mm and a held line's
+samples at most 0.0027 mm, where the seam had moved them 0.78 and 0.72 mm.
 
 ### 4. Radius and falloff
 
 Every handle has a **radius** in mm and a **falloff** from 0 to 100 %, edited in the Control
-points section for the selected handles. New handles take the last values set. Until the user
+points section for the selected handles. New handles take the last values set; with nothing
+selected, setting one is a session undo step of its own. Until the user
 sets a radius, a new point takes the larger of 6 % of the part's size and 4.5 node spacings
 where it is clicked, no more than a quarter of the region's extent. Radius 0 is a bare point;
 automatic points are radius 0. Effectively whole regions are laid at the 2,000-node level and
@@ -305,7 +307,10 @@ monotonically from the point, is 0.957 h at a tenth of the radius, within 0.08 h
 
 Region stage, painted regions only: **Feather edge**, off by default, with a width in mm
 (fitted logarithmic slider, starting at Warp's brush radius). The choice is remembered for
-the page session. Off, or width 0, builds exactly today's region with its fixed edge.
+the page session and starts each new session. A session keeps its own switch and width, which the
+grid is laid with and which undoing back to a layout restores with it, so Edit region then Lay
+grid with nothing changed keeps the grid. Off, or width 0, builds exactly today's region with its
+fixed edge.
 
 - **Growth.** The build worker keeps the painted-face mask, builds whole-mesh welded
   topology once, and runs a bounded Dijkstra over world-length edges outward from the
@@ -418,9 +423,15 @@ its most heavily bound one; an area also moves the free nodes on its faces. Ever
 seeds the reach's paths, and straight-line distance is measured from the samples and an area's
 outline. Taking every node a sample is bound to, as first written, made the ridge's width depend on
 which triangles the samples fell in: a binding reaches one to one and a half spacings, unevenly to
-either side, and two samplings of one stroke differed by a quarter of the lift. Section 4 applies
-with distance measured from the footprint: radius 0 gives a continuous ridge or a rigid patch, and a
-radius above 0 adds the smooth skirt.
+either side, and two samplings of one stroke differed by a quarter of the lift. A short curved line
+is the exception: one no longer than five node spacings that stands off its chord by more than
+3.5 % of it, with a radius between one and four spacings, moves every free node its samples are
+bound to. There the guides fade across those nodes while the samples pull them whole, and the
+surface between the samples rose: on a small patch painted on the 35 mm Tomb Crawler at the default
+density, a 1 mm line lifted 0.5 mm stood between 0.36 and 0.66 mm, and moving those nodes as one
+keeps it between 0.45 and 0.51 mm, and at 41 spots along it between 0.48 and 0.51 mm. A whole part's default radius is wider, and longer or straighter
+lines keep the narrower footprint. Section 4 applies with distance measured from the footprint:
+radius 0 gives a continuous ridge or a rigid patch, and a radius above 0 adds the smooth skirt.
 
 Acceptance: along a line handle moved by `h`, the written surface between samples stays within
 `0.1 h` of `h`, and no local maximum stands more than `0.05 h` above its neighbours; several interior
@@ -438,11 +449,14 @@ its source `faces`, for a line its drawn `path`, `radius`, `falloff`, `auto`, on
 while unmoved), `baseline` (a shared snapshot) and a cached `reach`. `moveWarpPoints` keeps taking one
 target per handle.
 
-Each session undo step holds the points, gap targets, the settled grid they held and the
-settings new points take, so undo restores the surface exactly without solving. Laying the
-same region at the same density and feather keeps the model. A real rebuild carries each
-distinct snapshot to the new grid once, writing each new node where the preview's own skinning
-wrote its scan vertex, and rebinds samples, dropping those bound exactly as another. A line keeps
+Each session undo step holds the points, which of them were selected, gap targets, the settled grid
+they held and the settings new points take, so undo restores the surface exactly without solving
+and selects again the handles it brings back that were selected. Laying the same region at the same
+density and feather keeps the model. When the region was painted or set differently since, as a
+mask painted wider and then laid as the whole part, the session keeps it as it now is, and the step
+that records holds the region as it was, which undo puts back without a rebuild. A real rebuild
+carries each distinct snapshot to the new grid once, writing each new node where the preview's own
+skinning wrote its scan vertex, and rebinds samples, dropping those bound exactly as another. A line keeps
 its longest unbroken run of painted samples and its drawn path between them; an area keeps its
 largest connected piece of painted faces and the samples on it. Either is centred again on what is
 left, its target moved by as much as its centre; a line left with fewer than two samples, or an area
@@ -459,10 +473,10 @@ dropped with a notice, and so is an unmoved one left on the new region's edge.
 A density change is one session undo step, and so is laying the grid on a changed region. The
 steps before it stay on the grid they were recorded on: their snapshots name a stand-in for it,
 their points let go of their reach and of binding arrays the solver caches against the old grid,
-and the step the change records keeps the region as painted, the density and feather that grid was
-laid from, with a hash of the model built. Undoing it rebuilds that grid (the build is
-deterministic, one build's time), checks the hash, puts every step recorded on it back on the
-rebuilt grid and restores the region, the handles and the surface exactly; undoing further restores
+and the step the change records keeps the region as painted and the feather switch and width, the
+density and feather that grid was laid from, with a hash of the model built. Undoing it rebuilds
+that grid (the build is deterministic, one build's time), checks the hash, puts every step recorded
+on it back on the rebuilt grid and restores the region, the handles and the surface exactly; undoing further restores
 each earlier step exactly, and undoing an earlier layout step rebuilds the grid it names in turn.
 Steps recorded on still earlier grids keep their own stand-ins and grid steps untouched. A rebuild
 that hashed differently would settle those steps again from rest and say so. Only the current

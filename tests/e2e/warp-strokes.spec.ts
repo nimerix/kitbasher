@@ -351,6 +351,144 @@ test('an area stroke leaves the region and its paint history alone', async ({ pa
   expect((await state(page)).handles).toHaveLength(before.handles.length);
 });
 
+test('after undoing an added area, the radius field still edits the line selected before', async ({
+  page,
+}) => {
+  await warpFront(page);
+  await page.getByRole('radio', { name: 'Line', exact: true }).click();
+  await drag(page, [
+    [-5, 9, 10],
+    [5, 11, 10],
+  ]);
+  const drawn = await state(page);
+  const line = drawn.handles.at(-1)!;
+  expect(drawn.selected).toEqual([line.id]);
+  const field = page.getByRole('spinbutton', { name: 'Point radius', exact: true });
+  const radiusOf = (id: string) =>
+    inStore<number>(
+      page,
+      'return store.useEditor.getState().warp.points.find((p) => p.id === args).radius;',
+      id,
+    );
+  await field.fill('3.3');
+  await field.press('Enter');
+  expect(await radiusOf(line.id)).toBe(3.3);
+
+  await page.getByRole('radio', { name: 'Area', exact: true }).click();
+  await drag(page, [
+    [-3, 4, 10],
+    [3, 5, 10],
+  ]);
+  const painted = await state(page);
+  expect(painted.handles.at(-1)!.kind).toBe('area');
+  expect(painted.selected).not.toContain(line.id);
+
+  await page.keyboard.press('ControlOrMeta+z');
+  const undone = await state(page);
+  expect(undone.handles.map(({ id }: { id: string }) => id)).toEqual([line.id]);
+  expect(undone.selected).toEqual([line.id]);
+  await expect(page.locator('.warp-point-settings')).not.toContainText(
+    'New points use this radius and falloff.',
+  );
+  await field.fill('6.6');
+  await field.press('Enter');
+  expect(await radiusOf(line.id)).toBe(6.6);
+  expect((await state(page)).undo).toBe(undone.undo + 1);
+
+  // With nothing selected the field sets what new handles take, and undo takes that back first.
+  const empty = await screen(page, [16, 10, 10]);
+  await page.mouse.click(empty.x, empty.y);
+  expect((await state(page)).selected).toEqual([]);
+  await expect(page.locator('.warp-point-settings')).toContainText(
+    'New points use this radius and falloff.',
+  );
+  await field.fill('2');
+  await field.press('Enter');
+  const defaults = await state(page);
+  expect(defaults.undo).toBe(undone.undo + 2);
+  await page.keyboard.press('ControlOrMeta+z');
+  expect(await inStore<number>(page, 'return store.useEditor.getState().warp.pointRadius;')).toBe(
+    6.6,
+  );
+  expect(await radiusOf(line.id)).toBe(6.6);
+});
+
+test('undo back to a feathered layout shows its feather, and laying it again changes nothing', async ({
+  page,
+}) => {
+  await page.goto('/');
+  await expect(page.locator('canvas')).toBeVisible();
+  await page.getByLabel('Open Kitbasher scene').setInputFiles({
+    name: 'strokes.kitbash',
+    mimeType: 'application/json',
+    buffer: Buffer.from(JSON.stringify(fixture)),
+  });
+  await page.getByRole('button', { name: 'Open scene', exact: true }).click();
+  await page.locator('.part-select[title="Scanned block"]').click();
+  await page.keyboard.press('1');
+  await page.keyboard.press('Home');
+  await page.keyboard.press('w');
+  const brush = page.getByRole('spinbutton', { name: 'Brush radius', exact: true });
+  await brush.fill('6');
+  await brush.press('Enter');
+  const centre = await screen(page, [0, 10, 10]);
+  await page.mouse.click(centre.x, centre.y);
+  const feather = page.getByRole('switch', { name: 'Feather the painted edge', exact: true });
+  const width = page.getByRole('spinbutton', { name: 'Feather width', exact: true });
+  await feather.click();
+  await width.fill('1.75');
+  await width.press('Enter');
+  const lay = page.getByRole('button', { name: 'Lay grid', exact: true });
+  const edit = page.getByRole('button', { name: 'Edit region', exact: true });
+  const laid = () => expect.poll(async () => (await state(page)).stage).toBe('warp');
+  await lay.click();
+  await laid();
+  const laidWidth = () =>
+    inStore<number | null>(
+      page,
+      'return store.useEditor.getState().warp.model.feather?.width ?? null;',
+    );
+  expect(await laidWidth()).toBe(1.75);
+  await page.getByRole('radio', { name: 'Point', exact: true }).click();
+  const spot = await screen(page, [2, 11, 10]);
+  await page.mouse.click(spot.x, spot.y);
+  for (let step = 0; step < 3; step++)
+    await page.getByRole('button', { name: 'Move Z positive', exact: true }).click();
+
+  // Feather off, laid again: a layout of its own.
+  await edit.click();
+  await feather.click();
+  await expect(feather).toHaveAttribute('aria-checked', 'false');
+  await lay.click();
+  await laid();
+  expect(await laidWidth()).toBeNull();
+
+  await page.keyboard.press('ControlOrMeta+z');
+  await laid();
+  await expect.poll(laidWidth).toBe(1.75);
+  await inStore(page, 'store.finishWarpSettling();');
+  const written = () =>
+    inStore<{ marked: boolean; undo: number; surface: number[] }>(
+      page,
+      `const warp = store.useEditor.getState().warp;
+      const marked = warp.model.marked === true;
+      warp.model.marked = true;
+      return { marked, undo: warp.undo.length, surface: Array.from(warp.preview.getAttribute('position').array) };`,
+    );
+  const before = await written();
+  await edit.click();
+  await expect(feather).toHaveAttribute('aria-checked', 'true');
+  await expect(width).toHaveValue('1.75');
+  await lay.click();
+  await laid();
+  await inStore(page, 'store.finishWarpSettling();');
+  const after = await written();
+  // The same model, no new step and not a vertex moved.
+  expect(after.marked).toBe(true);
+  expect(after.undo).toBe(before.undo);
+  expect(after.surface).toEqual(before.surface);
+});
+
 test('the first drag of a new line with the default radius lifts a smooth ridge', async ({
   page,
 }) => {
