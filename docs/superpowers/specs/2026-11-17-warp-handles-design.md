@@ -220,7 +220,11 @@ samples at most 0.0027 mm, where the seam had moved them 0.78 and 0.72 mm.
 
 Every handle has a **radius** in mm and a **falloff** from 0 to 100 %, edited in the Control
 points section for the selected handles. New handles take the last values set; with nothing
-selected, setting one is a session undo step of its own. Until the user
+selected, setting one is a session undo step of its own. Where the selected handles differ in
+radius, or in falloff, that field shows no value with a Mixed placeholder and its slider no thumb;
+a value typed or slid there sets every selected handle, as one undo step, even one equal to a
+value some already have. The line under the fields says what a new point will take: the same
+settings as the selection when it does, or else its radius and falloff. Until the user
 sets a radius, a new point takes the larger of 6 % of the part's size and 4.5 node spacings
 where it is clicked, no more than a quarter of the region's extent. Radius 0 is a bare point;
 automatic points are radius 0. Effectively whole regions are laid at the 2,000-node level and

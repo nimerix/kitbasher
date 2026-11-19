@@ -6544,6 +6544,16 @@ optgroup {
   width: 100%;
   accent-color: var(--accent);
 }
+/* Selected points that differ: no thumb and no fill until the slider is used. */
+.warp-point-setting > input[type='range'].mixed {
+  accent-color: var(--muted);
+}
+.warp-point-setting > input[type='range'].mixed::-webkit-slider-thumb {
+  opacity: 0;
+}
+.warp-point-setting > input[type='range'].mixed::-moz-range-thumb {
+  opacity: 0;
+}
 .warp-point-setting > input[type='number'],
 .warp-distribute-row > select,
 .warp-auto-points > select {

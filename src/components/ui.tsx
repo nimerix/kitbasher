@@ -230,6 +230,7 @@ export function NumericInput({
   step = 1,
   min,
   max,
+  mixed = false,
 }: {
   id?: string;
   value: number;
@@ -239,16 +240,20 @@ export function NumericInput({
   step?: number;
   min?: number;
   max?: number;
+  /** Shows no value, with a Mixed placeholder, and commits any valid value typed. */
+  mixed?: boolean;
 }) {
-  const [draft, setDraft] = useState(String(Number(value.toFixed(3))));
+  const shown = mixed ? '' : String(Number(value.toFixed(3)));
+  const [draft, setDraft] = useState(shown);
   const cancelled = useRef(false);
-  useEffect(() => setDraft(String(Number(value.toFixed(3)))), [value]);
+  useEffect(() => setDraft(shown), [value, mixed]);
   return (
     <input
       id={id}
       aria-label={label}
       type="number"
       value={draft}
+      placeholder={mixed ? 'Mixed' : undefined}
       disabled={disabled}
       step={step}
       min={min}
@@ -257,7 +262,7 @@ export function NumericInput({
       onBlur={() => {
         if (cancelled.current) {
           cancelled.current = false;
-          setDraft(String(Number(value.toFixed(3))));
+          setDraft(shown);
           return;
         }
         const next = Number(draft);
@@ -267,16 +272,16 @@ export function NumericInput({
           (min === undefined || next >= min) &&
           (max === undefined || next <= max)
         ) {
-          if (next !== Number(value.toFixed(3))) onCommit(next);
+          if (mixed || next !== Number(value.toFixed(3))) onCommit(next);
         }
         // A rejected constraint edit leaves the committed value unchanged.
-        setDraft(String(Number(value.toFixed(3))));
+        setDraft(shown);
       }}
       onKeyDown={(e) => {
         if (e.key === 'Enter') e.currentTarget.blur();
         if (e.key === 'Escape') {
           cancelled.current = true;
-          setDraft(String(Number(value.toFixed(3))));
+          setDraft(shown);
           e.currentTarget.blur();
         }
       }}
@@ -469,6 +474,7 @@ export function LogRangeInput({
   zero = false,
   className,
   disabled,
+  mixed = false,
   onChange,
 }: {
   label: string;
@@ -478,18 +484,20 @@ export function LogRangeInput({
   zero?: boolean;
   className?: string;
   disabled?: boolean;
+  /** Shows no value: the thumb hidden at the start. */
+  mixed?: boolean;
   onChange: (value: number) => void;
 }) {
   return (
     <input
       type="range"
-      className={className}
+      className={mixed ? [className, 'mixed'].filter(Boolean).join(' ') : className}
       aria-label={label}
-      aria-valuetext={`${Number(value.toPrecision(3))} mm`}
+      aria-valuetext={mixed ? 'Mixed' : `${Number(value.toPrecision(3))} mm`}
       min={0}
       max={logSteps}
       step={1}
-      value={logSliderPosition(value, min, max, zero)}
+      value={mixed ? 0 : logSliderPosition(value, min, max, zero)}
       disabled={disabled}
       onChange={(event) => onChange(logSliderValue(Number(event.target.value), min, max, zero))}
     />
