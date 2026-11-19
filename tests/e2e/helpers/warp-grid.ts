@@ -673,14 +673,15 @@ const luminanceSource = `
 
 /**
  * WCAG contrast of the grid against the surface beside it, per part colour. Samples are the
- * middles of segments on surface facing the camera squarely, away from nodes; at each, `core`
+ * middles of segments on surface facing the camera at least as squarely as `facing`, the cosine
+ * of the angle between the surface's normal and the view, away from nodes; at each, `core`
  * is the contrast at the line's centre (the pixels whose centres the 1.5 px core covers) and `line` the best
  * across the line's full width, each between the drawn image and the same pixels with the grid
  * hidden. Returns the worst and the fifth-percentile sample for each colour.
  */
-export async function gridContrast(page: Page, colors: string[], partId = 'ball') {
+export async function gridContrast(page: Page, colors: string[], partId = 'ball', facing = 0.5) {
   return page.evaluate(
-    async ({ colors, luminanceSource, viewDepthsSource, partId }) => {
+    async ({ colors, luminanceSource, viewDepthsSource, partId, facing }) => {
       const luminance = new Function(luminanceSource)() as (p: Uint8Array, i: number) => number;
       const viewDepths = new Function(viewDepthsSource)();
       const urls = performance.getEntriesByType('resource').map((entry) => entry.name);
@@ -742,7 +743,7 @@ export async function gridContrast(page: Page, colors: string[], partId = 'ball'
         const view = camera.isOrthographicCamera
           ? forward.clone().negate()
           : eye.clone().sub(p).normalize();
-        if (normal.dot(view) < 0.5) continue;
+        if (normal.dot(view) < facing) continue;
         const depth = -p.clone().applyMatrix4(camera.matrixWorldInverse).z;
         a.project(camera);
         b.project(camera);
@@ -811,14 +812,15 @@ export async function gridContrast(page: Page, colors: string[], partId = 'ball'
       root.invalidate();
       return { samples: samples.length, results };
     },
-    { colors, luminanceSource, viewDepthsSource, partId },
+    { colors, luminanceSource, viewDepthsSource, partId, facing },
   );
 }
 
 /**
  * Over every pixel of the warped part: the share the grid touches at all (any channel differs by
- * more than 12 levels) and the share it changes noticeably (luminance contrast above 1.5:1),
- * between the drawn image and the same view with the grid hidden. `color`, when given, is the
+ * more than 12 levels), the share it changes perceptibly (luminance contrast above 1.2:1) and the
+ * share it changes noticeably (above 1.5:1), between the drawn image and the same view with the
+ * grid hidden. `color`, when given, is the
  * part's colour while measuring.
  */
 export async function gridCoverage(page: Page, partId = 'ball', color?: string) {
@@ -872,6 +874,7 @@ export async function gridCoverage(page: Page, partId = 'ball', color?: string) 
       root.invalidate();
       let pixels = 0,
         touched = 0,
+        perceptible = 0,
         noticeable = 0;
       for (let i = 0; i < width * height * 4; i += 4) {
         if (silhouette[i] < 128) continue;
@@ -885,11 +888,14 @@ export async function gridCoverage(page: Page, partId = 'ball', color?: string) 
         )
           touched++;
         const [l1, l2] = [luminance(shown, i), luminance(bare, i)].sort((m, n) => n - m);
-        if ((l1 + 0.05) / (l2 + 0.05) > 1.5) noticeable++;
+        const contrast = (l1 + 0.05) / (l2 + 0.05);
+        if (contrast > 1.2) perceptible++;
+        if (contrast > 1.5) noticeable++;
       }
       return {
         pixels: pixels / (width / size.width) ** 2,
         touched: touched / pixels,
+        perceptible: perceptible / pixels,
         noticeable: noticeable / pixels,
       };
     },

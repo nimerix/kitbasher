@@ -22,6 +22,7 @@ import { buildWarpModel, type WarpModel } from '../../src/core/warp-model';
 import {
   traceWarpGridPathNow,
   warpGridChords,
+  warpGridDrawnEdges,
   WarpGridDrawing,
   warpGridPathLimits,
   warpGridSegments,
@@ -203,6 +204,121 @@ describe('grid paths', () => {
       const o = (before + k - path.start[e]) * 6 + 4;
       expect(moved[o] - still[o]).toBeCloseTo(2 + 2 * path.along[k], 5);
     }
+  });
+});
+
+/**
+ * The grid's edges and the drawn ones, by node pair, with each node inside the outline's drawn
+ * lines to it and grid edges to it. `rim` says which nodes are on the outline.
+ */
+function linesToOutline(m: WarpModel, rim: (n: number) => boolean) {
+  const { edgeStart, edges } = m.grid;
+  const nodeCount = edgeStart.length - 1;
+  const { ends } = warpGridDrawnEdges(m);
+  const drawn = new Set<number>();
+  for (let e = 0; e < ends.length; e += 2)
+    drawn.add(Math.min(ends[e], ends[e + 1]) * nodeCount + Math.max(ends[e], ends[e + 1]));
+  const inside: { node: number; lines: number[]; edges: number }[] = [];
+  let gridEdges = 0;
+  for (let n = 0; n < nodeCount; n++) {
+    const node = { node: n, lines: [] as number[], edges: 0 };
+    for (let k = edgeStart[n]; k < edgeStart[n + 1]; k++) {
+      const m = edges[k];
+      if (m > n) gridEdges++;
+      if (rim(n) || !rim(m)) continue;
+      node.edges++;
+      if (drawn.has(Math.min(n, m) * nodeCount + Math.max(n, m))) node.lines.push(m);
+    }
+    if (!rim(n)) inside.push(node);
+  }
+  return { drawn, nodeCount, inside, gridEdges };
+}
+
+/** The most lines a node inside may draw to the outline. */
+const handful = 4;
+
+describe('drawn grid edges', () => {
+  it('join each node inside to the outline by a few lines spread around it, never a fan', async () => {
+    // The 80 by 80 plate at the coarsest density: every border vertex is a node, and few are not.
+    const m = await model(new PlaneGeometry(40, 40, 80, 80), 0);
+    const p = m.restNodes;
+    const onBorder = (n: number) =>
+      Math.abs(Math.abs(p[n * 3]) - 20) < 1e-6 || Math.abs(Math.abs(p[n * 3 + 1]) - 20) < 1e-6;
+    const { drawn, nodeCount, inside } = linesToOutline(m, onBorder);
+    expect(inside.length).toBeGreaterThan(0);
+    expect(Math.max(...inside.map((node) => node.edges))).toBeGreaterThan(50);
+    for (const { node, lines, edges } of inside) {
+      expect(lines.length).toBeGreaterThan(0);
+      expect(lines.length).toBeLessThanOrEqual(Math.min(edges, handful));
+      // Every two lines from the node turn apart by 30° or more.
+      const angles = lines.map((m) =>
+        Math.atan2(p[m * 3 + 1] - p[node * 3 + 1], p[m * 3] - p[node * 3]),
+      );
+      for (let i = 0; i < angles.length; i++)
+        for (let j = i + 1; j < angles.length; j++) {
+          const turn = Math.abs(angles[i] - angles[j]) % (2 * Math.PI);
+          expect(Math.min(turn, 2 * Math.PI - turn)).toBeGreaterThanOrEqual(Math.PI / 6);
+        }
+    }
+    // The border is drawn whole, and nothing crosses the inside from one border node to another.
+    const side = (n: number) =>
+      Math.abs(Math.abs(p[n * 3]) - 20) < 1e-6
+        ? `x${Math.sign(p[n * 3])}`
+        : `y${Math.sign(p[n * 3 + 1])}`;
+    let along = 0;
+    for (const key of drawn) {
+      const a = Math.floor(key / nodeCount),
+        b = key % nodeCount;
+      if (!onBorder(a) || !onBorder(b)) continue;
+      along++;
+      const corner = (n: number) =>
+        Math.abs(Math.abs(p[n * 3]) - 20) < 1e-6 && Math.abs(Math.abs(p[n * 3 + 1]) - 20) < 1e-6;
+      if (!corner(a) && !corner(b)) expect(side(a)).toBe(side(b));
+    }
+    expect(along).toBe(320);
+  });
+
+  it("draw a painted region's fixed border as its outline and every edge between free nodes", async () => {
+    const geometry = new PlaneGeometry(40, 40, 80, 80);
+    const centres = new Vector3();
+    const faces: number[] = [];
+    const index = geometry.index!,
+      position = geometry.getAttribute('position');
+    for (let f = 0; f < index.count / 3; f++) {
+      centres.set(0, 0, 0);
+      for (let k = 0; k < 3; k++)
+        centres.add(new Vector3().fromBufferAttribute(position, index.getX(f * 3 + k)));
+      if (centres.divideScalar(3).length() < 8) faces.push(f);
+    }
+    const m = await buildWarpModel({
+      positions: new Float32Array(position.array),
+      index: new Uint32Array(index.array),
+      normals: null,
+      matrix: new Matrix4().elements.slice(),
+      faces,
+      density: 0,
+    });
+    const fixed = (n: number) => m.grid.fixed[n] === 1;
+    expect(m.grid.fixed.reduce((a, b) => a + b, 0)).toBeGreaterThan(100);
+    const { drawn, nodeCount, inside } = linesToOutline(m, fixed);
+    for (const { lines } of inside) expect(lines.length).toBeLessThanOrEqual(handful);
+    const { edgeStart, edges } = m.grid;
+    let rimEdges = 0;
+    for (let n = 0; n < nodeCount; n++)
+      for (let k = edgeStart[n]; k < edgeStart[n + 1]; k++) {
+        const o = edges[k];
+        if (o <= n) continue;
+        if (!fixed(n) && !fixed(o)) expect(drawn.has(n * nodeCount + o)).toBe(true);
+        if (fixed(n) && fixed(o) && drawn.has(n * nodeCount + o)) rimEdges++;
+      }
+    // The outline closes: one edge per fixed node around the disc.
+    expect(rimEdges).toBe(m.grid.fixed.reduce((a, b) => a + b, 0));
+  });
+
+  it('draw every edge of a grid without an outline', async () => {
+    const m = await model(sphere(), 3);
+    const { drawn, gridEdges } = linesToOutline(m, () => false);
+    expect(drawn.size).toBe(gridEdges);
   });
 });
 
