@@ -20,12 +20,16 @@ export interface Release {
 // Newest first. Each title must be unique: it names the release's link.
 export const releases: Release[] = [
   {
-    date: '2026-11-18',
-    title: 'Smoother long warp pulls',
+    date: '2026-11-19',
+    title: 'Smoother warp pulls and finer voxel remeshing',
     changes: [
       {
         kind: 'fixed',
-        text: 'A long warp pull, especially at 0 % falloff, rises from the surface without a jagged ring or a dip around its base.',
+        text: 'Long point pulls on flat surfaces have a smoother base, including at 0% falloff.',
+      },
+      {
+        kind: 'improved',
+        text: 'Voxel remesh now uses a default resolution of 128. Increase it to 256 to preserve smaller features.',
       },
     ],
   },
