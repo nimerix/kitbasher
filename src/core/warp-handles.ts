@@ -49,6 +49,12 @@ export interface WarpFootprint {
   sources: readonly Vec3[];
   /** Free nodes paths along the grid start from, at their straight-line distance. */
   seeds: readonly number[];
+  /** The other free nodes a line's drawn path is bound to, in node order. */
+  path: readonly number[];
+  /** The most weight any spot of the path gives each of them. */
+  pathWeight: readonly number[];
+  /** The share of the guides each takes at radius 0. */
+  pathShare: readonly number[];
 }
 
 /** The free nodes a handle's radius and holding band cover on one grid. */
@@ -67,6 +73,10 @@ export interface WarpReach {
   own: number;
   /** Intrinsic rest distance from the footprint, mm. */
   distance: Float64Array;
+  /** The least share of the guides each node takes, from the line's path. */
+  least: Float64Array;
+  /** How much of the radius's hold on each node the line's path lets go. */
+  release: Float64Array;
 }
 
 export interface WarpHandle {
@@ -366,7 +376,7 @@ type WarpFootprintOf = Pick<WarpHandle, 'samples'> &
  * A line or an area moves as one the free nodes within this many node spacings of it. A sample's
  * binding reaches farther, unevenly to either side, so taking every node the samples are bound to
  * would make the ridge's width depend on which triangles they fell in, and so on pointer speed. A
- * line also takes every node its whole drawn path is bound to.
+ * line's drawn path also guides the other nodes it is bound to, by `warpPathShare`.
  */
 export const warpFootprintSpacings = 0.75;
 
@@ -387,40 +397,55 @@ function segmentDistance(p: ArrayLike<number>, a: Vec3, b: Vec3) {
 }
 
 type WarpPath = NonNullable<WarpHandle['path']>;
-const boundToPath = new WeakMap<WarpModel, WeakMap<WarpPath, readonly number[]>>();
+type WarpPathBinding = { node: number[]; weight: number[] }[];
+const boundToPath = new WeakMap<WarpModel, WeakMap<WarpPath, WarpPathBinding>>();
 
-/** The grid nodes a line's drawn path is bound to, in node order. */
-function pathNodes(model: WarpModel, path: WarpPath) {
+/** How each spot of a line's drawn path is bound to the grid. */
+function pathBinding(model: WarpModel, path: WarpPath) {
   let paths = boundToPath.get(model);
   if (!paths) boundToPath.set(model, (paths = new WeakMap()));
-  let nodes = paths.get(path);
-  if (!nodes) {
-    const bound = new Set<number>();
+  let bound = paths.get(path);
+  if (!bound) {
+    bound = [];
     for (const { face, barycentric } of path) {
       const triangle = regionTriangleOf(model.region, face);
       if (triangle < 0) continue;
-      const { node } = bindTrianglePoint(
+      const { node, weight } = bindTrianglePoint(
         model.region,
         model.binding,
         model.restWorld,
         triangle,
         barycentric,
       );
-      for (const n of node) bound.add(n);
+      bound.push({ node, weight });
     }
-    nodes = [...bound].sort((a, b) => a - b);
-    paths.set(path, nodes);
+    paths.set(path, bound);
   }
-  return nodes;
+  return bound;
 }
+
+/**
+ * At radius 0, a node a spot of a line's path is bound to by `w`, where the spot has weight `B`
+ * on free nodes outside the footprint, takes `warpPathShare (w B)^warpPathPower` of the guides,
+ * at most all: as much as holds the path level without lifting the surface beside the line.
+ */
+export const warpPathShare = 6;
+export const warpPathPower = 1.5;
+/**
+ * As a radius's guides apply, a path node's share rises to a smoothstep of its weight over
+ * `warpPathBound`, and the radius's hold on it at its baseline lets go by as much: a firm partial
+ * lift of a node the line pulls a spot on raises or sinks the surface between the samples.
+ */
+export const warpPathBound = 0.05;
 
 /**
  * Where a handle's reach is measured from, by kind. A point is its samples alone. A line or an area
  * moves as one the free nodes on it: within `warpFootprintSpacings` of the line through its
  * samples in order, or of an area's samples, found along the grid from the nodes the samples are
  * bound to. A sample with none of its own nodes among them adds its most heavily bound one. A line
- * also moves every free node its drawn path is bound to: guides that hold one of them only partly
- * while the line pulls the hits on it raise or sink the surface between the samples. An area also
+ * also guides the other free nodes its drawn path is bound to, each by a share that grows with how
+ * far the path's spots on it would lag (`warpPathShare`): a node left behind while the line pulls
+ * the spots on it raises or sinks the surface between the samples. An area also
  * moves the free nodes on its faces still in the region, and straight-line distance is also
  * measured from its outline. Paths start at every free node the samples are bound to.
  */
@@ -470,8 +495,33 @@ export function handleFootprint(model: WarpModel, handle: WarpFootprintOf): Warp
       });
       if (heaviest >= 0) nodes.add(binding.node[heaviest]);
     }
-    if (handle.kind === 'line' && handle.path)
-      for (const n of pathNodes(model, handle.path)) if (eligible[n]) nodes.add(n);
+  }
+  const path: number[] = [],
+    pathWeight: number[] = [],
+    pathShare: number[] = [];
+  if (handle.kind === 'line' && handle.path) {
+    const most = new Map<number, number>(),
+      share = new Map<number, number>();
+    for (const { node, weight } of pathBinding(model, handle.path)) {
+      let outside = 0;
+      node.forEach((n, k) => {
+        if (eligible[n] && !nodes.has(n)) outside += weight[k];
+      });
+      node.forEach((n, k) => {
+        if (!eligible[n] || nodes.has(n)) return;
+        most.set(n, Math.max(most.get(n) ?? 0, weight[k]));
+        const lag = weight[k] * outside;
+        share.set(
+          n,
+          Math.max(share.get(n) ?? 0, Math.min(1, warpPathShare * lag ** warpPathPower)),
+        );
+      });
+    }
+    for (const n of [...most.keys()].sort((a, b) => a - b)) {
+      path.push(n);
+      pathWeight.push(most.get(n)!);
+      pathShare.push(share.get(n)!);
+    }
   }
   if (handle.kind === 'area' && handle.faces) {
     const { region, grid, restWorld } = model;
@@ -499,7 +549,7 @@ export function handleFootprint(model: WarpModel, handle: WarpFootprintOf): Warp
   }
   const sorted = (set: Set<number>) => [...set].sort((a, b) => a - b);
   for (const n of nodes) seeds.add(n);
-  return { nodes: sorted(nodes), sources, seeds: sorted(seeds) };
+  return { nodes: sorted(nodes), sources, seeds: sorted(seeds), path, pathWeight, pathShare };
 }
 
 const sameNumbers = (a: readonly number[], b: readonly number[]) =>
@@ -509,6 +559,9 @@ const sameNumbers = (a: readonly number[], b: readonly number[]) =>
 const sameFootprint = (a: WarpFootprint, b: WarpFootprint) =>
   sameNumbers(a.nodes, b.nodes) &&
   sameNumbers(a.seeds, b.seeds) &&
+  sameNumbers(a.path, b.path) &&
+  sameNumbers(a.pathWeight, b.pathWeight) &&
+  sameNumbers(a.pathShare, b.pathShare) &&
   a.sources.length === b.sources.length &&
   a.sources.every((p, i) => samePosition(p, b.sources[i]));
 
@@ -701,20 +754,44 @@ export function footprintReach(
   const spacing = spacingAt(model, seeds.keys());
   const activation = reachActivation(radius, spacing);
   const node = own.slice(),
-    distance = own.map(() => 0);
+    distance = own.map(() => 0),
+    least = own.map(() => 1),
+    release = own.map(() => 0);
+  const ownSet = new Set(own);
+  // The line's path nodes: their least share and how much of the radius's hold they let go.
+  const share = new Map<number, number>(),
+    letGo = new Map<number, number>();
+  footprint.path.forEach((n, k) => {
+    if (!eligible[n] || ownSet.has(n)) return;
+    const weight = footprint.pathWeight[k],
+      at0 = footprint.pathShare[k];
+    const bound = smoothstep(weight / warpPathBound);
+    share.set(n, at0 + activation * (bound - at0));
+    letGo.set(n, bound);
+  });
+  const path = new Float64Array(grid.nodes.length).fill(Infinity);
   if (activation > 0) {
     const band = bandWidth(0, spacing) + warpTailSpacings * spacing;
-    const path = new Float64Array(grid.nodes.length).fill(Infinity);
     const settled = relax(model, seeds, path, eligible, (radius + band) * warpPathStretch);
-    const ownSet = new Set(own);
     for (const n of settled.sort((a, b) => a - b)) {
       if (ownSet.has(n)) continue;
       const d = Math.max(straight(n), path[n] / warpPathStretch);
-      if (d >= radius + band) continue;
+      if (d >= radius + band && !share.has(n)) continue;
       node.push(n);
       distance.push(d);
+      least.push(share.get(n) ?? 0);
+      release.push(letGo.get(n) ?? 0);
+      share.delete(n);
     }
   }
+  // Path nodes beyond the radius's reach.
+  for (const [n, s] of [...share].sort((a, b) => a[0] - b[0]))
+    if (s > 0) {
+      node.push(n);
+      distance.push(Infinity);
+      least.push(s);
+      release.push(letGo.get(n)!);
+    }
   return {
     grid,
     radius,
@@ -724,6 +801,8 @@ export function footprintReach(
     node: Uint32Array.from(node),
     own: own.length,
     distance: Float64Array.from(distance),
+    least: Float64Array.from(least),
+    release: Float64Array.from(release),
   };
 }
 
@@ -763,9 +842,10 @@ function motionOf(handle: WarpHandle) {
  * has a profile: unmoved, its weight `w`, holding the surface softly over its radius; moved, 1
  * out to its radius and fading to 0 across the band past it. It drives the node toward its
  * baseline plus its whole offset at stiffness `w`, and holds it at its baseline for the rest of
- * the profile, so alone it targets `baseline + w × offset`. A holding term gives way by the
- * largest driving weight any other moved handle has there, and so does all of an unmoved
- * handle's profile.
+ * the profile, so alone it targets `baseline + w × offset`. A line's path raises `w` to its
+ * least share at the nodes the path is bound to and lets go of their hold by its release. A holding
+ * term gives way by the largest driving weight any other moved handle has there, and so does all of
+ * an unmoved handle's profile.
  * Stiffnesses add and the target is their stiffness-weighted mean, so nothing depends on the
  * order of the handles. The `exact` nodes, such as gap targets, get no guide. Undefined when no
  * handle guides a node.
@@ -811,8 +891,9 @@ export function warpGuides(
           : d <= radius + band
             ? 1 - (1 - warpTailShare) * smoothstep((d - radius) / band)
             : warpTailShare * (1 - smoothstep((d - radius - band) / tail));
-      weight[i] = reach.activation * w;
-      profile[i] = reach.activation * ((1 - motion) * w + motion * held);
+      const least = reach.least[i];
+      weight[i] = Math.max(least, reach.activation * w);
+      profile[i] = Math.max(least, reach.activation * ((1 - motion) * w + motion * held));
     }
     const share = carry?.get(handle) ?? 1;
     const offset = handleOffset(handle).map((value) => share * value) as Vec3;
@@ -845,7 +926,7 @@ export function warpGuides(
       const full = warpGuideStiffness * warpNodeStiffness(grid, model.restNodes, n);
       const others = leader[n] === h ? second[n] : first[n];
       const drive = full * weight[i] * (1 - (1 - motion) * others);
-      const hold = full * (profile[i] - weight[i]) * (1 - others);
+      const hold = full * (profile[i] - weight[i]) * (1 - others) * (1 - reach.release[i]);
       const s = drive + hold;
       if (!(s > 0)) continue;
       if (stiffness[n] === 0) touched.push(n);
@@ -1001,8 +1082,11 @@ export function reachWeights(handle: WarpHandle) {
     weight[i] =
       i < reach.own
         ? 1
-        : reach.activation *
-          handleWeight(reach.distance[i], handle.radius, handle.falloff, reach.spacing);
+        : Math.max(
+            reach.least[i],
+            reach.activation *
+              handleWeight(reach.distance[i], handle.radius, handle.falloff, reach.spacing),
+          );
   return weight;
 }
 

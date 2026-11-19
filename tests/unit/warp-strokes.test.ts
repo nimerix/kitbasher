@@ -456,7 +456,8 @@ describe('line handles', () => {
 
   it('lift short lines of every length, direction and bend level on painted patches of creased relief', async () => {
     // Six dabs of paint at the default density, ten strokes of up to 1 mm on each, curved either
-    // way, each pulled 0.5 mm along a view up to 17 degrees off vertical and measured at its hits.
+    // way, each pulled 0.5 mm along a view up to 17 degrees off vertical and measured at its hits,
+    // at the default radius and then at radius 0.
     const { part, height, below } = creasedRelief();
     let seed = 5;
     const random = () => {
@@ -465,10 +466,8 @@ describe('line handles', () => {
     };
     const lift = 0.5;
     const failures: string[] = [];
-    let lines = 0,
-      lowest = Infinity,
-      highest = -Infinity,
-      largest = 0;
+    let lines = 0;
+    const extremes = { default: [Infinity, -Infinity, 0], 'radius 0': [Infinity, -Infinity, 0] };
     for (let dab = 0; dab < 6; dab++) {
       const x0 = (random() - 0.5) * 3,
         y0 = (random() - 0.5) * 3;
@@ -501,10 +500,11 @@ describe('line handles', () => {
         });
         // A line partly held by fixed nodes stops short by design.
         if (!points.every((point) => freeAt(model, point))) continue;
+        const steps = session().undo.length;
         expect(editor().addWarpStroke({ kind: 'line', points })).toBe(true);
         made++;
         lines++;
-        const line = latest();
+        let line = latest();
         const tilt = random() * 0.3,
           turn = random() * Math.PI * 2;
         const up = [
@@ -518,35 +518,132 @@ describe('line handles', () => {
         );
         finishWarpSettling();
         const rest = points.map((p) => facePoint(model, model.positions, p));
-        const rises = points.map((p, i) => {
-          const moved = facePoint(model, session().output!.positions, p);
-          return [0, 1, 2].reduce((sum, a) => sum + (moved[a] - rest[i][a]) * up[a], 0);
-        });
         let along = 0;
         for (let i = 1; i < rest.length; i++) along += distance(rest[i], rest[i - 1]);
-        const peak = worstPeak(rises, Math.max(1, Math.round((line.reach!.spacing / along) * 60)));
-        const low = Math.min(...rises),
-          high = Math.max(...rises);
-        [lowest, highest, largest] = [
-          Math.min(lowest, low),
-          Math.max(highest, high),
-          Math.max(largest, peak),
-        ];
-        if (low < 0.9 * lift || high > 1.1 * lift || peak > 0.05 * lift)
-          failures.push(
-            `dab ${dab}, line ${made}: ${(along / line.reach!.spacing).toFixed(1)} spacings, ` +
-              `${low.toFixed(3)} to ${high.toFixed(3)} mm, peak ${peak.toFixed(3)} mm`,
+        for (const radius of ['default', 'radius 0'] as const) {
+          if (radius === 'radius 0') {
+            editor().setWarpPointSettings({ radius: 0 }, 'end');
+            finishWarpSettling();
+            line = latest();
+            expect(line.radius).toBe(0);
+          }
+          const rises = points.map((p, i) => {
+            const moved = facePoint(model, session().output!.positions, p);
+            return [0, 1, 2].reduce((sum, a) => sum + (moved[a] - rest[i][a]) * up[a], 0);
+          });
+          const peak = worstPeak(
+            rises,
+            Math.max(1, Math.round((line.reach!.spacing / along) * 60)),
           );
-        editor().undoWarpEdit();
-        editor().undoWarpEdit();
+          const low = Math.min(...rises),
+            high = Math.max(...rises);
+          const extreme = extremes[radius];
+          [extreme[0], extreme[1], extreme[2]] = [
+            Math.min(extreme[0], low),
+            Math.max(extreme[1], high),
+            Math.max(extreme[2], peak),
+          ];
+          if (low < 0.9 * lift || high > 1.1 * lift || peak > 0.05 * lift)
+            failures.push(
+              `dab ${dab}, line ${made}, ${radius}: ${(along / line.reach!.spacing).toFixed(1)} ` +
+                `spacings, ${low.toFixed(3)} to ${high.toFixed(3)} mm, peak ${peak.toFixed(3)} mm`,
+            );
+        }
+        while (session().undo.length > steps) editor().undoWarpEdit();
       }
       editor().cancelWarp();
     }
-    figures['short lines on creased relief'] = { lines, lowest, highest, peak: largest };
+    for (const [radius, [lowest, highest, peak]] of Object.entries(extremes))
+      figures[`short lines on creased relief${radius === 'default' ? '' : `, ${radius}`}`] = {
+        lines,
+        lowest,
+        highest,
+        peak,
+      };
     expect(lines).toBe(60);
     // Moving only the nodes nearest the samples left 5 of these between 0.41 and 0.54 mm, with
     // peaks up to 0.09 mm.
     expect(failures).toEqual([]);
+  }, 30_000);
+
+  it('raise a ridge at radius 0 about as narrow as the footprint on painted patches of creased relief', async () => {
+    // Six wider dabs of paint at the default density, ten straight strokes of 0.3 to 1.5 mm on
+    // each at radius 0, each pulled 0.5 mm straight up. Across its middle, the band of surface
+    // that rises at least 0.9 of that is measured in the line's node spacings.
+    const { part, height, below } = creasedRelief();
+    let seed = 5;
+    const random = () => {
+      seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+      return seed / 0x7fffffff;
+    };
+    const lift = 0.5;
+    const bands: number[] = [];
+    let worst = 0;
+    for (let dab = 0; dab < 6; dab++) {
+      const x0 = (random() - 0.5) * 3,
+        y0 = (random() - 0.5) * 3;
+      editor().setScene({ name: 'Warp', parts: [part], joints: [] });
+      useEditor.setState({ selected: [part.id] });
+      editor().setTool('warp');
+      editor().setWarpBrushRadius(3);
+      editor().paintWarpRegion(
+        { partId: part.id, point: [x0, y0, height(x0, y0)], normal: [0, 0, 1] },
+        below(x0, y0).face,
+        false,
+        true,
+      );
+      editor().endPaintStroke();
+      await editor().layWarpGrid();
+      const model = session().model!;
+      editor().setWarpPointSettings({ radius: 0 }, 'end');
+      for (let k = 0, made = 0; k < 40 && made < 10; k++) {
+        const direction = random() * Math.PI * 2,
+          length = 0.3 + random() * 1.2;
+        const cx = x0 + (random() - 0.5) * 0.8,
+          cy = y0 + (random() - 0.5) * 0.8;
+        const [c, s] = [Math.cos(direction), Math.sin(direction)];
+        const points = Array.from({ length: 61 }, (_, i) =>
+          below(cx + length * (i / 60 - 0.5) * c, cy + length * (i / 60 - 0.5) * s),
+        );
+        if (!points.every((point) => freeAt(model, point))) continue;
+        const steps = session().undo.length;
+        expect(editor().addWarpStroke({ kind: 'line', points })).toBe(true);
+        made++;
+        const line = latest();
+        expect(line.radius).toBe(0);
+        editor().moveWarpPoints(
+          [{ id: line.id, target: [line.pin[0], line.pin[1], line.pin[2] + lift] }],
+          'end',
+        );
+        finishWarpSettling();
+        const rise = (spot: WarpStrokePoint) =>
+          facePoint(model, session().output!.positions, spot)[2] -
+          facePoint(model, model.positions, spot)[2];
+        for (const point of points) worst = Math.max(worst, Math.abs(rise(point) - lift));
+        /** How far across the middle, to one side, the surface still rises 0.9 of the lift. */
+        const edge = (side: number) => {
+          for (let o = 0.005; o < 1.5; o += 0.005)
+            if (rise(below(cx - side * o * s, cy + side * o * c)) < 0.9 * lift) return o;
+          return 1.5;
+        };
+        bands.push((edge(1) + edge(-1)) / line.reach!.spacing);
+        while (session().undo.length > steps) editor().undoWarpEdit();
+      }
+      editor().cancelWarp();
+    }
+    const mean = bands.reduce((sum, band) => sum + band, 0) / bands.length;
+    figures['ridge width at radius 0 on creased relief'] = {
+      lines: bands.length,
+      mean,
+      widest: Math.max(...bands),
+      worst: worst / lift,
+    };
+    expect(bands.length).toBe(60);
+    expect(worst).toBeLessThan(0.1 * lift);
+    // The narrow footprint alone made these 2.67 and 3.71 spacings; moving every node the path
+    // is bound to with the line made them 3.00 and 4.36.
+    expect(mean).toBeLessThan(2.8);
+    expect(Math.max(...bands)).toBeLessThan(4);
   }, 30_000);
 
   it('lift a line by as much on either side of where its footprint used to change', async () => {
@@ -834,10 +931,12 @@ describe('handles made by strokes through a session', () => {
   const offset = (handle: WarpPoint) =>
     handle.target ? handle.target.map((value, a) => value - handle.pin[a]) : null;
   /** Whether a line moves as one every free node its drawn path is bound to on the current grid. */
-  const movesItsPath = (line: WarpPoint) => {
+  /** Whether the line moves or guides every free node its drawn path is bound to. */
+  const guidesItsPath = (line: WarpPoint) => {
     const model = session().model!;
     const eligible = warpEligibleNodes(model);
-    const own = new Set(line.reach!.node.subarray(0, line.reach!.own));
+    const { node, least } = line.reach!;
+    const guided = new Set([...node].filter((_, i) => least[i] > 0));
     const bound = line.path!.flatMap(({ face, barycentric }) =>
       bindTrianglePoint(
         model.region,
@@ -847,7 +946,7 @@ describe('handles made by strokes through a session', () => {
         barycentric,
       ).node.filter((n) => eligible[n]),
     );
-    return bound.length > 0 && bound.every((n) => own.has(n));
+    return bound.length > 0 && bound.every((n) => guided.has(n));
   };
 
   for (const moved of [false, true])
@@ -867,7 +966,7 @@ describe('handles made by strokes through a session', () => {
       expect(line.path!.length).toBeGreaterThan(10);
       for (const spot of line.path!) expect(isPaintedFace(model, spot.face)).toBe(true);
       for (const sample of line.samples) expect(isPaintedFace(model, sample.face)).toBe(true);
-      expect(movesItsPath(line)).toBe(true);
+      expect(guidesItsPath(line)).toBe(true);
       const xs = line.samples.map(({ restWorld }) => restWorld[0]);
       expect(Math.max(...xs)).toBeLessThan(2.5);
       expect(Math.max(...xs)).toBeGreaterThan(1);
@@ -965,7 +1064,7 @@ describe('handles made by strokes through a session', () => {
         expect(handle.samples.length).toBeGreaterThan(1);
         expect(handle.reach!.grid).toBe(session().model!.grid);
         expect(handle.reach!.own).toBeGreaterThan(2);
-        if (kind === 'line') expect(movesItsPath(handle)).toBe(true);
+        if (kind === 'line') expect(guidesItsPath(handle)).toBe(true);
       };
       /** The handle's spots stand at its lift. */
       const holds = (h: number) => {
