@@ -270,6 +270,8 @@ export interface WarpSession {
   undo: WarpEdit[];
   /** The last edit's solve has not converged yet. It goes on settling in idle frames. */
   settling: boolean;
+  /** Apply was pressed while settling: it bakes once the surface settles, unless an edit comes first. */
+  applying?: boolean;
 }
 /**
  * A session step: the points and gap targets, the settled grid they held, and the settings new
@@ -446,7 +448,11 @@ interface EditorState {
   /** Pulls the grid nodes that face a nearby part onto its surface, at the overlap depth. */
   closeWarpGap: () => void;
   undoWarpEdit: () => void;
-  /** Bakes the warp into the part as one undo step, then starts again on the result. */
+  /**
+   * Bakes the warp into the part as one undo step, then starts again on the result. A surface
+   * still settling settles first: in the browser in idle steps, baking once it settles and
+   * returning false meanwhile.
+   */
   applyWarp: () => boolean;
   /** The live server took the applied warp, or refused it. */
   submitWarp: () => void;
@@ -582,6 +588,7 @@ const newWarpSession = (part: Part, epoch: number, faces: number[] = []): WarpSe
   seam: null,
   undo: [],
   settling: false,
+  applying: false,
 });
 
 export const warpDistributeCounts = [4, 8, 16, 32] as const;
@@ -1092,6 +1099,13 @@ let warpSettled: {
 } = { warp: null, iterations: 0, drawn: 0 };
 let settleTimer: ReturnType<typeof setTimeout> | undefined;
 
+/** Stops idle settling and lets go of the session it was settling. */
+function forgetWarpSettle() {
+  clearTimeout(settleTimer);
+  settleTimer = undefined;
+  warpSettled = { warp: null, iterations: 0, drawn: 0 };
+}
+
 function scheduleWarpSettle() {
   if (typeof window === 'undefined' || settleTimer !== undefined) return;
   settleTimer = setTimeout(() => {
@@ -1141,17 +1155,19 @@ function stepWarpSettle(budget: number) {
     performance.now() < deadline
   );
   if (move < warpConvergedMove || progress.iterations >= warpSettleLimit) {
-    const next = showWarp(scene, { ...warp, settling: false, surface: null });
-    progress.warp = null;
+    // An Apply waiting for this replaces the session, so the seam is not measured.
+    const next = showWarp(scene, { ...warp, settling: false, surface: null }, !warp.applying);
+    forgetWarpSettle();
     useEditor.setState({ warp: next });
+    if (next.applying) useEditor.getState().applyWarp();
     return false;
   }
   const now = performance.now();
   let next = warp;
   if (now - progress.drawn >= warpSettleRedraw) {
     progress.drawn = now;
-    deformWarpPreview(warp, 'drag');
-    next = { ...warp };
+    // Folds are counted on the surface shown, so the panel never reports an older one.
+    next = { ...warp, folds: deformWarpPreview(warp, 'end')! };
     progress.warp = next;
   }
   if (next !== warp) useEditor.setState({ warp: next });
@@ -2177,8 +2193,7 @@ export const useEditor = create<EditorState>((set, get) => ({
     abortWarpBuild();
     clearTimeout(seamTimer);
     warpDrag = null;
-    clearTimeout(settleTimer);
-    settleTimer = undefined;
+    forgetWarpSettle();
     disposeWarpPreview(warp.preview);
     set({ warp: null, painting: false, paintHistory: [] });
     if (notice) get().notify(notice, 'info');
@@ -2539,7 +2554,19 @@ export const useEditor = create<EditorState>((set, get) => ({
       state.notify(`Unlock ${part.name} to apply the warp.`, 'info');
       return false;
     }
+    // A surface still settling would bake a shape that is still changing: it settles first, in idle
+    // steps, and bakes then. Without idle frames to settle in, it settles here.
+    if (warp.settling) {
+      if (!warp.applying) set({ warp: { ...warp, applying: true } });
+      if (typeof window !== 'undefined') {
+        scheduleWarpSettle();
+        return false;
+      }
+      finishWarpSettling();
+      return get().scene.parts.some((p) => p.id === part.id && p.geometry !== part.geometry);
+    }
     warpDrag = null;
+    forgetWarpSettle();
     // The session starts again on the result, keeping the region and options.
     const {
       region,
@@ -2559,8 +2586,8 @@ export const useEditor = create<EditorState>((set, get) => ({
     const keep =
       !state.warpPending &&
       (state.liveStatus === 'connected' || state.liveStatus === 'disconnected');
-    // Exactly the surface shown. A grid still settling stops where it is.
-    const settled = { ...warp, settling: false };
+    // Exactly the surface shown, which has settled.
+    const settled = { ...warp, applying: false };
     const geometry = appliedWarpGeometry(warp.source, settled.output!);
     const warped: Part = { ...part, geometry, source: `Warp · ${part.source}` };
     if (!keep) disposeWarpPreview(settled.preview);
@@ -3782,6 +3809,22 @@ useEditor.subscribe((state, previous) => {
     state.cancelWarp(edited ? 'The part changed, so the warp was cancelled.' : undefined);
   else if (state.tool !== 'warp')
     state.cancelWarp(edited ? 'Warp discarded. Use Apply to keep a warp.' : undefined);
+});
+
+// An Apply waiting for the surface to settle is dropped by any edit before it: another drag,
+// undo, a new grid, or leaving the warp stage.
+useEditor.subscribe((state, previous) => {
+  const { warp } = state,
+    before = previous.warp;
+  if (
+    warp?.applying &&
+    before &&
+    (warp.points !== before.points ||
+      warp.gapTargets !== before.gapTargets ||
+      warp.model !== before.model ||
+      warp.stage !== 'warp')
+  )
+    useEditor.setState({ warp: { ...warp, applying: false } });
 });
 
 export function measureDistance() {

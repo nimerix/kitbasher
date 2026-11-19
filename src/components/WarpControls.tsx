@@ -507,17 +507,33 @@ export function WarpControls() {
           {folds} folded {folds === 1 ? 'triangle' : 'triangles'}. Apply is still allowed.
         </p>
       ) : null}
+      {warp.settling && !building ? (
+        <p className="warp-building warp-settling" role="status">
+          <LoaderCircle size={13} className="spin" aria-hidden="true" />
+          {warp.applying
+            ? 'Applying once the surface settles…'
+            : 'The surface is still settling. Apply waits for it.'}
+        </p>
+      ) : null}
       <div className="warp-actions">
         <button className="button secondary" onClick={cancel}>
           Cancel
         </button>
         <button
           className="button primary"
-          disabled={building || !warpChanges(warp)}
+          disabled={building || !!warp.applying || !warpChanges(warp)}
+          aria-busy={warp.applying || undefined}
           title={warpChanges(warp) ? undefined : 'Move a control point or close the gap first.'}
           onClick={() => useEditor.getState().applyWarp()}
         >
-          Apply
+          {warp.applying ? (
+            <>
+              <LoaderCircle size={13} className="spin" aria-hidden="true" />
+              Applying…
+            </>
+          ) : (
+            'Apply'
+          )}
         </button>
       </div>
     </div>

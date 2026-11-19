@@ -445,6 +445,78 @@ test('a whole part gets pins of its own, so a moved point bends it, shaped by ra
   expect((await editorState(page)).points).toHaveLength(17);
 });
 
+test('says the surface is still settling, and Apply waits for it to settle', async ({ page }) => {
+  await open(page, {
+    ...fixture,
+    parts: fixture.parts.map((part) =>
+      part.id === 'block'
+        ? { ...part, geometry: serializeGeometry(new BoxGeometry(20, 20, 20, 52, 52, 52)) }
+        : part,
+    ),
+  });
+  await page.keyboard.press('w');
+  await page.getByRole('radio', { name: 'Whole part', exact: true }).click();
+  await page.getByRole('button', { name: 'Lay grid', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'Close gap', exact: true })).toBeEnabled();
+  // The finest grid settles longest.
+  await page.getByRole('slider', { name: 'Grid density', exact: true }).fill('6');
+  await expect(page.getByRole('button', { name: 'Close gap', exact: true })).toBeEnabled();
+  const front = await screen(page, [-4.5, 10.5, 10]);
+  await page.mouse.click(front.x, front.y);
+  const radius = page.getByRole('spinbutton', { name: 'Point radius', exact: true });
+  await radius.fill('0');
+  await radius.press('Tab');
+  // Records the surface shown when Apply is pressed, and when it stops settling.
+  await page.evaluate(async () => {
+    const url = performance
+      .getEntriesByType('resource')
+      .map((entry) => entry.name)
+      .find((url) => /\/src\/core\/store\.ts(?:\?.*)?$/.test(url))!;
+    const { useEditor } = await import(url);
+    const w = window as unknown as { pressed: number[] | null; settled: number[] | null };
+    const shown = () =>
+      Array.from(useEditor.getState().warp.preview.getAttribute('position').array);
+    w.pressed = w.settled = null;
+    document.addEventListener(
+      'click',
+      (event) => {
+        if ((event.target as Element).closest('.warp-actions .button.primary')) w.pressed = shown();
+      },
+      true,
+    );
+    useEditor.subscribe((state: any, previous: any) => {
+      if (previous.warp?.settling && state.warp && !state.warp.settling) w.settled = shown();
+    });
+  });
+  const settling = page.locator('.warp-settling');
+  const apply = page.getByRole('button', { name: 'Apply', exact: true });
+  await expect(settling).toHaveCount(0);
+  // A real drag on the gizmo's X arrow, released.
+  const handle = await moveHandle(page);
+  await page.mouse.move(handle.x, handle.y);
+  await page.mouse.down();
+  await page.mouse.move(handle.x + 240, handle.y, { steps: 8 });
+  await page.mouse.up();
+  await expect(settling).toContainText('The surface is still settling. Apply waits for it.');
+  await apply.click();
+  const applying = page.getByRole('button', { name: 'Applying…', exact: true });
+  await expect(applying).toBeDisabled();
+  await expect(applying).toHaveAttribute('aria-busy', 'true');
+  await expect(settling).toContainText('Applying once the surface settles…');
+  // Input still reaches the page while it settles.
+  await page.mouse.move(front.x + 40, front.y + 40);
+  await expect.poll(async () => (await editorState(page)).source).toBe('Warp · test');
+  const applied = await editorState(page);
+  const { pressed, settled } = await page.evaluate(() => {
+    const w = window as unknown as { pressed: number[]; settled: number[] };
+    return { pressed: w.pressed, settled: w.settled };
+  });
+  expect(applied.stage).toBe('region');
+  // It baked the settled surface, which had gone on moving after the button was pressed.
+  expect(applied.mesh).toEqual(settled);
+  expect(differs(settled, pressed)).toBe(true);
+});
+
 test.describe('with clipping on, as by default', () => {
   test.use({ storageState: { cookies: [], origins: [] } });
 

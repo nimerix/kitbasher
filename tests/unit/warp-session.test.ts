@@ -2509,7 +2509,9 @@ describe('warp handles that must land', () => {
     expect(warpShortfall(session())).toBeLessThan(0.01);
   });
 
-  it('Apply bakes exactly the surface shown, also while it is still settling', async () => {
+  it('Apply waits for a settling surface and bakes it settled, exactly as then shown', async () => {
+    // Idle settling runs in a browser window.
+    vi.stubGlobal('window', globalThis);
     for (const radius of [0, null]) {
       const a = plate('a', 0, 64);
       setup([a], ['a']);
@@ -2517,14 +2519,90 @@ describe('warp handles that must land', () => {
       await editor().layWarpGrid();
       if (radius !== null) editor().setWarpPointSettings({ radius }, 'end');
       const p = addAt(a, 0.3, 0.2);
+      // The same edit settled to the end, for reference.
+      move(p.id, [0.3, 0.2, 3]);
+      finishWarpSettling();
+      const settled = positionsOf(session().preview!);
+      editor().undoWarpEdit();
       move(p.id, [0.3, 0.2, 3]);
       expect(session().settling).toBe(true);
       const shown = positionsOf(session().preview!);
-      expect(editor().applyWarp()).toBe(true);
-      expect(positionsOf(partOf('a').geometry)).toEqual(shown);
+      // The surface still has some way to go.
+      expect(shown).not.toEqual(settled);
+      const source = partOf('a').geometry;
+      expect(editor().applyWarp()).toBe(false);
+      expect(session().applying).toBe(true);
+      expect(partOf('a').geometry).toBe(source);
+      finishWarpSettling();
+      expect(partOf('a').geometry).not.toBe(source);
+      expect(positionsOf(partOf('a').geometry)).toEqual(settled);
+      expect(session().stage).toBe('region');
+      expect(editor().past).toHaveLength(1);
       editor().cancelWarp();
     }
-  });
+    vi.unstubAllGlobals();
+    // Without a window it settles within Apply, to the same surface.
+    const b = plate('b', 0, 64);
+    setup([b], ['b']);
+    editor().setTool('warp');
+    await editor().layWarpGrid();
+    const q = addAt(b, 0.3, 0.2);
+    move(q.id, [0.3, 0.2, 3]);
+    finishWarpSettling();
+    const settled = positionsOf(session().preview!);
+    editor().undoWarpEdit();
+    move(q.id, [0.3, 0.2, 3]);
+    expect(session().settling).toBe(true);
+    expect(editor().applyWarp()).toBe(true);
+    expect(positionsOf(partOf('b').geometry)).toEqual(settled);
+    editor().cancelWarp();
+    // A settled surface bakes at once, exactly as shown.
+    const a = plate('a', 0, 64);
+    setup([a], ['a']);
+    editor().setTool('warp');
+    await editor().layWarpGrid();
+    move(addAt(a, 0.3, 0.2).id, [0.3, 0.2, 3]);
+    finishWarpSettling();
+    const shown = positionsOf(session().preview!);
+    expect(editor().applyWarp()).toBe(true);
+    expect(positionsOf(partOf('a').geometry)).toEqual(shown);
+  }, 30_000);
+
+  it('an edit, a new grid or Cancel drops an Apply waiting for the surface to settle', async () => {
+    const edits: [string, (id: string) => void | Promise<void>][] = [
+      ['undo', () => editor().undoWarpEdit()],
+      ['drag', (id) => move(id, [0.3, 0.2, 2.5], 'drag')],
+      ['density', () => editor().setWarpDensity(4)],
+      ['cancel', () => editor().cancelWarp()],
+      ['leaving the tool', () => editor().setTool('select')],
+    ];
+    vi.stubGlobal('window', globalThis);
+    for (const [name, edit] of edits) {
+      const a = plate('a', 0, 64);
+      setup([a], ['a']);
+      editor().setTool('warp');
+      await editor().layWarpGrid();
+      const p = addAt(a, 0.3, 0.2);
+      move(p.id, [0.3, 0.2, 3]);
+      expect(session().settling, name).toBe(true);
+      const source = partOf('a').geometry;
+      editor().applyWarp();
+      expect(session().applying, name).toBe(true);
+      await edit(p.id);
+      const warp = editor().warp;
+      if (warp) {
+        expect(warp.applying, name).toBe(false);
+        if (name === 'drag') move(p.id, [0.3, 0.2, 2.5], 'end');
+        finishWarpSettling();
+        expect(editor().warp!.stage, name).toBe('warp');
+      }
+      expect(partOf('a').geometry, name).toBe(source);
+      expect(editor().past, name).toHaveLength(0);
+      editor().cancelWarp();
+      editor().setTool('select');
+    }
+    vi.unstubAllGlobals();
+  }, 30_000);
 
   it('settles a grid until it has converged, so an edit settles only what it changed', async () => {
     const { lift } = await ridden();

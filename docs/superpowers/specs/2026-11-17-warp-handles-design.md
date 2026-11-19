@@ -208,9 +208,14 @@ Radius adds soft per-node **guides** around them.
   target, and an unmoved one's drift from its pin, once either exceeds 0.02 mm.
 - **Settling.** The end of an edit settles for up to 50 iterations. A solve whose last iteration
   still moved a node by 1 µm or more is marked settling and goes on in idle steps of 8 ms,
-  redrawing every 200 ms, until it converges (or 20,000 iterations). Undo restores the surface
-  exactly as shown, settling on from there if it was. Apply bakes the preview as shown. An edit
-  that changes nothing settles nothing.
+  redrawing every 200 ms and counting folds on each redraw, until it converges (or 20,000
+  iterations). Beside Apply the panel says the surface is still settling. Undo restores the
+  surface exactly as shown, settling on from there if it was. Apply bakes the preview as shown,
+  and only a settled one: pressed while settling, the button shows it is applying and the settle
+  finishes in the same idle steps, so input goes on, then bakes. Any edit before then (another
+  drag, undo, a density change, Edit region), Cancel or leaving the tool drops the waiting Apply.
+  Apply and Cancel let go of the session the idle steps were settling. An edit that changes
+  nothing settles nothing.
 
 - **Baseline.** A handle refers to a snapshot of the settled grid (positions and rotations),
   taken when it is created, and replaced by the settled grid when an unmoved handle with no
