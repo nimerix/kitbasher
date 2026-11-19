@@ -194,17 +194,35 @@ Radius adds soft per-node **guides** around them.
 
 - **Priority.** A moved point's sample, and gap targets, are held at 100 times the strength of
   an automatic pin. Any other sample the user placed or moved is too where other handles'
-  samples or gap targets share its nodes, and by how firmly guides hold its nodes where they do
-  (the nodes a handle moves as one do not count), so the surface stays continuous in the radius.
-  A moved point then lands on its target within 0.01 mm at default density and 0.03 mm on the
-  coarsest grid, unless a point the user placed on the same spot or the fixed edge holds it,
-  which the panel states when it exceeds 0.02 mm; its marker shows where the surface is and the
-  gizmo stays on the target. A drag frame solves without priority, so it costs what it did.
+  samples or gap targets share its nodes, an unmoved one also where it is bound to a free node a
+  moved handle's samples are bound to or beside one, and by how firmly guides hold its nodes
+  where they do (the nodes a handle moves as one do not count), so the surface stays continuous
+  in the radius. A moved point then lands on its target within 0.01 mm at default density and
+  0.03 mm on the coarsest grid, unless a point the user placed beside it or the fixed edge holds
+  it; its marker shows where the surface is and the gizmo stays on the target. A drag frame
+  solves without priority, so it costs what it did.
+- **Carry.** A moved handle bound partly to fixed nodes, or whose constraints fight an unmoved
+  handle the user placed on or beside its nodes, carries only the share of its offset the
+  surface can take; its constraints and guides move by that share, and it stops short. The share
+  comes from the solve's linear response to the handle's travel with rotations held (one more
+  conjugate-gradient solve on the system the solve builds anyway): no node moves more than 1.25
+  times the travel, an unmoved point the user placed moves no more than 0.005 mm, no edge with an
+  end on a fixed node, or on such a point that must hold, rises by more than its rest length, and
+  no node map beside one loses more than half its determinant. Otherwise the stiff constraint
+  reached its target by overdriving the few free nodes it had: on a scan a 1 mm pull beside the
+  fixed edge moved a node 4.5 mm and turned node maps inside out. Handles on free surface with no
+  such pin beside them are left alone. The panel states a moved handle's shortfall from its
+  target, and an unmoved one's drift from its pin, once either exceeds 0.02 mm.
 - **Settling.** The end of an edit settles for up to 50 iterations. A solve whose last iteration
   still moved a node by 1 µm or more is marked settling and goes on in idle steps of 8 ms,
-  redrawing every 200 ms, until it converges (or 20,000 iterations). Undo restores the surface
-  exactly as shown, settling on from there if it was. Apply bakes the preview as shown. An edit
-  that changes nothing settles nothing.
+  redrawing every 200 ms and counting folds on each redraw, until it converges (or 20,000
+  iterations). Beside Apply the panel says the surface is still settling. Undo restores the
+  surface exactly as shown, settling on from there if it was. Apply bakes the preview as shown,
+  and only a settled one: pressed while settling, the button shows it is applying and the settle
+  finishes in the same idle steps, so input goes on, then bakes. Any edit before then (another
+  drag, undo, a density change, Edit region), Cancel or leaving the tool drops the waiting Apply.
+  Apply and Cancel let go of the session the idle steps were settling. An edit that changes
+  nothing settles nothing.
 
 - **Baseline.** A handle refers to a snapshot of the settled grid (positions and rotations),
   taken when it is created, and replaced by the settled grid when an unmoved handle with no
@@ -327,12 +345,27 @@ target per handle.
 Each session undo step holds the points, gap targets, the settled grid they held and the
 settings new points take, so undo restores the surface exactly without solving. Laying the
 same region at the same density and feather keeps the model. A real rebuild carries each
-distinct snapshot to the new grid once, through the old binding of each new node's scan vertex,
-rebinds samples, dropping those bound exactly as another and an area's faces no longer painted,
-and drops handles whose samples are bound only to fixed nodes, from the session and its undo
-steps; undo across it settles from the carried grid. A vertex in the old feather band that the
-new region paints is carried at the position it was written at; where a feather still applies,
-it stays unblended so the blend applies once.
+distinct snapshot to the new grid once, writing each new node where the preview's own skinning
+wrote its scan vertex, and rebinds samples, dropping those bound exactly as another and an area's
+faces no longer painted. A vertex in the old feather band that the new region paints is carried
+at the position it was written at; where a feather still applies, it stays unblended so the blend
+applies once.
+
+A density change that would drop any handle, because every node its samples would be bound to on
+the new grid is fixed, is not made: the session keeps its grid and density and says that grid is
+too coarse for the points on this region. Laying a new region is not made either when it would
+leave a moved handle bound only to fixed nodes; a handle the repaint leaves outside the paint is
+dropped with a notice, and so is an unmoved one left on the new region's edge.
+
+A density change is one session undo step. The steps before it stay on the grid they were
+recorded on: their snapshots name a stand-in for it, their points let go of their reach and of
+binding arrays the solver caches against the old grid, and the step the change records keeps the
+region, density and feather that grid was laid from, with a hash of the model built. Undoing it
+rebuilds that grid (the build is deterministic, one build's time), checks the hash, puts every
+step recorded on it back on the rebuilt grid and restores the surface exactly; undoing further
+restores each earlier step exactly. A rebuild that hashed differently would settle those steps
+again from rest and say so. Laying a new region still carries every step to the new grid and
+settles undo across it from there.
 
 A pure module, `warp-handles.ts`, turns handles and a model into solver input: reach, weights,
 guides, snapshots and their transfer, and distribution. It is unit-tested without the store.

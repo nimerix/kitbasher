@@ -192,6 +192,32 @@ function skinVertex(
 }
 
 /**
+ * World positions of the listed welded vertices as `evaluateWarp` skins them for `state`, before
+ * any feather blend, three values each. A vertex the warp does not move gets NaN.
+ */
+export function skinnedWorldPositions(
+  model: WarpModel,
+  state: WarpState,
+  vertices: ArrayLike<number>,
+): Float64Array {
+  const { region } = model;
+  const rotation = new Float64Array(model.grid.nodes.length * 9),
+    skin = new Float64Array(model.grid.nodes.length * 9),
+    shift = new Float64Array(model.grid.nodes.length * 3);
+  writeNodeMaps(model, state, rotation, skin);
+  const skinned = skinOf(model);
+  writeShifts(skinned, state.positions, skin, shift);
+  const out = new Float64Array(vertices.length * 3).fill(NaN);
+  for (let i = 0; i < vertices.length; i++) {
+    const v = vertices[i];
+    if (v >= region.weldedCount || region.role[v] !== WarpRole.Interior) continue;
+    if (!skinVertex(skinned, state.positions, skin, shift, v, out, i * 3))
+      out.fill(NaN, i * 3, i * 3 + 3);
+  }
+  return out;
+}
+
+/**
  * Mesh-local positions of the listed welded vertices exactly as `evaluateWarp` writes them for
  * `state`, without writing a whole mesh. A vertex the warp does not move keeps the bits of
  * `first[v]`, the geometry vertex given for it.

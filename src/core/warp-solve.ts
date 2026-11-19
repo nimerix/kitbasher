@@ -887,6 +887,126 @@ function fitRotations(
   }
 }
 
+const responses = new WeakMap<
+  WarpSystem,
+  { share: Float64Array; guideShare: Float64Array; response: Float64Array }
+>();
+
+/**
+ * How far each node moves, per mm, when the targets move together along one direction with
+ * rotations held: constraint `c` by `share[c]` of that and guide entry `g` by `guideShare[g]`.
+ * The system is the one `solveWarp` builds for these constraints and guides, so it is reused.
+ * Fixed nodes get 0.
+ */
+export function warpResponse(
+  grid: WarpGrid,
+  restNodes: Float64Array,
+  constraints: WarpConstraint[],
+  guides: WarpGuides | undefined,
+  share: ArrayLike<number>,
+  guideShare: ArrayLike<number> = [],
+): Float64Array {
+  const { key } = constraintTerms(constraints, grid, restNodes);
+  const guiding = guideKey(guides);
+  let system = systems.get(grid);
+  if (!system || !sameKey(system.key, key) || !sameKey(system.guideKey, guiding))
+    systems.set(grid, (system = buildSystem(grid, restNodes, key, guiding)));
+  const cached = responses.get(system);
+  if (
+    cached &&
+    sameKey(cached.share, Array.from(share)) &&
+    sameKey(cached.guideShare, Array.from(guideShare))
+  )
+    return cached.response;
+  const { row, rhs, x } = system;
+  rhs.fill(0);
+  x.fill(0);
+  for (let i = 0; i < key.length;) {
+    const length = key[i + 1],
+      strength = key[i + 2];
+    const nodes = i + 3,
+      weights = nodes + length;
+    const s = share[key[i]];
+    if (s)
+      for (let k = 0; k < length; k++) {
+        const r = row[key[nodes + k]];
+        if (r >= 0) rhs[r * 3] += strength * key[weights + k] * s;
+      }
+    i = weights + length;
+  }
+  if (guides)
+    for (let g = 0; g < guideShare.length; g++) {
+      const r = row[guides.node[g]];
+      if (r >= 0) rhs[r * 3] += guides.stiffness[g] * guideShare[g];
+    }
+  conjugateGradient(system);
+  const response = new Float64Array(grid.fixed.length);
+  for (let k = 0; k < system.freeNodes.length; k++) response[system.freeNodes[k]] = x[k * 3];
+  responses.set(system, {
+    share: Float64Array.from(share),
+    guideShare: Float64Array.from(guideShare),
+    response,
+  });
+  return response;
+}
+
+/**
+ * For a node response from `warpResponse` along unit direction `u`, the most the skin map of a free
+ * node beside an `anchored` one loses of its determinant per mm, to first order with rotations
+ * held: the map gains u (Σ_e (r_n − r_j) B e)ᵀ, which turns it inside out once that loss reaches 1.
+ */
+export function responseShrink(
+  grid: WarpGrid,
+  restNodes: Float64Array,
+  response: ArrayLike<number>,
+  u: Vec3,
+  anchored: ArrayLike<number>,
+) {
+  const frame = stretchFrame(grid, restNodes);
+  const { edgeStart, edges } = grid;
+  const { inverse: b, edge } = frame;
+  let worst = 0;
+  for (let n = 0; n < grid.fixed.length; n++) {
+    if (!stretches(grid, frame, n)) continue;
+    let beside = false;
+    for (let e = edgeStart[n]; e < edgeStart[n + 1]; e++) beside ||= !!anchored[edges[e]];
+    if (!beside) continue;
+    let gx = 0,
+      gy = 0,
+      gz = 0;
+    for (let e = edgeStart[n]; e < edgeStart[n + 1]; e++) {
+      const d = response[n] - response[edges[e]];
+      gx += d * edge[e * 3];
+      gy += d * edge[e * 3 + 1];
+      gz += d * edge[e * 3 + 2];
+    }
+    const i = n * 9;
+    const shrink = -(
+      u[0] * (b[i] * gx + b[i + 1] * gy + b[i + 2] * gz) +
+      u[1] * (b[i + 3] * gx + b[i + 4] * gy + b[i + 5] * gz) +
+      u[2] * (b[i + 6] * gx + b[i + 7] * gy + b[i + 8] * gz)
+    );
+    if (shrink > worst) worst = shrink;
+  }
+  return worst;
+}
+
+/** How far a constraint's modelled point moves for a node response from `warpResponse`, per mm. */
+export function modelledResponse(
+  grid: WarpGrid,
+  restNodes: Float64Array,
+  constraint: WarpConstraint,
+  response: ArrayLike<number>,
+) {
+  const { node, weight } = constraint;
+  let sum = 0;
+  for (let k = 0; k < node.length; k++) sum += weight[k];
+  const term = termOf(constraint, grid, restNodes, sum);
+  let moved = 0;
+  term.node.forEach((n, k) => (moved += term.coefficient[k] * response[n]));
+  return moved;
+}
+
 /**
  * Warm-starts from and updates `state`. Returns the largest node move in the last iteration, mm.
  * Several guides on one node add.
