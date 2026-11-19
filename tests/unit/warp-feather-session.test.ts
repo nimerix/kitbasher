@@ -256,4 +256,49 @@ describe('a feathered region painted wider', () => {
     // As close as the carried grid holds painted vertices, rather than the unblended solve.
     expect(worst).toBeLessThan(0.03);
   });
+
+  it('gives every newly painted node the baseline that was written there', async () => {
+    editor().setWarpFeather({ enabled: true, width: 7 });
+    const part = plate();
+    await layOn(part, disc(part.geometry, 8));
+    const old = session().model!;
+    editor().setWarpPointSettings({ radius: 20 }, 'end');
+    editor().addWarpPoint(hit(0.3, 0.2), faceAt(part.geometry, 0.3, 0.2));
+    editor().moveWarpPoints([{ id: session().points[0].id, target: [0.3, 0.2, 2.5] }], 'end');
+    finishWarpSettling();
+    editor().selectWarpPoints([]);
+    editor().setWarpPointSettings({ radius: 6 }, 'end');
+    editor().addWarpPoint(hit(3.1, 1.2), faceAt(part.geometry, 3.1, 1.2));
+    const written = Float64Array.from(session().output!.positions);
+
+    editor().setWarpRegion('painted');
+    useEditor.setState({ warp: { ...session(), faces: disc(part.geometry, 14) } });
+    await editor().layWarpGrid();
+    const model = session().model!;
+    const { baseline } = session().points[1];
+    const first = new Int32Array(old.region.weldedCount).fill(-1);
+    old.region.weldOf.forEach((v, g) => {
+      if (v !== 0xffffffff && first[v] < 0) first[v] = g;
+    });
+    let painted = 0,
+      nearlyPainted = 0,
+      worst = 0;
+    for (let n = 0; n < model.grid.nodes.length; n++) {
+      const v = model.grid.nodes[n];
+      if (!isPaintedNode(model, n) || old.blend![v] === 1 || first[v] < 0) continue;
+      painted++;
+      if (old.blend![v] >= 0.9) nearlyPainted++;
+      // The plate sits at the origin, so its local positions are world positions.
+      worst = Math.max(
+        worst,
+        Math.hypot(
+          ...[0, 1, 2].map((a) => baseline.positions[n * 3 + a] - written[first[v] * 3 + a]),
+        ),
+      );
+    }
+    expect(painted).toBeGreaterThan(40);
+    expect(nearlyPainted).toBeGreaterThan(0);
+    // Single-precision rounding of the written mesh.
+    expect(worst).toBeLessThan(1e-5);
+  });
 });

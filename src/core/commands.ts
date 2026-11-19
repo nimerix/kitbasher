@@ -117,7 +117,7 @@ export function editorCommands(context: CommandContext = {}) {
       () => {
         const target = undoTarget(state);
         if (target === 'stroke') state.undoPaintStroke();
-        else if (target === 'warp') state.undoWarpEdit();
+        else if (target === 'warp') void state.undoWarpEdit();
         else if (target === 'scene') state.undo();
       },
       idle && undoAvailable(state),

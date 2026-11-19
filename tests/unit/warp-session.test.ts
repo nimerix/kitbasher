@@ -2281,7 +2281,7 @@ describe('warp handles', () => {
     expect(warpTasks()).toHaveLength(tasks);
   });
 
-  it('undo after a density change comes back close to each step', async () => {
+  it('a density change is one undo step, and undo restores it and each step before exactly', async () => {
     const a = plate('a', 0, 64);
     setup([a], ['a']);
     await warpDisc(a, 0, 0, 14);
@@ -2291,31 +2291,119 @@ describe('warp handles', () => {
     const q = addAt(a, 2.5, 0.5);
     move(q.id, [2.5, 0.5, -1]);
     const surfaces: number[][] = [];
-    surfaces.push(positionsOf(session().preview!));
+    const record = () => {
+      finishWarpSettling();
+      surfaces.push(positionsOf(session().preview!));
+    };
+    record();
     editor().selectWarpPoints([p.id]);
     editor().setWarpPointSettings({ radius: 8 }, 'end');
-    surfaces.push(positionsOf(session().preview!));
+    record();
     editor().setWarpPointSettings({ falloff: 0.6 }, 'end');
-    surfaces.push(positionsOf(session().preview!));
+    record();
     // Through the overlap.
     move(p.id, [0, 0, 2.5]);
-    const last = positionsOf(session().preview!);
-    const worst = (a: number[], b: number[]) =>
-      Math.max(...a.map((value, i) => Math.abs(value - b[i])));
+    record();
+    const { model, undo, points, gapTargets } = session();
+    const steps = undo.length;
+    const normals = Array.from(session().preview!.getAttribute('normal').array);
 
     await editor().setWarpDensity(4);
-    const errors = [worst(positionsOf(session().preview!), last)];
-    for (let step = surfaces.length - 1; step >= 0; step--) {
-      editor().undoWarpEdit();
-      errors.push(worst(positionsOf(session().preview!), surfaces[step]));
+    expect(session().model).not.toBe(model);
+    expect(session().undo).toHaveLength(steps + 1);
+    // The steps recorded on the old grid no longer hold it, and the step undoing to it names it.
+    const grid = session().undo.at(-1)!.grid!;
+    expect(grid.laid.density).toBe(defaultWarpDensity);
+    for (const step of session().undo) {
+      expect(step.surface!.grid).not.toBe(model!.grid);
+      for (const point of step.points) expect(point.baseline.grid).not.toBe(model!.grid);
     }
-    // Each step comes back as closely as the new grid holds the current surface itself.
-    for (const error of errors) expect(error).toBeLessThan(errors[0] * 1.05 + 0.02);
-    // Largest beside the downward point, whose dip around it is a node spacing wide. The evenly
-    // spaced grids at the two densities place that dip differently: 0.56 to 1.69 mm as the point
-    // shifts by up to 0.6 mm, where the simplifier's grids, on this plate's rows at both densities,
-    // gave 0.50 to 0.89.
-    expect(errors[0]).toBeLessThan(1.4);
+
+    await editor().undoWarpEdit();
+    expect(session()).toMatchObject({ stage: 'warp', density: defaultWarpDensity });
+    expect(session().model).not.toBe(model);
+    expect(session().model!.grid.nodes).toEqual(model!.grid.nodes);
+    expect(session().undo).toHaveLength(steps);
+    expect(
+      session().points.map(({ id, target, radius, falloff }) => [id, target, radius, falloff]),
+    ).toEqual(points.map(({ id, target, radius, falloff }) => [id, target, radius, falloff]));
+    expect(session().gapTargets).toEqual(gapTargets);
+    // Bit for bit as it was written before the change.
+    expect(positionsOf(session().preview!)).toEqual(surfaces.at(-1));
+    expect(Array.from(session().preview!.getAttribute('normal').array)).toEqual(normals);
+    for (let step = surfaces.length - 2; step >= 0; step--) {
+      await editor().undoWarpEdit();
+      expect(positionsOf(session().preview!)).toEqual(surfaces[step]);
+    }
+  });
+
+  it('a density change that would drop a handle is not made, and says why', async () => {
+    for (const feather of [false, true])
+      for (const [x, y] of [
+        [0.97, 0.02],
+        [-0.61, 0.41],
+        [0.56, -0.97],
+      ]) {
+        // A sheet as fine as a scan: on the coarsest grid a 1.5 mm disc's painted edge is all
+        // that is left, so these spots are bound only to fixed nodes there.
+        const a = { ...plate('a'), geometry: new PlaneGeometry(16, 16, 320, 320) };
+        setup([a], ['a']);
+        useEditor.setState({ warpFeather: { enabled: feather, width: feather ? 0.5 : null } });
+        await warpDisc(a, 0, 0, 1.5);
+        const p = addAt(a, x, y);
+        move(p.id, [x, y, 0.3]);
+        finishWarpSettling();
+        const before = session();
+        const surface = positionsOf(before.preview!);
+        useEditor.setState({ toast: null });
+        await editor().setWarpDensity(0);
+        const label = `feather ${feather}, ${x}, ${y}`;
+        expect(session().model, label).toBe(before.model);
+        expect(session().points, label).toBe(before.points);
+        expect(session().undo, label).toBe(before.undo);
+        expect(session(), label).toMatchObject({
+          stage: 'warp',
+          density: defaultWarpDensity,
+          densityChosen: false,
+        });
+        expect(positionsOf(session().preview!), label).toEqual(surface);
+        expect(toast(), label).toBe(
+          'That grid is too coarse for the points on this region, so the density stays as it was.',
+        );
+        editor().cancelWarp();
+      }
+    useEditor.setState({ warpFeather: { enabled: false, width: null } });
+  }, 60_000);
+
+  it('a new region that would leave a moved point on its fixed edge is not laid', async () => {
+    const a = plate('a', 0, 64);
+    setup([a], ['a']);
+    await warpDisc(a, 0, 0, 12);
+    editor().setWarpPointSettings({ radius: 0 }, 'end');
+    const p = addAt(a, 6.1, 0.2);
+    move(p.id, [6.1, 0.2, 1]);
+    const before = session();
+    // A thin strip around the point, so every node it is bound to is on the strip's edge.
+    const strip = Array.from({ length: triangleCount(a.geometry) }, (_, f) => f).filter((f) => {
+      const centre = readFace(a.geometry, f).getMidpoint(new Vector3());
+      return Math.abs(centre.y - 0.2) < 0.4 && centre.x > -8 && centre.x < 8;
+    });
+    expect(strip).toContain(p.samples[0].face);
+    editor().setWarpRegion('painted');
+    useEditor.setState({ toast: null, warp: { ...session(), faces: strip } });
+    await editor().layWarpGrid();
+    expect(session().stage).toBe('region');
+    expect(session().model).toBe(before.model);
+    expect(session().points).toBe(before.points);
+    expect(session().faces).toBe(strip);
+    expect(toast()).toBe(
+      'Points you moved would be held by the edge of the new region, so the grid was not laid. Paint farther around them, or delete them first.',
+    );
+    // Painted back, the grid it had is kept.
+    useEditor.setState({ warp: { ...session(), faces: before.faces } });
+    await editor().layWarpGrid();
+    expect(session().model).toBe(before.model);
+    expect(session().points).toBe(before.points);
   });
 
   it('a rebuild drops points that could only sit on fixed nodes, from undo steps too', async () => {
@@ -2509,7 +2597,9 @@ describe('warp handles that must land', () => {
     expect(warpShortfall(session())).toBeLessThan(0.01);
   });
 
-  it('Apply bakes exactly the surface shown, also while it is still settling', async () => {
+  it('Apply waits for a settling surface and bakes it settled, exactly as then shown', async () => {
+    // Idle settling runs in a browser window.
+    vi.stubGlobal('window', globalThis);
     for (const radius of [0, null]) {
       const a = plate('a', 0, 64);
       setup([a], ['a']);
@@ -2517,14 +2607,90 @@ describe('warp handles that must land', () => {
       await editor().layWarpGrid();
       if (radius !== null) editor().setWarpPointSettings({ radius }, 'end');
       const p = addAt(a, 0.3, 0.2);
+      // The same edit settled to the end, for reference.
+      move(p.id, [0.3, 0.2, 3]);
+      finishWarpSettling();
+      const settled = positionsOf(session().preview!);
+      editor().undoWarpEdit();
       move(p.id, [0.3, 0.2, 3]);
       expect(session().settling).toBe(true);
       const shown = positionsOf(session().preview!);
-      expect(editor().applyWarp()).toBe(true);
-      expect(positionsOf(partOf('a').geometry)).toEqual(shown);
+      // The surface still has some way to go.
+      expect(shown).not.toEqual(settled);
+      const source = partOf('a').geometry;
+      expect(editor().applyWarp()).toBe(false);
+      expect(session().applying).toBe(true);
+      expect(partOf('a').geometry).toBe(source);
+      finishWarpSettling();
+      expect(partOf('a').geometry).not.toBe(source);
+      expect(positionsOf(partOf('a').geometry)).toEqual(settled);
+      expect(session().stage).toBe('region');
+      expect(editor().past).toHaveLength(1);
       editor().cancelWarp();
     }
-  });
+    vi.unstubAllGlobals();
+    // Without a window it settles within Apply, to the same surface.
+    const b = plate('b', 0, 64);
+    setup([b], ['b']);
+    editor().setTool('warp');
+    await editor().layWarpGrid();
+    const q = addAt(b, 0.3, 0.2);
+    move(q.id, [0.3, 0.2, 3]);
+    finishWarpSettling();
+    const settled = positionsOf(session().preview!);
+    editor().undoWarpEdit();
+    move(q.id, [0.3, 0.2, 3]);
+    expect(session().settling).toBe(true);
+    expect(editor().applyWarp()).toBe(true);
+    expect(positionsOf(partOf('b').geometry)).toEqual(settled);
+    editor().cancelWarp();
+    // A settled surface bakes at once, exactly as shown.
+    const a = plate('a', 0, 64);
+    setup([a], ['a']);
+    editor().setTool('warp');
+    await editor().layWarpGrid();
+    move(addAt(a, 0.3, 0.2).id, [0.3, 0.2, 3]);
+    finishWarpSettling();
+    const shown = positionsOf(session().preview!);
+    expect(editor().applyWarp()).toBe(true);
+    expect(positionsOf(partOf('a').geometry)).toEqual(shown);
+  }, 30_000);
+
+  it('an edit, a new grid or Cancel drops an Apply waiting for the surface to settle', async () => {
+    const edits: [string, (id: string) => void | Promise<void>][] = [
+      ['undo', () => editor().undoWarpEdit()],
+      ['drag', (id) => move(id, [0.3, 0.2, 2.5], 'drag')],
+      ['density', () => editor().setWarpDensity(4)],
+      ['cancel', () => editor().cancelWarp()],
+      ['leaving the tool', () => editor().setTool('select')],
+    ];
+    vi.stubGlobal('window', globalThis);
+    for (const [name, edit] of edits) {
+      const a = plate('a', 0, 64);
+      setup([a], ['a']);
+      editor().setTool('warp');
+      await editor().layWarpGrid();
+      const p = addAt(a, 0.3, 0.2);
+      move(p.id, [0.3, 0.2, 3]);
+      expect(session().settling, name).toBe(true);
+      const source = partOf('a').geometry;
+      editor().applyWarp();
+      expect(session().applying, name).toBe(true);
+      await edit(p.id);
+      const warp = editor().warp;
+      if (warp) {
+        expect(warp.applying, name).toBe(false);
+        if (name === 'drag') move(p.id, [0.3, 0.2, 2.5], 'end');
+        finishWarpSettling();
+        expect(editor().warp!.stage, name).toBe('warp');
+      }
+      expect(partOf('a').geometry, name).toBe(source);
+      expect(editor().past, name).toHaveLength(0);
+      editor().cancelWarp();
+      editor().setTool('select');
+    }
+    vi.unstubAllGlobals();
+  }, 30_000);
 
   it('settles a grid until it has converged, so an edit settles only what it changed', async () => {
     const { lift } = await ridden();
@@ -2668,6 +2834,11 @@ describe('line and area handles through a session', () => {
     intact();
     lifted();
     expect(current(handle.id).samples.length).toBeLessThanOrEqual(handle.samples.length);
+    // The density change is a step of its own.
+    await editor().undoWarpEdit();
+    expect(session().density).toBe(defaultWarpDensity);
+    intact();
+    lifted();
     editor().undoWarpEdit();
     expect(current(handle.id).radius).toBe(0);
     intact();
