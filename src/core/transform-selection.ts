@@ -5,7 +5,7 @@ import { hiddenByIsolation } from './isolation';
 import type { TransformPatch } from './free-transform';
 import type { useEditor } from './store';
 import type { Part, Tool, Vec3 } from './types';
-import { untouchedAuto, writtenCentre } from './warp-handles';
+import { shownDetail, untouchedAuto, writtenCentre } from './warp-handles';
 
 type EditorState = ReturnType<typeof useEditor.getState>;
 type TransformState = Pick<
@@ -48,7 +48,7 @@ function pointSelection(state: TransformState) {
       position:
         point.target ??
         (untouchedAuto(point) && warp.model && warp.state
-          ? writtenCentre(warp.model, warp.state, point)
+          ? writtenCentre(warp.model, warp.state, point, shownDetail(warp.output))
           : point.pin),
       quaternion: [0, 0, 0, 1],
       scale: [1, 1, 1],

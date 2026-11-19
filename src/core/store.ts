@@ -103,16 +103,21 @@ import {
   heldWhereItIs,
   nodeSample,
   reachHandle,
+  showDetail,
+  shownDetail as shownOutputDetail,
   snapshotOf,
   spacingAt,
   transferSnapshot,
   uniqueSamples,
   untouchedAuto,
+  warpDetail,
   warpEligibleNodes,
   warpGuides,
   warpPinHold,
   warpPriorityStrength,
   writtenCentre,
+  writtenSample,
+  type WarpDetail,
   type WarpHandle,
   type WarpSample,
   type WarpSnapshot,
@@ -919,7 +924,7 @@ export function warpShortfall(warp: WarpSession) {
   let worst = 0;
   for (const point of warp.points)
     if (point.target && warp.selectedPoints.includes(point.id)) {
-      const at = writtenCentre(model, state, point);
+      const at = writtenCentre(model, state, point, shownDetail(warp));
       worst = Math.max(
         worst,
         Math.hypot(at[0] - point.target[0], at[1] - point.target[1], at[2] - point.target[2]),
@@ -940,7 +945,7 @@ export function warpPinDrift(warp: WarpSession) {
   let worst = 0;
   for (const point of warp.points)
     if (point.target === null && !point.auto && warp.selectedPoints.includes(point.id)) {
-      const at = writtenCentre(model, state, point);
+      const at = writtenCentre(model, state, point, shownDetail(warp));
       worst = Math.max(
         worst,
         Math.hypot(at[0] - point.pin[0], at[1] - point.pin[1], at[2] - point.pin[2]),
@@ -973,7 +978,7 @@ export function warpShortfallCause(warp: WarpSession): 'pin' | 'edge' | 'gap' | 
     far = 0;
   for (const point of warp.points)
     if (point.target && warp.selectedPoints.includes(point.id)) {
-      const at = writtenCentre(model, state, point);
+      const at = writtenCentre(model, state, point, shownDetail(warp));
       const d = Math.hypot(...at.map((value, a) => value - point.target![a]));
       if (d > far) [worst, far] = [point, d];
     }
@@ -1008,7 +1013,7 @@ export function warpPinDriftCause(warp: WarpSession): 'gap' | 'moved' {
     far = 0;
   for (const point of warp.points)
     if (point.target === null && !point.auto && warp.selectedPoints.includes(point.id)) {
-      const at = writtenCentre(model, state, point);
+      const at = writtenCentre(model, state, point, shownDetail(warp));
       const d = Math.hypot(...at.map((value, a) => value - point.pin[a]));
       if (d > far) [worst, far] = [point, d];
     }
@@ -1058,6 +1063,7 @@ function warpConstraints(
   { model, points, gapTargets }: WarpSolveInput,
   guides: WarpGuides | undefined,
   carry?: ReadonlyMap<WarpPoint, number>,
+  detail?: WarpDetail,
 ): WarpConstraint[] {
   const rest = model!.restNodes;
   return [
@@ -1067,6 +1073,7 @@ function warpConstraints(
       guides,
       gapTargets.map(({ node }) => node),
       carry,
+      detail,
     ),
     // A seam closes as exactly as a point the user moved lands.
     ...gapTargets.map(({ node, target }) => ({
@@ -1092,6 +1099,36 @@ const sessionGuides = ({ model, points, gapTargets }: WarpSolveInput) =>
  * back carrying only the share of its offset it can. A drag frame solves without priority.
  */
 function warpSolveInput(warp: WarpSolveInput, drag = false) {
+  const last = lastSolveInput;
+  if (
+    last &&
+    last.model === warp.model &&
+    last.points === warp.points &&
+    last.gapTargets === warp.gapTargets &&
+    last.drag === drag
+  )
+    return last.input;
+  const input = solveInputOf(warp, drag);
+  lastSolveInput = {
+    model: warp.model,
+    points: warp.points,
+    gapTargets: warp.gapTargets,
+    drag,
+    input,
+  };
+  return input;
+}
+
+// The last solve input, which the preview reads again for the same points.
+let lastSolveInput: {
+  model: WarpSolveInput['model'];
+  points: WarpSolveInput['points'];
+  gapTargets: WarpSolveInput['gapTargets'];
+  drag: boolean;
+  input: ReturnType<typeof solveInputOf>;
+} | null = null;
+
+function solveInputOf(warp: WarpSolveInput, drag: boolean) {
   const exact = warp.gapTargets.map(({ node }) => node);
   const plain = (constraints: WarpConstraint[]) =>
     drag
@@ -1100,11 +1137,11 @@ function warpSolveInput(warp: WarpSolveInput, drag = false) {
   let guides = sessionGuides(warp);
   let constraints = plain(warpConstraints(warp, guides));
   const carry = handleCarry(warp.model!, warp.points, constraints, guides, exact);
-  if (carry.size) {
-    guides = warpGuides(warp.model!, warp.points, exact, carry);
-    constraints = plain(warpConstraints(warp, guides, carry));
-  }
-  return { guides, constraints };
+  if (carry.size) guides = warpGuides(warp.model!, warp.points, exact, carry);
+  // What the moved handles bend between grid nodes, written over what the nodes carry.
+  const detail = warpDetail(warp.model!, warp.points, exact, carry);
+  if (carry.size || detail) constraints = plain(warpConstraints(warp, guides, carry, detail));
+  return { guides, constraints, detail };
 }
 
 /** World box around the grid as it is now deformed. */
@@ -1173,12 +1210,12 @@ function noticePreparing(warp: WarpSession, indexing: string[]) {
 }
 
 /** Deforms the preview from the solved grid, and returns the region triangles that folded. */
-function deformWarpPreview(
-  { model, state, output, preview, source }: WarpSession,
-  gesture: 'drag' | 'end',
-) {
+function deformWarpPreview(warp: WarpSession, gesture: 'drag' | 'end') {
+  const { model, state, output, preview, source } = warp;
+  const { detail } = warpSolveInput(warp, gesture === 'drag');
+  showDetail(output!, detail);
   // A drag frame leaves folds to the end of the gesture.
-  const folds = evaluateWarp(model!, state!, output!, gesture === 'end');
+  const folds = evaluateWarp(model!, state!, output!, gesture === 'end', detail);
   const ranges = warpUpdateRanges(model!);
   uploadRanges(preview!.getAttribute('position') as BufferAttribute, ranges.positions);
   const normal = preview!.getAttribute('normal') as BufferAttribute | undefined;
@@ -1194,6 +1231,9 @@ function deformWarpPreview(
   return folds;
 }
 const movedCorner = new Vector3();
+
+/** The detail the session's surface is shown with: what a point made on it sits on. */
+const shownDetail = (warp: Pick<WarpSession, 'output'>) => shownOutputDetail(warp.output);
 
 /** Sends only the given parts of an attribute to the GPU on its next upload. */
 function uploadRanges(attribute: BufferAttribute, ranges: Uint32Array) {
@@ -1360,6 +1400,17 @@ function stepWarpSettle(budget: number) {
   return true;
 }
 
+/**
+ * Where the session's surface is written at a sample, world: what its grid carries there, and
+ * the detail the moved handles bend between nodes.
+ */
+export function writtenWarpSample(
+  sample: Pick<WarpSample, 'face' | 'barycentric' | 'binding' | 'restWorld'>,
+) {
+  const { warp } = useEditor.getState();
+  return writtenSample(warp!.model!, warp!.state!, sample, shownDetail(warp!));
+}
+
 /** Settles the session's grid until it converges, without waiting for idle frames. */
 export function finishWarpSettling() {
   while (stepWarpSettle(Infinity));
@@ -1367,6 +1418,7 @@ export function finishWarpSettling() {
 
 /** Puts the source's positions and normals back into the preview. */
 function restWarpPreview({ model, output, preview, source }: WarpSession) {
+  showDetail(output!, undefined);
   output!.positions.set(model!.positions);
   if (output!.normals && model!.normals) output!.normals.set(model!.normals);
   output!.moved.set([Infinity, Infinity, Infinity, -Infinity, -Infinity, -Infinity]);
@@ -2496,13 +2548,14 @@ export const useEditor = create<EditorState>((set, get) => ({
       state.notify('This spot is fixed. Click farther inside the warp region.', 'info');
       return;
     }
-    const sample: WarpSample = {
-      face,
-      barycentric,
-      binding,
-      restWorld,
-      pin: deformPoint(model, warp.state!, binding, restWorld),
-    };
+    // Where the surface is written, so holding it there changes nothing.
+    const pin = writtenSample(
+      model,
+      warp.state!,
+      { face, barycentric, binding, restWorld },
+      shownDetail(warp),
+    );
+    const sample: WarpSample = { face, barycentric, binding, restWorld, pin };
     const part = state.scene.parts.find((p) => p.id === warp.partId);
     const eligible = warpEligibleNodes(model);
     const spacing = spacingAt(
@@ -2540,8 +2593,8 @@ export const useEditor = create<EditorState>((set, get) => ({
       return false;
     const made =
       stroke.kind === 'line'
-        ? lineSamples(model, warp.state, stroke.points)
-        : areaSamples(model, warp.state, stroke.faces, stroke.first);
+        ? lineSamples(model, warp.state, stroke.points, shownDetail(warp))
+        : areaSamples(model, warp.state, stroke.faces, stroke.first, shownDetail(warp));
     if (!made || (stroke.kind === 'line' && made.samples.length < 2)) {
       state.notify(
         stroke.kind === 'line'
@@ -2656,7 +2709,7 @@ export const useEditor = create<EditorState>((set, get) => ({
       // An automatic point the guides have carried is taken where it is now. A point with no
       // guides of its own starts its first move from the surface as it is.
       const from = untouchedAuto(point)
-        ? heldWhereItIs(model, surface, point, surface)
+        ? heldWhereItIs(model, surface, point, surface, shownDetail(warp))
         : point.target === null && !handleGuides(point)
           ? { ...point, baseline: surface }
           : point;
@@ -4251,12 +4304,19 @@ async function layWarp(from: WarpSettled, kind: 'region' | 'density' | WarpGridS
   // Each settled grid the session keeps is carried to the new grid once, so every version of a
   // handle and every undo step goes on sharing it.
   const carried = new Map<WarpSnapshot, WarpSnapshot>();
+  // The surface shown was written with the detail the points bend between nodes, so it goes too.
+  const written = old && current.surface?.grid === old.grid ? shownDetail(current) : undefined;
   const carry = (snapshot: WarpSnapshot) => {
     let next = carried.get(snapshot);
     if (!next) {
       next =
         old && snapshot.grid === old.grid
-          ? transferSnapshot(old, snapshot, model)
+          ? transferSnapshot(
+              old,
+              snapshot,
+              model,
+              snapshot === current.surface ? written : undefined,
+            )
           : { ...snapshotOf(model.grid, createWarpState(model.restNodes)), settled: false };
       carried.set(snapshot, next);
     }

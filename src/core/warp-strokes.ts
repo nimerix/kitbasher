@@ -1,8 +1,14 @@
 import { Triangle, Vector3 } from 'three';
 import type { Vec3 } from './types';
 import { bindTrianglePoint } from './warp-bind';
-import { deformPoint } from './warp-evaluate';
-import { spacingAt, warpEligibleNodes, type WarpHandle, type WarpSample } from './warp-handles';
+import {
+  spacingAt,
+  warpEligibleNodes,
+  writtenSample,
+  type WarpDetail,
+  type WarpHandle,
+  type WarpSample,
+} from './warp-handles';
 import { isPaintedFace, type WarpModel } from './warp-model';
 import { regionTriangleOf } from './warp-region';
 import type { WarpState } from './warp-solve';
@@ -62,6 +68,7 @@ export function strokeSample(
   model: WarpModel,
   state: Pick<WarpState, 'positions' | 'rotations'>,
   { face, barycentric }: WarpStrokePoint,
+  detail?: WarpDetail,
 ): WarpSample | null {
   if (!isPaintedFace(model, face)) return null;
   const triangle = regionTriangleOf(model.region, face);
@@ -84,7 +91,12 @@ export function strokeSample(
     barycentric,
     binding,
     restWorld,
-    pin: deformPoint(model, state as WarpState, binding, restWorld),
+    pin: writtenSample(
+      model,
+      state as WarpState,
+      { face, barycentric, binding, restWorld },
+      detail,
+    ),
   };
 }
 
@@ -156,8 +168,9 @@ export function lineSamples(
   model: WarpModel,
   state: Pick<WarpState, 'positions' | 'rotations'>,
   points: readonly WarpStrokePoint[],
+  detail?: WarpDetail,
 ): { samples: WarpSample[]; pin: Vec3; length: number } | null {
-  const hits = points.flatMap((point) => strokeSample(model, state, point) ?? []);
+  const hits = points.flatMap((point) => strokeSample(model, state, point, detail) ?? []);
   if (!hits.length) return null;
   const along = [0];
   for (let i = 1; i < hits.length; i++)
@@ -376,8 +389,9 @@ export function areaSamples(
   state: Pick<WarpState, 'positions' | 'rotations'>,
   faces: readonly number[],
   first: WarpStrokePoint,
+  detail?: WarpDetail,
 ): { samples: WarpSample[]; pin: Vec3 } | null {
-  const start = strokeSample(model, state, first);
+  const start = strokeSample(model, state, first, detail);
   const painted = faces.filter((face) => isPaintedFace(model, face));
   if (!painted.length) return null;
   const rest = (point: WarpStrokePoint) => {
@@ -420,7 +434,7 @@ export function areaSamples(
   // Spaced by the grid at the first spot that can hold; none can where fixed nodes alone bind it.
   let spaced = start;
   for (let i = 0; !spaced && i < candidates.length; i++)
-    spaced = strokeSample(model, state, candidates[i]);
+    spaced = strokeSample(model, state, candidates[i], detail);
   if (!spaced) return null;
   const apart = warpLineStep * sampleSpacing(model, spaced);
   const near = new Float64Array(candidates.length).fill(Infinity);
@@ -436,7 +450,7 @@ export function areaSamples(
     for (let i = 0; i < near.length; i++)
       if (near[i] > 0 && (best < 0 || near[i] > near[best])) best = i;
     if (best < 0 || (chosen.length >= warpAreaSamples.min && near[best] < apart)) break;
-    const sample = strokeSample(model, state, candidates[best]);
+    const sample = strokeSample(model, state, candidates[best], detail);
     if (sample) take(sample);
     else near[best] = 0;
   }
@@ -444,7 +458,7 @@ export function areaSamples(
   let middle = -1;
   for (let i = 0; i < candidates.length; i++)
     if (middle < 0 || distance(at[i], centroid) < distance(at[middle], centroid)) middle = i;
-  const pin = strokeSample(model, state, candidates[middle])?.pin ?? chosen[0].pin;
+  const pin = strokeSample(model, state, candidates[middle], detail)?.pin ?? chosen[0].pin;
   return { samples: chosen, pin };
 }
 

@@ -1,4 +1,5 @@
 import type { Vec3 } from './types';
+import type { WarpDetail } from './warp-handles';
 import type { WarpModel } from './warp-model';
 import { WarpRole } from './warp-region';
 import {
@@ -262,27 +263,31 @@ export function writtenLocalPositions(
 }
 
 /**
- * Writes interior vertices and their normals, touching only the region. A feathered model blends
- * once, in the welded world buffer, and everything else reads that. Returns the region
- * triangles whose world normal flipped, or null when `folds` is false, as for a drag frame.
+ * Writes interior vertices and their normals, touching only the region. `detail`, from
+ * `warpDetail`, adds the handles' bend between grid nodes to the skinned surface. A feathered
+ * model blends once, in the welded world buffer, and everything else reads that. Returns the
+ * region triangles whose world normal flipped, or null when `folds` is false, as for a drag frame.
  */
 export function evaluateWarp(
   model: WarpModel,
   state: WarpState,
   out: WarpOutput,
   folds?: true,
+  detail?: WarpDetail,
 ): Uint32Array;
 export function evaluateWarp(
   model: WarpModel,
   state: WarpState,
   out: WarpOutput,
   folds: boolean,
+  detail?: WarpDetail,
 ): Uint32Array | null;
 export function evaluateWarp(
   model: WarpModel,
   state: WarpState,
   out: WarpOutput,
   folds = true,
+  detail?: WarpDetail,
 ): Uint32Array | null {
   const { region } = model;
   const { weldOf, interior, interiorVertices } = region;
@@ -296,6 +301,16 @@ export function evaluateWarp(
   for (let i = 0; i < interior.length; i++) {
     const v = interior[i];
     moved[v] = skinVertex(skin, nodePos, maps, shift, v, world, v * 3) ? 1 : 0;
+  }
+  if (detail) {
+    const { vertices, delta } = detail;
+    for (let i = 0; i < vertices.length; i++) {
+      const v = vertices[i];
+      if (!moved[v]) continue;
+      world[v * 3] += delta[i * 3];
+      world[v * 3 + 1] += delta[i * 3 + 1];
+      world[v * 3 + 2] += delta[i * 3 + 2];
+    }
   }
   // The feather band writes part of the displacement: rest + b × (skinned − rest).
   if (blend) {

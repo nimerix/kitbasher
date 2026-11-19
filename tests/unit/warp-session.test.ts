@@ -25,6 +25,7 @@ import { spatialIndexOptions, workerIndexTriangles } from '../../src/core/spatia
 import {
   finishWarpDrag,
   finishWarpSettling,
+  writtenWarpSample,
   isWarpDragging,
   useEditor,
   warpChanges,
@@ -200,13 +201,8 @@ const middleAuto = () =>
 const beside = (point: WarpPoint) => [point.pin[0] + 1.2, point.pin[1] - 0.15] as const;
 
 /** Where a point sits on the solved warp, in world space. */
-const deformed = (point: WarpPoint) =>
-  deformPoint(
-    session().model!,
-    session().state!,
-    point.samples[0].binding,
-    point.samples[0].restWorld,
-  );
+/** Where the surface is written at the point's first sample. */
+const deformed = (point: WarpPoint) => writtenWarpSample(point.samples[0]);
 
 const distance = (a: ArrayLike<number>, b: ArrayLike<number>) =>
   Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]);
