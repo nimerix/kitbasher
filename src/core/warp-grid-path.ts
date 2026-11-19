@@ -22,6 +22,8 @@ export interface WarpGridPath {
   along: Float32Array;
   /** World rest length of each grid edge. */
   length: Float32Array;
+  /** 1 for each edge along the grid's outline: its fixed border or the part's open edge. */
+  outline: Uint8Array;
   /** The geometry vertex holding each node's written position; null until traced. */
   nodeVertex: Uint32Array | null;
   /** Per edge, two geometry vertices whose normals the line takes at its nodes; null until traced. */
@@ -134,27 +136,159 @@ export function warpGridEvenPoints(
   }
 }
 
-/** The grid's edges as straight chords: what is drawn until a path is traced. */
-export function warpGridChords(model: WarpModel): WarpGridPath {
-  const { edgeStart, edges } = model.grid;
-  let count = 0;
-  for (let n = 0; n + 1 < edgeStart.length; n++)
-    for (let k = edgeStart[n]; k < edgeStart[n + 1]; k++) if (edges[k] > n) count++;
-  const ends = new Uint32Array(count * 2),
-    length = new Float32Array(count);
+/**
+ * Lines a node inside the grid draws to its outline at most, and the least angle between any two
+ * of its lines for one more to be drawn.
+ */
+export const warpGridRimLimits = { lines: 4, apart: (40 * Math.PI) / 180 };
+
+/**
+ * The grid edges drawn, as node pairs, and which lie along its outline. The grid keeps every
+ * vertex of its fixed border and of the part's open edge, so where its inside is sparse against
+ * them, a node inside would draw a fan of lines out to dozens of them. Edges between nodes inside,
+ * and along the outline, are all drawn; from each node inside, only a few to the outline, each as
+ * far as can be from its other lines, shortest first; edges across the inside between two outline
+ * nodes, none.
+ */
+export function warpGridDrawnEdges(model: WarpModel, limits = warpGridRimLimits) {
+  const { edgeStart, edges, triangles, fixed } = model.grid;
   const rest = model.restNodes;
-  for (let n = 0, e = 0; n + 1 < edgeStart.length; n++)
+  const nodeCount = edgeStart.length - 1;
+  // Grid triangles at each edge, to find the outline: edges of one triangle.
+  const at = (n: number, m: number) => {
+    for (let k = edgeStart[n]; k < edgeStart[n + 1]; k++) if (edges[k] === m) return k;
+    return -1;
+  };
+  const faces = new Uint8Array(edges.length);
+  const normal = new Float64Array(nodeCount * 3);
+  for (let t = 0; t < triangles.length; t += 3) {
+    const a = triangles[t],
+      b = triangles[t + 1],
+      c = triangles[t + 2];
+    for (const [n, m] of [
+      [a, b],
+      [b, c],
+      [c, a],
+    ]) {
+      for (const k of [at(n, m), at(m, n)]) if (k >= 0 && faces[k] < 255) faces[k]++;
+    }
+    const ux = rest[b * 3] - rest[a * 3],
+      uy = rest[b * 3 + 1] - rest[a * 3 + 1],
+      uz = rest[b * 3 + 2] - rest[a * 3 + 2],
+      vx = rest[c * 3] - rest[a * 3],
+      vy = rest[c * 3 + 1] - rest[a * 3 + 1],
+      vz = rest[c * 3 + 2] - rest[a * 3 + 2];
+    const x = uy * vz - uz * vy,
+      y = uz * vx - ux * vz,
+      z = ux * vy - uy * vx;
+    for (const n of [a, b, c]) {
+      normal[n * 3] += x;
+      normal[n * 3 + 1] += y;
+      normal[n * 3 + 2] += z;
+    }
+  }
+  const rim = new Uint8Array(nodeCount);
+  for (let n = 0; n < nodeCount; n++) {
+    if (fixed[n]) rim[n] = 1;
+    for (let k = edgeStart[n]; k < edgeStart[n + 1]; k++)
+      if (faces[k] === 1) rim[n] = rim[edges[k]] = 1;
+  }
+  const length = (n: number, m: number) =>
+    Math.hypot(
+      rest[m * 3] - rest[n * 3],
+      rest[m * 3 + 1] - rest[n * 3 + 1],
+      rest[m * 3 + 2] - rest[n * 3 + 2],
+    );
+  // Per node inside, the outline nodes it draws a line to.
+  const chosen = new Set<number>();
+  const angles: number[] = [],
+    candidates: { m: number; angle: number; length: number }[] = [];
+  const turn = (a: number, b: number) => {
+    const d = Math.abs(a - b) % (2 * Math.PI);
+    return Math.min(d, 2 * Math.PI - d);
+  };
+  for (let n = 0; n < nodeCount; n++) {
+    if (rim[n]) continue;
+    angles.length = candidates.length = 0;
+    // Directions in the plane across the node's normal.
+    let nx = normal[n * 3],
+      ny = normal[n * 3 + 1],
+      nz = normal[n * 3 + 2];
+    const l = Math.hypot(nx, ny, nz) || 1;
+    nx /= l;
+    ny /= l;
+    nz /= l;
+    const ax = Math.abs(nx) < 0.9 ? 1 : 0,
+      ay = ax ? 0 : 1;
+    let ux = ay * nz,
+      uy = -ax * nz,
+      uz = ax * ny - ay * nx;
+    const lu = Math.hypot(ux, uy, uz) || 1;
+    ux /= lu;
+    uy /= lu;
+    uz /= lu;
+    const vx = ny * uz - nz * uy,
+      vy = nz * ux - nx * uz,
+      vz = nx * uy - ny * ux;
+    for (let k = edgeStart[n]; k < edgeStart[n + 1]; k++) {
+      const m = edges[k];
+      const dx = rest[m * 3] - rest[n * 3],
+        dy = rest[m * 3 + 1] - rest[n * 3 + 1],
+        dz = rest[m * 3 + 2] - rest[n * 3 + 2];
+      const angle = Math.atan2(dx * vx + dy * vy + dz * vz, dx * ux + dy * uy + dz * uz);
+      if (rim[m]) candidates.push({ m, angle, length: length(n, m) });
+      else angles.push(angle);
+    }
+    candidates.sort((p, q) => p.length - q.length);
+    for (let drawn = 0; drawn < limits.lines; drawn++) {
+      let best = -1,
+        widest = -1;
+      for (let c = 0; c < candidates.length; c++) {
+        if (candidates[c].m < 0) continue;
+        let least = Infinity;
+        for (const angle of angles) least = Math.min(least, turn(angle, candidates[c].angle));
+        if (least > widest) {
+          widest = least;
+          best = c;
+        }
+      }
+      if (best < 0 || widest < limits.apart) break;
+      angles.push(candidates[best].angle);
+      chosen.add(n * nodeCount + candidates[best].m);
+      candidates[best].m = -1;
+    }
+  }
+  const pairs: number[] = [],
+    outline: number[] = [];
+  for (let n = 0; n < nodeCount; n++)
     for (let k = edgeStart[n]; k < edgeStart[n + 1]; k++) {
       const m = edges[k];
       if (m <= n) continue;
-      ends[e * 2] = n;
-      ends[e * 2 + 1] = m;
-      length[e++] = Math.hypot(
-        rest[m * 3] - rest[n * 3],
-        rest[m * 3 + 1] - rest[n * 3 + 1],
-        rest[m * 3 + 2] - rest[n * 3 + 2],
-      );
+      const along = faces[k] === 1;
+      if (rim[n] && rim[m] && !along) continue;
+      if (rim[n] !== rim[m] && !chosen.has(rim[n] ? m * nodeCount + n : n * nodeCount + m))
+        continue;
+      pairs.push(n, m);
+      outline.push(along ? 1 : 0);
     }
+  return { ends: Uint32Array.from(pairs), outline: Uint8Array.from(outline) };
+}
+
+/** The grid's drawn edges as straight chords: what is drawn until a path is traced. */
+export function warpGridChords(model: WarpModel): WarpGridPath {
+  const { ends, outline } = warpGridDrawnEdges(model);
+  const count = outline.length;
+  const length = new Float32Array(count);
+  const rest = model.restNodes;
+  for (let e = 0; e < count; e++) {
+    const n = ends[e * 2],
+      m = ends[e * 2 + 1];
+    length[e] = Math.hypot(
+      rest[m * 3] - rest[n * 3],
+      rest[m * 3 + 1] - rest[n * 3 + 1],
+      rest[m * 3 + 2] - rest[n * 3 + 2],
+    );
+  }
   return {
     ends,
     start: new Uint32Array(count + 1),
@@ -163,6 +297,7 @@ export function warpGridChords(model: WarpModel): WarpGridPath {
     t: new Float32Array(0),
     along: new Float32Array(0),
     length,
+    outline,
     nodeVertex: null,
     endVertex: null,
     crossings: null,
@@ -260,7 +395,7 @@ export function* traceWarpGridPath(
   limits = warpGridPathLimits,
 ): Generator<void, WarpGridPath> {
   const chords = warpGridChords(model);
-  const { ends, length } = chords;
+  const { ends, length, outline } = chords;
   const { region, grid, restWorld: p, index } = model;
   const { weldOf, weldedCount, triangles, faces, adjacencyStart, adjacency } = region;
   const slice = 1 << 16;
@@ -666,6 +801,7 @@ export function* traceWarpGridPath(
   for (let i = 0; i < edgeCount; i++) drawnCount += drawn[i];
   const outEnds = new Uint32Array(drawnCount * 2),
     outLength = new Float32Array(drawnCount),
+    outOutline = new Uint8Array(drawnCount),
     outEndVertex = new Uint32Array(drawnCount * 2),
     start = new Uint32Array(drawnCount + 1);
   const crossings: WarpGridCrossings = {
@@ -688,6 +824,7 @@ export function* traceWarpGridPath(
     outEndVertex[d * 2] = endVertex[e * 2];
     outEndVertex[d * 2 + 1] = endVertex[e * 2 + 1];
     outLength[d] = length[e];
+    outOutline[d] = outline[e];
     start[++d] = kept.size;
   }
   const nodeVertex = new Uint32Array(nodeCount);
@@ -700,6 +837,7 @@ export function* traceWarpGridPath(
     t: kept.t.slice(0, kept.size),
     along: kept.along.slice(0, kept.size),
     length: outLength,
+    outline: outOutline,
     nodeVertex,
     endVertex: outEndVertex,
     crossings,
@@ -854,6 +992,15 @@ export function typicalLength(lengths: ArrayLike<number>) {
 }
 
 /**
+ * A path's typical cell: the middle of its edges' lengths, leaving out its outline, which keeps
+ * every border vertex and so runs at the mesh's own resolution.
+ */
+export function warpGridCell(path: Pick<WarpGridPath, 'length' | 'outline'>) {
+  const inside = path.length.filter((_, e) => !path.outline[e]);
+  return typicalLength(inside.length ? inside : path.length);
+}
+
+/**
  * Per drawn edge, the coarsest level whose net holds it: 0 for the grid alone. Level k picks
  * nodes of level k - 1's net about 2^k typical edges apart along it, gives each of its nodes to
  * the nearest, and joins each two whose shares meet by the shortest way along it through the two.
@@ -879,7 +1026,7 @@ export function warpGridLevels(
     incident[fill[ends[e * 2]]++] = e;
     incident[fill[ends[e * 2 + 1]]++] = e;
   }
-  const cell = typicalLength(length);
+  const cell = warpGridCell(path);
   const distance = new Float64Array(nodeCount),
     near = new Float64Array(nodeCount),
     owner = new Int32Array(nodeCount),

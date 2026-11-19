@@ -91,20 +91,39 @@ again remembers how far it bent the line; a view leaves out those that bend it b
 its smallest pixel on the grid, and never by more than 0.0375 mm, so a chord never dips under
 the pull toward the camera. Evenly spaced points always show.
 
+Not every grid edge is drawn. The grid keeps every vertex of a fixed border, and of a whole
+part's open edge, so where its inside is sparse against them (on a painted region of a dense scan,
+726 of 867 nodes on the torso; on an open 80 × 80 plate at the coarsest density, 320 of 321) a
+node inside would send a fan of lines to dozens of them. Edges between nodes inside and edges along
+the outline are all drawn. From each node inside, lines to the outline are chosen shortest first,
+each as far in angle as can be from the node's other lines, at most four and none closer than 40°
+to another; edges across the inside between two outline nodes are not drawn. The solve and the
+model keep every edge. The grid's typical cell, which scales line weight, leaves out the outline,
+whose edges run at the mesh's own resolution.
+
 Coarser nets of the grid's own edges keep a readable grid when its cells are too small to show:
 level k picks nodes of the net below about 2^k typical edges apart along it and joins each two
 whose shares of it meet by the shortest way along it, up to three levels. Each comes in over an
-octave of its own cells as the net below it goes, its core from 10 to 20 px and its casing, which
-shows only on dark parts, from 24 to 48 px; the first net's core comes in only as the grid's own
-is nearly gone, so on a light part the grid covers no more than it does at default density. Edges
-are drawn coarsest first, and each draw leaves out the levels whose largest cell is too small on
-screen for it to show.
+octave of its own cells, from 10 to 20 px, as the net below it goes, core and casing alike. An edge
+of two nets shows with the sum of their strengths, so it stays whole as one hands over to the
+next and the grid never dims as it zooms. A net's cells count as half their size for ink: its
+lines wind along the grid, so lie closer than a triangle grid's of the same cells. Edges are drawn
+coarsest first, and each draw leaves out the levels whose largest cell is too small on screen for
+it to show.
 
 Edges are drawn as screen-space quads (`WarpGrid.tsx`) in two draws over one instanced
-geometry: an opaque dark core 1.5 px wide, and a light casing 4 px wide drawn first with MAX
-blending, so it lifts only what is darker than itself and leaves light and mid colours alone.
-The core is full while cells are 13 px or more on screen (shrunk as the surface turns away),
-then thins to 1 px and fades out by 6 px; the casing fades out between 22 and 12 px cells.
+geometry: a dark core, and a light casing drawn first with MAX blending, so it lifts only what is
+darker than itself and leaves light and mid colours alone. Each line carries ink in proportion to
+its cell's size on screen, so the grid puts about the same ink on the part at any density or zoom:
+at cells of 40 px or more the core is 1.5 px and opaque and the casing 4 px, as dark and crisp as
+they ever were; below that the core's opacity falls as the 1.5 power of the cell's size over 40 px
+(blending in sRGB darkens faster than opacity grows, so this keeps the luminance ink about in
+proportion) and the casing's in proportion to it, the core thinning to 1 px and the casing to
+2.5 px below half strength. A shown line never falls below an opacity of 0.25 for the core or 0.35
+for the casing, so a dense grid stays visible rather than vanishing. The cell's size is measured
+as foreshortened where the surface turns away, down to half, so crowded lines on a slope stay
+light without the grid going patchy. A grid's own core fades out between 11 and 5 px cells by the
+fully foreshortened cell, and its casing between 12 and 6 px by the cell facing the camera.
 Each corner's depth is where its view ray meets the surface's tangent plane at the line, then
 nearer by at most a pixel or 0.05 mm, and never more than halfway to the near plane, so any
 opaque surface 0.2 mm or more in front hides the line in either projection at working
@@ -121,15 +140,23 @@ shows on a slope while a surface 0.2 mm or more in front hides it, or the part o
 covers, at working distance. While Interference inspection draws the part see-through, the grid
 is hidden.
 
-Acceptance: at about 300 px across at default density, no more than about a third of the
-part's pixels change by more than 1.5:1; the core's centre reaches 3:1 over the first 24
-Distinct colours and white at that zoom and close up, from two directions; the line reaches
-3:1 on a near-black part; at least 90 % of front-facing grid length is visible on the curved
-part; the far side, the other sheet of a thin shell and anything 0.2 mm or more behind an
-opaque surface do not show through at working distance; the grid stays on the written surface before and after
+Acceptance: the grid reads as a light overlay with the model the subject. With a part about 500 px
+across at the whole-part default of 2,000 nodes, and about 300 px across at 500, 2,000 and 4,000
+nodes, it changes by more than 1.5:1 less than 16 % of the part's pixels on any Distinct colour,
+the editor's default and white, and less than 20 % on a near-black part (on the torso and Tomb
+Crawler scans, 33 % and 31 % before, 13 % after). Its visibility floor: at 500, 2,000 and 4,000
+nodes from about 500 px across to 200, on every Distinct colour and a near-black part, it changes
+by more than 1.2:1 more than 8 % of the part's pixels (the old 1 px chords managed 0.2 to 1.6 %).
+Where cells are 40 px or more on screen, the core's centre reaches 3:1 over the first 24 Distinct
+colours and white from two directions and in an orthographic view, and the line reaches 3:1 on a
+near-black part and in every lighting preset. No node inside the outline draws more than four
+lines to it; the open plate at the coarsest density, its centre pulled, changes under 5 % of its
+pixels (40 % before). At least 90 % of front-facing grid length is visible on the curved part; the
+far side, the other sheet of a thin shell and anything 0.2 mm or more behind an opaque surface do
+not show through at working distance; the grid stays on the written surface before and after
 deformation, no drawn point more than 0.1 mm off it on a coarse grid over a fine mesh from the
-first surface written after a pull, and no line moving once it is released; at the
-highest density a coarser net still shows as the part is zoomed out, without a sudden change.
+first surface written after a pull, and no line moving once it is released; at the highest
+density a coarser net still shows as the part is zoomed out, without a sudden change.
 
 ### 2. Brush size fitted to the part
 
