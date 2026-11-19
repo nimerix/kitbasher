@@ -670,6 +670,131 @@ function relax(
   return settled;
 }
 
+const incidentTriangles = new WeakMap<WarpGrid, { start: Uint32Array; triangle: Uint32Array }>();
+
+/** CSR of the grid triangles at each node, skipping triangles with a repeated node. */
+function trianglesAt(grid: WarpGrid) {
+  let found = incidentTriangles.get(grid);
+  if (found) return found;
+  const { triangles } = grid;
+  const count = grid.nodes.length;
+  const sound = (t: number) =>
+    triangles[t] !== triangles[t + 1] &&
+    triangles[t + 1] !== triangles[t + 2] &&
+    triangles[t] !== triangles[t + 2];
+  const start = new Uint32Array(count + 1);
+  for (let t = 0; t < triangles.length; t += 3)
+    if (sound(t)) for (let k = 0; k < 3; k++) start[triangles[t + k] + 1]++;
+  for (let n = 0; n < count; n++) start[n + 1] += start[n];
+  const triangle = new Uint32Array(start[count]);
+  const fill = start.slice(0, count);
+  for (let t = 0; t < triangles.length; t += 3)
+    if (sound(t)) for (let k = 0; k < 3; k++) triangle[fill[triangles[t + k]]++] = t;
+  incidentTriangles.set(grid, (found = { start, triangle }));
+  return found;
+}
+
+/**
+ * Distance at node k across triangle (i, j, k) from a front that reaches i and j at `di` and `dj`,
+ * unfolded flat: the front's source lies `di` from i and `dj` from j on the far side of the edge,
+ * and its line to k must cross the edge. Infinity when it does not.
+ */
+function acrossTriangle(
+  points: Float64Array,
+  i: number,
+  j: number,
+  k: number,
+  di: number,
+  dj: number,
+) {
+  const ex = points[j * 3] - points[i * 3],
+    ey = points[j * 3 + 1] - points[i * 3 + 1],
+    ez = points[j * 3 + 2] - points[i * 3 + 2];
+  const fx = points[k * 3] - points[i * 3],
+    fy = points[k * 3 + 1] - points[i * 3 + 1],
+    fz = points[k * 3 + 2] - points[i * 3 + 2];
+  const e = Math.hypot(ex, ey, ez);
+  if (!(e > 0)) return Infinity;
+  const fu = (fx * ex + fy * ey + fz * ez) / e;
+  const fv = Math.sqrt(Math.max(0, fx * fx + fy * fy + fz * fz - fu * fu));
+  if (!(fv > 0)) return Infinity;
+  const a = (di * di - dj * dj + e * e) / (2 * e);
+  const b2 = di * di - a * a;
+  if (!(b2 >= 0)) return Infinity;
+  const b = Math.sqrt(b2);
+  // Where the line from the source (a, −b) to k (fu, fv) crosses the edge.
+  const cross = a + ((fu - a) * b) / (fv + b);
+  if (cross < 0 || cross > e) return Infinity;
+  return Math.hypot(fu - a, fv + b);
+}
+
+/**
+ * Like `relax`, but a node is also reached across each grid triangle from two settled corners as
+ * a flat front would reach it, which follows the surface far closer than paths along grid edges
+ * do. Paths along edges overstate the distance by a share that changes from node to node with how
+ * the edges happen to lie, which roughens anything shaped by the distance.
+ */
+function march(
+  model: WarpModel,
+  seeds: Iterable<readonly [number, number]>,
+  distance: Float64Array,
+  through: Uint8Array,
+  limit = Infinity,
+) {
+  const { grid, restNodes } = model;
+  const { edgeStart, edges, triangles } = grid;
+  const { start, triangle } = trianglesAt(grid);
+  const done = new Uint8Array(grid.nodes.length);
+  const heap = new Heap();
+  for (const [n, d] of seeds)
+    if (d <= limit && d < distance[n]) {
+      distance[n] = d;
+      heap.push(d, n);
+    }
+  const settled: number[] = [];
+  const top = { distance: 0, node: 0 };
+  const offer = (j: number, next: number) => {
+    if (next <= limit && next < distance[j]) {
+      distance[j] = next;
+      heap.push(next, j);
+    }
+  };
+  while (heap.size) {
+    heap.pop(top);
+    const { distance: d, node: i } = top;
+    if (done[i] || d > distance[i]) continue;
+    done[i] = 1;
+    settled.push(i);
+    for (let e = edgeStart[i]; e < edgeStart[i + 1]; e++) {
+      const j = edges[e];
+      if (!through[j] || done[j]) continue;
+      offer(
+        j,
+        d +
+          Math.hypot(
+            restNodes[i * 3] - restNodes[j * 3],
+            restNodes[i * 3 + 1] - restNodes[j * 3 + 1],
+            restNodes[i * 3 + 2] - restNodes[j * 3 + 2],
+          ),
+      );
+    }
+    for (let e = start[i]; e < start[i + 1]; e++) {
+      const t = triangle[e];
+      for (let k = 0; k < 3; k++) {
+        const j = triangles[t + k],
+          m = triangles[t + ((k + 1) % 3)];
+        if (j === i || m === i) continue;
+        // j is the other settled corner and m the one to reach, either way round.
+        if (done[j] && !done[m] && through[m])
+          offer(m, acrossTriangle(restNodes, i, j, m, d, distance[j]));
+        if (done[m] && !done[j] && through[j])
+          offer(j, acrossTriangle(restNodes, i, m, j, d, distance[m]));
+      }
+    }
+  }
+  return settled;
+}
+
 const borderDistances = new WeakMap<WarpGrid, Float64Array>();
 
 /**
@@ -722,10 +847,17 @@ export const reachActivation = (radius: number, spacing: number) =>
   spacing > 0 ? smoothstep(radius / spacing - 1) : 0;
 
 /**
+ * How far the distance marched over the grid may exceed the straight line, as a share of it, and
+ * still count as the straight line. Marching overstates a flat distance by a few percent that
+ * change from node to node, and a bend shaped by that is uneven.
+ */
+export const warpChordSlack = 0.05;
+
+/**
  * The free nodes within `radius` of the footprint and the widest holding band and tail past it.
- * Distance
- * is the larger of the straight-line distance and the grid path over `warpPathStretch`, so it is
- * round on a flat area and cannot cross a fold to a surface the grid does not join nearby.
+ * Distance is the straight-line distance plus however far the distance marched over the grid
+ * exceeds it beyond `warpChordSlack`, so it is round on a flat area and cannot cross a fold to a
+ * surface the grid does not join nearby.
  */
 export function footprintReach(
   model: WarpModel,
@@ -772,10 +904,11 @@ export function footprintReach(
   const path = new Float64Array(grid.nodes.length).fill(Infinity);
   if (activation > 0) {
     const band = bandWidth(0, spacing) + warpTailSpacings * spacing;
-    const settled = relax(model, seeds, path, eligible, (radius + band) * warpPathStretch);
+    const settled = march(model, seeds, path, eligible, radius + band);
     for (const n of settled.sort((a, b) => a - b)) {
       if (ownSet.has(n)) continue;
-      const d = Math.max(straight(n), path[n] / warpPathStretch);
+      const line = straight(n);
+      const d = line + Math.max(0, path[n] - (1 + warpChordSlack) * line);
       if (d >= radius + band && !share.has(n)) continue;
       node.push(n);
       distance.push(d);

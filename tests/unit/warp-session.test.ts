@@ -3210,8 +3210,8 @@ describe('line and area handles through a session', () => {
     const area = handleOf('area', samples, faces);
     expect(area.faces).toEqual(faces);
     const inside = centres.map((c): [number, number] => [c.x, c.y]);
-    // A radius of 4 tilts the rim's face centres to 1.927 and 2.037 mm.
-    await lifecycle(area, inside, 0.08);
+    // A radius of 4 tilts the rim's face centres to 1.916 and 2.039 mm.
+    await lifecycle(area, inside, 0.09);
 
     // One face, smaller than a cell, with a few samples on it.
     editor().cancelWarp();
