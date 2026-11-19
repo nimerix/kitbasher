@@ -524,10 +524,17 @@ describe('warp session', () => {
     );
     expect(kept.target).toEqual([-10, 1, 3]);
     expect(kept.pin).toEqual(inside.pin);
-    expect(warp.undo).toHaveLength(1);
-    expect(warp.undo[0]).toMatchObject({ points: [kept], gapTargets: [] });
-    expect(warp.undo[0].surface!.grid).toBe(model.grid);
-    expect(kept.baseline).toBe(warp.undo[0].surface);
+    expect(kept.baseline.grid).toBe(model.grid);
+    // The new region is one step of its own; the steps before it stay on the grid it replaced.
+    expect(warp.undo).toHaveLength(2);
+    const [earlier, relaid] = warp.undo;
+    expect(relaid.grid!.laid.faces).toBeNull();
+    expect(relaid.grid!.laid.painted).toMatchObject({ region: 'painted', faces: [] });
+    expect(relaid.points.map((p) => p.id)).toEqual(['inside', 'outside']);
+    expect(relaid.gapTargets).toEqual(gapTargets);
+    expect(earlier.points.map((p) => p.id)).toEqual(['inside', 'outside']);
+    expect(earlier.gapTargets).toEqual(gapTargets);
+    for (const step of warp.undo) expect(step.surface!.grid).not.toBe(whole.grid);
 
     // A density change rebuilds the grid and keeps every point that is still inside.
     editor().setWarpRegion('whole');
@@ -2340,6 +2347,68 @@ describe('warp handles', () => {
     }
   });
 
+  it('a new region is one undo step, and undo restores it, the density change and each step before exactly', async () => {
+    for (const feather of [false, true]) {
+      const a = plate('a', 0, 64);
+      setup([a], ['a']);
+      useEditor.setState({ warpFeather: { enabled: feather, width: feather ? 2 : null } });
+      await warpDisc(a, 0, 0, 10);
+      editor().setWarpPointSettings({ radius: 5 }, 'end');
+      const label = `feather ${feather}`;
+      const record = () => {
+        finishWarpSettling();
+        const warp = session();
+        return {
+          surface: positionsOf(warp.preview!),
+          normals: Array.from(warp.preview!.getAttribute('normal').array),
+          region: warp.faces,
+          density: warp.density,
+          nodes: Array.from(warp.model!.grid.nodes),
+          undo: warp.undo.length,
+          points: warp.points.map(({ id, pin, target, radius, falloff, samples, baseline }) => ({
+            id,
+            pin,
+            target,
+            radius,
+            falloff,
+            samples: samples.map(({ pin, binding }) => ({ pin, binding })),
+            baseline: Array.from(baseline.positions),
+          })),
+        };
+      };
+      // Bend the plate, then place a second handle on the bend and edit it.
+      const p = addAt(a, -2, 0);
+      move(p.id, [-2, 0, 2]);
+      const history = [record()];
+      const q = addAt(a, 1, 0.5, deformed(p)[2]);
+      history.push(record());
+      editor().selectWarpPoints([q.id]);
+      editor().setWarpPointSettings({ radius: 3 }, 'end');
+      history.push(record());
+      move(q.id, [1, 0.5, 2.5]);
+      history.push(record());
+      await editor().setWarpDensity(4);
+      history.push(record());
+      const density = session().undo.at(-1)!.grid!;
+      // Expand the paint and lay the grid again.
+      editor().setWarpRegion('painted');
+      editor().paintWarpRegion(hit('a', 9, 0), faceAt(a.geometry, 9, 0), false, true);
+      editor().endPaintStroke();
+      await editor().layWarpGrid();
+      expect(session().stage, label).toBe('warp');
+      expect(session().faces.length, label).toBeGreaterThan(history.at(-1)!.region.length);
+      expect(session().undo, label).toHaveLength(history.at(-1)!.undo + 1);
+      expect(session().undo.at(-1)!.grid!.laid.painted.faces, label).toBe(history.at(-1)!.region);
+      expect(session().undo.at(-2)!.grid, label).toBe(density);
+      for (let step = history.length - 1; step >= 0; step--) {
+        await editor().undoWarpEdit();
+        expect(record(), `${label}, step ${step}`).toEqual(history[step]);
+      }
+      editor().cancelWarp();
+    }
+    useEditor.setState({ warpFeather: { enabled: false, width: null } });
+  }, 60_000);
+
   it('a density change that would drop a handle is not made, and says why', async () => {
     for (const feather of [false, true])
       for (const [x, y] of [
@@ -2409,7 +2478,7 @@ describe('warp handles', () => {
     expect(session().points).toBe(before.points);
   });
 
-  it('a rebuild drops points that could only sit on fixed nodes, from undo steps too', async () => {
+  it('a rebuild drops points that could only sit on fixed nodes, and undo brings them back', async () => {
     const a = plate('a');
     setup([a], ['a']);
     await warpDisc(a, 0, 0, 12);
@@ -2427,10 +2496,13 @@ describe('warp handles', () => {
     useEditor.setState({ toast: null, warp: { ...session(), region: 'painted', faces: row } });
     await editor().layWarpGrid();
     expect(session().points.map((point) => point.id)).toEqual([kept.id]);
-    for (const step of session().undo)
-      expect(step.points.map((point) => point.id)).not.toContain(lost.id);
     expect(toast()).toBe('Some control points were outside the new region and were removed.');
     expect(warpChanges(session())).toBe(false);
+    const { faces } = session().undo.at(-1)!.grid!.laid.painted;
+    await editor().undoWarpEdit();
+    expect(session().points.map((point) => point.id)).toEqual([kept.id, lost.id]);
+    expect(session().faces).toBe(faces);
+    expect(warpChanges(session())).toBe(true);
   });
 
   it('points without a radius solve bit for bit as their own constraints, a moved one held first', async () => {

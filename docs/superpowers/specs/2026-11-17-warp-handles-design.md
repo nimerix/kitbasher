@@ -403,15 +403,17 @@ too coarse for the points on this region. Laying a new region is not made either
 leave a moved handle bound only to fixed nodes; a handle the repaint leaves outside the paint is
 dropped with a notice, and so is an unmoved one left on the new region's edge.
 
-A density change is one session undo step. The steps before it stay on the grid they were
-recorded on: their snapshots name a stand-in for it, their points let go of their reach and of
-binding arrays the solver caches against the old grid, and the step the change records keeps the
-region, density and feather that grid was laid from, with a hash of the model built. Undoing it
-rebuilds that grid (the build is deterministic, one build's time), checks the hash, puts every
-step recorded on it back on the rebuilt grid and restores the surface exactly; undoing further
-restores each earlier step exactly. A rebuild that hashed differently would settle those steps
-again from rest and say so. Laying a new region still carries every step to the new grid and
-settles undo across it from there.
+A density change is one session undo step, and so is laying the grid on a changed region. The
+steps before it stay on the grid they were recorded on: their snapshots name a stand-in for it,
+their points let go of their reach and of binding arrays the solver caches against the old grid,
+and the step the change records keeps the region as painted, the density and feather that grid was
+laid from, with a hash of the model built. Undoing it rebuilds that grid (the build is
+deterministic, one build's time), checks the hash, puts every step recorded on it back on the
+rebuilt grid and restores the region, the handles and the surface exactly; undoing further restores
+each earlier step exactly, and undoing an earlier layout step rebuilds the grid it names in turn.
+Steps recorded on still earlier grids keep their own stand-ins and grid steps untouched. A rebuild
+that hashed differently would settle those steps again from rest and say so. Only the current
+handles are carried to a new grid.
 
 A pure module, `warp-handles.ts`, turns handles and a model into solver input: reach, weights,
 guides, snapshots and their transfer, and distribution. It is unit-tested without the store.

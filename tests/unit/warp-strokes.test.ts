@@ -385,22 +385,56 @@ describe('handles made by strokes through a session', () => {
           expect(Math.abs(rise - h)).toBeLessThan(0.1 * Math.max(h, 1));
         }
       };
+      /** What each undo step must give back exactly: surface, region, grid and every handle. */
+      const record = () => {
+        finishWarpSettling();
+        const warp = session();
+        return {
+          surface: Array.from(warp.preview!.getAttribute('position').array),
+          normals: Array.from(warp.preview!.getAttribute('normal').array),
+          region: warp.faces,
+          density: warp.density,
+          nodes: Array.from(warp.model!.grid.nodes),
+          undo: warp.undo.length,
+          handles: warp.points.map((handle) => ({
+            id: handle.id,
+            kind: handle.kind,
+            pin: handle.pin,
+            target: handle.target,
+            radius: handle.radius,
+            falloff: handle.falloff,
+            faces: handle.faces,
+            path: handle.path,
+            samples: handle.samples.map(({ face, barycentric, restWorld, pin, binding }) => ({
+              face,
+              barycentric,
+              restWorld,
+              pin,
+              binding,
+            })),
+            baseline: Array.from(handle.baseline.positions),
+          })),
+        };
+      };
       whole();
-      const steps: number[] = [session().undo.length];
+      const history = [record()];
       lift(current(), h);
-      steps.push(session().undo.length);
+      history.push(record());
       whole();
       holds(h);
       editor().selectWarpPoints([id]);
       editor().setWarpPointSettings({ radius: 4 }, 'end');
+      history.push(record());
       editor().setWarpPointSettings({ falloff: 0.3 }, 'end');
-      steps.push(session().undo.length);
+      history.push(record());
       expect(current()).toMatchObject({ radius: 4, falloff: 0.3 });
       whole();
       holds(h);
       await editor().setWarpDensity(defaultWarpDensity + 1);
       whole();
       holds(h);
+      history.push(record());
+      const grid = session().undo.at(-1)!.grid!;
       // Edit region, paint more, and lay the grid again.
       editor().setWarpRegion('painted');
       editor().paintWarpRegion(
@@ -412,21 +446,20 @@ describe('handles made by strokes through a session', () => {
       editor().endPaintStroke();
       await editor().layWarpGrid();
       expect(session().stage).toBe('warp');
+      expect(session().faces).not.toEqual(history.at(-1)!.region);
+      expect(session().undo).toHaveLength(history.at(-1)!.undo + 1);
       whole();
       holds(h);
-      // Undo steps back through the falloff, the radius and the move, keeping the handle.
-      await editor().undoWarpEdit();
-      // The density step was recorded on the region before the re-lay and has nothing to restore.
-      if (current().falloff !== 1) await editor().undoWarpEdit();
-      expect(current().falloff).toBe(1);
-      expect(current().radius).toBe(4);
-      await editor().undoWarpEdit();
-      expect(current().radius).toBe(made.radius);
-      whole();
-      holds(h);
-      await editor().undoWarpEdit();
+      // The density step keeps the grid it rebuilds and its fingerprint through the re-lay.
+      expect(session().undo.at(-2)!.grid).toBe(grid);
+      // Each undo gives back the step before it exactly: the re-lay, the density change, the
+      // falloff, the radius and the move.
+      for (let step = history.length - 1; step >= 0; step--) {
+        await editor().undoWarpEdit();
+        expect(record()).toEqual(history[step]);
+        whole();
+      }
       expect(current().target).toBeNull();
-      whole();
       lift(current(), h);
       // A refused live Apply reopens the session with the handle as it was.
       useEditor.setState({ liveStatus: 'connected' });

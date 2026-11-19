@@ -287,19 +287,22 @@ type WarpEdit = Pick<
   WarpSession,
   'points' | 'gapTargets' | 'surface' | 'pointRadius' | 'pointFalloff'
 > & {
-  /** On the step a density change records: the grid it undoes to, rebuilt when it is undone. */
+  /** On the step a new grid records: the grid it undoes to, rebuilt when it is undone. */
   grid?: WarpGridStep;
 };
-type WarpLaid = { faces: number[] | null; density: number; feather: number };
+type WarpLaid = {
+  faces: number[] | null;
+  density: number;
+  feather: number;
+  /** The region as painted when the grid was laid, which undoing a later grid paints again. */
+  painted: Pick<WarpSession, 'region' | 'faces' | 'seed'>;
+};
 /**
- * The grid a density change left. Its steps' snapshots name `token` instead of the grid, so the old
- * model can be let go; undoing rebuilds it from `laid` and puts them back on it.
+ * The grid a density change or a new region left. Its steps' snapshots name `token` instead of the
+ * grid, so the old model can be let go; undoing rebuilds it from `laid` and puts them back on it.
  */
 interface WarpGridStep {
   laid: WarpLaid;
-  region: WarpSession['region'];
-  faces: number[];
-  seed: WarpSession['seed'];
   densityChosen: boolean;
   token: WarpGrid;
   /** Of the old model, to tell that the rebuild is the same grid. */
@@ -3843,9 +3846,10 @@ function moveSteps(steps: WarpEdit[], from: WarpGrid, to: WarpGrid, model?: Warp
 /**
  * Lays the session's grid. A build that stops returns the session to `from`. Laying from the region
  * stage takes the page's feather option; a rebuild keeps the feather the session was laid with. A
- * density change is one session undo step, and undoing it, given its grid step, rebuilds the grid
- * it left and restores that step on it exactly. A density change that would drop a handle, or a new
- * region that would leave a moved one on its fixed edge rather than outside the paint, is not made.
+ * density change or a new region is one session undo step, and undoing it, given its grid step,
+ * rebuilds the grid it left and restores that step on it exactly. A density change that would drop
+ * a handle, or a new region that would leave a moved one on its fixed edge rather than outside the
+ * paint, is not made.
  */
 async function layWarp(from: WarpSettled, kind: 'region' | 'density' | WarpGridStep) {
   const state = useEditor.getState(),
@@ -3876,7 +3880,12 @@ async function layWarp(from: WarpSettled, kind: 'region' | 'density' | WarpGridS
       : faces
         ? defaultWarpDensity
         : warpWholeDensity;
-  const laid: WarpLaid = { faces, density, feather };
+  const laid: WarpLaid = restore?.laid ?? {
+    faces,
+    density,
+    feather,
+    painted: { region: warp.region, faces: warp.faces, seed: warp.seed },
+  };
   // The same region at the same density keeps its grid, so nothing moves.
   if (!restore && warp.model && warp.laid && sameLaid(warp.laid, laid)) {
     if (warp.settling) scheduleWarpSettle();
@@ -3955,9 +3964,7 @@ async function layWarp(from: WarpSettled, kind: 'region' | 'density' | WarpGridS
     const next: WarpSession = {
       ...current,
       stage: 'warp',
-      region: restore.region,
-      faces: restore.faces,
-      seed: restore.seed,
+      ...restore.laid.painted,
       density,
       densityChosen: restore.densityChosen,
       feather,
@@ -4024,10 +4031,10 @@ async function layWarp(from: WarpSettled, kind: 'region' | 'density' | WarpGridS
   const points = rebind(current.points);
   const kept = new Set(points.map((point) => point.id));
   const start = current.surface ? carry(current.surface) : null;
-  // A density change is a step of its own. The steps before it stay on the grid they were
-  // recorded on, which undoing it rebuilds.
+  // A density change or a new region is a step of its own. The steps before it stay on the grid
+  // they were recorded on, which undoing it rebuilds.
   let undo: WarpEdit[];
-  if (kind === 'density' && old && current.laid) {
+  if (old && current.laid) {
     const token = detachedGrid();
     const [step, ...earlier] = moveSteps(
       [warpEdit(current), ...current.undo.slice(-(warpUndoLimit - 1))],
@@ -4040,9 +4047,6 @@ async function layWarp(from: WarpSettled, kind: 'region' | 'density' | WarpGridS
         ...step,
         grid: {
           laid: current.laid,
-          region: current.region,
-          faces: current.faces,
-          seed: current.seed,
           densityChosen: from.densityChosen,
           token,
           fingerprint: warpFingerprint(old),
