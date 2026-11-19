@@ -27,6 +27,7 @@ import {
   strokeSample,
   type WarpStrokePoint,
 } from '../../src/core/warp-strokes';
+import { warpShortLineRadius } from '../../src/core/warp-handles';
 import type { Part, SceneDocument, Vec3 } from '../../src/core/types';
 
 function partOf(geometry: BufferGeometry): Part {
@@ -295,6 +296,59 @@ describe('line handles', () => {
       // Both ends land, and nothing between them stands above or sinks below the lift.
       for (const rise of rises) expect(Math.abs(rise - lift)).toBeLessThan(0.05 * lift);
     }, 30_000);
+
+  it('lift a short line over tight relief on a small painted patch level at default settings', async () => {
+    // A 1.2 mm tube about as coarse as a scanned miniature's mesh, one dab of paint on it at the
+    // default density, and a line a little over two node spacings around it, rising along it.
+    const R = 0.6;
+    const part = partOf(new CylinderGeometry(R, R, 12, 12, 70, true).toNonIndexed());
+    editor().setScene({ name: 'Warp', parts: [part], joints: [] });
+    useEditor.setState({ selected: [part.id] });
+    editor().setTool('warp');
+    editor().setWarpBrushRadius(1.1);
+    editor().paintWarpRegion(
+      { partId: part.id, point: [0, 0, R], normal: [0, 0, 1] },
+      surfaceAt(part, [0, 0, R]).face,
+      false,
+      true,
+    );
+    editor().endPaintStroke();
+    await editor().layWarpGrid();
+    const a = (35 * Math.PI) / 180;
+    const points = Array.from({ length: 81 }, (_, i) => {
+      const t = -a + (2 * a * i) / 80;
+      return surfaceAt(part, [R * Math.sin(t), 0.4 * t, R * Math.cos(t)]);
+    });
+    expect(editor().addWarpStroke({ kind: 'line', points })).toBe(true);
+    const line = latest();
+    const spacing = line.reach!.spacing;
+    expect(2 * a * R).toBeLessThan(3 * spacing);
+    expect(line.radius).toBeLessThan(warpShortLineRadius * spacing);
+    const lift = 0.5;
+    editor().moveWarpPoints(
+      [{ id: line.id, target: [line.pin[0], line.pin[1], line.pin[2] + lift] }],
+      'end',
+    );
+    finishWarpSettling();
+    const model = session().model!;
+    const rises = points.map(
+      (p) =>
+        facePoint(model, session().output!.positions, p)[2] -
+        facePoint(model, model.positions, p)[2],
+    );
+    figures['short line over a small painted tube'] = {
+      nodes: model.grid.nodes.length,
+      samples: line.samples.length,
+      spacing,
+      radius: line.radius,
+      lowest: Math.min(...rises),
+      highest: Math.max(...rises),
+      peak: worstPeak(rises, 4),
+    };
+    // Moving only the nodes nearest the line left spots between its samples 0.08 of the lift off.
+    for (const rise of rises) expect(Math.abs(rise - lift)).toBeLessThan(0.05 * lift);
+    expect(worstPeak(rises, 4)).toBeLessThan(0.02 * lift);
+  });
 
   it('take a sample about every half spacing and merge those bound alike, keeping both ends', async () => {
     const surface = { ...surfaces.plate, make: () => partOf(new PlaneGeometry(40, 40, 8, 8)) };

@@ -418,9 +418,15 @@ its most heavily bound one; an area also moves the free nodes on its faces. Ever
 seeds the reach's paths, and straight-line distance is measured from the samples and an area's
 outline. Taking every node a sample is bound to, as first written, made the ridge's width depend on
 which triangles the samples fell in: a binding reaches one to one and a half spacings, unevenly to
-either side, and two samplings of one stroke differed by a quarter of the lift. Section 4 applies
-with distance measured from the footprint: radius 0 gives a continuous ridge or a rigid patch, and a
-radius above 0 adds the smooth skirt.
+either side, and two samplings of one stroke differed by a quarter of the lift. A short curved line
+is the exception: one no longer than five node spacings that stands off its chord by more than
+3.5 % of it, with a radius between one and four spacings, moves every free node its samples are
+bound to. There the guides fade across those nodes while the samples pull them whole, and the
+surface between the samples rose: on a small patch painted on the 35 mm Tomb Crawler at the default
+density, a 1 mm line lifted 0.5 mm stood between 0.36 and 0.66 mm, and moving those nodes as one
+keeps it between 0.45 and 0.51 mm, and at 41 spots along it between 0.48 and 0.51 mm. A whole part's default radius is wider, and longer or straighter
+lines keep the narrower footprint. Section 4 applies with distance measured from the footprint:
+radius 0 gives a continuous ridge or a rigid patch, and a radius above 0 adds the smooth skirt.
 
 Acceptance: along a line handle moved by `h`, the written surface between samples stays within
 `0.1 h` of `h`, and no local maximum stands more than `0.05 h` above its neighbours; several interior
