@@ -118,7 +118,9 @@ export function TransformAdjustments() {
           </label>
           <p className="transform-help">
             Drag an arrow to move, a ring to rotate{scaling ? ', or a cube to scale' : ''}.{' '}
-            {scaling ? 'Turn off scaling to hide its handles.' : 'Scale handles are disabled.'}
+            {!single && !selection.locks?.some(Boolean)
+              ? 'The outer ring rotates in the plane of the viewport.'
+              : null}
           </p>
           <p className="transform-help">
             Shift: fine adjustment · Uses Snap and the selected pivot.
