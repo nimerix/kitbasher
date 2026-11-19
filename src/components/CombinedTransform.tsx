@@ -109,6 +109,7 @@ export function CombinedTransform({ onPress }: { onPress: () => void }) {
     [selection, scene],
   );
   const root = useRef<Group>(null),
+    viewRing = useRef<Group>(null),
     worldSize = useRef(1);
   const { camera, size, invalidate, get, setEvents } = useThree();
   const [hover, setHover] = useState('');
@@ -183,6 +184,8 @@ export function CombinedTransform({ onPress }: { onPress: () => void }) {
     };
   }, [finish]);
   const unavailable = !!selection.blocked || free;
+  const canRotateInView =
+    !selection.locks?.some(Boolean) && (selection.kind !== 'warp' || selection.parts.length > 1);
   useEffect(() => {
     if (unavailable) finish();
   }, [unavailable, finish]);
@@ -237,14 +240,13 @@ export function CombinedTransform({ onPress }: { onPress: () => void }) {
     right.x += 2 / size.width;
     worldSize.current = right.unproject(camera).distanceTo(root.current.position) * 96;
     root.current.scale.setScalar(worldSize.current);
+    const cameraInGizmo = root.current.quaternion.clone().invert().multiply(camera.quaternion);
+    viewRing.current?.quaternion.copy(cameraInGizmo);
     // Keep uniform scale clear of the free-move center in every camera orientation.
     root.current
       .getObjectByName('transform:scale:uniform')
-      ?.position.copy(
-        new Vector3(-0.45, -0.45, 0)
-          .applyQuaternion(camera.quaternion)
-          .applyQuaternion(root.current.quaternion.clone().invert()),
-      );
+      ?.position.set(-0.45, -0.45, 0)
+      .applyQuaternion(cameraInGizmo);
     const eye = camera.getWorldDirection(new Vector3()).negate();
     root.current.traverse((child) => {
       const normal = child.userData.planeNormal as number | undefined;
@@ -275,7 +277,10 @@ export function CombinedTransform({ onPress }: { onPress: () => void }) {
       const state = useEditor.getState();
       if (handle.mode === 'scale' && !usePreferences.getState().transform.scaling) return;
       if (handle.mode === 'translate' && pinned) return;
-      if (handle.mode === 'rotate' && handle.axis !== null && selection.locks?.[handle.axis])
+      if (
+        handle.mode === 'rotate' &&
+        (handle.axis === null ? !canRotateInView : selection.locks?.[handle.axis])
+      )
         return;
       const capture = event.target as unknown as Capture;
       drag.current = {
@@ -340,6 +345,23 @@ export function CombinedTransform({ onPress }: { onPress: () => void }) {
       side={DoubleSide}
     />
   );
+  const rotationRing = (
+    id: string,
+    axis: TransformHandle['axis'],
+    radius: number,
+    color: string,
+  ) => (
+    <>
+      <mesh {...handlers(id, { mode: 'rotate', axis })} renderOrder={1001}>
+        <torusGeometry args={[radius, 0.045, 8, 80]} />
+        <meshBasicMaterial transparent opacity={0} depthWrite={false} side={DoubleSide} />
+      </mesh>
+      <mesh raycast={noRaycast} renderOrder={1001}>
+        <torusGeometry args={[radius, hover === id ? 0.018 : 0.011, 8, 80]} />
+        {material(id, color)}
+      </mesh>
+    </>
+  );
   if (unavailable) return null;
   return (
     <group ref={root} name="combined-transform">
@@ -380,14 +402,7 @@ export function CombinedTransform({ onPress }: { onPress: () => void }) {
                 userData={{ planeNormal: i }}
                 quaternion={new Quaternion().setFromUnitVectors(new Vector3(0, 0, 1), axis)}
               >
-                <mesh {...handlers(ring, { mode: 'rotate', axis: index })} renderOrder={1001}>
-                  <torusGeometry args={[0.78, 0.045, 8, 80]} />
-                  <meshBasicMaterial transparent opacity={0} depthWrite={false} side={DoubleSide} />
-                </mesh>
-                <mesh raycast={noRaycast} renderOrder={1001}>
-                  <torusGeometry args={[0.78, hover === ring ? 0.018 : 0.011, 8, 80]} />
-                  {material(ring, colors[i])}
-                </mesh>
+                {rotationRing(ring, index, 0.78, colors[i])}
               </group>
             ) : null}
             {scaling ? (
@@ -404,6 +419,9 @@ export function CombinedTransform({ onPress }: { onPress: () => void }) {
           </group>
         );
       })}
+      {canRotateInView ? (
+        <group ref={viewRing}>{rotationRing('rotate:view', null, 1.3, '#e2e4e8')}</group>
+      ) : null}
       {!pinned ? (
         <>
           <mesh {...handlers('move:free', { mode: 'translate', axis: null })} renderOrder={1005}>

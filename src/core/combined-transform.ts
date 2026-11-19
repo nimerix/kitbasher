@@ -7,6 +7,7 @@ import type { TransformTarget } from './transform-selection';
 
 export interface TransformHandle {
   mode: 'translate' | 'rotate' | 'scale';
+  /** A null rotation axis uses the viewport normal. */
   axis: 0 | 1 | 2 | null;
   /** The normal axis of a planar move handle. */
   plane?: 0 | 1 | 2;
@@ -40,9 +41,11 @@ export class CombinedTransformDrag {
     this.pointer = pointer.clone();
     this.motion = new FreeTransformMotion(this.camera, pivot, width, height);
     this.worldAxis =
-      handle.axis === null
-        ? null
-        : new Vector3().setComponent(handle.axis, 1).applyQuaternion(orientation);
+      handle.axis !== null
+        ? new Vector3().setComponent(handle.axis, 1).applyQuaternion(orientation)
+        : handle.mode === 'rotate'
+          ? this.camera.getWorldDirection(new Vector3()).negate()
+          : null;
     const normal =
       handle.plane !== undefined
         ? new Vector3().setComponent(handle.plane, 1).applyQuaternion(orientation)

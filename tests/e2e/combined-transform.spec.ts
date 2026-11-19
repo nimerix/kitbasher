@@ -1,5 +1,5 @@
 import { expect, test, type Page } from '@playwright/test';
-import { BoxGeometry } from 'three';
+import { BoxGeometry, Quaternion, Vector3 } from 'three';
 import { serializeGeometry } from '../../src/core/geometry';
 
 const cube = {
@@ -82,6 +82,7 @@ async function state(page: Page) {
       })),
       enabled: root.controls.enabled,
       handles,
+      viewAxis: root.camera.getWorldDirection(root.camera.position.clone()).negate().toArray(),
       jointErrors: s.scene.joints.map((j: any) => anchorError(s.scene.parts, j)),
     };
   });
@@ -197,6 +198,62 @@ test('removes scaling from display and picking, persists the choice, and keeps m
   ).toHaveAttribute('aria-checked', 'false');
 });
 
+test('rotates in the viewport plane in perspective and orthographic views', async ({ page }) => {
+  await open(page);
+  await page.getByRole('button', { name: 'Local', exact: true }).click();
+  const snap = page.getByRole('spinbutton', { name: 'Transform rotation snap', exact: true });
+  await snap.fill('15');
+  await snap.press('Enter');
+  await page.getByRole('button', { name: 'Snap', exact: true }).click();
+  await page.getByRole('button', { name: 'Perspective', exact: true }).click();
+  await page.getByRole('button', { name: 'Isometric', exact: true }).click();
+
+  for (const projection of ['Perspective', 'Orthographic']) {
+    await expect(page.getByRole('button', { name: projection, exact: true })).toBeVisible();
+    const before = await state(page);
+    expect(Math.abs(before.viewAxis[0])).toBeGreaterThan(0.3);
+    expect(Math.abs(before.viewAxis[1])).toBeGreaterThan(0.3);
+    const name = 'transform:rotate:view';
+    const center = await point(page, name);
+    const right = await point(page, name, [1.3, 0, 0]);
+    const top = await point(page, name, [0, 1.3, 0]);
+    expect(right.y).toBeCloseTo(center.y, 3);
+    expect(top.x).toBeCloseTo(center.x, 3);
+    expect(right.x - center.x).toBeCloseTo(center.y - top.y, 3);
+
+    const angle = (40 * Math.PI) / 180;
+    const end = await point(page, name, [1.3 * Math.cos(angle), 1.3 * Math.sin(angle), 0]);
+    await drag(page, right, end);
+    const after = await state(page);
+    const rotation = new Quaternion().setFromAxisAngle(
+      new Vector3().fromArray(before.viewAxis),
+      Math.PI / 4,
+    );
+    const expected = rotation.multiply(new Quaternion().fromArray(before.parts[0].quaternion));
+    expect(new Quaternion().fromArray(after.parts[0].quaternion).angleTo(expected)).toBeLessThan(
+      1e-6,
+    );
+    const pivot = (p: (typeof after.parts)[number]) =>
+      new Vector3()
+        .fromArray(cube.pivot)
+        .applyQuaternion(new Quaternion().fromArray(p.quaternion))
+        .add(new Vector3().fromArray(p.position));
+    expect(pivot(after.parts[0]).distanceTo(pivot(before.parts[0]))).toBeLessThan(1e-6);
+    expect(after.parts[0].scale).toEqual(before.parts[0].scale);
+    expect(after.past).toBe(before.past + 1);
+    expect(after.enabled).toBe(true);
+
+    if (projection === 'Perspective') {
+      await page.keyboard.press('5');
+    } else {
+      await page.keyboard.press('Control+z');
+      const restored = await state(page);
+      expect(restored.parts).toEqual(before.parts);
+      expect(restored.past).toBe(before.past);
+    }
+  }
+});
+
 test('preserves redo on a click without motion and restores camera input on interruption', async ({
   page,
 }) => {
@@ -235,6 +292,7 @@ test('shows only free joint rotation axes and keeps the anchor connected', async
   expect(handles).not.toContain('transform:move:X');
   expect(handles).not.toContain('transform:rotate:X');
   expect(handles).not.toContain('transform:rotate:Z');
+  expect(handles).not.toContain('transform:rotate:view');
   expect(handles).toContain('transform:rotate:Y');
   const from = await point(page, 'transform:rotate:Y', [
     0.78 * Math.cos(Math.PI / 4),
