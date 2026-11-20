@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   BoxGeometry,
   BufferAttribute,
@@ -6,6 +6,7 @@ import {
   InterleavedBuffer,
   InterleavedBufferAttribute,
   type Intersection,
+  Line3,
   Mesh,
   PlaneGeometry,
   Raycaster,
@@ -17,15 +18,27 @@ import { requestTaskCancellation, useActivity } from '../../src/core/activity';
 import { editorCommands, undoTarget } from '../../src/core/commands';
 import { partMatrix, triangleCount } from '../../src/core/geometry';
 import { detectDefaults } from '../../src/core/refine-detect';
-import { writeRefinedGeometry } from '../../src/core/refine-mesh';
+import {
+  type RefineMesh,
+  type RefineTopology,
+  weldedCorner,
+  writeRefinedGeometry,
+} from '../../src/core/refine-mesh';
+import type { EdgeCurve } from '../../src/core/refine-curve';
+import type { RefineProposal } from '../../src/core/refine-detect';
+import type { RegionInput } from '../../src/core/refine-region';
+import * as cutCode from '../../src/core/refine-cut';
+import * as edgeCode from '../../src/core/refine-edge';
 import { patchRefinedGeometry } from '../../src/core/refine-preview';
 import { solveEdge } from '../../src/core/refine-edge';
 import {
   brushingRefine,
   commitRefine,
   fittedWarpBrushRadius,
+  heldRefineState,
   paintingRefine,
   refineBrushRadius,
+  refineDraftLimit,
   refineEdited,
   refineUndoBytes,
   refineUndoLimit,
@@ -52,7 +65,7 @@ import {
   toast,
   trianglesArea,
 } from '../helpers/refine-session';
-import { rivetedPlate, softBox } from '../helpers/soft-edges';
+import { rivetedPlate, softBox, softCylinder } from '../helpers/soft-edges';
 
 const job = vi.hoisted(() => ({ failure: null as Error | null }));
 vi.mock('../../src/core/refine-job', async (importOriginal) => {
@@ -398,6 +411,7 @@ describe('refine session steps', () => {
       features: [],
       selected: [],
       triangles: [],
+      drawing: false,
     });
     const models = [start];
     for (let i = 0; i < 4; i++) models.push(movedModel(models[i], [i], [0, 0.01, 0]));
@@ -1088,6 +1102,7 @@ describe('refine lifecycle edges', () => {
       features: [],
       selected: [],
       triangles: [],
+      drawing: false,
     });
     const oversized = {
       ...start,
@@ -1114,3 +1129,524 @@ describe('refine lifecycle edges', () => {
     expect(undoTarget(editor())).toBe('refine');
   });
 });
+
+// Several detections and cuts each; slow when the machine is loaded, so no timing is asserted.
+describe('refine session integrity', { timeout: 20_000 }, () => {
+  const rimRadius = 1.2 + 0.3 / Math.SQRT2,
+    rimHeight = 0.7 + 0.3 / Math.SQRT2;
+  /** A point on the rounded top rim of softCylinder(1.5, 1, 0.3) at `angle`. */
+  const rim = (angle: number) =>
+    surfacePoint([rimRadius * Math.cos(angle), rimHeight, rimRadius * Math.sin(angle)]);
+  const canPart = () => boxPart({ id: 'can', name: 'Can', geometry: softCylinder(1.5, 1, 0.3) });
+  const positionBytes = (model = session().model!) =>
+    Buffer.from(model.mesh.position.buffer).toString('base64');
+
+  /** Holds the next detection's worker until `finish` replies with `proposals`. */
+  function holdDetect() {
+    let reply: ((proposals: RefineProposal[]) => void) | undefined;
+    const terminate = vi.fn();
+    class HeldWorker {
+      onmessage?: (event: { data: unknown }) => void;
+      onerror = null;
+      onmessageerror = null;
+      terminate = terminate;
+      postMessage() {
+        reply = (result) => this.onmessage?.({ data: { result } });
+      }
+    }
+    vi.stubGlobal('Worker', HeldWorker);
+    return { finish: (proposals: RefineProposal[]) => reply!(proposals), terminate };
+  }
+  const detectTask = () =>
+    useActivity.getState().tasks.find((t) => t.title === 'Finding edges and surfaces');
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it('closes a spline being drawn on its first point as one step, and solves it on a rim', async () => {
+    setup([canPart()], ['can']);
+    await ready();
+    editor().setRefineEdge({ kind: 'spline', joint: 'smooth', width: 0.6 });
+    const points = [0, 1, 2, 3, 4].map((i) => rim((2 * Math.PI * i) / 5));
+    for (const point of points) editor().addRefinePoint(point);
+    const undo = session().undo.length;
+    editor().addRefinePoint(points[0], true);
+    const input = edgeInput();
+    expect(input.closed).toBe(true);
+    expect(input.segments).toHaveLength(1);
+    expect(input.segments[0].points).toEqual([...points, points[0]]);
+    expect(input.joints).toEqual(['smooth']);
+    expect(session().undo.length).toBe(undo + 1);
+    expect(session().drawing).toBe(false);
+    const curve = session().features[0].curve!;
+    expect(curve.closed).toBe(true);
+    // The rim's sharp edge, where the side and the top meet, at radius 1.5 and height 1.
+    for (let i = 0; i < curve.points.length; i += 3) {
+      const [x, y, z] = curve.points.subarray(i, i + 3);
+      expect(Math.abs(Math.hypot(x, z) - 1.5)).toBeLessThan(0.1);
+      expect(Math.abs(y - 1)).toBeLessThan(0.1);
+    }
+    editor().acceptRefine();
+    expect(session().features[0].state).toBe('accepted');
+  });
+
+  it('restores whether a spline is still being drawn on undo and redo', async () => {
+    setup([boxPart()], ['box']);
+    await ready();
+    editor().setRefineEdge({ kind: 'spline' });
+    for (const x of [-1.6, 0, 1.6]) editor().addRefinePoint(crest(x));
+    editor().undoRefine();
+    expect(session().drawing).toBe(true);
+    editor().redoRefine();
+    expect(session().drawing).toBe(true);
+    editor().addRefinePoint(crest(1.7));
+    expect(edgeInput().segments.map((s) => s.points.length)).toEqual([4]);
+  });
+
+  it('gives each drag of a handle its own step', async () => {
+    setup([boxPart()], ['box']);
+    await ready();
+    const id = crestGuide();
+    const steps = session().undo.length;
+    // Without `begin`, a move after anything else starts a new step.
+    editor().moveRefinePoint(id, 0, 1, crest(1.3));
+    editor().selectRefine([]);
+    editor().selectRefine([id]);
+    editor().moveRefinePoint(id, 0, 1, crest(1.1));
+    expect(session().undo.length).toBe(steps + 2);
+    editor().undoRefine();
+    expect(edgeInput(id).segments[0].points[1]).toEqual(crest(1.3));
+    editor().redoRefine();
+    // `begin` starts a step even right after a move of the same point; moves without it extend it.
+    editor().moveRefinePoint(id, 0, 1, crest(1.2), true);
+    editor().moveRefinePoint(id, 0, 1, crest(1.0));
+    editor().moveRefinePoint(id, 0, 1, crest(0.9), true);
+    editor().moveRefinePoint(id, 0, 1, crest(0.8), false);
+    expect(session().undo.length).toBe(steps + 4);
+    editor().undoRefine();
+    expect(edgeInput(id).segments[0].points[1]).toEqual(crest(1.0));
+  });
+
+  it('keeps the brush settings a stroke began with, and the committed surface, to its end', async () => {
+    setup([boxPart()], ['box']);
+    await ready();
+    editor().setRefineMode('brush');
+    editor().setRefineBrushRadius(0.4);
+    editor().setRefineBrush({ kind: 'crease', strength: 1 });
+    const model = session().model!;
+    const before = positionBytes(model);
+    editor().beginRefineStroke(top(-0.5));
+    editor().setRefineBrush({ kind: 'smooth' });
+    editor().moveRefineStroke(top(0.1));
+    expect(positionBytes(model)).toBe(before);
+    editor().endRefineStroke();
+    expect(session().model).toBe(model);
+
+    const stroke = (change: boolean) => {
+      editor().setRefineBrush({ kind: 'smooth', strength: 0.5 });
+      editor().setRefineBrushRadius(0.4);
+      editor().beginRefineStroke(top(-0.5));
+      if (change) {
+        editor().setRefineBrush({ kind: 'flatten', strength: 1 });
+        editor().setRefineBrushRadius(1.5);
+      }
+      for (let i = 1; i <= 4; i++) editor().moveRefineStroke(top(-0.5 + i * 0.15));
+      expect(positionBytes(model)).toBe(before);
+      editor().endRefineStroke();
+      const bytes = positionBytes();
+      editor().undoRefine();
+      return bytes;
+    };
+    expect(stroke(true)).toBe(stroke(false));
+  });
+
+  it('lets a stroke own the preview: a draft queued before it does not overwrite it', async () => {
+    setup([boxPart()], ['box']);
+    await ready();
+    let frame: FrameRequestCallback | undefined;
+    vi.stubGlobal('window', {});
+    vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => {
+      frame = callback;
+      return 1;
+    });
+    vi.stubGlobal('cancelAnimationFrame', () => {});
+    crestGuide();
+    editor().setRefineMode('brush');
+    editor().setRefineBrushRadius(0.4);
+    editor().beginRefineStroke(top(-0.5));
+    const shown = session().preview!.clone();
+    expect(differingAttributes(fresh(), shown)).not.toEqual([]);
+    frame!(0);
+    editor().moveRefineStroke(top(-0.3));
+    editor().selectRefine([]);
+    expect(heldRefineState()).not.toContain('frame');
+    editor().endRefineStroke();
+    expect(differingAttributes(session().preview!, fresh())).toEqual([]);
+  });
+
+  it('discards a stroke on a mode change: nothing is committed and the preview shows the model', async () => {
+    setup([boxPart()], ['box']);
+    await ready();
+    editor().setRefineMode('brush');
+    editor().setRefineBrushRadius(0.4);
+    const model = session().model,
+      undo = session().undo.length;
+    editor().beginRefineStroke(top(-0.5));
+    editor().moveRefineStroke(top(-0.2));
+    expect(differingAttributes(session().preview!, fresh())).not.toEqual([]);
+    editor().setRefineMode('edge');
+    expect(differingAttributes(session().preview!, fresh())).toEqual([]);
+    editor().endRefineStroke();
+    expect(session().model).toBe(model);
+    expect(session().undo.length).toBe(undo);
+    expect(differingAttributes(session().preview!, fresh())).toEqual([]);
+  });
+
+  it.each(['cancel', 'tool', 'part', 'scene undo', 'apply'] as const)(
+    'leaves nothing held after a %s',
+    async (exit) => {
+      for (const holding of ['guide', 'stroke'] as const) {
+        setup([boxPart()], ['box']);
+        if (exit === 'scene undo') editor().renameScene('Undoable rename');
+        await ready();
+        // Something accepted, so Apply has work to write.
+        editor().setRefineEdge({ strength: 0.3 });
+        editor().acceptRefine([crestGuide()]);
+        const model = session().model!;
+        if (holding === 'guide') {
+          const id = crestGuide(-1.4, 1.2);
+          editor().moveRefinePoint(id, 0, 1, crest(1.3));
+          expect(heldRefineState()).toEqual(['draft', 'drag']);
+        } else {
+          editor().setRefineMode('brush');
+          editor().setRefineBrushRadius(0.4);
+          editor().beginRefineStroke(top(-0.5));
+          expect(heldRefineState()).toContain('stroke');
+        }
+        if (exit === 'cancel') editor().cancelRefine();
+        if (exit === 'tool') editor().setTool('select');
+        if (exit === 'part') editor().transform('box', { position: [1, 0, 0] });
+        if (exit === 'scene undo') editor().undo();
+        if (exit === 'apply') expect(editor().applyRefine()).toBe(true);
+        expect(heldRefineState()).toEqual([]);
+        editor().endRefineStroke();
+        if (exit !== 'apply') {
+          expect(editor().refine).toBeNull();
+          continue;
+        }
+        // Apply writes the accepted model, never the stroke, and starts afresh.
+        const part = editor().scene.parts[0];
+        const written = writeRefinedGeometry(holdingSource(), partMatrix(part), model.mesh);
+        expect(differingAttributes(part.geometry, written)).toEqual([]);
+        expect(session()).toMatchObject({ draft: null, draftSkipped: false, undo: [], redo: [] });
+        await vi.waitFor(() => expect(session().stage).toBe('ready'));
+        editor().cancelRefine();
+      }
+    },
+  );
+  let source: BufferGeometry | null = null;
+  const holdingSource = () => source!;
+  beforeEach(() => {
+    source = null;
+    const unsubscribe = useEditor.subscribe((state) => {
+      if (state.refine && !source) source = state.refine.source;
+    });
+    return unsubscribe;
+  });
+
+  it('settles detection on a cancel that comes after the job replied', async () => {
+    setup([boxPart()], ['box']);
+    await ready();
+    const job = editor().detectRefine();
+    await Promise.resolve();
+    editor().cancelRefineDetect();
+    await job;
+    expect(session().features).toEqual([]);
+    expect(session().detect.running).toBe(false);
+    expect(detectTask()?.status).toBe('cancelled');
+
+    const held = holdDetect();
+    const closing = editor().detectRefine();
+    held.finish([]);
+    editor().cancelRefine();
+    await closing;
+    expect(detectTask()?.status).toBe('cancelled');
+    expect(heldRefineState()).toEqual([]);
+  });
+
+  it('replaces pending detected proposals and leaves out what is accepted', async () => {
+    setup([boxPart()], ['box']);
+    await ready();
+    const hand = crestGuide();
+    await editor().detectRefine();
+    const first = session().features.filter((f) => f.origin === 'detected');
+    expect(first).toHaveLength(18);
+    editor().selectRefine([hand, first[0].id]);
+    const undo = session().undo.length;
+    await editor().detectRefine();
+    const second = session().features.filter((f) => f.origin === 'detected');
+    expect(second).toHaveLength(18);
+    expect(second.map((f) => f.feature)).toEqual(first.map((f) => f.feature));
+    expect(second.some((f) => first.includes(f))).toBe(false);
+    expect(session().features[0].id).toBe(hand);
+    expect(session().selected).toEqual([hand]);
+    expect(session().undo.length).toBe(undo);
+
+    const target = second.find((f) => f.feature.type === 'edge')!;
+    editor().acceptRefine([target.id]);
+    const accepted = session().features.find((f) => f.id === target.id)!;
+    expect(accepted.state).toBe('accepted');
+    await editor().detectRefine();
+    const third = session().features.filter(
+      (f) => f.origin === 'detected' && f.state === 'pending',
+    );
+    const along = third.filter(
+      ({ feature }) =>
+        feature.type === 'edge' &&
+        feature.input.segments
+          .flatMap((s) => s.points)
+          .every((p) => nearestOnCurve(accepted.curve!, p.position) <= 0.15),
+    );
+    expect(third.length).toBeGreaterThan(0);
+    expect(along).toEqual([]);
+    expect(session().features.filter((f) => f.state === 'accepted')).toEqual([accepted]);
+  });
+
+  it('leaves out a detected region mostly inside an accepted one', async () => {
+    const { geometry } = rivetedPlate();
+    setup([boxPart({ id: 'plate', name: 'Plate', geometry })], ['plate']);
+    await ready();
+    editor().setRefineMode('region');
+    editor().setRefineBrushRadius(0.8);
+    paint([[0, 0.5, 0]]);
+    editor().makeRefineRegion();
+    const region = session().features[0];
+    if (region.feature.type !== 'region') throw new Error('not a region');
+    const { triangles } = region.feature.input;
+    editor().acceptRefine();
+    const covered = new Set(triangles);
+    const outside: number[] = [];
+    for (let t = 0; outside.length < triangles.length; t++) if (!covered.has(t)) outside.push(t);
+    // Six tenths and four tenths of each proposal inside the accepted region.
+    const mixed = (share: number) => {
+      const count = Math.round(triangles.length * share);
+      return Uint32Array.from([...triangles.subarray(0, count), ...outside.slice(count)]).sort();
+    };
+    const [inside, half] = [mixed(0.6), mixed(0.4)];
+    const held = holdDetect();
+    const detection = editor().detectRefine();
+    const proposal = (t: Uint32Array): RefineProposal => ({
+      type: 'region',
+      input: { ...region.feature.input, triangles: t } as RegionInput,
+    });
+    held.finish([proposal(inside), proposal(half)]);
+    await detection;
+    const found = session().features.filter((f) => f.origin === 'detected');
+    expect(found.map((f) => f.feature.type === 'region' && f.feature.input.triangles)).toEqual([
+      half,
+    ]);
+  });
+
+  it('cancels a stroke under way, leaving the steps and the model as they were', async () => {
+    setup([boxPart()], ['box']);
+    await ready();
+    crestGuide();
+    editor().acceptRefine();
+    editor().undoRefine();
+    editor().setRefineMode('brush');
+    editor().setRefineBrushRadius(0.4);
+    const { model, undo, redo } = session();
+    editor().beginRefineStroke(top(-0.5));
+    for (let i = 1; i <= 4; i++) editor().moveRefineStroke(top(-0.5 + i * 0.15));
+    expect(differingAttributes(session().preview!, fresh())).not.toEqual([]);
+    editor().cancelRefineStroke();
+    editor().endRefineStroke();
+    expect(session().model).toBe(model);
+    expect(session().undo).toEqual(undo);
+    expect(session().redo).toEqual(redo);
+    expect(session().redo).toHaveLength(1);
+    expect(differingAttributes(session().preview!, fresh())).toEqual([]);
+    expect(heldRefineState()).not.toContain('stroke');
+  });
+
+  /** The end-to-end fixture: a coarse 0.2 mm mesh with a 0.6 mm fillet. */
+  const coarseBox = () =>
+    boxPart({ geometry: softBox([4, 3, 2], 0.6, { step: 0.2, ripple: 0.04, noise: 0.008 }) });
+  const coarseCrest = (x: number) => surfacePoint([x, 3 - 0.1757, 2 - 0.1757]); // 0.6 - 0.6 / sqrt(2)
+  const creaseStroke = () => {
+    editor().setRefineMode('brush');
+    editor().setRefineBrush({ kind: 'crease', strength: 1 });
+    editor().beginRefineStroke(coarseCrest(-3));
+    for (let i = 1; i <= 30; i++) editor().moveRefineStroke(coarseCrest(-3 + i * 0.2));
+    editor().endRefineStroke();
+  };
+
+  it('adds an edge from a crease stroke on a coarse mesh with a brush as wide as the fillet', async () => {
+    setup([coarseBox()], ['box']);
+    await ready();
+    editor().setRefineBrushRadius(1.2);
+    creaseStroke();
+    expect(session().features).toHaveLength(1);
+    expect(session().features[0]).toMatchObject({ state: 'accepted', origin: 'hand' });
+  });
+
+  // creaseInput (refine-brush.ts) gives the guide the brush radius as its width. The default radius
+  // here is fittedWarpBrushRadius, 0.24 mm, and solveEdge finds no edge on this 0.6 mm fillet below
+  // about 1.0 mm (its own estimate is 1.0 mm). Needs a decision outside the store.
+  it.skip('adds an edge from a crease stroke on a coarse mesh at the default brush radius', async () => {
+    setup([coarseBox()], ['box']);
+    await ready();
+    creaseStroke();
+    expect(session().features).toHaveLength(1);
+    expect(session().features[0].state).toBe('accepted');
+  });
+
+  it('opens a closed loop left with too few corners, keeping its segments in order', async () => {
+    setup([boxPart()], ['box']);
+    await ready();
+    const [a, b, c] = [crest(-1), crest(0), top(1)];
+    for (const point of [a, b, c]) editor().addRefinePoint(point);
+    editor().addRefinePoint(a, true);
+    const id = session().selected[0];
+    expect(edgeInput(id).closed).toBe(true);
+    editor().removeRefinePoint(id, 1, 1);
+    expect(edgeInput(id)).toMatchObject({ closed: false, joints: [] });
+    expect(edgeInput(id).segments.map((s) => s.points)).toEqual([[a, b]]);
+    editor().undoRefine();
+
+    // A square left with three corners stays a closed triangle.
+    editor().selectRefine([]);
+    const [p, q, r, s] = [top(-1, -0.5), top(1, -0.5), top(1, 0.5), top(-1, 0.5)];
+    for (const point of [p, q, r, s]) editor().addRefinePoint(point);
+    editor().addRefinePoint(p, true);
+    const square = session().selected[0];
+    editor().removeRefinePoint(square, 2, 0);
+    expect(edgeInput(square).closed).toBe(true);
+    expect(edgeInput(square).segments.map((x) => x.points)).toEqual([
+      [p, q],
+      [q, s],
+      [s, p],
+    ]);
+  });
+
+  it('closes a pinhole a cut leaves in the paint and in a pending region', async () => {
+    setup([canPart()], ['can']);
+    await ready();
+    editor().setRefineMode('region');
+    editor().setRefineBrushRadius(1);
+    paint([[1.45, 0.4, 0]]);
+    editor().makeRefineRegion();
+    paint([[1.45, 0.4, 0]]);
+    const { mesh, topology } = session().model!;
+    const painted = new Set(session().triangles);
+    // A painted triangle well away from the rim, whose neighbours the cut will not split.
+    const hole = session().triangles.find((t) => {
+      const centre = triangleCentre(mesh, t);
+      return (
+        centre[1] < 0.3 &&
+        edgeNeighbours(mesh, topology, t).every((u) => painted.has(u)) &&
+        centre[1] > -0.2
+      );
+    })!;
+    expect(hole).toBeDefined();
+    const remap = cutCode.remapTriangles;
+    vi.spyOn(cutCode, 'remapTriangles').mockImplementation((set, children) =>
+      remap(set, children).filter((t) => t !== hole),
+    );
+    editor().setRefineMode('edge');
+    editor().setRefineEdge({ kind: 'arc', width: 0.6 });
+    editor().selectRefine([]);
+    for (const angle of [-0.6, 0, 0.6]) editor().addRefinePoint(rim(angle));
+    const before = session().model!.mesh.triangleCount;
+    editor().acceptRefine();
+    const after = session().model!;
+    expect(after.mesh.triangleCount).toBeGreaterThan(before);
+    expect(cutCode.remapTriangles).toHaveBeenCalled();
+    const region = session().features[0].feature;
+    if (region.type !== 'region') throw new Error('not a region');
+    for (const set of [session().triangles, [...region.input.triangles]]) {
+      expect(set).toContain(hole);
+      expect(enclosed(after.mesh, after.topology, set)).toEqual([]);
+    }
+  });
+
+  it(`builds no draft with more than ${refineDraftLimit} pending features selected`, async () => {
+    setup([boxPart()], ['box']);
+    await ready();
+    await editor().detectRefine();
+    const ids = session().features.map((f) => f.id);
+    const solve = vi.spyOn(edgeCode, 'solveEdge');
+    editor().selectRefine(ids.slice(0, refineDraftLimit + 1));
+    expect(solve).not.toHaveBeenCalled();
+    expect(session()).toMatchObject({ draft: null, draftSkipped: true });
+    expect(differingAttributes(session().preview!, fresh())).toEqual([]);
+    editor().selectRefine(ids.slice(0, refineDraftLimit));
+    expect(session().draft).not.toBeNull();
+    expect(session().draftSkipped).toBe(false);
+    expect(differingAttributes(session().preview!, freshShown())).toEqual([]);
+    editor().selectRefine(ids.slice(0, refineDraftLimit + 1));
+    expect(session()).toMatchObject({ draft: null, draftSkipped: true });
+    expect(differingAttributes(session().preview!, fresh())).toEqual([]);
+    const undo = session().undo.length;
+    editor().acceptRefine();
+    expect(session().features.filter((f) => f.state === 'accepted').length).toBeGreaterThan(
+      refineDraftLimit,
+    );
+    expect(session().undo.length).toBe(undo + 1);
+    expect(session().draftSkipped).toBe(false);
+  });
+});
+
+/** Distance from `p` to the polyline of `curve`. */
+function nearestOnCurve(curve: EdgeCurve, p: [number, number, number]) {
+  const a = new Vector3(),
+    b = new Vector3(),
+    point = new Vector3(...p),
+    closest = new Vector3();
+  const count = curve.points.length / 3;
+  let nearest = Infinity;
+  for (let i = 0; i < (curve.closed ? count : count - 1); i++) {
+    a.fromArray(curve.points, i * 3);
+    b.fromArray(curve.points, ((i + 1) % count) * 3);
+    new Line3(a, b).closestPointToPoint(point, true, closest);
+    nearest = Math.min(nearest, closest.distanceTo(point));
+  }
+  return nearest;
+}
+
+function triangleCentre(mesh: RefineMesh, t: number) {
+  const centre = [0, 0, 0];
+  for (const k of [0, 1, 2] as const)
+    for (let axis = 0; axis < 3; axis++)
+      centre[axis] += mesh.position[weldedCorner(mesh, t, k) * 3 + axis] / 3;
+  return centre;
+}
+
+/** The triangles across the edges of triangle `t`. */
+function edgeNeighbours(mesh: RefineMesh, topology: RefineTopology, t: number) {
+  const corners = ([0, 1, 2] as const).map((k) => weldedCorner(mesh, t, k));
+  const found: number[] = [];
+  for (let k = 0; k < 3; k++) {
+    const [a, b] = [corners[k], corners[(k + 1) % 3]];
+    for (let i = topology.triangleStart[a]; i < topology.triangleStart[a + 1]; i++) {
+      const u = topology.trianglesOf[i];
+      if (u !== t && ([0, 1, 2] as const).some((j) => weldedCorner(mesh, u, j) === b))
+        found.push(u);
+    }
+  }
+  return found;
+}
+
+/** Triangles outside `set` whose three edge-neighbours are all in it. */
+function enclosed(mesh: RefineMesh, topology: RefineTopology, set: ArrayLike<number>) {
+  const inside = new Set(Array.from(set));
+  const found = new Set<number>();
+  for (const t of inside)
+    for (const u of edgeNeighbours(mesh, topology, t)) {
+      const around = edgeNeighbours(mesh, topology, u);
+      if (!inside.has(u) && around.length >= 3 && around.every((w) => inside.has(w))) found.add(u);
+    }
+  return [...found];
+}

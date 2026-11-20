@@ -87,6 +87,7 @@ import type { RefineProposal } from './refine-detect';
 import type { EdgeEnd, EdgeInput, EdgeSegment, EdgeSolve } from './refine-edge';
 import {
   type RefineMesh,
+  type RefineTopology,
   cloneRefineMesh,
   foldedTriangles,
   writeRefinedGeometry,
@@ -380,6 +381,8 @@ export interface RefineStep {
   features: RefineFeature[];
   selected: string[];
   triangles: number[];
+  /** Whether the selected guide's last spline segment still took points. */
+  drawing: boolean;
 }
 export interface RefineSession {
   id: string;
@@ -393,6 +396,8 @@ export interface RefineSession {
   model: RefineModel | null;
   /** The working surface with the selected pending features previewed, uncut. Null when nothing is selected. */
   draft: RefineMesh | null;
+  /** Whether more than refineDraftLimit pending features are selected, so no draft is built. */
+  draftSkipped: boolean;
   /** Never in the scene or history. Face t is triangle t of the working surface. */
   preview: BufferGeometry | null;
   mode: RefineMode;
@@ -621,7 +626,14 @@ interface EditorState {
   setRefineDetect: (options: Partial<Omit<RefineSession['detect'], 'running'>>) => void;
   /** Adds a point to the guide being drawn, starting one if none is selected. `close` is set when the point is the path's first point. */
   addRefinePoint: (point: GuidePoint, close?: boolean) => void;
-  moveRefinePoint: (feature: string, segment: number, index: number, point: GuidePoint) => void;
+  /** `begin` starts a new undo step for a drag; moves without it extend the current drag. */
+  moveRefinePoint: (
+    feature: string,
+    segment: number,
+    index: number,
+    point: GuidePoint,
+    begin?: boolean,
+  ) => void;
   removeRefinePoint: (feature: string, segment: number, index: number) => void;
   /** Ends the spline segment being drawn. */
   finishRefineGuide: () => void;
@@ -640,6 +652,8 @@ interface EditorState {
   beginRefineStroke: (point: GuidePoint) => void;
   moveRefineStroke: (point: GuidePoint) => void;
   endRefineStroke: () => void;
+  /** Ends the stroke under way without committing it: no step, and the preview shows the model. */
+  cancelRefineStroke: () => void;
   detectRefine: () => Promise<void>;
   cancelRefineDetect: () => void;
   setRefineBrushRadius: (radius: number) => void;
@@ -3265,6 +3279,7 @@ export const useEditor = create<EditorState>((set, get) => ({
   },
   cancelRefine: (notice) => {
     abortRefineJobs();
+    releaseRefineState();
     const { refine } = get();
     if (!refine) return;
     disposeRefinePreview(refine.preview);
@@ -3285,6 +3300,8 @@ export const useEditor = create<EditorState>((set, get) => ({
       return false;
     }
     abortRefineJobs();
+    // A stroke under way was never accepted: it is dropped, not applied.
+    releaseRefineState();
     const { mesh } = refine.model;
     const geometry = writeRefinedGeometry(refine.source, partMatrix(part), mesh);
     // Without a cut, triangle t is still the source's, so its tree only needs new bounds.
@@ -3320,8 +3337,9 @@ export const useEditor = create<EditorState>((set, get) => ({
       ...refine.redo,
       refineStep(refine),
     ]);
-    refineStroke = null;
-    set({ refine: showRefine({ ...refine, ...step, ...kept, ...unsteppedRefine }) });
+    discardRefineStroke();
+    refineDrag = null;
+    set({ refine: showRefine({ ...get().refine!, ...step, ...kept, ...unsteppedRefine }) });
     scheduleRefineDraft();
   },
   redoRefine: () => {
@@ -3333,17 +3351,21 @@ export const useEditor = create<EditorState>((set, get) => ({
       [...refine.undo, refineStep(refine)],
       refine.redo.slice(0, -1),
     );
-    refineStroke = null;
-    set({ refine: showRefine({ ...refine, ...step, ...kept, ...unsteppedRefine }) });
+    discardRefineStroke();
+    refineDrag = null;
+    set({ refine: showRefine({ ...get().refine!, ...step, ...kept, ...unsteppedRefine }) });
     scheduleRefineDraft();
   },
   setRefineMode: (mode) => {
+    if (get().refine?.mode !== mode) discardRefineStroke();
+    refineDrag = null;
     const { refine } = get();
     if (refine) set({ painting: false, refine: { ...refine, mode, drawing: false } });
   },
   setRefineEdge: (options, each = {}) => {
     const { refine } = get();
     if (!refine) return;
+    refineDrag = null;
     const { kind, joint, ...feature } = options;
     const next = { ...(kind ? { kind } : {}), ...(joint ? { joint } : {}) };
     const touched = Object.keys(feature).length > 0 || Object.keys(each).length > 0;
@@ -3362,6 +3384,7 @@ export const useEditor = create<EditorState>((set, get) => ({
   setRefineRegion: (options, each = {}) => {
     const { refine } = get();
     if (!refine) return;
+    refineDrag = null;
     const features = updateSelected(refine, (proposal, id) =>
       proposal.type === 'region'
         ? { type: 'region', input: { ...proposal.input, ...options, ...each[id] } }
@@ -3426,7 +3449,10 @@ export const useEditor = create<EditorState>((set, get) => ({
     if (close) {
       if (segments.length === 1 && last.kind === 'arc' && last.points.length === 3)
         next = { ...input, closed: true, joints: [edge.joint] };
-      else if (segments.length > 1 && open) {
+      else if (segments.length === 1 && last.kind === 'spline' && open && last.points.length > 2) {
+        segments[0] = { ...last, points: [...last.points, first] };
+        next = { ...input, segments, closed: true, joints: [edge.joint] };
+      } else if (segments.length > 1 && open) {
         segments[segments.length - 1] = { ...last, points: [...last.points, first] };
         next = { ...input, segments, closed: true, joints: [...input.joints, edge.joint] };
       } else if (!open && edge.kind !== 'arc' && (segments.length > 1 || last.points.length > 2)) {
@@ -3447,7 +3473,7 @@ export const useEditor = create<EditorState>((set, get) => ({
       drawing,
     });
   },
-  moveRefinePoint: (id, segment, index, point) => {
+  moveRefinePoint: (id, segment, index, point, begin) => {
     const refine = readyRefine();
     const feature = refine?.features.find((f) => f.id === id);
     if (!refine || feature?.state !== 'pending' || feature.feature.type !== 'edge') return;
@@ -3461,8 +3487,8 @@ export const useEditor = create<EditorState>((set, get) => ({
     }));
     const features = withProposal(refine, id, { type: 'edge', input: { ...input, segments } });
     const key = `${refine.id} ${id} ${segment} ${index}`;
-    // One step per drag: further moves of the point just moved replace it in place.
-    if (refineDrag?.key === key && refineDrag.step === refine.undo[refine.undo.length - 1])
+    // One step per drag: further moves of the point just moved, with nothing between, extend it.
+    if (!begin && refineDrag?.key === key && refineDrag.step === refine.undo.at(-1))
       set({ refine: { ...refine, features } });
     else {
       commitRefine({ features });
@@ -3487,6 +3513,7 @@ export const useEditor = create<EditorState>((set, get) => ({
     );
   },
   finishRefineGuide: () => {
+    refineDrag = null;
     const { refine } = get();
     if (refine?.drawing) set({ refine: { ...refine, drawing: false } });
   },
@@ -3550,6 +3577,7 @@ export const useEditor = create<EditorState>((set, get) => ({
   selectRefine: (ids) => {
     const { refine } = get();
     if (!refine) return;
+    refineDrag = null;
     const known = new Set(refine.features.map((f) => f.id));
     set({ refine: { ...refine, selected: ids.filter((id) => known.has(id)), drawing: false } });
     scheduleRefineDraft();
@@ -3580,19 +3608,27 @@ export const useEditor = create<EditorState>((set, get) => ({
     });
   },
   beginRefineStroke: (point) => {
+    discardRefineStroke();
     let refine = readyRefine();
     if (!refine || refine.mode !== 'brush') return;
+    // The stroke owns the preview: a draft rebuild queued before it would overwrite its dabs.
+    cancelRefineDraft();
     if (refine.selected.length || refine.draft) {
       refine = showRefine({ ...refine, selected: [], draft: null, drawing: false });
       set({ refine });
     }
     const model = refine.model!;
-    const crease = refine.brush.kind === 'crease';
+    const { kind, strength } = refine.brush;
+    const crease = kind === 'crease';
     refineStroke = {
       session: refine.id,
       model,
+      kind,
+      radius: refineBrushRadius(get()),
+      strength,
       mesh: crease ? model.mesh : cloneRefineMesh(model.mesh, false),
       shownTouched: crease ? model.mesh.touched : model.mesh.touched.slice(),
+      changed: new Set(),
       points: [point],
       last: point.position,
       moved: false,
@@ -3601,22 +3637,21 @@ export const useEditor = create<EditorState>((set, get) => ({
   },
   moveRefineStroke: (point) => {
     const stroke = liveStroke();
-    const refine = get().refine;
-    if (!stroke || !refine) return;
-    if (refine.brush.kind === 'crease') {
+    if (!stroke) return;
+    if (stroke.kind === 'crease') {
       stroke.points.push(point);
       return;
     }
     const [x, y, z] = stroke.last;
     const travel = Math.hypot(point.position[0] - x, point.position[1] - y, point.position[2] - z);
-    if (travel >= refineBrushRadius(get()) / 4) dabRefine(stroke, point);
+    if (travel >= stroke.radius / 4) dabRefine(stroke, point);
   },
   endRefineStroke: () => {
     const stroke = liveStroke();
     refineStroke = null;
     const refine = get().refine;
     if (!stroke || !refine?.model) return;
-    if (refine.brush.kind !== 'crease') {
+    if (stroke.kind !== 'crease') {
       if (!stroke.moved) return;
       commitRefine({ model: { ...stroke.model, mesh: stroke.mesh } });
       // Each dab only grew the bounds; they are measured afresh once the stroke ends.
@@ -3625,11 +3660,7 @@ export const useEditor = create<EditorState>((set, get) => ({
       preview?.computeBoundingSphere();
       return;
     }
-    const input = refineCode!.brush.creaseInput(
-      stroke.points,
-      refineBrushRadius(get()),
-      refine.brush.strength,
-    );
+    const input = refineCode!.brush.creaseInput(stroke.points, stroke.radius, stroke.strength);
     if (!input) {
       get().notify(noEdgeNotice, 'info');
       return;
@@ -3642,6 +3673,7 @@ export const useEditor = create<EditorState>((set, get) => ({
     };
     acceptFeatures(refine, [...refine.features, feature], [feature]);
   },
+  cancelRefineStroke: () => discardRefineStroke(),
   detectRefine: async () => {
     const refine = readyRefine();
     if (!refine || refine.detect.running) return;
@@ -3658,6 +3690,7 @@ export const useEditor = create<EditorState>((set, get) => ({
     });
     set({ refine: { ...refine, detect: { ...refine.detect, running: true } } });
     let proposals: RefineProposal[] | null = null;
+    let failure: unknown = null;
     try {
       proposals = await refineCode!.job.detectRefineJob(
         model,
@@ -3670,32 +3703,41 @@ export const useEditor = create<EditorState>((set, get) => ({
         (progress) => updateTask(taskId, { progress }),
       );
     } catch (error) {
-      if (controller.signal.aborted) cancelTask(taskId);
-      else failTask(taskId, error instanceof Error ? error.message : String(error));
+      failure = error;
     }
     refineJobs.delete(controller);
     if (refineDetect === controller) refineDetect = null;
+    // Checked here, just before publishing: a cancel may come after the job has replied.
     const current = get().refine;
-    if (current?.id !== refine.id) return;
-    const detect = { ...current.detect, running: false };
-    if (!proposals) {
-      set({ refine: { ...current, detect } });
+    const live = current?.id === refine.id;
+    const detect = live ? { ...current.detect, running: false } : null;
+    if (failure !== null && !controller.signal.aborted) {
+      failTask(taskId, failure instanceof Error ? failure.message : String(failure));
+      if (detect) set({ refine: { ...current!, detect } });
       return;
     }
-    if (current.model !== model) {
+    if (!proposals || !detect || controller.signal.aborted) {
       cancelTask(taskId);
-      set({ refine: { ...current, detect } });
+      if (detect) set({ refine: { ...current!, detect } });
+      return;
+    }
+    if (current!.model !== model) {
+      cancelTask(taskId);
+      set({ refine: { ...current!, detect } });
       get().notify('The surface changed, so detection was stopped.', 'info');
       return;
     }
     completeTask(taskId);
-    const found: RefineFeature[] = proposals.map((feature) => ({
-      id: uid(),
-      state: 'pending',
-      origin: 'detected',
-      feature,
-    }));
-    set({ refine: { ...current, detect, features: [...current.features, ...found] } });
+    // A new run replaces the detected proposals still pending, and leaves out what is accepted.
+    const kept = current!.features.filter((f) => f.origin !== 'detected' || f.state !== 'pending');
+    const accepted = kept.filter((f) => f.state === 'accepted');
+    const found: RefineFeature[] = proposals
+      .filter((feature) => !repeatsAccepted(feature, accepted))
+      .map((feature) => ({ id: uid(), state: 'pending', origin: 'detected', feature }));
+    const ids = new Set(kept.map((f) => f.id));
+    const selected = current!.selected.filter((id) => ids.has(id));
+    set({ refine: { ...current!, detect, features: [...kept, ...found], selected } });
+    if (selected.length !== current!.selected.length) scheduleRefineDraft();
   },
   cancelRefineDetect: () => refineDetect?.abort(),
   setRefineBrushRadius: (radius) =>
@@ -5113,6 +5155,8 @@ useEditor.subscribe((state, previous) => {
 });
 
 export const refineUndoLimit = 50;
+/** The most pending features a draft previews; with more selected none is built. */
+export const refineDraftLimit = 8;
 /** The most memory session undo and redo may hold beyond the working surface, in bytes. */
 export const refineUndoBytes = 512 * 1024 * 1024;
 const noFolds: Uint32Array = new Uint32Array(0);
@@ -5133,6 +5177,7 @@ const newRefineSession = (part: Part, epoch: number): RefineSession => ({
   start: null,
   model: null,
   draft: null,
+  draftSkipped: false,
   preview: null,
   mode: 'edge',
   features: [],
@@ -5338,11 +5383,18 @@ const modelBuffers = ({ mesh, topology }: RefineModel) =>
     ArrayBuffer.isView(value) ? [value.buffer] : [],
   );
 
-const refineStep = ({ model, features, selected, triangles }: RefineSession): RefineStep => ({
+const refineStep = ({
+  model,
+  features,
+  selected,
+  triangles,
+  drawing,
+}: RefineSession): RefineStep => ({
   model: model!,
   features,
   selected,
   triangles,
+  drawing,
 });
 
 /**
@@ -5381,6 +5433,7 @@ export function trimRefineSteps(
 export function commitRefine(next: Partial<RefineSession>) {
   const { refine } = useEditor.getState();
   if (!refine?.model || refine.stage !== 'ready') return;
+  refineDrag = null;
   if (next.model) shareCrease(next.model.mesh, refine.model.mesh);
   const updated = { ...refine, ...next };
   const kept = trimRefineSteps(
@@ -5401,10 +5454,16 @@ let refineDrag: { key: string; step: RefineStep | undefined } | null = null;
 interface RefineStroke {
   session: string;
   model: RefineModel;
+  /** The brush settings when the stroke began, which it keeps to its end. */
+  kind: RefineBrush;
+  radius: number;
+  strength: number;
   /** Smooth and Flatten: the stroke's own copy of the surface, sharing all but positions. */
   mesh: RefineMesh;
   /** The touched flags the preview was last written with. */
   shownTouched: Uint8Array;
+  /** Every welded vertex a dab moved. */
+  changed: Set<number>;
   points: GuidePoint[];
   /** Where the last dab was made. */
   last: Vec3;
@@ -5420,6 +5479,64 @@ function liveStroke() {
   return refineStroke;
 }
 
+/**
+ * Ends the stroke under way without committing it, and brings the preview back to the model the
+ * stroke began from.
+ */
+function discardRefineStroke() {
+  const stroke = refineStroke;
+  if (!stroke) return;
+  refineStroke = null;
+  const state = useEditor.getState(),
+    refine = state.refine;
+  const preview = refine?.preview;
+  if (refine?.id === stroke.session && preview && previewMeshes.get(preview) === stroke.mesh) {
+    const model = refine.model!;
+    const part = state.scene.parts.find((p) => p.id === refine.partId);
+    const shown = { touched: stroke.shownTouched, crease: stroke.mesh.crease };
+    if (
+      part &&
+      model === stroke.model &&
+      patchRefinedVertices(
+        preview,
+        refine.source,
+        partMatrix(part),
+        shown,
+        model.mesh,
+        model.topology,
+        stroke.changed,
+      )
+    ) {
+      previewMeshes.set(preview, model.mesh);
+      preview.computeBoundingBox();
+      preview.computeBoundingSphere();
+    } else {
+      previewMeshes.delete(preview);
+      useEditor.setState({ refine: showRefine(refine) });
+    }
+  }
+  scheduleRefineDraft();
+}
+
+/** Lets go of everything the store keeps for a session outside it, when the session ends. */
+function releaseRefineState() {
+  refineStroke = null;
+  refineDrag = null;
+  refineDetect = null;
+  builtDraft = null;
+  cancelRefineDraft();
+}
+
+/** What the store keeps for Refine outside the session object; nothing once a session has ended. */
+export const heldRefineState = () =>
+  [
+    builtDraft && 'draft',
+    refineStroke && 'stroke',
+    refineDrag && 'drag',
+    refineDetect && 'detection',
+    draftFrame && 'frame',
+  ].filter(Boolean);
+
 /** One brush dab on the stroke's surface, written into the preview. */
 function dabRefine(stroke: RefineStroke, point: GuidePoint) {
   const state = useEditor.getState(),
@@ -5428,19 +5545,16 @@ function dabRefine(stroke: RefineStroke, point: GuidePoint) {
   const dab = {
     triangle: point.triangle,
     center: point.position,
-    radius: refineBrushRadius(state),
-    strength: refine.brush.strength,
+    radius: stroke.radius,
+    strength: stroke.strength,
     noise,
   };
   const { smoothDab, flattenDab } = refineCode!.brush;
-  const moved = (refine.brush.kind === 'flatten' ? flattenDab : smoothDab)(
-    stroke.mesh,
-    topology,
-    dab,
-  );
+  const moved = (stroke.kind === 'flatten' ? flattenDab : smoothDab)(stroke.mesh, topology, dab);
   stroke.last = point.position;
   if (!moved.length) return;
   stroke.moved = true;
+  for (const v of moved) stroke.changed.add(v);
   const part = state.scene.parts.find((p) => p.id === refine.partId);
   const { preview, source } = refine;
   if (!preview || !part) return;
@@ -5501,7 +5615,7 @@ function solveProposal<P extends RefineProposal>(
   const { edge, region } = refineCode!;
   const solve =
     proposal.type === 'edge'
-      ? edge.solveEdge(mesh, model.topology, proposal.input, model.noise)
+      ? edge.solveEdge(mesh, model.topology, solvedForm(proposal.input), model.noise)
       : region.solveRegion(mesh, model.topology, proposal.input, model.noise);
   // Only a solve on a model's own surface can be asked for again.
   if (mesh === model.mesh) refineSolves.set(key, { mesh, input: proposal.input, solve });
@@ -5575,16 +5689,18 @@ function acceptFeatures(
       model = result.cut ? refineCode!.model.modelFromMesh(mesh, model) : { ...model, mesh };
       if (children?.size) {
         const remap = (t: Uint32Array) => cut.remapTriangles(t, children);
-        triangles = remap(triangles);
+        const painted = (t: Uint32Array) => closePinholes(model.mesh, model.topology, remap(t));
+        triangles = painted(triangles);
         folds = remap(folds);
         skipped = remap(skipped);
+        // Accepted regions follow too, so a later Detect can tell what they already cover.
         for (const [id, f] of byId)
-          if (f.state === 'pending' && f.feature.type === 'region')
+          if (f.feature.type === 'region')
             byId.set(id, {
               ...f,
               feature: {
                 type: 'region',
-                input: { ...f.feature.input, triangles: remap(f.feature.input.triangles) },
+                input: { ...f.feature.input, triangles: painted(f.feature.input.triangles) },
               },
             });
       }
@@ -5627,6 +5743,103 @@ function acceptFeatures(
   if (skipped.length || folds.length) notify(cutNotice, 'info');
 }
 
+/**
+ * `set` with every triangle added whose three edge-neighbours are all in it. One pass is enough:
+ * a triangle that joins has no neighbour outside, so it can enclose no other.
+ */
+function closePinholes(mesh: RefineMesh, topology: RefineTopology, set: Uint32Array) {
+  const { weldOf, corners } = mesh;
+  const { triangleStart, trianglesOf } = topology;
+  const inside = new Uint8Array(mesh.triangleCount);
+  for (const t of set) inside[t] = 1;
+  const welded = (t: number, k: number) => weldOf[corners[t * 3 + k]];
+  /** The triangles across each edge of `t`, into `out`; false when an edge has none. */
+  const across = (t: number, out: number[]) => {
+    out.length = 0;
+    let every = true;
+    for (let k = 0; k < 3; k++) {
+      const a = welded(t, k),
+        b = welded(t, (k + 1) % 3);
+      let found = false;
+      for (let i = triangleStart[a]; i < triangleStart[a + 1]; i++) {
+        const u = trianglesOf[i];
+        if (u !== t && (welded(u, 0) === b || welded(u, 1) === b || welded(u, 2) === b)) {
+          out.push(u);
+          found = true;
+        }
+      }
+      every &&= found;
+    }
+    return every;
+  };
+  const around: number[] = [],
+    outside: number[] = [],
+    added: number[] = [];
+  for (const t of set) {
+    across(t, around);
+    for (const u of around) if (!inside[u]) outside.push(u);
+  }
+  for (const u of outside) {
+    if (inside[u] || !across(u, around) || around.some((w) => !inside[w])) continue;
+    inside[u] = 1;
+    added.push(u);
+  }
+  return added.length ? Uint32Array.from([...set, ...added]).sort() : set;
+}
+
+/** solveEdge takes a closed path of one spline as two splines joined smoothly. */
+function solvedForm(input: EdgeInput): EdgeInput {
+  const [only] = input.segments;
+  if (!input.closed || input.segments.length !== 1 || only.kind !== 'spline') return input;
+  const half = Math.ceil((only.points.length - 1) / 2);
+  return {
+    ...input,
+    segments: [
+      { kind: 'spline', points: only.points.slice(0, half + 1) },
+      { kind: 'spline', points: only.points.slice(half) },
+    ],
+    joints: ['smooth', input.joints[0]],
+  };
+}
+
+/** How near an accepted edge's curve a detected edge's guide points lie for it to repeat it, mm. */
+const repeatedEdge = 0.15;
+
+/** Whether a detected proposal repeats an accepted feature: along its edge, or mostly inside it. */
+function repeatsAccepted(proposal: RefineProposal, accepted: RefineFeature[]) {
+  if (proposal.type === 'region') {
+    const { triangles } = proposal.input;
+    return accepted.some((f) => {
+      if (f.feature.type !== 'region') return false;
+      const covered = new Set(f.feature.input.triangles);
+      let inside = 0;
+      for (const t of triangles) if (covered.has(t)) inside++;
+      return inside > triangles.length / 2;
+    });
+  }
+  const points = proposal.input.segments.flatMap((s) => s.points);
+  return accepted.some(
+    ({ curve }) => curve && points.every((p) => distanceToCurve(curve, p.position) <= repeatedEdge),
+  );
+}
+
+/** Distance from `p` to the polyline of `curve`, its closing span included when closed. */
+function distanceToCurve({ points, closed }: EdgeCurve, p: Vec3) {
+  const count = points.length / 3;
+  let nearest = Infinity;
+  for (let i = 0; i < (closed ? count : count - 1); i++) {
+    const a = i * 3,
+      b = ((i + 1) % count) * 3;
+    const d = [0, 1, 2].map((k) => points[b + k] - points[a + k]);
+    const q = [0, 1, 2].map((k) => p[k] - points[a + k]);
+    const length = d[0] * d[0] + d[1] * d[1] + d[2] * d[2];
+    const t =
+      length > 0 ? Math.max(0, Math.min(1, (q[0] * d[0] + q[1] * d[1] + q[2] * d[2]) / length)) : 0;
+    nearest = Math.min(nearest, Math.hypot(q[0] - t * d[0], q[1] - t * d[1], q[2] - t * d[2]));
+  }
+  return count === 1 ? Math.hypot(p[0] - points[0], p[1] - points[1], p[2] - points[2]) : nearest;
+}
+
 /** The sorted union of two sorted triangle sets. */
 const union = (a: Uint32Array, b: Uint32Array) =>
   b.length ? Uint32Array.from(new Set([...a, ...b])).sort() : a;
@@ -5643,26 +5856,43 @@ let builtDraft: { session: string; model: RefineModel; proposals: RefineProposal
 const draftMoves = new WeakMap<RefineMesh, { base: RefineMesh; moved: Uint32Array }>();
 let draftFrame = 0;
 
-/** Rebuilds the draft once per frame in a browser, at once without one. */
+/**
+ * Rebuilds the draft once per frame in a browser, at once without one. A brush stroke owns the
+ * preview, so none is built or queued while one is under way.
+ */
 function scheduleRefineDraft() {
+  if (refineStroke) return;
   if (typeof window === 'undefined' || typeof requestAnimationFrame !== 'function')
     rebuildRefineDraft();
-  else if (!draftFrame)
-    draftFrame = requestAnimationFrame(() => {
+  else if (!draftFrame) {
+    const frame = requestAnimationFrame(() => {
+      if (draftFrame !== frame) return;
       draftFrame = 0;
       rebuildRefineDraft();
     });
+    draftFrame = frame;
+  }
+}
+
+/** Drops a draft rebuild queued for the next frame. */
+function cancelRefineDraft() {
+  if (draftFrame && typeof cancelAnimationFrame === 'function') cancelAnimationFrame(draftFrame);
+  draftFrame = 0;
 }
 
 function rebuildRefineDraft() {
   const refine = readyRefine();
-  if (!refine) return;
+  if (!refine || refineStroke) return;
   const model = refine.model!;
-  const features = drafted(refine);
+  const selected = drafted(refine);
+  // Solving and applying a large selection on the main thread would stall the editor.
+  const skipped = selected.length > refineDraftLimit;
+  const features = skipped ? [] : selected;
   const proposals = features.map((f) => f.feature);
   if (
     builtDraft?.session === refine.id &&
     builtDraft.model === model &&
+    refine.draftSkipped === skipped &&
     (refine.draft !== null) === proposals.length > 0 &&
     builtDraft.proposals.length === proposals.length &&
     builtDraft.proposals.every((p, i) => p === proposals[i])
@@ -5670,7 +5900,7 @@ function rebuildRefineDraft() {
     return;
   builtDraft = { session: refine.id, model, proposals };
   if (!proposals.length) {
-    useEditor.setState({ refine: showDraft(refine, null, noFolds) });
+    useEditor.setState({ refine: showDraft({ ...refine, draftSkipped: skipped }, null, noFolds) });
     return;
   }
   const { edge, region } = refineCode!;
@@ -5707,7 +5937,9 @@ function rebuildRefineDraft() {
   });
   const changed = Uint32Array.from(new Set(moved.flatMap((m) => [...m])));
   draftMoves.set(mesh, { base: model.mesh, moved: changed });
-  useEditor.setState({ refine: showDraft({ ...refine, features: curved }, mesh, changed) });
+  useEditor.setState({
+    refine: showDraft({ ...refine, features: curved, draftSkipped: false }, mesh, changed),
+  });
   const { notify } = useEditor.getState();
   for (const notice of solvePass(refine.id, pass)) notify(notice, 'info');
 }
@@ -5755,7 +5987,7 @@ function shareCrease(mesh: RefineMesh, before: RefineMesh) {
 }
 
 /** What undo and redo reset: none of it is recorded in a step. */
-const unsteppedRefine = { draft: null, folds: noFolds, skipped: noFolds, drawing: false };
+const unsteppedRefine = { draft: null, folds: noFolds, skipped: noFolds };
 
 const noEdgeNotice =
   'No edge found under this guide. Move it onto the rounded edge or change Width.';
@@ -5853,7 +6085,8 @@ function updateSelected(
 /**
  * The guide without point `index` of `segment`, or null when no point is left. A point two
  * segments share leaves the earlier one, which the later then starts from; the closing point opens
- * the path. A segment left with fewer than 2 points is dropped with its joint.
+ * the path. A segment left with fewer than 2 points is dropped with its joint. A closed path left
+ * in a form solveEdge cannot close is opened where it closed.
  */
 function withoutPoint(input: EdgeInput, segment: number, index: number): EdgeInput | null {
   const segments = input.segments.map((s) => ({ kind: s.kind, points: [...s.points] }));
@@ -5866,13 +6099,15 @@ function withoutPoint(input: EdgeInput, segment: number, index: number): EdgeInp
   const n = segments.length;
   const points = segments[segment].points;
   const lastPoint = index === points.length - 1;
+  const loops = () =>
+    samePoint(segments[0].points[0], segments[segments.length - 1].points.at(-1)!);
   if (closed && ((segment === 0 && index === 0) || (segment === n - 1 && lastPoint))) {
     closed = false;
     joints.pop();
-    if (n === 1) points.splice(index, 1);
+    if (n === 1 && !loops()) points.splice(index, 1);
     else {
       segments[0].points.shift();
-      segments[n - 1].points.pop();
+      segments[segments.length - 1].points.pop();
     }
   } else if (lastPoint && segment < n - 1) {
     points.pop();
@@ -5880,11 +6115,37 @@ function withoutPoint(input: EdgeInput, segment: number, index: number): EdgeInp
     else segments[segment + 1].points.shift();
   } else points.splice(index, 1);
   // Joint k joins segments k and k + 1; a dropped segment takes the joint at its emptied end.
-  for (let k; (k = segments.findIndex((s) => s.points.length < 2)) >= 0 && segments.length > 1;) {
-    joints.splice(k < segments.length - 1 ? k : k - 1, 1);
-    segments.splice(k, 1);
+  const dropShort = () => {
+    for (let k; (k = segments.findIndex((s) => s.points.length < 2)) >= 0 && segments.length > 1;) {
+      joints.splice(k < segments.length - 1 ? k : k - 1, 1);
+      segments.splice(k, 1);
+    }
+  };
+  dropShort();
+  if (closed && !closesAs(segments)) {
+    closed = false;
+    joints.pop();
+    if (loops()) segments[segments.length - 1].points.pop();
+    dropShort();
   }
   return segments[0].points.length ? { ...input, segments, joints, closed } : null;
+}
+
+/**
+ * Whether closed segments are a form solveEdge closes: one arc of 3 points, one spline back on
+ * its first point, or several segments back on the first point, through at least 3 points.
+ */
+function closesAs(segments: EdgeSegment[]) {
+  const [first] = segments;
+  const end = segments[segments.length - 1].points.at(-1)!;
+  const distinct: GuidePoint[] = [];
+  for (const { points } of segments)
+    for (const p of points) if (!distinct.some((q) => samePoint(p, q))) distinct.push(p);
+  if (distinct.length < 3) return false;
+  if (segments.length > 1) return samePoint(first.points[0], end);
+  return first.kind === 'arc'
+    ? first.points.length === 3
+    : first.kind === 'spline' && samePoint(first.points[0], end);
 }
 
 // A refinement is built from one geometry of one scene at one pose. Undo, another editor,
