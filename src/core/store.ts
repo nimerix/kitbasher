@@ -5485,8 +5485,19 @@ function solveProposal<P extends RefineProposal>(
   return solve as Solve;
 }
 
-/** Proposals already reported as unsolvable, so a guide that finds no edge says so once. */
-const reported = new WeakSet<RefineProposal>();
+/** The feature whose draft last failed to solve and why, so a settings change does not repeat it. */
+let unsolved: { session: string; id: string; notice: string } | null = null;
+
+/**
+ * Whether a feature's failure to solve is news: not the last failure reported unless that feature
+ * has solved since.
+ */
+function reportUnsolved(session: string, id: string, notice: string) {
+  if (unsolved?.session === session && unsolved.id === id && unsolved.notice === notice)
+    return false;
+  unsolved = { session, id, notice };
+  return true;
+}
 
 /**
  * Bakes `targets`, pending features of `features`, into the working surface in list order as one
@@ -5637,17 +5648,13 @@ function rebuildRefineDraft() {
         moved.push(
           edge.applyEdge(mesh, model.topology, solve, proposal.input.strength, false).changed,
         );
-      else if (!reported.has(proposal)) {
-        reported.add(proposal);
-        notices.push(noEdgeNotice);
-      }
+      else if (reportUnsolved(refine.id, id, noEdgeNotice)) notices.push(noEdgeNotice);
+      if (solve && unsolved?.id === id) unsolved = null;
     } else {
       const solve = solveProposal(model, on, proposal);
       if (solve) moved.push(region.applyRegion(mesh, solve));
-      else if (!reported.has(proposal)) {
-        reported.add(proposal);
-        notices.push(smallRegionNotice);
-      }
+      else if (reportUnsolved(refine.id, id, smallRegionNotice)) notices.push(smallRegionNotice);
+      if (solve && unsolved?.id === id) unsolved = null;
     }
   }
   const curved = refine.features.map((f) => {

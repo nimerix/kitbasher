@@ -4402,6 +4402,9 @@ optgroup {
 .paint-brush-modes > button:last-child {
   flex: 0 0 32px;
 }
+.paint-brush-modes.without-undo > button:last-child {
+  flex: 1;
+}
 .paint-brush-modes > .active {
   border-color: #c78c54;
   background: #dda16513;
@@ -6701,6 +6704,10 @@ optgroup {
 }
 .refine-spaced {
   margin-top: 10px;
+}
+/* Groups the brush radius field and slider for their release handling, without a box of its own. */
+.refine-brush-radius {
+  display: contents;
 }
 .refine-counts {
   margin: 12px 16px 0;

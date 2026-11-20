@@ -18,6 +18,7 @@ import { chooseTransformTool, executeEditorCommand, shortcutCommand } from '../c
 import { isEditableTarget, keyboardContextMenu } from '../core/context-menu';
 import { actionRepeats, keyName, matchKeyAction } from '../core/keybindings';
 import { usePreferences } from '../core/preferences';
+import { refineTargets } from '../components/refine-panel';
 
 /** Key actions that choose a tool. */
 export const keyTools = {
@@ -246,7 +247,10 @@ export function useKeyboard(openScene: () => void, searchParts: () => void) {
             state.setNavigationMode(null);
             return;
           }
-          const guide = state.tool === 'refine' && state.refine && drawingRefineGuide(state.refine);
+          // Only Edge mode draws guides; elsewhere Escape leaves the tool as it does for Warp.
+          const refine = state.tool === 'refine' ? state.refine : null;
+          const guide =
+            refine?.stage === 'ready' && refine.mode === 'edge' && drawingRefineGuide(refine);
           if (guide) {
             state.dismissRefine([guide]);
             return;
@@ -261,16 +265,23 @@ export function useKeyboard(openScene: () => void, searchParts: () => void) {
           event.preventDefault();
           if (state.tool === 'warp' && state.warp) {
             if (state.warp.stage === 'warp') state.removeWarpPoints();
-          } else if (state.tool === 'refine' && state.refine) {
-            if (state.refine.selected.length) state.dismissRefine();
+          } else if (state.tool === 'refine') {
+            // Without a ready session Delete does nothing: it never reaches the scene's parts.
+            const targets = state.refine?.stage === 'ready' ? refineTargets(state.refine) : [];
+            if (targets.length) state.dismissRefine(targets.map((f) => f.id));
           } else executeEditorCommand('delete');
           return;
         case 'apply':
           if (nativeActivation) return;
-          if (state.tool === 'refine' && state.refine) {
+          if (state.tool === 'refine') {
             event.preventDefault();
-            if (state.refine.drawing) state.finishRefineGuide();
-            else state.acceptRefine();
+            const refine = state.refine;
+            if (refine?.stage !== 'ready') return;
+            if (refine.drawing) state.finishRefineGuide();
+            else {
+              const ids = refineTargets(refine).map((f) => f.id);
+              if (ids.length) state.acceptRefine(ids);
+            }
             return;
           }
           if (!['align', 'joint'].includes(state.tool)) return;

@@ -1,9 +1,18 @@
-import { useEffect, useRef, useState, type ReactNode } from 'react';
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type KeyboardEvent,
+  type PointerEvent,
+  type ReactNode,
+} from 'react';
+import { useShallow } from 'zustand/react/shallow';
 import { LoaderCircle, TriangleAlert } from 'lucide-react';
 import { isTaskActive, useActivity } from '../core/activity';
 import { fittedSizeRange, partSize } from '../core/geometry';
-import type { EdgeEnd, EdgeSolve } from '../core/refine-edge';
-import type { RegionSolve, RegionShape, Treatment } from '../core/refine-region';
+import type { EdgeEnd, EdgeInput, EdgeSolve } from '../core/refine-edge';
+import type { RegionInput, RegionSolve, RegionShape, Treatment } from '../core/refine-region';
 import {
   refineBrushRadius,
   refineEdited,
@@ -13,13 +22,18 @@ import {
   type RefineSession,
 } from '../core/store';
 import {
-  autoStart,
+  autoRule,
   endLabels,
   endOption,
+  extendsGuide,
   featureCounts,
   fittedLabel,
   foldWarning,
+  manualStart,
+  refineTargets,
+  shared,
   skippedWarning,
+  targetKey,
 } from './refine-panel';
 import { SurfaceBrushControls } from './SurfaceBrushControls';
 import { LogRangeInput, NumericInput, RadioGroup, Section, Switch } from './ui';
@@ -29,54 +43,124 @@ const editor = () => useEditor.getState();
 const isSlider = (target: EventTarget | null) =>
   target instanceof HTMLInputElement && target.type === 'range';
 
+/** What the panel shows of the session: everything but the painted triangles. */
+const panelView = (refine: RefineSession | null) =>
+  refine && {
+    partId: refine.partId,
+    stage: refine.stage,
+    model: refine.model,
+    // A new draft means new solves to show, such as a fitted shape or an Auto end.
+    draft: refine.draft,
+    mode: refine.mode,
+    features: refine.features,
+    selected: refine.selected,
+    edge: refine.edge,
+    region: refine.region,
+    brush: refine.brush,
+    detect: refine.detect,
+    folds: refine.folds.length,
+    skipped: refine.skipped.length,
+    edited: refineEdited(refine),
+  };
+type PanelView = NonNullable<ReturnType<typeof panelView>>;
+
+/** The key of what the panel's settings write to now. */
+function currentTarget() {
+  const { refine } = editor();
+  return refine ? targetKey(refine.mode, refineTargets(refine)) : '';
+}
+
+/** Whether a setting rendered for `target` may still write: the panel still edits that target. */
+const ownedBy = (target: string) => () => currentTarget() === target;
+
 /**
- * A slider with a number field. A percent setting holds 0 to 1 and shows 0 to 100; a setting with
- * `range` is in mm on a logarithmic slider. Unless `live`, a drag shows its value and sets it once,
- * when let go or changed by key, since each set may solve again.
+ * A slider value shown while dragged and set once, when let go or changed by key. Escape drops it,
+ * and the rest of that drag is ignored; so is a value whose target is no longer the panel's.
  */
-function SliderSetting({
-  label,
-  value,
-  range,
-  live = false,
-  onSet,
-}: {
-  label: string;
-  value: number;
-  range?: { min: number; max: number };
-  live?: boolean;
-  onSet: (value: number) => void;
-}) {
+function useReleaseDraft(owned: () => boolean, onSet: (value: number) => void) {
   const [draft, setDraft] = useState<number | null>(null);
   const pending = useRef<number | null>(null);
-  const set = useRef(onSet);
-  set.current = onSet;
-  const row = useRef<HTMLLabelElement>(null);
+  const cancelled = useRef(false);
+  const latest = useRef({ owned, onSet });
+  latest.current = { owned, onSet };
+  const row = useRef<HTMLElement | null>(null);
   useEffect(() => {
     const element = row.current!;
     // A range input fires a native change when it is let go, by pointer or by key.
-    const commit = (event: Event) => {
+    const end = (event: Event) => {
       if (!isSlider(event.target)) return;
       const next = pending.current;
       pending.current = null;
       setDraft(null);
-      if (next !== null) set.current(next);
+      if (next !== null && latest.current.owned()) latest.current.onSet(next);
     };
-    element.addEventListener('change', commit);
-    element.addEventListener('focusout', commit);
+    element.addEventListener('change', end);
+    element.addEventListener('focusout', end);
     return () => {
-      element.removeEventListener('change', commit);
-      element.removeEventListener('focusout', commit);
+      element.removeEventListener('change', end);
+      element.removeEventListener('focusout', end);
     };
   }, []);
-  const change = (next: number) => {
-    if (live) return onSet(next);
-    pending.current = next;
-    setDraft(next);
+  return {
+    draft,
+    row: (element: HTMLElement | null) => {
+      row.current = element;
+    },
+    change: (next: number) => {
+      if (cancelled.current) return;
+      pending.current = next;
+      setDraft(next);
+    },
+    onPointerDown: (event: PointerEvent) => {
+      if (isSlider(event.target)) cancelled.current = false;
+    },
+    onKeyDown: (event: KeyboardEvent) => {
+      if (!isSlider(event.target)) return;
+      if (event.key !== 'Escape') {
+        cancelled.current = false;
+        return;
+      }
+      if (pending.current === null) return;
+      event.preventDefault();
+      pending.current = null;
+      cancelled.current = true;
+      setDraft(null);
+    },
   };
-  const shown = draft ?? value;
+}
+
+/**
+ * A slider with a number field. A percent setting holds 0 to 1 and shows 0 to 100; a setting with
+ * `range` is in mm on a logarithmic slider. Unless `live`, a drag sets its value once on release.
+ */
+function SliderSetting({
+  label,
+  value,
+  mixed = false,
+  range,
+  live = false,
+  owned,
+  onSet,
+}: {
+  label: string;
+  value: number;
+  mixed?: boolean;
+  range?: { min: number; max: number };
+  live?: boolean;
+  owned: () => boolean;
+  onSet: (value: number) => void;
+}) {
+  const slider = useReleaseDraft(owned, onSet);
+  const change = (next: number) => (live ? owned() && onSet(next) : slider.change(next));
+  const shown = slider.draft ?? value;
+  const hidden = mixed && slider.draft === null;
   return (
-    <label className="warp-point-setting" ref={row}>
+    <label
+      className="warp-point-setting"
+      ref={slider.row}
+      onPointerDown={slider.onPointerDown}
+      onKeyDown={slider.onKeyDown}
+    >
       <span>{label}</span>
       {range ? (
         <LogRangeInput
@@ -84,58 +168,83 @@ function SliderSetting({
           value={shown}
           min={range.min}
           max={range.max}
+          mixed={hidden}
           onChange={change}
         />
       ) : (
         <input
           type="range"
+          className={hidden ? 'mixed' : undefined}
           aria-label={`${label} slider`}
+          aria-valuetext={hidden ? 'Mixed' : undefined}
           min={0}
           max={100}
           step={1}
-          value={Math.round(shown * 100)}
+          value={hidden ? 0 : Math.round(shown * 100)}
           onChange={(event) => change(Number(event.target.value) / 100)}
         />
       )}
       <NumericInput
         label={label}
         value={range ? shown : Math.round(shown * 100)}
+        mixed={hidden}
         min={range ? range.min : 0}
         max={range ? range.max : 100}
         step={range ? 0.01 : 1}
-        onCommit={(next) => onSet(range ? next : next / 100)}
+        onCommit={(next) => owned() && onSet(range ? next : next / 100)}
       />
       <small>{range ? 'mm' : '%'}</small>
     </label>
   );
 }
 
-/** A switch that hands a setting to the solver (null), and the setting itself once it is off. */
+const fieldRange = { min: 0, max: 100 };
+
+/**
+ * A switch that hands a setting to the solver (null), and the setting itself once it is off,
+ * starting from `start` held to `range`. It is on when every target is automatic.
+ */
 function AutoSetting({
   label,
-  value,
+  values,
   start,
+  range,
   onSet,
   children,
 }: {
   label: string;
-  value: number | null;
-  /** Where the setting starts when Auto is turned off. */
+  values: readonly (number | null)[];
+  /** What the solver used, where a setting turned off starts. */
   start: () => number;
+  range: { min: number; max: number };
   onSet: (value: number | null) => void;
-  children: (value: number) => ReactNode;
+  children: (value: number, mixed: boolean) => ReactNode;
 }) {
+  const [adjusted, setAdjusted] = useState<number | null>(null);
+  const auto = values.every((v) => v === null);
+  const value = values.find((v) => v !== null) ?? 0;
+  const mixed = values.some((v) => v !== values[0]);
   return (
     <>
       <div className="appearance-row">
         <span>Automatic {label.toLowerCase()}</span>
         <Switch
           label={`Choose ${label.toLowerCase()} automatically`}
-          checked={value === null}
-          onChange={(auto) => onSet(auto ? null : Number(start().toPrecision(3)))}
+          checked={auto}
+          onChange={(on) => {
+            if (on) return onSet(null);
+            const seeded = manualStart(start(), range);
+            setAdjusted(seeded.adjusted ? seeded.value : null);
+            onSet(seeded.value);
+          }}
         />
       </div>
-      {value === null ? null : children(value)}
+      {auto ? null : children(value, mixed)}
+      {!auto && !mixed && adjusted === value ? (
+        <p className="anchor-help" role="status">
+          Adjusted to the nearest allowed value.
+        </p>
+      ) : null}
     </>
   );
 }
@@ -144,22 +253,34 @@ function AutoSetting({
 function MillimetreField({
   label,
   value,
+  mixed,
+  owned,
   onSet,
 }: {
   label: string;
   value: number;
+  mixed: boolean;
+  owned: () => boolean;
   onSet: (value: number) => void;
 }) {
   return (
     <label className="brush-radius">
       <span>{label}</span>
-      <NumericInput label={label} value={value} min={0} max={100} step={0.01} onCommit={onSet} />
+      <NumericInput
+        label={label}
+        value={value}
+        mixed={mixed}
+        min={fieldRange.min}
+        max={fieldRange.max}
+        step={0.01}
+        onCommit={(next) => owned() && onSet(next)}
+      />
       <small>mm</small>
     </label>
   );
 }
 
-/** A labelled choice of a few options. */
+/** A labelled choice of a few options; none is chosen when the targets differ. */
 function Choice<T extends string>({
   label,
   value,
@@ -167,7 +288,7 @@ function Choice<T extends string>({
   onChange,
 }: {
   label: string;
-  value: T;
+  value: T | null;
   options: { id: T; label: string }[];
   onChange: (value: T) => void;
 }) {
@@ -185,33 +306,22 @@ function Choice<T extends string>({
   );
 }
 
-/** The one selected pending feature of a type, whose settings the panel shows. */
-function selectedOf<T extends 'edge' | 'region'>(refine: RefineSession, type: T) {
-  if (refine.selected.length !== 1) return null;
-  const feature = refine.features.find((f) => f.id === refine.selected[0]);
-  return feature?.state === 'pending' && feature.feature.type === type
-    ? (feature as RefineFeature & { feature: { type: T } })
-    : null;
-}
-
-/** Dismiss and Accept for the selected pending features. */
-function FeatureActions({ refine }: { refine: RefineSession }) {
-  const pending = refine.features.some(
-    (f) => f.state === 'pending' && refine.selected.includes(f.id),
-  );
+/** Dismiss and Accept for the mode's selected pending features. */
+function FeatureActions({ targets }: { targets: RefineFeature[] }) {
+  const ids = targets.map((f) => f.id);
   return (
     <div className="warp-gap-row">
       <button
         className="button secondary"
-        disabled={!pending}
-        onClick={() => editor().dismissRefine()}
+        disabled={!ids.length}
+        onClick={() => editor().dismissRefine(ids)}
       >
         Dismiss
       </button>
       <button
         className="button primary"
-        disabled={!pending}
-        onClick={() => editor().acceptRefine()}
+        disabled={!ids.length}
+        onClick={() => editor().acceptRefine(ids)}
       >
         Accept
       </button>
@@ -219,17 +329,32 @@ function FeatureActions({ refine }: { refine: RefineSession }) {
   );
 }
 
+/** A setting of the targets, or of the next feature when there are none. */
+function settingOf<I, T>(inputs: readonly I[], pick: (input: I) => T, fallback: T) {
+  return inputs.length ? shared(inputs.map(pick), fallback) : { value: fallback, mixed: false };
+}
+
 const endChoices = ['auto', 'taper', 'hold'] as const;
 
-function EdgeControls({ refine }: { refine: RefineSession }) {
-  const selected = selectedOf(refine, 'edge');
-  const input = selected?.feature.input;
-  const width = input ? input.width : refine.edge.width;
-  const strength = input ? input.strength : refine.edge.strength;
-  const ends = input ? (input.ends ?? [null, null]) : refine.edge.ends;
-  const solve = selected ? (refineSolved(refine, selected) as EdgeSolve | null) : null;
+interface ModeProps {
+  view: PanelView;
+  targets: RefineFeature[];
+  owned: () => boolean;
+}
+
+function EdgeControls({ view, targets, owned }: ModeProps) {
+  const inputs = targets.map((f) => f.feature.input as EdgeInput);
+  const widths = inputs.length ? inputs.map((i) => i.width) : [view.edge.width];
+  const strength = settingOf(inputs, (i) => i.strength, view.edge.strength);
+  const ends = ([0, 1] as const).map((k) =>
+    settingOf(inputs, (i) => i.ends?.[k] ?? null, view.edge.ends[k]),
+  );
+  const closed = inputs.length > 0 && inputs.every((i) => i.closed);
+  const first = targets[0];
+  const firstSolve = first ? (refineSolved(editor().refine!, first) as EdgeSolve | null) : null;
+  const solve = targets.length === 1 ? firstSolve : null;
   const setEnd = (index: 0 | 1, choice: (typeof endChoices)[number]) => {
-    const next: [EdgeEnd | null, EdgeEnd | null] = [ends[0], ends[1]];
+    const next: [EdgeEnd | null, EdgeEnd | null] = [ends[0].value, ends[1].value];
     next[index] = choice === 'auto' ? null : choice;
     editor().setRefineEdge({ ends: next });
   };
@@ -237,7 +362,7 @@ function EdgeControls({ refine }: { refine: RefineSession }) {
     <>
       <Choice
         label="Guide"
-        value={refine.edge.kind}
+        value={view.edge.kind}
         options={[
           { id: 'line', label: 'Line' },
           { id: 'arc', label: 'Arc' },
@@ -247,23 +372,28 @@ function EdgeControls({ refine }: { refine: RefineSession }) {
       />
       <AutoSetting
         label="Width"
-        value={width}
-        start={() => autoStart('width', refine.model!, solve?.width)}
+        values={widths}
+        start={() => firstSolve?.width ?? autoRule('width', view.model!)}
+        range={widthRange}
         onSet={(width) => editor().setRefineEdge({ width })}
       >
-        {(width) => (
+        {(width, mixed) => (
           <SliderSetting
             label="Width"
             value={width}
-            range={{ min: 0.1, max: 5 }}
+            mixed={mixed}
+            range={widthRange}
+            owned={owned}
             onSet={(width) => editor().setRefineEdge({ width })}
           />
         )}
       </AutoSetting>
       <SliderSetting
         label="Strength"
-        value={strength}
+        value={strength.value}
+        mixed={strength.mixed}
         live
+        owned={owned}
         onSet={(strength) => editor().setRefineEdge({ strength })}
       />
       <p className="anchor-help">
@@ -271,14 +401,19 @@ function EdgeControls({ refine }: { refine: RefineSession }) {
       </p>
       <Choice
         label="Joints"
-        value={refine.edge.joint}
+        value={view.edge.joint}
         options={[
           { id: 'sharp', label: 'Sharp' },
           { id: 'smooth', label: 'Smooth' },
         ]}
         onChange={(joint) => editor().setRefineEdge({ joint })}
       />
-      {input?.closed ? null : (
+      {extendsGuide(view) ? (
+        <p className="anchor-help" role="status">
+          Applies to the next segment.
+        </p>
+      ) : null}
+      {closed ? null : (
         <div className="refine-choice">
           <span>Ends</span>
           <div className="refine-ends">
@@ -287,11 +422,16 @@ function EdgeControls({ refine }: { refine: RefineSession }) {
                 <span>{label}</span>
                 <select
                   aria-label={`${label} of the guide`}
-                  value={ends[index] ?? 'auto'}
+                  value={ends[index].mixed ? 'mixed' : (ends[index].value ?? 'auto')}
                   onChange={(event) =>
                     setEnd(index as 0 | 1, event.target.value as (typeof endChoices)[number])
                   }
                 >
+                  {ends[index].mixed ? (
+                    <option value="mixed" disabled>
+                      Mixed
+                    </option>
+                  ) : null}
                   {endChoices.map((choice) => (
                     <option key={choice} value={choice}>
                       {choice === 'auto' ? endOption(solve?.ends[index]) : endLabels[choice]}
@@ -303,10 +443,13 @@ function EdgeControls({ refine }: { refine: RefineSession }) {
           </div>
         </div>
       )}
-      <FeatureActions refine={refine} />
+      <FeatureActions targets={targets} />
     </>
   );
 }
+
+const widthRange = { min: 0.1, max: 5 };
+const reachRange = { min: 0.3, max: 5 };
 
 const shapes: { id: RegionShape; label: string }[] = [
   { id: 'auto', label: 'Auto' },
@@ -316,48 +459,96 @@ const shapes: { id: RegionShape; label: string }[] = [
   { id: 'sweep', label: 'Sweep' },
 ];
 
-/** Paint brush controls and how much is painted. */
-function PaintControls({ refine }: { refine: RefineSession }) {
-  const part = useEditor((s) => s.scene.parts.find((p) => p.id === refine.partId));
-  const fitted = part
-    ? {
-        radius: refineBrushRadius,
-        range: fittedSizeRange(partSize(part)),
-        set: editor().setRefineBrushRadius,
-      }
-    : undefined;
+/** The brush radius on the session's part, set once a drag is let go. */
+function BrushRadius() {
+  const radius = useEditor(refineBrushRadius);
+  const size = useEditor((s) => {
+    const part = s.refine && s.scene.parts.find((p) => p.id === s.refine!.partId);
+    return part ? partSize(part) : 0;
+  });
+  const range = fittedSizeRange(size);
+  const set = (value: number) => editor().setRefineBrushRadius(value);
+  const slider = useReleaseDraft(always, set);
+  const shown = slider.draft ?? radius;
+  return (
+    <div
+      className="refine-brush-radius"
+      ref={slider.row}
+      onPointerDown={slider.onPointerDown}
+      onKeyDown={slider.onKeyDown}
+    >
+      <label className="brush-radius">
+        <span>Brush radius</span>
+        <NumericInput
+          label="Brush radius"
+          value={shown}
+          min={0.05}
+          max={100}
+          step={0.1}
+          onCommit={set}
+        />
+        <small>mm</small>
+      </label>
+      <LogRangeInput
+        className="brush-radius-slider"
+        label="Brush radius slider"
+        value={shown}
+        min={range.min}
+        max={range.max}
+        onChange={slider.change}
+      />
+    </div>
+  );
+}
+
+const always = () => true;
+
+/** Paint and Erase, the brush radius, and how much is painted. Session undo takes paint back. */
+function PaintControls() {
+  const painted = useEditor((s) => s.refine?.triangles.length ?? 0);
   return (
     <>
-      <SurfaceBrushControls fitted={fitted} />
+      <SurfaceBrushControls paintUndo={false} seedPlane={false} radius={<BrushRadius />} />
       <p className="anchor-help" role="status">
-        {refine.triangles.length
-          ? `${refine.triangles.length.toLocaleString()} ${refine.triangles.length === 1 ? 'triangle' : 'triangles'} painted.`
+        {painted
+          ? `${painted.toLocaleString()} ${painted === 1 ? 'triangle' : 'triangles'} painted.`
           : 'Nothing painted yet.'}
       </p>
     </>
   );
 }
 
-function RegionControls({ refine }: { refine: RefineSession }) {
-  const selected = selectedOf(refine, 'region');
-  const region = selected ? selected.feature.input : refine.region;
-  const solve = selected ? (refineSolved(refine, selected) as RegionSolve | null) : null;
-  const model = refine.model!;
-  const set = editor().setRefineRegion;
-  const fitted = region.shape === 'auto' ? fittedLabel(solve?.fitted ?? null) : null;
+function RegionControls({ view, targets, owned }: ModeProps) {
+  const painted = useEditor((s) => (s.refine?.triangles.length ?? 0) > 0);
+  const inputs = targets.map((f) => f.feature.input as RegionInput);
+  const defaults = view.region;
+  const treatment = settingOf(inputs, (i) => i.treatment, defaults.treatment);
+  const shape = settingOf(inputs, (i) => i.shape, defaults.shape);
+  const strength = settingOf(inputs, (i) => i.strength, defaults.strength);
+  const keepDetail = settingOf(inputs, (i) => i.keepDetail, defaults.keepDetail);
+  const values = (pick: (input: Omit<RegionInput, 'triangles'>) => number | null) =>
+    inputs.length ? inputs.map(pick) : [pick(defaults)];
+  const solve =
+    targets.length === 1
+      ? (refineSolved(editor().refine!, targets[0]) as RegionSolve | null)
+      : null;
+  const model = view.model!;
+  const set = (options: Partial<RefineSession['region']>) => editor().setRefineRegion(options);
+  const smooth = !treatment.mixed && treatment.value === 'smooth';
+  const fitted = !shape.mixed && shape.value === 'auto' ? fittedLabel(solve?.fitted ?? null) : null;
   return (
     <>
-      <PaintControls refine={refine} />
+      <PaintControls />
       <button
         className="button secondary full-width refine-spaced"
-        disabled={!refine.triangles.length}
+        disabled={!painted}
         onClick={() => editor().makeRefineRegion()}
       >
         Make region
       </button>
       <Choice<Treatment>
         label="Treatment"
-        value={region.treatment}
+        value={treatment.mixed ? null : treatment.value}
         options={[
           { id: 'smooth', label: 'Smooth' },
           { id: 'flatten', label: 'Flatten' },
@@ -365,15 +556,20 @@ function RegionControls({ refine }: { refine: RefineSession }) {
         ]}
         onChange={(treatment) => set({ treatment })}
       />
-      {region.treatment === 'shape' ? (
+      {!treatment.mixed && treatment.value === 'shape' ? (
         <>
           <label className="brush-radius">
             <span>Shape</span>
             <select
               aria-label="Shape"
-              value={region.shape}
+              value={shape.mixed ? 'mixed' : shape.value}
               onChange={(event) => set({ shape: event.target.value as RegionShape })}
             >
+              {shape.mixed ? (
+                <option value="mixed" disabled>
+                  Mixed
+                </option>
+              ) : null}
               {shapes.map(({ id, label }) => (
                 <option key={id} value={id}>
                   {label}
@@ -390,57 +586,76 @@ function RegionControls({ refine }: { refine: RefineSession }) {
       ) : null}
       <SliderSetting
         label="Strength"
-        value={region.strength}
+        value={strength.value}
+        mixed={strength.mixed}
+        owned={owned}
         onSet={(strength) => set({ strength })}
       />
       <div className="appearance-row">
         <span>Keep detail</span>
         <Switch
           label="Keep detail"
-          checked={region.keepDetail}
+          checked={keepDetail.value && !keepDetail.mixed}
           onChange={(keepDetail) => set({ keepDetail })}
         />
       </div>
-      {region.keepDetail ? (
-        <AutoSetting
-          label="Offset"
-          value={region.detail}
-          start={() => autoStart('detail', model)}
-          onSet={(detail) => set({ detail })}
-        >
-          {(detail) => (
-            <MillimetreField label="Offset" value={detail} onSet={(detail) => set({ detail })} />
-          )}
-        </AutoSetting>
-      ) : null}
-      {region.keepDetail ? (
-        <p className="anchor-help">
-          How far a feature must deviate from the surface, raised or recessed, to be preserved.
-        </p>
+      {keepDetail.value && !keepDetail.mixed ? (
+        <>
+          <AutoSetting
+            label="Offset"
+            values={values((i) => i.detail)}
+            start={() => autoRule('detail', model)}
+            range={fieldRange}
+            onSet={(detail) => set({ detail })}
+          >
+            {(detail, mixed) => (
+              <MillimetreField
+                label="Offset"
+                value={detail}
+                mixed={mixed}
+                owned={owned}
+                onSet={(detail) => set({ detail })}
+              />
+            )}
+          </AutoSetting>
+          <p className="anchor-help">
+            How far a feature must deviate from the surface, raised or recessed, to be preserved.
+          </p>
+        </>
       ) : null}
       <AutoSetting
         label="Blend"
-        value={region.blend}
-        start={() => autoStart('blend', model)}
+        values={values((i) => i.blend)}
+        start={() => autoRule('blend', model)}
+        range={fieldRange}
         onSet={(blend) => set({ blend })}
       >
-        {(blend) => (
-          <MillimetreField label="Blend" value={blend} onSet={(blend) => set({ blend })} />
+        {(blend, mixed) => (
+          <MillimetreField
+            label="Blend"
+            value={blend}
+            mixed={mixed}
+            owned={owned}
+            onSet={(blend) => set({ blend })}
+          />
         )}
       </AutoSetting>
-      {region.treatment === 'smooth' ? (
+      {smooth ? (
         <>
           <AutoSetting
             label="Reach"
-            value={region.scale ?? null}
-            start={() => Math.min(5, autoStart('scale', model))}
+            values={values((i) => i.scale ?? null)}
+            start={() => autoRule('scale', model)}
+            range={reachRange}
             onSet={(scale) => set({ scale })}
           >
-            {(scale) => (
+            {(scale, mixed) => (
               <SliderSetting
                 label="Reach"
                 value={scale}
-                range={{ min: 0.3, max: 5 }}
+                mixed={mixed}
+                range={reachRange}
+                owned={owned}
                 onSet={(scale) => set({ scale })}
               />
             )}
@@ -448,21 +663,17 @@ function RegionControls({ refine }: { refine: RefineSession }) {
           <p className="anchor-help">The longest ripple Smooth removes.</p>
         </>
       ) : null}
-      <FeatureActions refine={refine} />
+      <FeatureActions targets={targets} />
     </>
   );
 }
 
-function BrushControls({ refine }: { refine: RefineSession }) {
-  const part = useEditor((s) => s.scene.parts.find((p) => p.id === refine.partId));
-  const radius = useEditor(refineBrushRadius);
-  const range = fittedSizeRange(part ? partSize(part) : 0);
-  const setRadius = (value: number) => editor().setRefineBrushRadius(value);
+function BrushControls({ view, owned }: ModeProps) {
   return (
     <>
       <Choice
         label="Brush"
-        value={refine.brush.kind}
+        value={view.brush.kind}
         options={[
           { id: 'crease', label: 'Crease' },
           { id: 'flatten', label: 'Flatten' },
@@ -470,30 +681,12 @@ function BrushControls({ refine }: { refine: RefineSession }) {
         ]}
         onChange={(kind) => editor().setRefineBrush({ kind })}
       />
-      <label className="brush-radius">
-        <span>Brush radius</span>
-        <NumericInput
-          label="Brush radius"
-          value={radius}
-          min={0.05}
-          max={100}
-          step={0.1}
-          onCommit={setRadius}
-        />
-        <small>mm</small>
-      </label>
-      <LogRangeInput
-        className="brush-radius-slider"
-        label="Brush radius slider"
-        value={radius}
-        min={range.min}
-        max={range.max}
-        onChange={setRadius}
-      />
+      <BrushRadius />
       <SliderSetting
         label="Strength"
-        value={refine.brush.strength}
+        value={view.brush.strength}
         live
+        owned={owned}
         onSet={(strength) => editor().setRefineBrush({ strength })}
       />
     </>
@@ -502,12 +695,14 @@ function BrushControls({ refine }: { refine: RefineSession }) {
 
 const detectTitle = 'Finding edges and surfaces';
 
-function DetectControls({ refine }: { refine: RefineSession }) {
-  const { detect } = refine;
+function DetectControls({ view, targets, owned }: ModeProps) {
+  const { detect, features } = view;
+  const painted = useEditor((s) => (s.refine?.triangles.length ?? 0) > 0);
   const task = useActivity((s) =>
     s.tasks.find((task) => task.title === detectTitle && isTaskActive(task)),
   );
-  const pending = refine.features.filter((f) => f.state === 'pending');
+  const pending = useMemo(() => features.filter((f) => f.state === 'pending'), [features]);
+  const ids = targets.map((f) => f.id);
   return (
     <>
       <Choice
@@ -519,11 +714,12 @@ function DetectControls({ refine }: { refine: RefineSession }) {
         ]}
         onChange={(where) => editor().setRefineDetect({ where })}
       />
-      {detect.where === 'painted' ? <PaintControls refine={refine} /> : null}
+      {detect.where === 'painted' ? <PaintControls /> : null}
       <SliderSetting
         label="Sensitivity"
         value={detect.sensitivity}
         live
+        owned={owned}
         onSet={(sensitivity) => editor().setRefineDetect({ sensitivity })}
       />
       <label className="brush-radius">
@@ -557,7 +753,7 @@ function DetectControls({ refine }: { refine: RefineSession }) {
       ) : (
         <button
           className="button primary full-width refine-spaced"
-          disabled={detect.where === 'painted' && !refine.triangles.length}
+          disabled={detect.where === 'painted' && !painted}
           onClick={() => void editor().detectRefine()}
         >
           Find edges and surfaces
@@ -574,15 +770,15 @@ function DetectControls({ refine }: { refine: RefineSession }) {
           <div className="warp-gap-row">
             <button
               className="button secondary"
-              disabled={!refine.selected.length}
-              onClick={() => editor().dismissRefine()}
+              disabled={!ids.length}
+              onClick={() => editor().dismissRefine(ids)}
             >
               Dismiss selected
             </button>
             <button
               className="button primary"
-              disabled={!refine.selected.length}
-              onClick={() => editor().acceptRefine()}
+              disabled={!ids.length}
+              onClick={() => editor().acceptRefine(ids)}
             >
               Accept selected
             </button>
@@ -603,11 +799,22 @@ function cancel() {
 const modeTitles = { edge: 'Edge', region: 'Region', brush: 'Brush', detect: 'Detect' } as const;
 
 export function RefineControls() {
-  const refine = useEditor((s) => s.refine);
-  const name = useEditor((s) =>
-    s.refine ? s.scene.parts.find((p) => p.id === s.refine!.partId)?.name : undefined,
+  const view = useEditor(useShallow((s) => panelView(s.refine)));
+  const part = useEditor(
+    useShallow((s) => {
+      const part = s.refine && s.scene.parts.find((p) => p.id === s.refine!.partId);
+      return { name: part?.name, locked: !!part?.locked };
+    }),
   );
-  if (!refine)
+  const features = view?.features;
+  const counts = useMemo(() => (features ? featureCounts(features) : ''), [features]);
+  const mode = view?.mode;
+  const selected = view?.selected;
+  const targets = useMemo(
+    () => (mode && features && selected ? refineTargets({ mode, features, selected }) : []),
+    [mode, features, selected],
+  );
+  if (!view)
     return (
       <Section title="Refine">
         <p className="anchor-help">
@@ -619,14 +826,14 @@ export function RefineControls() {
         </button>
       </Section>
     );
-  const building = refine.stage === 'building';
-  const folds = refine.folds.length;
-  const skipped = refine.skipped.length;
+  const building = view.stage === 'building';
+  const target = targetKey(view.mode, targets);
+  const props: ModeProps = { view, targets, owned: ownedBy(target) };
   return (
     <div className="warp-controls refine-controls">
       <Section title="Mode">
         <p className="anchor-help">
-          Refining <strong>{name}</strong>.
+          Refining <strong>{part.name}</strong>.
         </p>
         {building ? (
           <p className="warp-building" role="status">
@@ -637,7 +844,7 @@ export function RefineControls() {
           <RadioGroup
             label="Refine mode"
             className="display-segmented refine-modes"
-            value={refine.mode}
+            value={view.mode}
             options={[
               { id: 'edge', label: 'Edge' },
               { id: 'region', label: 'Region' },
@@ -649,31 +856,32 @@ export function RefineControls() {
         )}
       </Section>
       {building ? null : (
-        <Section title={modeTitles[refine.mode]}>
-          {refine.mode === 'edge' ? (
-            <EdgeControls refine={refine} />
-          ) : refine.mode === 'region' ? (
-            <RegionControls refine={refine} />
-          ) : refine.mode === 'brush' ? (
-            <BrushControls refine={refine} />
+        <Section title={modeTitles[view.mode]}>
+          {/* Keyed by target, so an edit under way is dropped when the target changes. */}
+          {view.mode === 'edge' ? (
+            <EdgeControls key={target} {...props} />
+          ) : view.mode === 'region' ? (
+            <RegionControls key={target} {...props} />
+          ) : view.mode === 'brush' ? (
+            <BrushControls key={target} {...props} />
           ) : (
-            <DetectControls refine={refine} />
+            <DetectControls key={target} {...props} />
           )}
         </Section>
       )}
       <p className="anchor-help refine-counts" role="status">
-        {featureCounts(refine.features)}
+        {counts}
       </p>
-      {folds ? (
+      {view.folds ? (
         <p className="warp-warning" role="status">
           <TriangleAlert size={13} aria-hidden="true" />
-          {foldWarning(folds)}
+          {foldWarning(view.folds)}
         </p>
       ) : null}
-      {skipped ? (
+      {view.skipped ? (
         <p className="warp-warning" role="status">
           <TriangleAlert size={13} aria-hidden="true" />
-          {skippedWarning(skipped)}
+          {skippedWarning(view.skipped)}
         </p>
       ) : null}
       <div className="warp-actions">
@@ -682,8 +890,14 @@ export function RefineControls() {
         </button>
         <button
           className="button primary"
-          disabled={building || !refineEdited(refine)}
-          title={refineEdited(refine) ? undefined : 'Accept a feature or make a stroke first.'}
+          disabled={building || !view.edited || part.locked}
+          title={
+            part.locked
+              ? `Unlock ${part.name} to apply the refinement.`
+              : view.edited
+                ? undefined
+                : 'Accept a feature or make a stroke first.'
+          }
           onClick={() => editor().applyRefine()}
         >
           Apply
