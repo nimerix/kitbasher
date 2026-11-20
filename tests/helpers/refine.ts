@@ -882,3 +882,106 @@ export function largestGap(curve: { points: Float32Array; closed: boolean }) {
   }
   return largest;
 }
+
+/**
+ * A 25 x 25 grid 0.04 apart on y = 0 and a 12 x 12 cap 0.02 apart standing 0.5 above it off
+ * centre, every point jittered in y by up to 0.002, all with normals +Y.
+ */
+export function cappedFlat(seed = 3) {
+  const next = signedRandom(seed);
+  const points: number[] = [];
+  for (let i = 0; i < 25; i++)
+    for (let j = 0; j < 25; j++) points.push(i * 0.04, next() * 0.002, j * 0.04);
+  for (let i = 0; i < 12; i++)
+    for (let j = 0; j < 12; j++) points.push(0.7 + i * 0.02, 0.5 + next() * 0.002, 0.7 + j * 0.02);
+  const normals = Array.from({ length: points.length }, (_, k) => (k % 3 === 1 ? 1 : 0));
+  return [new Float32Array(points), new Float32Array(normals)] as SurfaceSample;
+}
+
+/**
+ * A narrow `coneSide(0.05, 2, 0.0002)` (apex (0, 1, 0)) followed by 24 points on a ring of radius
+ * 0.001 about its axis, 0.395 behind the apex, with radial normals.
+ */
+export function coneBehindApex() {
+  const [side, sideNormals] = coneSide(0.05, 2, 0.0002);
+  const points = Array.from(side),
+    normals = Array.from(sideNormals);
+  for (let k = 0; k < 24; k++) {
+    const turn = (k / 24) * Math.PI * 2;
+    points.push(0.001 * Math.cos(turn), 1.395, 0.001 * Math.sin(turn));
+    normals.push(Math.cos(turn), 0, Math.sin(turn));
+  }
+  return {
+    sample: [new Float32Array(points), new Float32Array(normals)] as SurfaceSample,
+    clean: side.length / 3,
+  };
+}
+
+/** Three rings of 360 points about Y at y = -height / 2, 0 and height / 2, with radial normals. */
+export function band(radius: number, height: number) {
+  const points: number[] = [],
+    normals: number[] = [];
+  for (const y of [-height / 2, 0, height / 2])
+    for (let k = 0; k < 360; k++) {
+      const turn = (k / 360) * Math.PI * 2;
+      points.push(radius * Math.cos(turn), y, radius * Math.sin(turn));
+      normals.push(Math.cos(turn), 0, Math.sin(turn));
+    }
+  return [new Float32Array(points), new Float32Array(normals)] as SurfaceSample;
+}
+
+/**
+ * A tube about Y from y = -0.5 to 0.5 whose radius grows from `radius` at the bottom at `taper`
+ * radians, 48 points round by 21 high, moved along their normals by up to `jitter`.
+ */
+export function taperedTube(radius: number, taper: number, jitter: number, seed = 5) {
+  const next = signedRandom(seed);
+  const points: number[] = [],
+    normals: number[] = [];
+  for (let j = 0; j <= 20; j++) {
+    const y = -0.5 + j / 20;
+    const r = radius + (y + 0.5) * Math.tan(taper);
+    for (let k = 0; k < 48; k++) {
+      const turn = (k / 48) * Math.PI * 2;
+      const n = [
+        Math.cos(turn) * Math.cos(taper),
+        -Math.sin(taper),
+        Math.sin(turn) * Math.cos(taper),
+      ];
+      const offset = next() * jitter;
+      points.push(
+        r * Math.cos(turn) + n[0] * offset,
+        y + n[1] * offset,
+        r * Math.sin(turn) + n[2] * offset,
+      );
+      normals.push(...n);
+    }
+  }
+  return [new Float32Array(points), new Float32Array(normals)] as SurfaceSample;
+}
+
+/** Root mean square of `shapeDistance` over the first `count` points. */
+export function shapeRms(
+  distance: (x: number, y: number, z: number) => number,
+  points: Float32Array,
+  count = points.length / 3,
+) {
+  let sum = 0;
+  for (let i = 0; i < count; i++)
+    sum += distance(points[i * 3], points[i * 3 + 1], points[i * 3 + 2]) ** 2;
+  return Math.sqrt(sum / count);
+}
+
+/** An open fan: a centre vertex and six about it at radius 1 in XZ, with the given y heights. */
+export function sevenVertexFan(heights: number[]) {
+  const points = [0, heights[0], 0];
+  for (let k = 0; k < 6; k++) {
+    const turn = (k / 6) * Math.PI * 2;
+    points.push(Math.cos(turn), heights[k + 1], -Math.sin(turn));
+  }
+  const geometry = new BufferGeometry();
+  geometry.setAttribute('position', new BufferAttribute(new Float32Array(points), 3));
+  geometry.setIndex([0, 1, 2, 0, 2, 3, 0, 3, 4, 0, 4, 5, 0, 5, 6, 0, 6, 1]);
+  geometry.computeVertexNormals();
+  return geometry;
+}

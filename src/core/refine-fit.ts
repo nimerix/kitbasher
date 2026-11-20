@@ -24,6 +24,11 @@ export interface ShapeFit {
 const tukey = 4.685;
 const rounds = 10;
 const minimumPoints: Record<ShapeKind, number> = { plane: 3, sphere: 4, cylinder: 5, cone: 6 };
+/** Points in each seeded sample a fit is started from, and how many samples are tried. */
+const sampleSize: Record<ShapeKind, number> = { plane: 3, sphere: 6, cylinder: 6, cone: 8 };
+const samples = 64;
+/** Floor of the weighting scale in cloud units, so exact data keeps its points. */
+const exact = 1e-9;
 
 /** Eigenvalues ascending and their unit eigenvectors (row i for value i) of a symmetric 3x3. */
 function eigen3(matrix: ArrayLike<number>) {
@@ -88,10 +93,31 @@ function perpendiculars(a: ArrayLike<number>): [Vec3, Vec3] {
   return [u, [a[1] * u[2] - a[2] * u[1], a[2] * u[0] - a[0] * u[2], a[0] * u[1] - a[1] * u[0]]];
 }
 
+/** The lower median, the value a sort would put at (length - 1) >> 1, found by selection. */
 function median(values: Float64Array) {
   if (!values.length) return 0;
-  const sorted = Float64Array.from(values).sort();
-  return sorted[(sorted.length - 1) >> 1];
+  const a = Float64Array.from(values);
+  const k = (a.length - 1) >> 1;
+  let low = 0,
+    high = a.length - 1;
+  while (low < high) {
+    const pivot = a[(low + high) >> 1];
+    let i = low,
+      j = high;
+    while (i <= j) {
+      while (a[i] < pivot) i++;
+      while (a[j] > pivot) j--;
+      if (i <= j) {
+        const t = a[i];
+        a[i++] = a[j];
+        a[j--] = t;
+      }
+    }
+    if (k <= j) high = j;
+    else if (k >= i) low = i;
+    else break;
+  }
+  return a[k];
 }
 
 /** Points centred on their mean and scaled to unit RMS radius, so every fit is well conditioned. */
@@ -138,7 +164,7 @@ interface Model {
 
 /** Tukey biweights from residuals, with a scale of 1.4826 times the median absolute residual. */
 function reweight(residual: Float64Array, noise: number, weight: Float64Array) {
-  const scale = Math.max(1.4826 * median(residual.map(Math.abs)), noise);
+  const scale = Math.max(1.4826 * median(residual.map(Math.abs)), noise, exact);
   const cut = tukey * scale;
   for (let i = 0; i < residual.length; i++) {
     const u = residual[i] / cut;
@@ -213,41 +239,67 @@ function refine(model: Model, cloud: Cloud, state: Float64Array, weight: Float64
 
 interface Fitted {
   state: Float64Array;
-  rms: number;
   /** True when the normals face against the model's outward direction. */
   inward: boolean;
   weight: Float64Array;
 }
 
-/** Iteratively reweighted fit: `fit` takes weights and the previous state and returns a state. */
+/**
+ * Iteratively reweighted fit: `fit` takes weights and the previous state and returns a state. It
+ * starts from whichever of the all-point start and `samples` seeded samples of `size` points has
+ * the least median absolute residual, so a minority of points off the surface cannot move it.
+ */
 function robust(
   cloud: Cloud,
   noise: number,
+  size: number,
   model: Pick<Model, 'residuals' | 'gradient'>,
   fit: (weight: Float64Array, previous: Float64Array | null) => Float64Array | null,
 ): Fitted | null {
-  const weight = new Float64Array(cloud.count).fill(1),
-    residual = new Float64Array(cloud.count);
-  let state = fit(weight, null);
+  const { count } = cloud;
+  const weight = new Float64Array(count).fill(1),
+    residual = new Float64Array(count);
+  let state: Float64Array | null = null,
+    least = Infinity;
+  const consider = (candidate: Float64Array | null) => {
+    if (!candidate || !candidate.every(Number.isFinite)) return;
+    model.residuals(candidate, residual);
+    for (let i = 0; i < count; i++) residual[i] = Math.abs(residual[i]);
+    const score = median(residual);
+    if (score < least) {
+      least = score;
+      state = candidate;
+    }
+  };
+  consider(fit(weight, null));
+  let seed = 0x2545f491;
+  const random = () => (seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0) / 4294967296;
+  for (let sample = 0; count > size && sample < samples; sample++) {
+    weight.fill(0);
+    for (let picked = 0; picked < size;) {
+      const i = Math.floor(random() * count);
+      if (!weight[i]) ((weight[i] = 1), picked++);
+    }
+    consider(fit(weight, null));
+  }
   for (let round = 0; state && round < rounds; round++) {
     model.residuals(state, residual);
     reweight(residual, noise, weight);
     state = fit(weight, state);
   }
-  if (!state || !state.every(Number.isFinite)) return null;
-  model.residuals(state, residual);
+  const final: Float64Array | null = state;
+  if (!final || !final.every(Number.isFinite)) return null;
+  model.residuals(final, residual);
   reweight(residual, noise, weight);
-  let sum = 0,
-    inliers = 0,
+  let inliers = 0,
     facing = 0;
-  for (let i = 0; i < cloud.count; i++) {
+  for (let i = 0; i < count; i++) {
     if (weight[i] <= 0) continue;
-    sum += residual[i] * residual[i];
     inliers++;
-    facing += weight[i] * dot(model.gradient(state, i), cloud.n.subarray(i * 3, i * 3 + 3));
+    facing += weight[i] * dot(model.gradient(final, i), cloud.n.subarray(i * 3, i * 3 + 3));
   }
   if (!inliers) return null;
-  return { state, rms: Math.sqrt(sum / inliers), inward: facing < 0, weight };
+  return { state: final, inward: facing < 0, weight };
 }
 
 const at = (cloud: Cloud, i: number): Vec3 => [
@@ -266,7 +318,7 @@ function fitPlane(cloud: Cloud, noise: number) {
         (cloud.p[i * 3 + 2] - state[2]) * state[5];
   };
   const model = { residuals, gradient: (s: Float64Array): Vec3 => [s[3], s[4], s[5]] };
-  return robust(cloud, noise, model, (weight) => {
+  return robust(cloud, noise, sampleSize.plane, model, (weight) => {
     let total = 0;
     const mean = [0, 0, 0];
     for (let i = 0; i < cloud.count; i++) {
@@ -277,6 +329,7 @@ function fitPlane(cloud: Cloud, noise: number) {
     for (let k = 0; k < 3; k++) mean[k] /= total;
     const covariance = new Float64Array(9);
     for (let i = 0; i < cloud.count; i++) {
+      if (!weight[i]) continue;
       const d = at(cloud, i).map((v, k) => v - mean[k]);
       for (let r = 0; r < 3; r++)
         for (let c = 0; c < 3; c++) covariance[r * 3 + c] += weight[i] * d[r] * d[c];
@@ -317,14 +370,16 @@ function fitSphere(cloud: Cloud, noise: number) {
     parameters: 4,
     perturb: (state, step) => state.map((v, i) => v + step[i]),
     residuals(s, out) {
-      for (let i = 0; i < cloud.count; i++)
-        out[i] =
-          Math.hypot(cloud.p[i * 3] - s[0], cloud.p[i * 3 + 1] - s[1], cloud.p[i * 3 + 2] - s[2]) -
-          s[3];
+      for (let i = 0; i < cloud.count; i++) {
+        const x = cloud.p[i * 3] - s[0],
+          y = cloud.p[i * 3 + 1] - s[1],
+          z = cloud.p[i * 3 + 2] - s[2];
+        out[i] = Math.sqrt(x * x + y * y + z * z) - s[3];
+      }
     },
     gradient: (s, i) => normalize(at(cloud, i).map((v, k) => v - s[k])),
   };
-  return robust(cloud, noise, model, (weight, previous) => {
+  return robust(cloud, noise, sampleSize.sphere, model, (weight, previous) => {
     if (previous) return refine(model, cloud, previous, weight);
     const x = leastSquares(
       cloud.count,
@@ -342,22 +397,26 @@ function fitSphere(cloud: Cloud, noise: number) {
   });
 }
 
-/** Unit axis from the normals: the eigenvector of least spread, about their mean when `centred`. */
-function normalAxis(cloud: Cloud, centred: boolean) {
+/**
+ * Unit axis from the normals of the points with weight: the eigenvector of least spread, about
+ * their mean when `centred`.
+ */
+function normalAxis(cloud: Cloud, centred: boolean, weight: Float64Array) {
   const mean = [0, 0, 0];
   let total = 0;
+  const used = (i: number) =>
+    weight[i] > 0 && (cloud.n[i * 3] !== 0 || cloud.n[i * 3 + 1] !== 0 || cloud.n[i * 3 + 2] !== 0);
   for (let i = 0; i < cloud.count; i++) {
-    const n = cloud.n.subarray(i * 3, i * 3 + 3);
-    if (n[0] === 0 && n[1] === 0 && n[2] === 0) continue;
+    if (!used(i)) continue;
     total++;
-    for (let k = 0; k < 3; k++) mean[k] += n[k];
+    for (let k = 0; k < 3; k++) mean[k] += cloud.n[i * 3 + k];
   }
   if (total < 3) return null;
   for (let k = 0; k < 3; k++) mean[k] = centred ? mean[k] / total : 0;
   const covariance = new Float64Array(9);
   for (let i = 0; i < cloud.count; i++) {
+    if (!used(i)) continue;
     const n = cloud.n.subarray(i * 3, i * 3 + 3);
-    if (n[0] === 0 && n[1] === 0 && n[2] === 0) continue;
     for (let r = 0; r < 3; r++)
       for (let c = 0; c < 3; c++) covariance[r * 3 + c] += (n[r] - mean[r]) * (n[c] - mean[c]);
   }
@@ -378,9 +437,11 @@ function fitCylinder(cloud: Cloud, noise: number) {
     parameters: 5,
     residuals(s, out) {
       for (let i = 0; i < cloud.count; i++) {
-        const w = [cloud.p[i * 3] - s[0], cloud.p[i * 3 + 1] - s[1], cloud.p[i * 3 + 2] - s[2]];
-        const h = w[0] * s[3] + w[1] * s[4] + w[2] * s[5];
-        out[i] = Math.sqrt(Math.max(0, dot(w, w) - h * h)) - s[6];
+        const x = cloud.p[i * 3] - s[0],
+          y = cloud.p[i * 3 + 1] - s[1],
+          z = cloud.p[i * 3 + 2] - s[2];
+        const h = x * s[3] + y * s[4] + z * s[5];
+        out[i] = Math.sqrt(Math.max(0, x * x + y * y + z * z - h * h)) - s[6];
       }
     },
     gradient(s, i) {
@@ -400,12 +461,12 @@ function fitCylinder(cloud: Cloud, noise: number) {
       ]);
     },
   };
-  const start = normalAxis(cloud, false);
-  if (!start) return null;
-  const { axis } = start;
-  const [u, v] = perpendiculars(axis);
-  return robust(cloud, noise, model, (weight, previous) => {
+  return robust(cloud, noise, sampleSize.cylinder, model, (weight, previous) => {
     if (previous) return refine(model, cloud, previous, weight);
+    const start = normalAxis(cloud, false, weight);
+    if (!start) return null;
+    const { axis } = start;
+    const [u, v] = perpendiculars(axis);
     const x = leastSquares(
       cloud.count,
       3,
@@ -431,19 +492,24 @@ function fitCone(cloud: Cloud, noise: number) {
   const model: Model = {
     parameters: 6,
     residuals(s, out) {
-      const cos = Math.cos(s[6]),
-        sin = Math.sin(s[6]);
-      for (let i = 0; i < cloud.count; i++) {
-        const w = [cloud.p[i * 3] - s[0], cloud.p[i * 3 + 1] - s[1], cloud.p[i * 3 + 2] - s[2]];
-        const h = w[0] * s[3] + w[1] * s[4] + w[2] * s[5];
-        out[i] = Math.sqrt(Math.max(0, dot(w, w) - h * h)) * cos - h * sin;
-      }
+      const frame = coneFrame(s.subarray(3, 6), s[6]);
+      for (let i = 0; i < cloud.count; i++)
+        out[i] = coneDistance(
+          cloud.p[i * 3] - s[0],
+          cloud.p[i * 3 + 1] - s[1],
+          cloud.p[i * 3 + 2] - s[2],
+          frame,
+        );
     },
     gradient(s, i) {
       const w = at(cloud, i).map((v, k) => v - s[k]);
-      const h = dot(w, s.subarray(3, 6));
-      const radial = normalize(w.map((v, k) => v - h * s[3 + k]));
-      return [0, 1, 2].map((k) => Math.cos(s[6]) * radial[k] - Math.sin(s[6]) * s[3 + k]) as Vec3;
+      const frame = coneFrame(s.subarray(3, 6), s[6]);
+      const h = w[0] * frame[0] + w[1] * frame[1] + w[2] * frame[2];
+      const radial = normalize(w.map((v, k) => v - h * frame[k]));
+      const rho = Math.sqrt(Math.max(0, dot(w, w) - h * h));
+      if (h * frame[3] + rho * frame[4] < 0)
+        return normalize(w.map((v) => (coneDistance(w[0], w[1], w[2], frame) < 0 ? -v : v)));
+      return [0, 1, 2].map((k) => frame[3] * radial[k] - frame[4] * frame[k]) as Vec3;
     },
     perturb(s, step) {
       const [u, v] = perpendiculars(s.subarray(3, 6));
@@ -455,18 +521,18 @@ function fitCone(cloud: Cloud, noise: number) {
       ]);
     },
   };
-  const start = normalAxis(cloud, true);
-  if (!start) return null;
-  let axis = start.axis;
-  // Outward normals of a cone make the angle (90 degrees + half angle) with the axis.
-  let along = dot(start.mean, axis);
-  if (along > 0) {
-    axis = axis.map((v) => -v) as Vec3;
-    along = -along;
-  }
-  const angle = Math.asin(Math.min(1, -along));
-  return robust(cloud, noise, model, (weight, previous) => {
+  return robust(cloud, noise, sampleSize.cone, model, (weight, previous) => {
     if (previous) return refine(model, cloud, previous, weight);
+    const start = normalAxis(cloud, true, weight);
+    if (!start) return null;
+    let axis = start.axis;
+    // Outward normals of a cone make the angle (90 degrees + half angle) with the axis.
+    let along = dot(start.mean, axis);
+    if (along > 0) {
+      axis = axis.map((v) => -v) as Vec3;
+      along = -along;
+    }
+    const angle = Math.asin(Math.min(1, -along));
     // Every tangent plane passes through the apex.
     const apex = leastSquares(
       cloud.count,
@@ -548,9 +614,22 @@ export function fitShape(
   if (!fitted) return null;
   const shape = shapeOf(kind, cloud, fitted.state, fitted.inward);
   if (!shape) return null;
-  if (kind !== 'plane' && flatness(cloud, kind, fitted) < scaled) return null;
-  const rms = fitted.rms * cloud.scale;
-  return { shape, rms, within: rms <= 2 * noise };
+  if (
+    kind !== 'plane' &&
+    flatness(cloud, kind, fitted) < scaled &&
+    !normalsResolve(cloud, kind, fitted)
+  )
+    return null;
+  let sum = 0,
+    kept = 0;
+  for (let i = 0; i < cloud.count; i++) {
+    if (fitted.weight[i] <= 0) continue;
+    const d = shapeDistance(shape, points[i * 3], points[i * 3 + 1], points[i * 3 + 2]);
+    sum += d * d;
+    kept++;
+  }
+  const rms = Math.sqrt(sum / kept);
+  return { shape, rms, within: rms <= 2 * Math.max(noise, exact * cloud.scale) };
 }
 
 /**
@@ -576,18 +655,61 @@ function flatness(cloud: Cloud, kind: ShapeKind, fitted: Fitted) {
   return Math.sqrt(Math.max(0, eigen3(covariance).values[0]) / count);
 }
 
-/** Plane when it is within noise; else the best of cylinder, cone and sphere; else the lowest rms of all. */
+/**
+ * True when the measured normals of the inliers follow a curved fit's own normals far more closely
+ * than its normals spread over the points: the normals resolve the curvature the positions cannot.
+ */
+function normalsResolve(cloud: Cloud, kind: ShapeKind, fitted: Fitted) {
+  const local = shapeOf(kind, { ...cloud, centre: [0, 0, 0], scale: 1 }, fitted.state, false)!;
+  const fittedNormals: Vec3[] = [],
+    measured: Vec3[] = [];
+  const h = 1e-6;
+  for (let i = 0; i < cloud.count; i++) {
+    const n = cloud.n.subarray(i * 3, i * 3 + 3);
+    if (fitted.weight[i] <= 0 || (n[0] === 0 && n[1] === 0 && n[2] === 0)) continue;
+    const p = at(cloud, i);
+    const g = [0, 1, 2].map((k) => {
+      const q = [...p];
+      q[k] += h;
+      const forward = shapeDistance(local, q[0], q[1], q[2]);
+      q[k] -= 2 * h;
+      return forward - shapeDistance(local, q[0], q[1], q[2]);
+    });
+    if (!(Math.hypot(g[0], g[1], g[2]) > 0)) continue;
+    fittedNormals.push(normalize(g));
+    measured.push([n[0], n[1], n[2]]);
+  }
+  if (!fittedNormals.length) return false;
+  const products = new Float64Array(9);
+  for (const g of fittedNormals)
+    for (let r = 0; r < 3; r++) for (let c = 0; c < 3; c++) products[r * 3 + c] += g[r] * g[c];
+  const principal = eigen3(products).vectors[2];
+  const angle = (a: Vec3, b: Vec3) => Math.acos(Math.min(1, Math.abs(dot(a, b))));
+  let spread = 0,
+    error = 0;
+  fittedNormals.forEach((g, i) => {
+    spread += angle(g, principal) ** 2;
+    error += angle(g, measured[i]) ** 2;
+  });
+  return error < spread / 4;
+}
+
+/**
+ * Plane when it is within noise; else the best within noise of sphere and of cylinder or cone (a
+ * cone over a cylinder only at under half its rms); else the lowest rms of all.
+ */
 export function fitAuto(points: Float32Array, normals: Float32Array, noise: number): ShapeFit {
   const plane = fitShape(points, normals, 'plane', noise);
   if (plane?.within) return plane;
   const cylinder = fitShape(points, normals, 'cylinder', noise);
   const cone = fitShape(points, normals, 'cone', noise);
   const sphere = fitShape(points, normals, 'sphere', noise);
-  const round = cone && (!cylinder || cone.rms < cylinder.rms / 2) ? cone : cylinder;
+  const within = (fit: ShapeFit | null) => (fit?.within ? fit : null);
+  const [tube, taper] = [within(cylinder), within(cone)];
+  const round = taper && (!tube || taper.rms < tube.rms / 2) ? taper : tube;
   const best = (fits: (ShapeFit | null)[]) =>
     fits.reduce<ShapeFit | null>((a, b) => (b && (!a || b.rms < a.rms) ? b : a), null);
-  const curved = best([round, sphere].filter((fit) => fit?.within));
-  const result = curved ?? best([plane, round, sphere]);
+  const result = best([round, within(sphere)]) ?? best([plane, cylinder, cone, sphere]);
   if (!result) throw new Error('These points do not define a surface.');
   return result;
 }
@@ -614,17 +736,35 @@ export function shapeDistance(shape: Shape, x: number, y: number, z: number): nu
       return Math.sign(shape.radius) * (rho - Math.abs(shape.radius));
     }
     case 'cone': {
-      const { apex: p, axis: a, angle } = shape;
-      const w = [x - p[0], y - p[1], z - p[2]];
-      const h = dot(w, a);
-      const rho = Math.sqrt(Math.max(0, dot(w, w) - h * h));
-      const along = h * Math.cos(angle) + rho * Math.sin(angle);
-      const side = rho * Math.cos(angle) - h * Math.sin(angle);
-      // Behind the apex the nearest surface point is the apex itself.
-      if (along >= 0) return side;
-      return (side < 0 ? -1 : 1) * Math.hypot(w[0], w[1], w[2]);
+      const { apex: p } = shape;
+      return coneDistance(x - p[0], y - p[1], z - p[2], coneFrame(shape.axis, shape.angle));
     }
   }
+}
+
+/** Axis, cosine and sine of a cone; (axis, -angle) is the same nappe as (-axis, angle). */
+function coneFrame(axis: ArrayLike<number>, angle: number) {
+  const k = angle < 0 ? -1 : 1;
+  return Float64Array.of(
+    k * axis[0],
+    k * axis[1],
+    k * axis[2],
+    Math.cos(k * angle),
+    Math.sin(k * angle),
+  );
+}
+
+/** Signed distance of the offset `w` from a cone's apex to the cone's one nappe. */
+function coneDistance(wx: number, wy: number, wz: number, frame: Float64Array) {
+  const cos = frame[3],
+    sin = frame[4];
+  const h = wx * frame[0] + wy * frame[1] + wz * frame[2];
+  const rho = Math.sqrt(Math.max(0, wx * wx + wy * wy + wz * wz - h * h));
+  const along = h * cos + rho * sin;
+  const side = rho * cos - h * sin;
+  // Behind the apex the nearest surface point is the apex itself.
+  if (along >= 0) return side;
+  return (side < 0 ? -1 : 1) * Math.hypot(wx, wy, wz);
 }
 
 export function projectToShape(
@@ -687,13 +827,16 @@ export function projectToShape(
   }
 }
 
-/** Solves the 6x6 system `a x = b` in place by Gaussian elimination; false if singular. */
+/** Solves the 6x6 system `a x = b` in place by Gaussian elimination; false if rank deficient. */
 function solve6(a: Float64Array, b: Float64Array) {
+  let largest = 0;
+  for (let c = 0; c < 6; c++) largest = Math.max(largest, Math.abs(a[c * 7]));
+  const tiny = 1e-12 * largest;
   for (let c = 0; c < 6; c++) {
     let pivot = c;
     for (let r = c + 1; r < 6; r++)
       if (Math.abs(a[r * 6 + c]) > Math.abs(a[pivot * 6 + c])) pivot = r;
-    if (Math.abs(a[pivot * 6 + c]) < 1e-12) return false;
+    if (!(Math.abs(a[pivot * 6 + c]) > tiny)) return false;
     if (pivot !== c) {
       for (let k = 0; k < 6; k++) {
         const t = a[c * 6 + k];
@@ -770,7 +913,8 @@ export function estimateNoise(
       }
       ringStart = ringEnd;
     }
-    if (count < 10) continue;
+    // A quadric needs more than six points to leave a residual; rank is checked by the solve.
+    if (count <= 6) continue;
     let nx = 0,
       ny = 0,
       nz = 0,
