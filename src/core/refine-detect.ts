@@ -74,15 +74,20 @@ const fitSample = 512;
 /** The first refits of a growing region choose the kind afresh; later ones keep it. */
 const openRefits = 2;
 /**
- * Two neighbouring regions are one surface when the fit to both is as good as each alone (rms no
- * more than `joinRms` times the larger of their own), neither sits to one side of it (mean signed
- * residual within the noise), and, for planes, their own planes agree within `joinAngle` degrees
- * and the noise in offset. A curved shape fitted to part of a surface extrapolates too loosely to
- * compare directly (two halves of one dome fit radii 0.05 mm apart), so for curved shapes the
- * joint fit's tests are the agreement.
+ * Two neighbouring regions are one surface only when each, on its own, is held by the fit to both:
+ * of each region's samples, the fraction within the growth tolerance of the joint surface is at
+ * least `joinSupport` of the fraction its own fit holds and never below `acceptedSupport` (what a
+ * fit needs to be accepted at all), the rms of those is no more than `joinRms` times its own, and
+ * its mean signed distance is within the noise. Then their own shapes must agree: axes or normals
+ * within `joinAngle` degrees, and offsets between planes, axes, centres or apexes and differences
+ * of radius within the growth tolerance or `parameterSpread` times the two regions' own scatter
+ * (the difference between fits to the even and the odd half of each sample), whichever is larger.
  */
 const joinRms = 1.2;
 const joinAngle = 0.5;
+const joinSupport = 0.9;
+const acceptedSupport = 0.5;
+const parameterSpread = 2;
 /** Times growth may go on with a different kind of shape. */
 const maxSwitches = 2;
 /** Progress is reported at least this often, as a fraction of the run. */
@@ -2155,19 +2160,6 @@ interface Sample {
   directions: Float32Array;
 }
 
-/** Signed distances of a sample's points from `shape`: their mean, and their rms. */
-function residuals(shape: Shape, { points }: Sample) {
-  let sum = 0,
-    squares = 0;
-  const count = points.length / 3;
-  for (let i = 0; i < count; i++) {
-    const d = shapeDistance(shape, points[i * 3], points[i * 3 + 1], points[i * 3 + 2]);
-    sum += d;
-    squares += d * d;
-  }
-  return { mean: sum / count, rms: Math.sqrt(squares / count) };
-}
-
 /**
  * True when samples of two neighbouring regions are one surface of `kind`: see `joinRms`. A step, a
  * fold or a taper leaves each side consistently to one side of the joint fit, or the joint fit
@@ -2189,16 +2181,117 @@ export function sameSurface(kind: ShapeKind, a: Sample, b: Sample, noise: number
   both.points.set(b.points, a.points.length);
   both.directions.set(a.directions);
   both.directions.set(b.directions, a.directions.length);
-  const [own, other, joint] = [fit(a), fit(b), fit(both)];
-  if (!own?.within || !other?.within || !joint?.within) return false;
-  if (joint.rms > joinRms * Math.max(own.rms, other.rms, 1e-9)) return false;
-  if (Math.abs(residuals(joint.shape, a).mean) > noise) return false;
-  if (Math.abs(residuals(joint.shape, b).mean) > noise) return false;
-  if (own.shape.kind !== 'plane' || other.shape.kind !== 'plane') return true;
-  const cos = Math.abs(dot(own.shape.normal, other.shape.normal));
+  const own = [fit(a), fit(b)],
+    joint = fit(both);
+  if (!own[0]?.within || !own[1]?.within || !joint?.within) return false;
+  // Each side on its own terms: the shared surface must hold it nearly as well as its own fit.
+  const tolerance = 3 * noise;
+  for (const [k, side] of [a, b].entries()) {
+    const mine = scored(own[k]!.shape, side, tolerance),
+      shared = scored(joint.shape, side, tolerance);
+    if (shared.support < Math.max(joinSupport * mine.support, acceptedSupport)) return false;
+    if (shared.rms > joinRms * Math.max(mine.rms, 1e-9)) return false;
+    if (Math.abs(shared.mean) > noise) return false;
+  }
+  // And the two shapes themselves agree, within what each region's own fit can tell.
+  const spread = [a, b].map((side) => {
+    const halves = [0, 1].map((h) => {
+      const count = side.points.length / 3;
+      const take = Math.floor((count - h + 1) / 2);
+      const half: Sample = {
+        points: new Float32Array(take * 3),
+        directions: new Float32Array(take * 3),
+      };
+      for (let i = 0; i < take; i++) {
+        half.points.set(side.points.subarray((2 * i + h) * 3, (2 * i + h) * 3 + 3), i * 3);
+        half.directions.set(side.directions.subarray((2 * i + h) * 3, (2 * i + h) * 3 + 3), i * 3);
+      }
+      return fit(half);
+    });
+    return halves[0] && halves[1] ? apart(halves[0].shape, halves[1].shape, side) : null;
+  });
+  const between = apart(own[0]!.shape, own[1]!.shape, both);
+  if (!spread[0] || !spread[1]) return false;
+  const allowed = (key: keyof Apart, floor: number) =>
+    Math.max(floor, parameterSpread * (spread[0]![key] + spread[1]![key]));
   return (
-    cos >= Math.cos((joinAngle * Math.PI) / 180) &&
-    Math.abs(residuals(other.shape, a).mean) <= noise &&
-    Math.abs(residuals(own.shape, b).mean) <= noise
+    between.angle <= allowed('angle', joinAngle) &&
+    between.offset <= allowed('offset', tolerance) &&
+    between.size <= allowed('size', tolerance)
   );
+}
+
+/**
+ * Of a sample against `shape`: the fraction within `tolerance`, the rms of those (as a fit's rms is
+ * of its inliers), and the mean signed distance of all.
+ */
+function scored(shape: Shape, { points }: Sample, tolerance: number) {
+  let sum = 0,
+    squares = 0,
+    near = 0;
+  const count = points.length / 3;
+  for (let i = 0; i < count; i++) {
+    const d = shapeDistance(shape, points[i * 3], points[i * 3 + 1], points[i * 3 + 2]);
+    sum += d;
+    if (Math.abs(d) > tolerance) continue;
+    squares += d * d;
+    near++;
+  }
+  return { support: near / count, rms: Math.sqrt(squares / Math.max(near, 1)), mean: sum / count };
+}
+
+/**
+ * How far apart two shapes of one kind are, near a sample: `angle` between normals or axes in
+ * degrees (a cone's half-angle difference counts too), `offset` between planes, axes, centres or
+ * apexes in mm (between axes, at the sample's centroid), `size` between radii in mm.
+ */
+interface Apart {
+  angle: number;
+  offset: number;
+  size: number;
+}
+function apart(p: Shape, q: Shape, near: Sample): Apart {
+  const count = near.points.length / 3;
+  const centroid: Vec3 = [0, 0, 0];
+  for (let i = 0; i < count; i++)
+    for (let k = 0; k < 3; k++) centroid[k] += near.points[i * 3 + k] / count;
+  const degrees = (u: Vec3, v: Vec3) =>
+    (Math.acos(Math.min(1, Math.abs(dot(u, v)))) * 180) / Math.PI;
+  /** Distance from `x` to the line through `o` along unit `d`. */
+  const fromLine = (x: Vec3, o: Vec3, d: Vec3) => {
+    const w = sub(x, o);
+    const t = dot(w, d);
+    return Math.hypot(w[0] - t * d[0], w[1] - t * d[1], w[2] - t * d[2]);
+  };
+  if (p.kind === 'plane' && q.kind === 'plane')
+    return {
+      angle: degrees(p.normal, q.normal),
+      offset: Math.abs(
+        dot(sub(centroid, p.point), p.normal) - dot(sub(centroid, q.point), q.normal),
+      ),
+      size: 0,
+    };
+  if (p.kind === 'sphere' && q.kind === 'sphere')
+    return {
+      angle: 0,
+      offset: Math.hypot(...sub(p.center, q.center)),
+      size: Math.abs(Math.abs(p.radius) - Math.abs(q.radius)),
+    };
+  if (p.kind === 'cylinder' && q.kind === 'cylinder') {
+    // The axis of q at the centroid's level on p's axis, measured from p's axis.
+    const t = dot(sub(centroid, q.point), q.axis);
+    const onQ = along(q.point, q.axis, t);
+    return {
+      angle: degrees(p.axis, q.axis),
+      offset: fromLine(onQ, p.point, p.axis),
+      size: Math.abs(Math.abs(p.radius) - Math.abs(q.radius)),
+    };
+  }
+  if (p.kind === 'cone' && q.kind === 'cone')
+    return {
+      angle: degrees(p.axis, q.axis) + (Math.abs(p.angle - q.angle) * 180) / Math.PI,
+      offset: Math.hypot(...sub(p.apex, q.apex)),
+      size: 0,
+    };
+  return { angle: Infinity, offset: Infinity, size: Infinity };
 }

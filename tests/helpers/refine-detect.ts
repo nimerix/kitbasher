@@ -279,3 +279,36 @@ export function distanceToTriangles(mesh: RefineMesh, p: Vec3, triangles: ArrayL
   }
   return best;
 }
+
+/**
+ * An open tube of radius 2 about y, 32 rings of 16 at y = 0.06 apart, continued by 20 more rings
+ * about an axis `offset` along x: two cylinders that meet along a seam. Each ring has a seeded
+ * ripple, 0.003 mm on the first and 0.012 mm on the second.
+ */
+export function offsetPipe(offset: number) {
+  const first = 32,
+    second = 20,
+    around = 16;
+  const at = (i: number, j: number): Vec3 => {
+    const a = (j * Math.PI * 2) / around;
+    const right = i >= first;
+    const r = 2 + (right ? 0.012 : 0.003) * Math.sin(41 * (right ? i - first : i) + 39 * j);
+    return [(right ? offset : 0) + r * Math.cos(a), (i - first + 1) * 0.06, r * Math.sin(a)];
+  };
+  const xyz: number[] = [];
+  for (let i = 0; i < first + second - 1; i++)
+    for (let j = 0; j < around; j++) {
+      const k = (j + 1) % around;
+      xyz.push(
+        ...at(i, j),
+        ...at(i + 1, j),
+        ...at(i, k),
+        ...at(i + 1, j),
+        ...at(i + 1, k),
+        ...at(i, k),
+      );
+    }
+  const geometry = new BufferGeometry();
+  geometry.setAttribute('position', new BufferAttribute(Float32Array.from(xyz), 3));
+  return geometry;
+}
