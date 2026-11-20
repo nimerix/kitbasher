@@ -434,3 +434,102 @@ export function farFan(indexed: boolean) {
   result.computeVertexNormals();
   return result;
 }
+
+/** Welded vertex ids of every triangle corner, in corner order. */
+const weldedCorners = (mesh: RefineMesh) =>
+  Uint32Array.from({ length: mesh.triangleCount * 3 }, (_, c) => mesh.weldOf[mesh.corners[c]]);
+
+/** True when every welded edge of the mesh is shared by exactly two triangles. */
+export function closedMesh(mesh: RefineMesh) {
+  return hasClosedEdges(weldedCorners(mesh), mesh.weldedCount);
+}
+
+/** Area of the smallest triangle of the mesh, in world space. */
+export function meshMinTriangleArea(mesh: RefineMesh) {
+  const p = mesh.position;
+  let smallest = Infinity;
+  for (let t = 0; t < mesh.triangleCount; t++) {
+    const [a, b, c] = ([0, 1, 2] as const).map((k) => weldedCorner(mesh, t, k) * 3);
+    const u = [0, 1, 2].map((axis) => p[b + axis] - p[a + axis]),
+      v = [0, 1, 2].map((axis) => p[c + axis] - p[a + axis]);
+    const area =
+      Math.hypot(u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]) /
+      2;
+    smallest = Math.min(smallest, area);
+  }
+  return smallest;
+}
+
+/** Triangles with one corner above `tolerance` and another below `-tolerance` of `fn`. */
+export function straddling(
+  mesh: RefineMesh,
+  fn: (x: number, y: number, z: number) => number,
+  tolerance: number,
+) {
+  let count = 0;
+  for (let t = 0; t < mesh.triangleCount; t++) {
+    const values = ([0, 1, 2] as const).map((k) => {
+      const v = weldedCorner(mesh, t, k) * 3;
+      return fn(mesh.position[v], mesh.position[v + 1], mesh.position[v + 2]);
+    });
+    if (values.some((f) => f > tolerance) && values.some((f) => f < -tolerance)) count++;
+  }
+  return count;
+}
+
+/** Triangles whose three corners all lie in `chain`. */
+export function trianglesWhollyOn(mesh: RefineMesh, chain: Uint32Array) {
+  const on = new Set(chain);
+  let count = 0;
+  for (let t = 0; t < mesh.triangleCount; t++)
+    if (([0, 1, 2] as const).every((k) => on.has(weldedCorner(mesh, t, k)))) count++;
+  return count;
+}
+
+/**
+ * Sizes of the connected pieces of the graph of mesh edges joining two `chain` vertices, or -1 for
+ * a piece that is not a simple loop because some vertex in it has other than two such edges.
+ */
+export function loops(mesh: RefineMesh, chain: Uint32Array) {
+  const on = new Set(chain);
+  const next = new Map([...chain].map((v) => [v, new Set<number>()]));
+  const corners = weldedCorners(mesh);
+  for (let c = 0; c < corners.length; c++) {
+    const a = corners[c],
+      b = corners[c % 3 === 2 ? c - 2 : c + 1];
+    if (a !== b && on.has(a) && on.has(b)) {
+      next.get(a)!.add(b);
+      next.get(b)!.add(a);
+    }
+  }
+  const seen = new Set<number>();
+  const sizes: number[] = [];
+  for (const start of chain) {
+    if (seen.has(start)) continue;
+    const piece = [start];
+    seen.add(start);
+    for (let i = 0; i < piece.length; i++)
+      for (const w of next.get(piece[i])!)
+        if (!seen.has(w)) {
+          seen.add(w);
+          piece.push(w);
+        }
+    sizes.push(piece.every((v) => next.get(v)!.size === 2) ? piece.length : -1);
+  }
+  return sizes;
+}
+
+/** Welded vertices of `before`, outside `chain`, whose position in `after` differs in any bit. */
+export function movedOutside(before: RefineMesh, after: RefineMesh, chain: Uint32Array) {
+  const on = new Set(chain);
+  let moved = 0;
+  for (let v = 0; v < before.weldedCount; v++)
+    if (
+      !on.has(v) &&
+      [0, 1, 2].some(
+        (axis) => !Object.is(before.position[v * 3 + axis], after.position[v * 3 + axis]),
+      )
+    )
+      moved++;
+  return moved;
+}
