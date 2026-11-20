@@ -3244,8 +3244,10 @@ export const useEditor = create<EditorState>((set, get) => ({
     }
     state.cancelRefine();
     const refine = newRefineSession(part, state.sceneEpoch);
+    // Registered before the session is published, so a cancel on publishing reaches the build.
+    const build = refineBuild();
     set((state) => ({ ...toolChange(state, 'refine'), refine }));
-    void buildRefine(refine, part);
+    void buildRefine(refine, part, build);
     return true;
   },
   cancelRefine: (notice) => {
@@ -3273,7 +3275,7 @@ export const useEditor = create<EditorState>((set, get) => ({
     const { mesh } = refine.model;
     const geometry = writeRefinedGeometry(refine.source, partMatrix(part), mesh);
     // Without a cut, triangle t is still the source's, so its tree only needs new bounds.
-    if (mesh.triangleCount === mesh.sourceTriangleCount) refitWarpTree(refine.source, geometry);
+    if (mesh.corners === refine.start?.mesh.corners) refitWarpTree(refine.source, geometry);
     const refined: Part = { ...part, geometry, source: `Refine · ${part.source}` };
     const { mode, edge, region, brush, detect } = refine;
     const next: RefineSession = {
@@ -3285,6 +3287,7 @@ export const useEditor = create<EditorState>((set, get) => ({
       detect: { ...detect, running: false },
     };
     disposeRefinePreview(refine.preview);
+    const build = refineBuild();
     set({
       ...changed(state, {
         ...state.scene,
@@ -3293,7 +3296,7 @@ export const useEditor = create<EditorState>((set, get) => ({
       refine: next,
     });
     preparePicking(geometry);
-    void buildRefine(next, refined);
+    void buildRefine(next, refined, build);
     return true;
   },
   undoRefine: () => {
@@ -3593,8 +3596,10 @@ export const useEditor = create<EditorState>((set, get) => ({
     if (refine.brush.kind !== 'crease') {
       if (!stroke.moved) return;
       commitRefine({ model: { ...stroke.model, mesh: stroke.mesh } });
-      const { preview, source } = get().refine!;
-      if (preview) refitWarpTree(source, preview);
+      // Each dab only grew the bounds; they are measured afresh once the stroke ends.
+      const { preview } = get().refine!;
+      preview?.computeBoundingBox();
+      preview?.computeBoundingSphere();
       return;
     }
     const input = refineCode!.brush.creaseInput(
@@ -5177,9 +5182,20 @@ function disposeRefinePreview(preview: BufferGeometry | null) {
 /** The mesh each preview holds, so a refresh writes only what differs from it. */
 const previewMeshes = new WeakMap<BufferGeometry, RefineMesh>();
 
-async function buildRefine(refine: RefineSession, part: Part) {
+/** A build's abort, registered with the session's jobs so ending the session reaches it. */
+function refineBuild() {
   const controller = new AbortController();
   refineJobs.add(controller);
+  return controller;
+}
+
+const refineCancelled = () => new DOMException('Refine cancelled', 'AbortError');
+
+async function buildRefine(refine: RefineSession, part: Part, controller: AbortController) {
+  if (controller.signal.aborted) {
+    refineJobs.delete(controller);
+    return;
+  }
   const taskId = startTask({
     title: 'Preparing to refine',
     detail: `${triangleCount(part.geometry).toLocaleString()} triangles`,
@@ -5192,33 +5208,74 @@ async function buildRefine(refine: RefineSession, part: Part) {
     () => cancelTask(taskId, 'Refine preparation cancelled.'),
     { once: true },
   );
+  const failed = (error: unknown) => {
+    failTask(taskId, error instanceof Error ? error.message : String(error));
+    useEditor.getState().cancelRefine(`${part.name} could not be prepared for refining.`);
+  };
   const matrix = partMatrix(part);
   let model: RefineModel;
   try {
     const { job, model: build } = await loadRefineCode();
+    if (controller.signal.aborted) throw refineCancelled();
     model = await job.buildRefineModelJob(
       build.refineModelInput(part.geometry, matrix),
       controller.signal,
     );
+    if (controller.signal.aborted) throw refineCancelled();
   } catch (error) {
     // Ending the session has already cleared its jobs; a cancel from the activity centre has not.
     if (!refineJobs.delete(controller) || useEditor.getState().refine?.id !== refine.id) return;
-    if (controller.signal.aborted) {
-      useEditor.getState().cancelRefine();
-      return;
-    }
-    failTask(taskId, error instanceof Error ? error.message : String(error));
-    useEditor.getState().cancelRefine(`${part.name} could not be prepared for refining.`);
+    if (controller.signal.aborted) useEditor.getState().cancelRefine();
+    else failed(error);
     return;
   }
   const current = useEditor.getState().refine;
   if (!refineJobs.delete(controller) || current?.id !== refine.id) return;
-  const preview = writeRefinedGeometry(refine.source, matrix, model.mesh);
-  refitWarpTree(refine.source, preview);
+  let preview: BufferGeometry;
+  try {
+    preview = writeRefinedGeometry(refine.source, matrix, model.mesh);
+  } catch (error) {
+    failed(error);
+    return;
+  }
   previewMeshes.set(preview, model.mesh);
+  givePickingTree(preview, model.mesh.corners, refine.source, model.mesh.corners, null);
   useEditor.setState({ refine: { ...current, stage: 'ready', start: model, model, preview } });
   completeTask(taskId, `${model.mesh.weldedCount.toLocaleString()} vertices`);
 }
+
+/** The corners array whose triangle order each preview's triangles follow. */
+const previewLayouts = new WeakMap<BufferGeometry, Uint32Array>();
+
+/**
+ * Gives a newly written preview a picking tree: a copy of one built over the same triangle layout,
+ * the previous preview's or the source's (whose layout is `sourceCorners`), or else its own index.
+ */
+function givePickingTree(
+  preview: BufferGeometry,
+  corners: Uint32Array,
+  source: BufferGeometry,
+  sourceCorners: Uint32Array | undefined,
+  previous: BufferGeometry | null,
+) {
+  previewLayouts.set(preview, corners);
+  if (previous?.boundsTree && previewLayouts.get(previous) === corners)
+    refitWarpTree(previous, preview);
+  else if (source.boundsTree && corners === sourceCorners) refitWarpTree(source, preview);
+  else preparePicking(preview, () => useEditor.getState().refine?.preview === preview);
+}
+
+// A source whose index arrives after its session's preview was written lends the preview its tree.
+useEditor.subscribe(({ refine }) => {
+  const preview = refine?.preview;
+  if (
+    preview &&
+    !preview.boundsTree &&
+    refine.source.boundsTree &&
+    previewLayouts.get(preview) === refine.start?.mesh.corners
+  )
+    refitWarpTree(refine.source, preview);
+});
 
 /**
  * Brings the preview to the draft, or to the model without one. A change of positions only is
@@ -5237,17 +5294,12 @@ function showRefine(refine: RefineSession): RefineSession {
     patchRefinedGeometry(preview, source, matrix, shown, mesh, model.topology)
   ) {
     previewMeshes.set(preview, mesh);
-    refitWarpTree(source, preview);
     return refine;
   }
   const next = writeRefinedGeometry(source, matrix, mesh);
   previewMeshes.set(next, mesh);
-  // A tree over the same number of triangles stays valid with new bounds.
-  if (preview.boundsTree && triangleCount(preview) === mesh.triangleCount)
-    refitWarpTree(preview, next);
-  else if (mesh.triangleCount === mesh.sourceTriangleCount) refitWarpTree(source, next);
+  givePickingTree(next, mesh.corners, source, refine.start?.mesh.corners, preview);
   disposeRefinePreview(preview);
-  preparePicking(next, () => useEditor.getState().refine?.preview === next);
   return { ...refine, preview: next };
 }
 
@@ -5291,9 +5343,11 @@ export function trimRefineSteps(
         }
     return bytes;
   };
-  while (undo.length + redo.length && held() > budget)
-    if (undo.length) undo = undo.slice(1);
-    else redo = redo.slice(1);
+  // The newest undo step, or with none the nearest redo step, stays whatever it costs.
+  while (held() > budget)
+    if (undo.length > 1) undo = undo.slice(1);
+    else if (redo.length > (undo.length ? 0 : 1)) redo = redo.slice(1);
+    else break;
   return { undo, redo };
 }
 
@@ -5304,6 +5358,7 @@ export function trimRefineSteps(
 export function commitRefine(next: Partial<RefineSession>) {
   const { refine } = useEditor.getState();
   if (!refine?.model || refine.stage !== 'ready') return;
+  if (next.model) shareCrease(next.model.mesh, refine.model.mesh);
   const updated = { ...refine, ...next };
   const kept = trimRefineSteps(
     updated.model!,
@@ -5636,8 +5691,18 @@ function showDraft(refine: RefineSession, draft: RefineMesh | null, changed: Uin
   )
     return showRefine(next);
   previewMeshes.set(preview, mesh);
-  refitWarpTree(source, preview);
   return next;
+}
+
+/**
+ * Gives `mesh` the crease array of `before` when they hold the same flags, so a position-only
+ * edit shares it as it shares corners, weld map and topology. Neither is written once committed.
+ */
+function shareCrease(mesh: RefineMesh, before: RefineMesh) {
+  const count = mesh.weldedCount;
+  if (mesh.crease === before.crease || before.weldedCount !== count) return;
+  for (let v = 0; v < count; v++) if (mesh.crease[v] !== before.crease[v]) return;
+  mesh.crease = before.crease;
 }
 
 /** What undo and redo reset: none of it is recorded in a step. */

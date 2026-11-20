@@ -1,11 +1,6 @@
-import { Vector3 } from 'three';
-import type {
-  BufferAttribute,
-  BufferGeometry,
-  InterleavedBufferAttribute,
-  Matrix4,
-  TypedArray,
-} from 'three';
+import { BufferAttribute, Vector3 } from 'three';
+import type { BufferGeometry, InterleavedBufferAttribute, Matrix4, TypedArray } from 'three';
+import { MeshBVH } from 'three-mesh-bvh';
 import type { RefineMesh, RefineTopology } from './refine-mesh';
 
 const unused = 0xffffffff;
@@ -37,10 +32,93 @@ function copyItem(source: Attribute, target: BufferAttribute, from: number, to: 
 const anyTouched = (mesh: Pick<RefineMesh, 'touched'>, count: number) =>
   mesh.touched.subarray(0, count).includes(1);
 
+const accessors = [
+  'getX',
+  'getY',
+  'getZ',
+  'getW',
+  'getComponent',
+  'setX',
+  'setY',
+  'setZ',
+  'setXYZ',
+  'setComponent',
+] as const;
+
+/**
+ * Whether the writer stores an attribute the same way whether it keeps the source's storage or
+ * writes its own: a plain float array read and written through BufferAttribute's own accessors.
+ */
 const plainFloat = (attribute: Attribute) =>
   !('isInterleavedBufferAttribute' in attribute) &&
   !attribute.normalized &&
-  (attribute.array instanceof Float32Array || attribute.array instanceof Float64Array);
+  (attribute.array instanceof Float32Array || attribute.array instanceof Float64Array) &&
+  accessors.every((name) => attribute[name] === BufferAttribute.prototype[name]);
+
+/** The writer copies a colour attribute into one of its own; an interleaved one changes stride. */
+const plainColor = (attribute: Attribute | undefined) =>
+  !attribute || !('isInterleavedBufferAttribute' in attribute);
+
+/** Per picking tree: the leaf node of each triangle and the parent of each node, by node id. */
+const treeLeaves = new WeakMap<object, { leafOf: Uint32Array; parent: Int32Array }>();
+
+/** Bytes and 32-bit words of one node of a three-mesh-bvh node buffer. */
+const nodeBytes = 32,
+  nodeWords = 8;
+
+function leavesOf(tree: MeshBVH) {
+  const cached = treeLeaves.get(tree);
+  if (cached) return cached;
+  const { roots, indirectBuffer } = MeshBVH.serialize(tree, { cloneBuffers: false });
+  const leafOf = new Uint32Array(indirectBuffer!.length);
+  const parent = new Int32Array(roots.reduce((sum, root) => sum + root.byteLength / nodeBytes, 0));
+  let first = 0;
+  for (const root of roots) {
+    const words = new Uint32Array(root),
+      halves = new Uint16Array(root);
+    const id = (n32: number) => first + n32 / nodeWords;
+    parent[first] = -1;
+    const stack = [0];
+    while (stack.length) {
+      const n32 = stack.pop()!;
+      if (halves[n32 * 2 + 15] === 0xffff) {
+        const offset = words[n32 + 6],
+          count = halves[n32 * 2 + 14];
+        for (let i = offset; i < offset + count; i++)
+          leafOf[tree.resolveTriangleIndex(i)] = id(n32);
+        continue;
+      }
+      const left = n32 + nodeWords,
+        right = n32 + words[n32 + 6] * nodeWords;
+      parent[id(left)] = parent[id(right)] = id(n32);
+      stack.push(left, right);
+    }
+    first += root.byteLength / nodeBytes;
+  }
+  const leaves = { leafOf, parent };
+  treeLeaves.set(tree, leaves);
+  return leaves;
+}
+
+/**
+ * Refits the nodes over `triangles` and their ancestors only. A tree that is not indirect, or not
+ * over `triangleCount` triangles, is refitted whole.
+ */
+function refitTriangles(tree: MeshBVH, triangles: Iterable<number>, triangleCount: number) {
+  if (!tree.indirect) {
+    tree.refit();
+    return;
+  }
+  const { leafOf, parent } = leavesOf(tree);
+  if (leafOf.length !== triangleCount) {
+    tree.refit();
+    return;
+  }
+  const nodes = new Set<number>();
+  for (const t of triangles)
+    for (let n = leafOf[t]; n >= 0 && !nodes.has(n); n = parent[n]) nodes.add(n);
+  tree.refit(nodes);
+}
 
 const representatives = new WeakMap<
   Uint32Array,
@@ -90,7 +168,8 @@ function fansAround(mesh: RefineMesh, welded: number, triangles: Uint32Array, ow
  * that it equals writeRefinedGeometry(source, matrixWorld, next). Only the vertices that moved and
  * the normals around them are written. Returns false, writing nothing, when the two meshes would
  * be written with different vertices or index: another topology, a first or last moved vertex,
- * or a fan split differently.
+ * or a fan split differently. The bounds grow over what moved rather than shrink, and the
+ * preview's picking tree is refitted where triangles moved.
  */
 export function patchRefinedGeometry(
   preview: BufferGeometry,
@@ -103,17 +182,21 @@ export function patchRefinedGeometry(
   if (!sameLayout(shown, next, topology)) return false;
   const moved: number[] = [];
   const creased: number[] = [];
-  for (let v = 0; v < next.weldedCount; v++) {
-    const p = v * 3;
-    if (
-      shown.touched[v] !== next.touched[v] ||
-      shown.position[p] !== next.position[p] ||
-      shown.position[p + 1] !== next.position[p + 1] ||
-      shown.position[p + 2] !== next.position[p + 2]
-    )
-      moved.push(v);
-    if (shown.crease[v] !== next.crease[v]) creased.push(v);
-  }
+  const [from, to] = [shown.position, next.position];
+  const [wasTouched, isTouched] = [shown.touched, next.touched];
+  const [wasCrease, isCrease] = [shown.crease, next.crease];
+  const count = next.weldedCount;
+  if (from !== to || wasTouched !== isTouched)
+    for (let v = 0, p = 0; v < count; v++, p += 3)
+      if (
+        from[p] !== to[p] ||
+        from[p + 1] !== to[p + 1] ||
+        from[p + 2] !== to[p + 2] ||
+        wasTouched[v] !== isTouched[v]
+      )
+        moved.push(v);
+  if (wasCrease !== isCrease)
+    for (let v = 0; v < count; v++) if (wasCrease[v] !== isCrease[v]) creased.push(v);
   return writeChanges(preview, source, matrixWorld, shown, next, topology, moved, creased);
 }
 
@@ -121,8 +204,7 @@ export function patchRefinedGeometry(
  * As patchRefinedGeometry when `next` differs from what the preview shows only at the welded
  * vertices `changed`, which costs time in proportion to them rather than to the mesh. `shown` gives
  * the touched and crease flags the preview was written with; its positions are not read, so `next`
- * may be the very mesh the preview was written from, moved in place since. The bounds grow to
- * take the moved vertices in, rather than being measured afresh over the whole preview.
+ * may be the very mesh the preview was written from, moved in place since.
  */
 export function patchRefinedVertices(
   preview: BufferGeometry,
@@ -136,7 +218,7 @@ export function patchRefinedVertices(
   if (!sameLayout(next, next, topology)) return false;
   const moved = [...new Set(changed)];
   const creased = moved.filter((v) => shown.crease[v] !== next.crease[v]);
-  return writeChanges(preview, source, matrixWorld, shown, next, topology, moved, creased, true);
+  return writeChanges(preview, source, matrixWorld, shown, next, topology, moved, creased);
 }
 
 const sameLayout = (shown: RefineMesh, next: RefineMesh, topology: RefineTopology) =>
@@ -157,7 +239,6 @@ function writeChanges(
   topology: RefineTopology,
   moved: number[],
   creased: number[],
-  grow = false,
 ): boolean {
   const { weldOf, corners, weldedCount } = next;
   const { triangleStart, trianglesOf, neighbourStart, neighbours } = topology;
@@ -166,7 +247,11 @@ function writeChanges(
   const sourceNormal = source.getAttribute('normal');
   // Without a moved vertex the writer keeps the source's storage, which differs unless plain float.
   if (
-    !(plainFloat(sourcePosition) && plainFloat(sourceNormal)) &&
+    !(
+      plainFloat(sourcePosition) &&
+      plainFloat(sourceNormal) &&
+      plainColor(next.color ? source.getAttribute('color') : undefined)
+    ) &&
     !(anyTouched(shown, weldedCount) && anyTouched(next, weldedCount))
   )
     return false;
@@ -312,8 +397,10 @@ function writeChanges(
     attribute.addUpdateRange(low * attribute.itemSize, (high - low + 1) * attribute.itemSize);
     attribute.needsUpdate = true;
   }
+  // Bounds grow to take the moved vertices in, and the picking tree is refitted over the
+  // triangles around them, so a patch costs time in proportion to what moved.
   const { boundingBox: box, boundingSphere: sphere } = preview;
-  if (grow && box && sphere) {
+  if (box && sphere) {
     const point = new Vector3();
     for (const v of moved)
       eachCorner(v, (c) => {
@@ -325,5 +412,12 @@ function writeChanges(
     preview.computeBoundingBox();
     preview.computeBoundingSphere();
   }
+  const tree = preview.boundsTree as MeshBVH | undefined;
+  if (tree && moved.length)
+    refitTriangles(
+      tree,
+      moved.flatMap((v) => [...trianglesOf.subarray(triangleStart[v], triangleStart[v + 1])]),
+      next.triangleCount,
+    );
   return true;
 }

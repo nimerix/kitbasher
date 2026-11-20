@@ -1,5 +1,18 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { BufferAttribute, BufferGeometry } from 'three';
+import {
+  BoxGeometry,
+  BufferAttribute,
+  BufferGeometry,
+  InterleavedBuffer,
+  InterleavedBufferAttribute,
+  type Intersection,
+  Mesh,
+  PlaneGeometry,
+  Raycaster,
+  Vector3,
+} from 'three';
+import { MeshBVH } from 'three-mesh-bvh';
+import { pickRaycast } from '../../src/core/bvh';
 import { requestTaskCancellation, useActivity } from '../../src/core/activity';
 import { editorCommands, undoTarget } from '../../src/core/commands';
 import { partMatrix, triangleCount } from '../../src/core/geometry';
@@ -402,7 +415,8 @@ describe('refine session steps', () => {
     expect(two.undo).toEqual(steps.slice(2));
     const redo = trimRefineSteps(current, [], [...steps].reverse(), 3 * positionOnly);
     expect(redo.redo).toEqual([...steps].reverse().slice(1));
-    expect(trimRefineSteps(current, steps, [], 0).undo).toEqual([]);
+    // The newest step stays, whatever it costs.
+    expect(trimRefineSteps(current, steps, [], 0).undo).toEqual(steps.slice(-1));
   });
 });
 
@@ -942,5 +956,160 @@ describe('refine detection', () => {
       .getState()
       .tasks.find((t) => t.title === 'Finding edges and surfaces')!;
     expect(task.status).toBe('cancelled');
+  });
+});
+
+describe('refine lifecycle edges', () => {
+  const preparing = () =>
+    useActivity.getState().tasks.filter((t) => t.title === 'Preparing to refine');
+
+  it('starts no task when the session is cancelled as it turns building', async () => {
+    setup([boxPart()], ['box']);
+    const stop = useEditor.subscribe((state) => {
+      if (state.refine?.stage === 'building') state.cancelRefine();
+    });
+    try {
+      editor().setTool('refine');
+      expect(editor().refine).toBeNull();
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      expect(preparing().filter((t) => t.status === 'running')).toHaveLength(0);
+    } finally {
+      stop();
+    }
+  });
+
+  it('does not decode the source when cancelled before the code loads', async () => {
+    const part = boxPart({ geometry: new BoxGeometry().toNonIndexed() });
+    setup([part], ['box']);
+    const getX = vi.spyOn(part.geometry.getAttribute('position'), 'getX');
+    editor().setTool('refine');
+    editor().setTool('select');
+    await import('../../src/core/refine-job');
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(editor().refine).toBeNull();
+    expect(getX).not.toHaveBeenCalled();
+  });
+
+  it('fails and closes the session when the preview cannot be made', async () => {
+    const geometry = new BoxGeometry();
+    vi.spyOn(geometry.getAttribute('normal') as BufferAttribute, 'clone').mockImplementation(() => {
+      throw new Error('preview allocation failed');
+    });
+    setup([boxPart({ geometry })], ['box']);
+    editor().setTool('refine');
+    await vi.waitFor(() => expect(preparing()[0].status).not.toBe('running'));
+    expect(preparing()[0].status).toBe('failed');
+    expect(editor().refine).toBeNull();
+    expect(toast()).toBe('Box could not be prepared for refining.');
+  });
+
+  it('never gives a cut preview the source tree', async () => {
+    const geometry = new BoxGeometry().toNonIndexed();
+    geometry.boundsTree = new MeshBVH(geometry, { indirect: true });
+    setup([boxPart({ geometry })], ['box']);
+    await ready();
+    const start = session().model!;
+    const cut = rebuiltModel(start, (mesh) => splitEdge(mesh, 0));
+    commitRefine({ model: cut });
+    const preview = session().preview!;
+    expect(preview.boundsTree).toBeUndefined();
+    commitRefine({ model: movedModel(cut, [0], [0, 0, 0.05]) });
+    expect(session().preview).toBe(preview);
+    if (preview.boundsTree)
+      expect(MeshBVH.serialize(preview.boundsTree as MeshBVH).indirectBuffer!.length).toBe(
+        cut.mesh.triangleCount,
+      );
+  });
+
+  it('makes a dense preview pickable once the source index arrives', async () => {
+    const geometry = new PlaneGeometry(24, 24, 225, 225);
+    setup([boxPart({ geometry })], ['box']);
+    await ready();
+    const preview = session().preview!;
+    geometry.boundsTree = new MeshBVH(geometry, { indirect: true });
+    useEditor.setState({ indexingMeshes: 0 });
+    const ray = new Raycaster(new Vector3(0.123, 0.456, 1), new Vector3(0, 0, -1));
+    const hits: Intersection[] = [];
+    pickRaycast.call(new Mesh(preview), ray, hits);
+    expect(hits.length).toBeGreaterThan(0);
+  });
+
+  it('matches a fresh preview for interleaved colour and custom position accessors', async () => {
+    class ScaledPosition extends BufferAttribute {
+      override setXYZ(index: number, x: number, y: number, z: number) {
+        return super.setXYZ(index, x * 2, y, z);
+      }
+    }
+    const coloured = new BoxGeometry();
+    const count = coloured.getAttribute('position').count;
+    const packed = new Float32Array(count * 4);
+    for (let i = 0; i < count; i++) packed.set([7, i / count, 0.5, 1], i * 4);
+    coloured.setAttribute(
+      'color',
+      new InterleavedBufferAttribute(new InterleavedBuffer(packed, 4), 3, 1),
+    );
+    const scaled = new BoxGeometry();
+    scaled.setAttribute(
+      'position',
+      new ScaledPosition(Float64Array.from(scaled.getAttribute('position').array), 3),
+    );
+    for (const part of [
+      boxPart({ geometry: coloured }),
+      boxPart({ geometry: scaled, scale: [-1, 2, 0.5] }),
+    ]) {
+      setup([part], ['box']);
+      await ready();
+      const start = session().model!;
+      commitRefine({ model: movedModel(start, [0], [0.005, 0, 0]) });
+      expect(differingAttributes(session().preview!, fresh())).toEqual([]);
+      commitRefine({ model: movedModel(session().model!, [1], [0, 0.005, 0]) });
+      expect(differingAttributes(session().preview!, fresh())).toEqual([]);
+      editor().undoRefine();
+      editor().undoRefine();
+      expect(differingAttributes(session().preview!, fresh())).toEqual([]);
+    }
+  });
+
+  it('shares the unchanged crease array of a position-only edit', async () => {
+    setup([boxPart()], ['box']);
+    await ready();
+    const start = session().model!;
+    commitRefine({ model: movedModel(start, topVertices(), [0, 0.01, 0]) });
+    expect(session().model!.mesh.crease).toBe(start.mesh.crease);
+  });
+
+  it('keeps the newest step even when it alone is over the byte budget', async () => {
+    setup([boxPart()], ['box']);
+    await ready();
+    const start = session().model!;
+    const step = (model: typeof start): RefineStep => ({
+      model,
+      features: [],
+      selected: [],
+      triangles: [],
+    });
+    const oversized = {
+      ...start,
+      topology: {
+        ...start.topology,
+        neighbours: new Uint32Array(new ArrayBuffer(refineUndoBytes + 4), 0, 1),
+      },
+    };
+    const older = movedModel(start, [0], [0, 0.01, 0]);
+    expect(trimRefineSteps(start, [step(older), step(oversized)], []).undo).toEqual([
+      step(oversized),
+    ]);
+    const positions = new Float64Array(
+      new ArrayBuffer(refineUndoBytes + 8),
+      0,
+      start.mesh.position.length,
+    );
+    positions.set(start.mesh.position);
+    const large = { ...start, mesh: { ...start.mesh, position: positions } };
+    commitRefine({ model: large });
+    commitRefine({ model: movedModel(large, [0], [0, 0.01, 0]) });
+    expect(session().undo).toHaveLength(1);
+    expect(session().undo[0].model).toBe(large);
+    expect(undoTarget(editor())).toBe('refine');
   });
 });
