@@ -1555,7 +1555,7 @@ function classifyOriented(
     };
   };
   const away = median(Array.from(solved.offset, Math.abs));
-  return { result, soft, edge, away };
+  return { result, soft, edge, away, gathered: band.width };
 }
 
 /** True when the guide's last point comes before its first, in x, then y, then z, then triangle. */
@@ -1630,7 +1630,13 @@ function classify(
   };
 }
 
-/** Null when no edge lies under the guide: two flank surfaces meeting within reach of it. */
+/** A guide's classification, which every width up to `gathered` caps without classifying again. */
+export type BandClassification = NonNullable<ReturnType<typeof classify>>;
+
+/**
+ * Null when no edge lies under the guide: two flank surfaces meeting within reach of it. `known`, a
+ * classification of the same guide on the same surface, is capped instead when it reaches `width`.
+ */
 export function buildBand(
   mesh: RefineMesh,
   topology: RefineTopology,
@@ -1638,8 +1644,11 @@ export function buildBand(
   points: GuidePoint[],
   width: number,
   noise: number,
+  known?: BandClassification | null,
 ): EdgeBand | null {
-  return classify(mesh, topology, kind, points, width, noise)?.result(width) ?? null;
+  const found =
+    known && width <= known.gathered ? known : classify(mesh, topology, kind, points, width, noise);
+  return found?.result(width) ?? null;
 }
 
 /**
@@ -1654,11 +1663,22 @@ export function estimateWidth(
   points: GuidePoint[],
   noise: number,
 ): number {
+  return estimateBand(mesh, topology, kind, points, noise).width;
+}
+
+/** `estimateWidth` with the classification it read, for `buildBand` to reuse. */
+export function estimateBand(
+  mesh: RefineMesh,
+  topology: RefineTopology,
+  kind: GuideKind,
+  points: GuidePoint[],
+  noise: number,
+): { width: number; found: BandClassification | null } {
   const found = classify(mesh, topology, kind, points, null, noise);
-  if (!found) return 0;
+  if (!found) return { width: 0, found };
   const width = Math.min(
     widestEstimate,
     found.away + found.soft + Math.max(2 * found.soft, 6 * found.edge),
   );
-  return found.result(width) ? width : 0;
+  return { width: found.result(width) ? width : 0, found };
 }

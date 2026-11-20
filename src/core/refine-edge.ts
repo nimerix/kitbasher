@@ -4,8 +4,9 @@ import {
   BandZone,
   type EdgeBand,
   type GuidePoint,
+  type BandClassification,
   buildBand,
-  estimateWidth,
+  estimateBand,
   minBandAngle,
 } from './refine-band';
 import { type CutResult, cutAlongField } from './refine-cut';
@@ -716,8 +717,9 @@ function solvePart(
   points: GuidePoint[],
   width: number,
   noise: number,
+  known: BandClassification | null,
 ): Part | null {
-  const band = buildBand(mesh, topology, kind, points, width, noise);
+  const band = buildBand(mesh, topology, kind, points, width, noise, known);
   if (!band) return null;
   const edge = bandEdgeLength(mesh, topology, band);
   const solved = unbiasedFlanks(mesh, topology, band, kind, points.length, width, noise, edge);
@@ -1098,18 +1100,20 @@ export function solveEdge(
   if (!segments) return null;
   const joints: GuideJoint[] = circle ? segments.map(() => 'smooth') : input.joints;
   let width = input.width;
+  const known: (BandClassification | null)[] = segments.map(() => null);
   if (width === null) {
     width = 0;
-    for (const { kind, points } of segments) {
-      const estimate = estimateWidth(mesh, topology, kind, points, noise);
-      if (!(estimate > 0)) return null;
-      width = Math.max(width, estimate);
+    for (const [i, { kind, points }] of segments.entries()) {
+      const estimate = estimateBand(mesh, topology, kind, points, noise);
+      if (!(estimate.width > 0)) return null;
+      width = Math.max(width, estimate.width);
+      known[i] = estimate.found;
     }
   }
   if (!(width > 0)) return null;
   const parts: Part[] = [];
-  for (const { kind, points } of segments) {
-    const part = solvePart(mesh, topology, kind, points, width, noise);
+  for (const [i, { kind, points }] of segments.entries()) {
+    const part = solvePart(mesh, topology, kind, points, width, noise, known[i]);
     if (!part) return null;
     parts.push(part);
   }
