@@ -229,6 +229,30 @@ describe('solveEdge and applyEdge on one segment', () => {
       expect(offEdge(out, v, 1.5 + bump(out.position[v * 3]), 1)).toBeLessThan(0.03);
   });
 
+  it('finishes where both flanks are profiles per slice', () => {
+    // Both faces bulge 0.2 mm over 0.5 mm along the edge, so neither flank fits one shape.
+    const geometry = softBox([2, 1.5, 1], 0.3);
+    const position = geometry.getAttribute('position');
+    const bump = (x: number) => 0.2 * Math.exp(-((x / 0.5) ** 2));
+    for (let i = 0; i < position.count; i++) {
+      const [x, y, z] = [position.getX(i), position.getY(i), position.getZ(i)];
+      position.setXYZ(i, x, y + (bump(x) * (y + 1.5)) / 3, z + (bump(x) * (z + 1)) / 2);
+    }
+    const model = modelOf(geometry);
+    const points = [-1.2, -0.9, -0.6, -0.3, 0, 0.3, 0.6, 0.9, 1.2].map((x) =>
+      pointOn(model.mesh, [
+        x,
+        1.5 - crest + (bump(x) * (3 - crest)) / 3,
+        1 - crest + (bump(x) * (2 - crest)) / 2,
+      ]),
+    );
+    const start = performance.now();
+    const solve = solveEdge(model.mesh, model.topology, inputOf('spline', points), model.noise);
+    expect(performance.now() - start).toBeLessThan(2000);
+    expect(solve).not.toBeNull();
+    expect(solve!.flanks[0].map((flank) => flank.kind)).toEqual(['profile', 'profile']);
+  });
+
   it('changes nothing it made sharp when run again over its own result', () => {
     const { model, solve, out } = refineBoxEdge();
     const weights = moveWeights(model.mesh, model.topology, solve);

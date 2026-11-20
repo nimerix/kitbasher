@@ -590,7 +590,8 @@ function largestGap(curve: EdgeCurve, drawn: EdgeCurve, points: ArrayLike<number
  * fitted there. Vertices a little way up the rounding lie within tolerance of a flank and tilt its
  * fit toward the rounding, pulling the edge inward: each flank is refitted from its vertices past
  * `soft + clearEdges` edge lengths from the edge, then `clearEdges` more each step, until the edge
- * moves no more than `settled` between steps or too few vertices remain. A profile flank is kept.
+ * moves no more than `settled` between steps or too few vertices remain. A profile flank is kept;
+ * with both kept nothing is refitted.
  */
 function unbiasedFlanks(
   mesh: RefineMesh,
@@ -656,8 +657,10 @@ function unbiasedFlanks(
     if (meet.angles.length < 2) return null;
     return { flanks, meet, curve: fitCurve(kind, meet.points, controls, edge), samples: read };
   };
-  // The band's own flanks seed the first step; once two steps agree, the nearer one is kept.
+  // The band's own flanks seed the first step; once two steps agree, the nearer one is kept. With
+  // both flanks kept as profiles no step changes them, so the seed is the answer.
   let solved = meetWith([flankOf(band.flanks[0]), flankOf(band.flanks[1])], [null, null]);
+  if (band.fits.every((fit) => fit === 'profile')) return solved;
   for (let step = clearEdges; solved; step += clearEdges) {
     const flanks = refit(band.soft + step * edge, solved.curve);
     const next = flanks && meetWith(flanks, [...samples]);
