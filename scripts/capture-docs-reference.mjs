@@ -179,6 +179,81 @@ try {
       { x: 760, y: 0, width: 680, height: 540 },
     );
   }
+  await capture('refine', async (page) => {
+    // A synthetic scan: the softened block of the Refine end-to-end tests.
+    await page.evaluate(async () => {
+      // The store module as the app loaded it, so the scene reaches the running editor.
+      const store = performance
+        .getEntriesByType('resource')
+        .map((entry) => entry.name)
+        .find((url) => /\/src\/core\/store\.ts(?:\?.*)?$/.test(url));
+      const { useEditor } = await import(store);
+      const { softBox } = await import('/tests/helpers/soft-edges.ts');
+      const geometry = softBox([4, 3, 2], 0.6, { step: 0.2, ripple: 0.04, noise: 0.008 });
+      useEditor.getState().setScene({
+        name: 'Refine',
+        joints: [],
+        parts: [
+          {
+            id: 'block',
+            name: 'Scanned block',
+            geometry,
+            position: [0, 0, 0],
+            quaternion: [0, 0, 0, 1],
+            scale: [1, 1, 1],
+            color: '#d4a272',
+            visible: true,
+            locked: false,
+            source: 'Scanned block',
+          },
+        ],
+      });
+      useEditor.getState().select('block');
+    });
+    await page.locator('.part-select[title="Scanned block"]').waitFor();
+    await page.keyboard.press('1');
+    await page.keyboard.press('Home');
+    const canvas = await page.locator('canvas').first().boundingBox();
+    const centre = { x: canvas.x + canvas.width / 2, y: canvas.y + canvas.height / 2 };
+    await page.mouse.move(centre.x, centre.y);
+    await page.mouse.down({ button: 'middle' });
+    await page.mouse.move(centre.x - 70, centre.y + 45, { steps: 12 });
+    await page.mouse.up({ button: 'middle' });
+    await page.keyboard.press('Home');
+    await page.mouse.wheel(0, -200);
+    await page.waitForTimeout(2000);
+    await page.keyboard.press('e');
+    await expect(page.getByRole('radio', { name: 'Edge', exact: true })).toBeVisible({
+      timeout: 30000,
+    });
+    await page.waitForTimeout(800);
+    // The crest of a rounded edge of the block: 0.6 mm fillets on a block of half size 4, 3, 2.
+    const inset = 0.6 - 0.6 / Math.SQRT2;
+    const click = async (world) => {
+      const ndc = await page.evaluate(async (world) => {
+        const url = performance
+          .getEntriesByType('resource')
+          .map((entry) => entry.name)
+          .find((url) => url.includes('/@react-three_fiber.js'));
+        const root = (await import(url))._roots.get(document.querySelector('canvas')).store;
+        const { camera } = root.getState();
+        return camera.position.clone().fromArray(world).project(camera).toArray();
+      }, world);
+      await page.mouse.click(
+        canvas.x + ((ndc[0] + 1) * canvas.width) / 2,
+        canvas.y + ((1 - ndc[1]) * canvas.height) / 2,
+      );
+    };
+    await click([-3, 3 - inset, 2 - inset]);
+    await click([3, 3 - inset, 2 - inset]);
+    await expect(page.getByText('0 accepted · 1 proposed')).toBeVisible({ timeout: 30000 });
+    await page.getByRole('button', { name: 'Accept', exact: true }).click();
+    await expect(page.getByText('1 accepted · 0 proposed')).toBeVisible({ timeout: 30000 });
+    await click([4 - inset, 2, 2 - inset]);
+    await click([4 - inset, -2, 2 - inset]);
+    await expect(page.getByText('1 accepted · 1 proposed')).toBeVisible({ timeout: 30000 });
+    await page.waitForTimeout(1500);
+  });
   await capture('exploded-view', async (page) => {
     await page.getByRole('slider', { name: 'Exploded view amount' }).fill('65');
   });
