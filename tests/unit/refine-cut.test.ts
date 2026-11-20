@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { BufferAttribute, type BufferGeometry, Matrix4, Vector3 } from 'three';
+import { BufferAttribute, type BufferGeometry, Matrix4, SphereGeometry, Vector3 } from 'three';
 import { cloneRefineMesh, writeRefinedGeometry } from '../../src/core/refine-mesh';
 import { cutAlongField, remapTriangles } from '../../src/core/refine-cut';
 import {
@@ -272,4 +272,29 @@ it('remaps a painted set through the children map', () => {
   }
   const children = [...painted].flatMap((t) => result.children.get(t) ?? [t]);
   expect(remapped.size).toBe(new Set(children).size);
+});
+
+it('cuts a band of about 2,000 vertices in a mesh of 800,000 triangles in under 40 ms', () => {
+  const { mesh, topology } = modelOf(new SphereGeometry(10, 640, 640));
+  expect(mesh.triangleCount).toBeGreaterThanOrEqual(800_000);
+  const band: number[] = [];
+  for (let v = 0; v < mesh.weldedCount; v++)
+    if (Math.abs(mesh.position[v * 3 + 1] - 0.013) < 0.075) band.push(v);
+  expect(band.length).toBeGreaterThan(1500);
+  expect(band.length).toBeLessThan(2500);
+  const ids = Uint32Array.from(band);
+  // Best of three, each on a fresh copy, so that other work on the machine does not decide it.
+  let time = Infinity;
+  for (let run = 0; run < 3; run++) {
+    const cut = cloneRefineMesh(mesh, true);
+    const field = Float32Array.from(ids, (v) => cut.position[v * 3 + 1] - 0.013);
+    const start = performance.now();
+    const result = cutAlongField(cut, topology, ids, field, (x, _y, z, out) =>
+      out.set([x, 0.013, z]),
+    );
+    time = Math.min(time, performance.now() - start);
+    expect(result.chain.length).toBeGreaterThan(0);
+  }
+  console.log(`cutAlongField: ${ids.length} band vertices, ${time.toFixed(1)} ms`);
+  expect(time).toBeLessThan(40);
 });
