@@ -4,6 +4,7 @@ import { Matrix4, Vector3 } from 'three';
 import { buildRefineMesh, buildTopology, vertexNormal } from '../../src/core/refine-mesh';
 import {
   type Shape,
+  type ShapeFit,
   estimateNoise,
   fitAuto,
   fitShape,
@@ -11,19 +12,25 @@ import {
   shapeDistance,
 } from '../../src/core/refine-fit';
 import {
+  type SurfaceSample,
   angleDeg,
   band,
   cappedFlat,
   coneBehindApex,
   coneSide,
+  coneWithStrays,
   modelOf,
+  narrowStrip,
   noiseWhere,
   onTopFace,
   onWall,
   patch,
+  quadricRms,
   sevenVertexFan,
   shapeRms,
+  sphereCap,
   surfaceWhere,
+  tangentPatch,
   taperedTube,
   topFace,
   wall,
@@ -137,6 +144,50 @@ describe('fitShape against one-sided outliers and edge cases', () => {
   });
 });
 
+describe('fitShape whichever way the normals face', () => {
+  const reversed = ([points, normals]: SurfaceSample): SurfaceSample => [
+    points,
+    normals.map((v) => -v),
+  ];
+
+  it('fits the same cone from outward and inward normals', () => {
+    const side = coneSide(1, 2, 0);
+    const [out, into] = [side, reversed(side)].map((sample) => fitShape(...sample, 'cone', 0.004)!);
+    const [a, b] = [out, into].map((fit) => fit.shape as Extract<Shape, { kind: 'cone' }>);
+    expect(Math.hypot(...a.apex.map((v, k) => v - b.apex[k]))).toBeLessThan(0.001);
+    const half = (angle: number) => (Math.min(angle, Math.PI - angle) * 180) / Math.PI;
+    expect(Math.abs(half(a.angle) - half(b.angle))).toBeLessThan(0.05);
+    expect(out.rms).toBeLessThan(1e-4);
+    expect(into.rms).toBeLessThan(1e-4);
+  });
+
+  it('fits the same cylinder and sphere from outward and inward normals', () => {
+    for (const [sample, kind] of [
+      [band(1.5, 1), 'cylinder'],
+      [sphereCap(3), 'sphere'],
+    ] as const) {
+      const [out, into] = [sample, reversed(sample)].map((s) => fitShape(...s, kind, 0.004)!);
+      const radius = (fit: ShapeFit) =>
+        Math.abs((fit.shape as Extract<Shape, { kind: 'cylinder' | 'sphere' }>).radius);
+      expect(Math.abs(radius(out) - radius(into))).toBeLessThan(0.001);
+      expect(out.rms).toBeLessThan(1e-4);
+      expect(into.rms).toBeLessThan(1e-4);
+    }
+  });
+});
+
+describe('fitShape support', () => {
+  it('finds a cone holding 600 of 1000 points', () => {
+    const sample = coneWithStrays();
+    const fit = fitShape(...sample, 'cone', 0.004)!;
+    const cone = fit.shape as Extract<Shape, { kind: 'cone' }>;
+    expect(Math.hypot(cone.apex[0], cone.apex[1] - 1, cone.apex[2])).toBeLessThan(0.01);
+    expect(fit.support).toBeGreaterThan(0.55);
+    expect(fit.support).toBeLessThan(0.65);
+    expect(fitShape(...sample, 'cone', 0.004)).toEqual(fit);
+  });
+});
+
 describe('fitAuto', () => {
   it('falls back to the lowest rms of every valid fit', () => {
     const sample = taperedTube(1.5, (0.5 * Math.PI) / 180, 0.02);
@@ -156,6 +207,22 @@ describe('fitAuto', () => {
 
   it('says when nothing fits', () => {
     expect(fitAuto(...patch(softElbow(4, 1)), 0.004).within).toBe(false);
+  });
+
+  it('names the shape holding most of the points', () => {
+    const tube = fitAuto(...tangentPatch(600, 400), 0.004);
+    expect(tube.shape.kind).toBe('cylinder');
+    const radius = (tube.shape as Extract<Shape, { kind: 'cylinder' }>).radius;
+    expect(Math.abs(radius - 1.5)).toBeLessThan(0.01);
+    expect(fitAuto(...tangentPatch(400, 600), 0.004).shape.kind).toBe('plane');
+  });
+
+  it('keeps a riveted plate a plane within noise', () => {
+    const plate = rivetedPlate().geometry;
+    const fit = fitAuto(...topFace(plate), modelOf(plate).noise);
+    expect(fit.shape.kind).toBe('plane');
+    expect(fit.within).toBe(true);
+    expect(fit.support).toBeGreaterThan(0.8);
   });
 });
 
@@ -285,6 +352,17 @@ describe('estimateNoise', () => {
     const expected = Math.sqrt(residual.to1DArray().reduce((a, r) => a + r * r, 0) / 7);
     expect(expected).toBeGreaterThan(0.001);
     expect(Math.abs(estimateNoise(mesh, topology) - expected)).toBeLessThan(0.1 * expected);
+  });
+
+  it('measures a narrow strip whose quadric fit has full rank', () => {
+    const geometry = narrowStrip();
+    const { mesh, topology } = modelOf(geometry);
+    const expected = quadricRms(geometry);
+    expect(expected).toBeGreaterThan(0.000005);
+    // Twenty rings take in the whole strip from every vertex.
+    expect(Math.abs(estimateNoise(mesh, topology, undefined, 20) - expected)).toBeLessThan(
+      0.1 * expected,
+    );
   });
 
   it('runs in under a second on a 60,000 triangle sphere', () => {

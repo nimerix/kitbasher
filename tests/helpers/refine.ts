@@ -6,8 +6,10 @@ import {
   Float16BufferAttribute,
   type InterleavedBufferAttribute,
   Matrix4,
+  SphereGeometry,
   Vector3,
 } from 'three';
+import { Matrix, solve } from 'ml-matrix';
 import { hasClosedEdges, weldedPositionIndex } from '../../src/core/mesh-topology';
 import { estimateNoise } from '../../src/core/refine-fit';
 import {
@@ -984,4 +986,147 @@ export function sevenVertexFan(heights: number[]) {
   geometry.setIndex([0, 1, 2, 0, 2, 3, 0, 3, 4, 0, 4, 5, 0, 5, 6, 0, 6, 1]);
   geometry.computeVertexNormals();
   return geometry;
+}
+
+/** Unit normal pointing a seeded random way. */
+function randomDirection(next: () => number) {
+  for (;;) {
+    const d = [next(), next(), next()];
+    const length = Math.hypot(d[0], d[1], d[2]);
+    if (length > 0.1 && length <= 1) return d.map((v) => v / length);
+  }
+}
+
+/** A clean cap of a sphere about +Y, to 60 degrees from the pole, with radial normals. */
+export function sphereCap(radius: number) {
+  const geometry = new SphereGeometry(radius, 32, 16, 0, Math.PI * 2, 0, Math.PI / 3);
+  return [
+    Float32Array.from(geometry.getAttribute('position').array),
+    Float32Array.from(geometry.getAttribute('normal').array),
+  ] as SurfaceSample;
+}
+
+/**
+ * 600 points on a cone with apex (0, 1, 0) opening down -Y at half angle atan(0.5), moved along
+ * their outward normals by up to 0.002, followed by 400 strays in the box about it, each at least
+ * 0.05 off the cone, with random normals.
+ */
+export function coneWithStrays(seed = 7) {
+  const next = signedRandom(seed);
+  const half = Math.atan(0.5);
+  const points: number[] = [],
+    normals: number[] = [];
+  for (let j = 0; j < 20; j++) {
+    const t = 0.1 + (j / 19) * 1.9;
+    for (let k = 0; k < 30; k++) {
+      const turn = (k / 30) * Math.PI * 2;
+      const n = [Math.cos(turn) * Math.cos(half), Math.sin(half), Math.sin(turn) * Math.cos(half)];
+      const offset = next() * 0.002;
+      const r = t * Math.tan(half);
+      points.push(
+        r * Math.cos(turn) + n[0] * offset,
+        1 - t + n[1] * offset,
+        r * Math.sin(turn) + n[2] * offset,
+      );
+      normals.push(...n);
+    }
+  }
+  const coneDistance = (x: number, y: number, z: number) => {
+    const h = 1 - y,
+      rho = Math.hypot(x, z);
+    if (h * Math.cos(half) + rho * Math.sin(half) < 0) return Math.hypot(x, h, z);
+    return Math.abs(rho * Math.cos(half) - h * Math.sin(half));
+  };
+  while (points.length < 1000 * 3) {
+    const [x, y, z] = [next() * 1.2, next() * 1.2, next() * 1.2];
+    if (coneDistance(x, y, z) < 0.05) continue;
+    points.push(x, y, z);
+    normals.push(...randomDirection(next));
+  }
+  return [new Float32Array(points), new Float32Array(normals)] as SurfaceSample;
+}
+
+/**
+ * Points of a cylinder of radius 1.5 about Z (a quarter turn from its top toward +X) and of the
+ * plane y = 1.5 tangent to it there (1.5 wide toward -X), 20 rows along z in [0, 1]: `cylinder`
+ * and `plane` points in all, moved along their normals by up to 0.001.
+ */
+export function tangentPatch(cylinder: number, plane: number, seed = 9) {
+  const next = signedRandom(seed);
+  const radius = 1.5;
+  const points: number[] = [],
+    normals: number[] = [];
+  const arc = cylinder / 20,
+    flat = plane / 20;
+  for (let j = 0; j < 20; j++) {
+    const z = j / 19;
+    for (let k = 0; k < arc; k++) {
+      const turn = ((k + 0.5) / arc) * (Math.PI / 2);
+      const n = [Math.sin(turn), Math.cos(turn), 0];
+      const offset = next() * 0.001;
+      points.push(n[0] * (radius + offset), n[1] * (radius + offset), z);
+      normals.push(...n);
+    }
+    for (let k = 0; k < flat; k++) {
+      points.push(-((k + 0.5) / flat) * 1.5, radius + next() * 0.001, z);
+      normals.push(0, 1, 0);
+    }
+  }
+  return [new Float32Array(points), new Float32Array(normals)] as SurfaceSample;
+}
+
+/**
+ * A 7 x 5 grid 0.1 apart along x and 0.0001 apart along z, its heights moved by up to 0.00002: a
+ * narrow strip of 35 vertices whose quadric height field has full rank.
+ */
+export function narrowStrip(seed = 13) {
+  const next = signedRandom(seed);
+  const points: number[] = [],
+    index: number[] = [];
+  for (let j = 0; j < 5; j++)
+    for (let i = 0; i < 7; i++) points.push(i * 0.1, next() * 0.00002, j * 0.0001);
+  for (let j = 0; j < 4; j++)
+    for (let i = 0; i < 6; i++) {
+      const a = j * 7 + i;
+      index.push(a, a + 7, a + 1, a + 1, a + 7, a + 8);
+    }
+  const geometry = new BufferGeometry();
+  geometry.setAttribute('position', new BufferAttribute(new Float32Array(points), 3));
+  geometry.setIndex(index);
+  geometry.computeVertexNormals();
+  return geometry;
+}
+
+/**
+ * RMS residual over every vertex of the least squares quadric height field in the frame of the
+ * mean vertex normal, solved with `ml-matrix`.
+ */
+export function quadricRms(geometry: BufferGeometry) {
+  const mesh = buildRefineMesh(geometry, new Matrix4());
+  const topology = buildTopology(mesh);
+  const count = mesh.weldedCount;
+  const normal = new Float32Array(3);
+  const sum = [0, 0, 0],
+    centre = [0, 0, 0];
+  for (let v = 0; v < count; v++) {
+    vertexNormal(mesh, topology, v, normal);
+    for (let k = 0; k < 3; k++) {
+      sum[k] += normal[k];
+      centre[k] += mesh.position[v * 3 + k] / count;
+    }
+  }
+  const n = new Vector3(...sum).normalize();
+  const u = new Vector3(1, 0, 0).cross(n).normalize(),
+    w = n.clone().cross(u);
+  const rows: number[][] = [],
+    heights: number[][] = [];
+  for (let v = 0; v < count; v++) {
+    const d = new Vector3(...[0, 1, 2].map((k) => mesh.position[v * 3 + k] - centre[k]));
+    const [x, y] = [d.dot(u), d.dot(w)];
+    rows.push([1, x, y, x * x, x * y, y * y]);
+    heights.push([d.dot(n)]);
+  }
+  const design = new Matrix(rows);
+  const residual = design.mmul(solve(design, new Matrix(heights))).sub(new Matrix(heights));
+  return Math.sqrt(residual.to1DArray().reduce((a, r) => a + r * r, 0) / count);
 }

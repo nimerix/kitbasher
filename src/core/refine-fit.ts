@@ -17,18 +17,24 @@ export interface ShapeFit {
   shape: Shape;
   /** RMS distance of inliers. */
   rms: number;
-  /** True when rms <= 2 * noise. */
+  /** Fraction of the input points the final weights keep. */
+  support: number;
+  /**
+   * True when rms <= 2 * noise and the fit keeps at least half of its points. Noise is floored at
+   * 1e-9 mm so exact data passes at zero noise.
+   */
   within: boolean;
 }
 
 const tukey = 4.685;
 const rounds = 10;
 const minimumPoints: Record<ShapeKind, number> = { plane: 3, sphere: 4, cylinder: 5, cone: 6 };
-/** Points in each seeded sample a fit is started from, and how many samples are tried. */
-const sampleSize: Record<ShapeKind, number> = { plane: 3, sphere: 6, cylinder: 6, cone: 8 };
-const samples = 64;
-/** Floor of the weighting scale in cloud units, so exact data keeps its points. */
+/** Floor of the noise in mm, so exact data keeps its points and passes at zero noise. */
 const exact = 1e-9;
+/** Chance of drawing at least one sample wholly on a surface that holds half of the points. */
+const confidence = 0.999;
+/** Most points a seed candidate is scored on. */
+const scoringPoints = 4096;
 
 /** Eigenvalues ascending and their unit eigenvectors (row i for value i) of a symmetric 3x3. */
 function eigen3(matrix: ArrayLike<number>) {
@@ -164,7 +170,7 @@ interface Model {
 
 /** Tukey biweights from residuals, with a scale of 1.4826 times the median absolute residual. */
 function reweight(residual: Float64Array, noise: number, weight: Float64Array) {
-  const scale = Math.max(1.4826 * median(residual.map(Math.abs)), noise, exact);
+  const scale = Math.max(1.4826 * median(residual.map(Math.abs)), noise);
   const cut = tukey * scale;
   for (let i = 0; i < residual.length; i++) {
     const u = residual[i] / cut;
@@ -172,45 +178,42 @@ function reweight(residual: Float64Array, noise: number, weight: Float64Array) {
   }
 }
 
-/** Damped Gauss-Newton on the weighted squared residuals, with a central-difference Jacobian. */
+/** Damped Gauss-Newton on the weighted squared residuals, with a forward-difference Jacobian. */
 function refine(model: Model, cloud: Cloud, state: Float64Array, weight: Float64Array) {
   const { count } = cloud;
   const size = model.parameters,
     h = 1e-6;
-  const residual = new Float64Array(count),
-    plus = new Float64Array(count),
-    minus = new Float64Array(count);
+  let residual = new Float64Array(count),
+    trial = new Float64Array(count);
   const jacobian = Array.from({ length: size }, () => new Float64Array(count));
-  const cost = (s: Float64Array) => {
-    model.residuals(s, residual);
+  const cost = (r: Float64Array) => {
     let sum = 0;
-    for (let i = 0; i < count; i++) sum += weight[i] * residual[i] * residual[i];
+    for (let i = 0; i < count; i++) sum += weight[i] * r[i] * r[i];
     return sum;
   };
-  let current = cost(state),
+  model.residuals(state, residual);
+  let current = cost(residual),
     damping = 1e-3;
+  const step = new Float64Array(size);
   for (let iteration = 0; iteration < 20; iteration++) {
-    const step = new Float64Array(size);
     for (let j = 0; j < size; j++) {
       step.fill(0);
       step[j] = h;
-      const forward = model.perturb(state, step);
-      step[j] = -h;
-      const backward = model.perturb(state, step);
-      model.residuals(forward, plus);
-      model.residuals(backward, minus);
-      for (let i = 0; i < count; i++) jacobian[j][i] = (plus[i] - minus[i]) / (2 * h);
+      const column = jacobian[j];
+      model.residuals(model.perturb(state, step), column);
+      for (let i = 0; i < count; i++) column[i] = (column[i] - residual[i]) / h;
     }
-    model.residuals(state, residual);
     const normal = new Matrix(size, size),
       gradient = new Matrix(size, 1);
     for (let a = 0; a < size; a++) {
+      const ja = jacobian[a];
       let g = 0;
-      for (let i = 0; i < count; i++) g += weight[i] * jacobian[a][i] * residual[i];
+      for (let i = 0; i < count; i++) g += weight[i] * ja[i] * residual[i];
       gradient.set(a, 0, -g);
       for (let b = a; b < size; b++) {
+        const jb = jacobian[b];
         let sum = 0;
-        for (let i = 0; i < count; i++) sum += weight[i] * jacobian[a][i] * jacobian[b][i];
+        for (let i = 0; i < count; i++) sum += weight[i] * ja[i] * jb[i];
         normal.set(a, b, sum);
         normal.set(b, a, sum);
       }
@@ -220,12 +223,14 @@ function refine(model: Model, cloud: Cloud, state: Float64Array, weight: Float64
       const damped = normal.clone();
       for (let a = 0; a < size; a++) damped.set(a, a, normal.get(a, a) * (1 + damping) + 1e-12);
       const delta = Float64Array.from(solve(damped, gradient).getColumn(0));
-      const next = delta.every(Number.isFinite) ? model.perturb(state, delta) : state;
-      const value = next === state ? Infinity : cost(next);
-      if (value <= current) {
+      const next = delta.every(Number.isFinite) ? model.perturb(state, delta) : null;
+      if (next) model.residuals(next, trial);
+      const value = next ? cost(trial) : Infinity;
+      if (next && value <= current) {
         const settled = current - value <= 1e-12 * current;
         state = next;
         current = value;
+        [residual, trial] = [trial, residual];
         damping = Math.max(damping / 10, 1e-9);
         improved = !settled;
         break;
@@ -242,50 +247,94 @@ interface Fitted {
   /** True when the normals face against the model's outward direction. */
   inward: boolean;
   weight: Float64Array;
+  /** Fraction of the points the final weights keep. */
+  support: number;
+}
+
+type Scorer = Pick<Model, 'residuals' | 'gradient'>;
+
+/** How one kind of shape is measured, started and refitted. */
+interface Fitter<M extends Scorer> {
+  /** Points a minimal sample needs to define the shape. */
+  size: number;
+  model(cloud: Cloud): M;
+  /** Start states from the points with weight, one for each orientation the normals leave open. */
+  starts(cloud: Cloud, weight: Float64Array): (Float64Array | null)[];
+  refit(cloud: Cloud, model: M, weight: Float64Array, previous: Float64Array): Float64Array | null;
+}
+
+/** The points at `indices`, in the cloud's own frame. */
+function subset(cloud: Cloud, indices: ArrayLike<number>): Cloud {
+  const count = indices.length;
+  const p = new Float64Array(count * 3),
+    n = new Float64Array(count * 3);
+  for (let j = 0; j < count; j++)
+    for (let k = 0; k < 3; k++) {
+      p[j * 3 + k] = cloud.p[indices[j] * 3 + k];
+      n[j * 3 + k] = cloud.n[indices[j] * 3 + k];
+    }
+  return { count, p, n, centre: cloud.centre, scale: cloud.scale };
 }
 
 /**
- * Iteratively reweighted fit: `fit` takes weights and the previous state and returns a state. It
- * starts from whichever of the all-point start and `samples` seeded samples of `size` points has
- * the least median absolute residual, so a minority of points off the surface cannot move it.
+ * Iteratively reweighted fit started from whichever of the all-point start and seeded minimal
+ * samples has the least median absolute residual. Enough samples are drawn to find a surface that
+ * holds half of the points with the chance `confidence`, so a minority off the surface cannot
+ * move it; drawing stops once a candidate keeps more than half of the points within the noise.
+ * Candidates are scored on an even subsample of at most `scoringPoints` points.
  */
-function robust(
-  cloud: Cloud,
-  noise: number,
-  size: number,
-  model: Pick<Model, 'residuals' | 'gradient'>,
-  fit: (weight: Float64Array, previous: Float64Array | null) => Float64Array | null,
-): Fitted | null {
+function robust<M extends Scorer>(cloud: Cloud, noise: number, fitter: Fitter<M>): Fitted | null {
   const { count } = cloud;
-  const weight = new Float64Array(count).fill(1),
-    residual = new Float64Array(count);
+  const model = fitter.model(cloud);
+  const scored =
+    count > scoringPoints
+      ? subset(
+          cloud,
+          Array.from({ length: scoringPoints }, (_, j) => Math.floor((j * count) / scoringPoints)),
+        )
+      : cloud;
+  const scorer = scored === cloud ? model : fitter.model(scored);
+  const distance = new Float64Array(scored.count);
   let state: Float64Array | null = null,
-    least = Infinity;
-  const consider = (candidate: Float64Array | null) => {
-    if (!candidate || !candidate.every(Number.isFinite)) return;
-    model.residuals(candidate, residual);
-    for (let i = 0; i < count; i++) residual[i] = Math.abs(residual[i]);
-    const score = median(residual);
-    if (score < least) {
-      least = score;
-      state = candidate;
+    least = Infinity,
+    settled = false;
+  const consider = (candidates: (Float64Array | null)[]) => {
+    for (const candidate of candidates) {
+      if (!candidate || !candidate.every(Number.isFinite)) continue;
+      scorer.residuals(candidate, distance);
+      let near = 0;
+      for (let i = 0; i < scored.count; i++) {
+        distance[i] = Math.abs(distance[i]);
+        if (distance[i] <= noise) near++;
+      }
+      const score = median(distance);
+      if (score < least) {
+        least = score;
+        state = candidate;
+      }
+      if (2 * near > scored.count) settled = true;
     }
   };
-  consider(fit(weight, null));
+  consider(fitter.starts(cloud, new Float64Array(count).fill(1)));
+  const { size } = fitter;
+  const draws = Math.ceil(Math.log(1 - confidence) / Math.log(1 - 0.5 ** size));
+  const ones = new Float64Array(size).fill(1),
+    picked = new Uint32Array(size);
   let seed = 0x2545f491;
   const random = () => (seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0) / 4294967296;
-  for (let sample = 0; count > size && sample < samples; sample++) {
-    weight.fill(0);
-    for (let picked = 0; picked < size;) {
+  for (let draw = 0; !settled && count > size && draw < draws; draw++) {
+    for (let filled = 0; filled < size;) {
       const i = Math.floor(random() * count);
-      if (!weight[i]) ((weight[i] = 1), picked++);
+      if (!picked.subarray(0, filled).includes(i)) picked[filled++] = i;
     }
-    consider(fit(weight, null));
+    consider(fitter.starts(subset(cloud, picked), ones));
   }
+  const weight = new Float64Array(count),
+    residual = new Float64Array(count);
   for (let round = 0; state && round < rounds; round++) {
     model.residuals(state, residual);
     reweight(residual, noise, weight);
-    state = fit(weight, state);
+    state = fitter.refit(cloud, model, weight, state);
   }
   const final: Float64Array | null = state;
   if (!final || !final.every(Number.isFinite)) return null;
@@ -299,7 +348,7 @@ function robust(
     facing += weight[i] * dot(model.gradient(final, i), cloud.n.subarray(i * 3, i * 3 + 3));
   }
   if (!inliers) return null;
-  return { state: final, inward: facing < 0, weight };
+  return { state: final, inward: facing < 0, weight, support: inliers / count };
 }
 
 const at = (cloud: Cloud, i: number): Vec3 => [
@@ -308,37 +357,43 @@ const at = (cloud: Cloud, i: number): Vec3 => [
   cloud.p[i * 3 + 2],
 ];
 
-/** State: point (3), unit normal (3). */
-function fitPlane(cloud: Cloud, noise: number) {
-  const residuals = (state: Float64Array, out: Float64Array) => {
-    for (let i = 0; i < cloud.count; i++)
-      out[i] =
-        (cloud.p[i * 3] - state[0]) * state[3] +
-        (cloud.p[i * 3 + 1] - state[1]) * state[4] +
-        (cloud.p[i * 3 + 2] - state[2]) * state[5];
-  };
-  const model = { residuals, gradient: (s: Float64Array): Vec3 => [s[3], s[4], s[5]] };
-  return robust(cloud, noise, sampleSize.plane, model, (weight) => {
-    let total = 0;
-    const mean = [0, 0, 0];
-    for (let i = 0; i < cloud.count; i++) {
-      total += weight[i];
-      for (let k = 0; k < 3; k++) mean[k] += weight[i] * cloud.p[i * 3 + k];
-    }
-    if (!(total > 0)) return null;
-    for (let k = 0; k < 3; k++) mean[k] /= total;
-    const covariance = new Float64Array(9);
-    for (let i = 0; i < cloud.count; i++) {
-      if (!weight[i]) continue;
-      const d = at(cloud, i).map((v, k) => v - mean[k]);
-      for (let r = 0; r < 3; r++)
-        for (let c = 0; c < 3; c++) covariance[r * 3 + c] += weight[i] * d[r] * d[c];
-    }
-    const { values, vectors } = eigen3(covariance);
-    if (values[1] <= 1e-10 * values[2]) return null;
-    return Float64Array.from([...mean, ...vectors[0]]);
-  });
+/** Weighted principal plane of the points: point (3), unit normal (3). */
+function planeThrough(cloud: Cloud, weight: Float64Array) {
+  let total = 0;
+  const mean = [0, 0, 0];
+  for (let i = 0; i < cloud.count; i++) {
+    total += weight[i];
+    for (let k = 0; k < 3; k++) mean[k] += weight[i] * cloud.p[i * 3 + k];
+  }
+  if (!(total > 0)) return null;
+  for (let k = 0; k < 3; k++) mean[k] /= total;
+  const covariance = new Float64Array(9);
+  for (let i = 0; i < cloud.count; i++) {
+    if (!weight[i]) continue;
+    const d = at(cloud, i).map((v, k) => v - mean[k]);
+    for (let r = 0; r < 3; r++)
+      for (let c = 0; c < 3; c++) covariance[r * 3 + c] += weight[i] * d[r] * d[c];
+  }
+  const { values, vectors } = eigen3(covariance);
+  if (values[1] <= 1e-10 * values[2]) return null;
+  return Float64Array.from([...mean, ...vectors[0]]);
 }
+
+const planeFitter: Fitter<Scorer> = {
+  size: 3,
+  model: (cloud) => ({
+    residuals(state, out) {
+      for (let i = 0; i < cloud.count; i++)
+        out[i] =
+          (cloud.p[i * 3] - state[0]) * state[3] +
+          (cloud.p[i * 3 + 1] - state[1]) * state[4] +
+          (cloud.p[i * 3 + 2] - state[2]) * state[5];
+    },
+    gradient: (s) => [s[3], s[4], s[5]],
+  }),
+  starts: (cloud, weight) => [planeThrough(cloud, weight)],
+  refit: (cloud, _, weight) => planeThrough(cloud, weight),
+};
 
 /** Solves the weighted least squares rows . x = rhs; null when the rows do not fix x. */
 function leastSquares(
@@ -365,8 +420,9 @@ function leastSquares(
 }
 
 /** State: centre (3), radius. */
-function fitSphere(cloud: Cloud, noise: number) {
-  const model: Model = {
+const sphereFitter: Fitter<Model> = {
+  size: 4,
+  model: (cloud) => ({
     parameters: 4,
     perturb: (state, step) => state.map((v, i) => v + step[i]),
     residuals(s, out) {
@@ -378,9 +434,8 @@ function fitSphere(cloud: Cloud, noise: number) {
       }
     },
     gradient: (s, i) => normalize(at(cloud, i).map((v, k) => v - s[k])),
-  };
-  return robust(cloud, noise, sampleSize.sphere, model, (weight, previous) => {
-    if (previous) return refine(model, cloud, previous, weight);
+  }),
+  starts(cloud, weight) {
     const x = leastSquares(
       cloud.count,
       4,
@@ -391,11 +446,12 @@ function fitSphere(cloud: Cloud, noise: number) {
       },
       weight,
     );
-    if (!x) return null;
+    if (!x) return [];
     const radius = Math.sqrt(x[3] + x[0] * x[0] + x[1] * x[1] + x[2] * x[2]);
-    return Number.isFinite(radius) ? Float64Array.from([x[0], x[1], x[2], radius]) : null;
-  });
-}
+    return Number.isFinite(radius) ? [Float64Array.from([x[0], x[1], x[2], radius])] : [];
+  },
+  refit: (cloud, model, weight, previous) => refine(model, cloud, previous, weight),
+};
 
 /**
  * Unit axis from the normals of the points with weight: the eigenvector of least spread, about
@@ -432,8 +488,9 @@ function tilted(axis: ArrayLike<number>, a: number, b: number) {
 }
 
 /** State: point on the axis nearest the cloud centre (3), unit axis (3), radius. */
-function fitCylinder(cloud: Cloud, noise: number) {
-  const model: Model = {
+const cylinderFitter: Fitter<Model> = {
+  size: 3,
+  model: (cloud) => ({
     parameters: 5,
     residuals(s, out) {
       for (let i = 0; i < cloud.count; i++) {
@@ -460,11 +517,10 @@ function fitCylinder(cloud: Cloud, noise: number) {
         s[6] + step[4],
       ]);
     },
-  };
-  return robust(cloud, noise, sampleSize.cylinder, model, (weight, previous) => {
-    if (previous) return refine(model, cloud, previous, weight);
+  }),
+  starts(cloud, weight) {
     const start = normalAxis(cloud, false, weight);
-    if (!start) return null;
+    if (!start) return [];
     const { axis } = start;
     const [u, v] = perpendiculars(axis);
     const x = leastSquares(
@@ -479,17 +535,19 @@ function fitCylinder(cloud: Cloud, noise: number) {
       },
       weight,
     );
-    if (!x) return null;
+    if (!x) return [];
     const radius = Math.sqrt(x[2] + x[0] * x[0] + x[1] * x[1]);
-    if (!Number.isFinite(radius)) return null;
+    if (!Number.isFinite(radius)) return [];
     const point = [0, 1, 2].map((k) => x[0] * u[k] + x[1] * v[k]);
-    return Float64Array.from([...point, ...axis, radius]);
-  });
-}
+    return [Float64Array.from([...point, ...axis, radius])];
+  },
+  refit: (cloud, model, weight, previous) => refine(model, cloud, previous, weight),
+};
 
 /** State: apex (3), unit axis (3), angle from the axis. */
-function fitCone(cloud: Cloud, noise: number) {
-  const model: Model = {
+const coneFitter: Fitter<Model> = {
+  size: 3,
+  model: (cloud) => ({
     parameters: 6,
     residuals(s, out) {
       const frame = coneFrame(s.subarray(3, 6), s[6]);
@@ -520,19 +578,13 @@ function fitCone(cloud: Cloud, noise: number) {
         s[6] + step[5],
       ]);
     },
-  };
-  return robust(cloud, noise, sampleSize.cone, model, (weight, previous) => {
-    if (previous) return refine(model, cloud, previous, weight);
+  }),
+  starts(cloud, weight) {
     const start = normalAxis(cloud, true, weight);
-    if (!start) return null;
-    let axis = start.axis;
-    // Outward normals of a cone make the angle (90 degrees + half angle) with the axis.
-    let along = dot(start.mean, axis);
-    if (along > 0) {
-      axis = axis.map((v) => -v) as Vec3;
-      along = -along;
-    }
-    const angle = Math.asin(Math.min(1, -along));
+    if (!start) return [];
+    // Normals make the angle (90 degrees + half angle) with the axis toward the opening, whichever
+    // way they face, so the axis is tried both ways.
+    const angle = Math.asin(Math.min(1, Math.abs(dot(start.mean, start.axis))));
     // Every tangent plane passes through the apex.
     const apex = leastSquares(
       cloud.count,
@@ -543,9 +595,11 @@ function fitCone(cloud: Cloud, noise: number) {
       },
       weight,
     );
-    return apex && angle > 0 ? Float64Array.from([...apex, ...axis, angle]) : null;
-  });
-}
+    if (!apex || !(angle > 0)) return [];
+    return [1, -1].map((k) => Float64Array.from([...apex, ...start.axis.map((v) => k * v), angle]));
+  },
+  refit: (cloud, model, weight, previous) => refine(model, cloud, previous, weight),
+};
 
 const world = (cloud: Cloud, p: ArrayLike<number>): Vec3 => [
   p[0] * cloud.scale + cloud.centre[0],
@@ -602,15 +656,15 @@ export function fitShape(
   if (points.length / 3 < minimumPoints[kind]) return null;
   const cloud = cloudOf(points, normals);
   if (!cloud) return null;
-  const scaled = noise / cloud.scale;
-  const fitted =
-    kind === 'plane'
-      ? fitPlane(cloud, scaled)
-      : kind === 'sphere'
-        ? fitSphere(cloud, scaled)
-        : kind === 'cylinder'
-          ? fitCylinder(cloud, scaled)
-          : fitCone(cloud, scaled);
+  const floor = Math.max(noise, exact);
+  const scaled = floor / cloud.scale;
+  const fitter: Fitter<Scorer> = {
+    plane: planeFitter,
+    sphere: sphereFitter,
+    cylinder: cylinderFitter,
+    cone: coneFitter,
+  }[kind];
+  const fitted = robust(cloud, scaled, fitter);
   if (!fitted) return null;
   const shape = shapeOf(kind, cloud, fitted.state, fitted.inward);
   if (!shape) return null;
@@ -629,7 +683,8 @@ export function fitShape(
     kept++;
   }
   const rms = Math.sqrt(sum / kept);
-  return { shape, rms, within: rms <= 2 * Math.max(noise, exact * cloud.scale) };
+  const { support } = fitted;
+  return { shape, rms, support, within: rms <= 2 * floor && support >= 0.5 };
 }
 
 /**
@@ -695,21 +750,26 @@ function normalsResolve(cloud: Cloud, kind: ShapeKind, fitted: Fitted) {
 }
 
 /**
- * Plane when it is within noise; else the best within noise of sphere and of cylinder or cone (a
- * cone over a cylinder only at under half its rms); else the lowest rms of all.
+ * Among the fits within noise, those keeping at least 0.9 of the largest support compete: the
+ * plane first, then the better of sphere and of cylinder or cone (a cone over a cylinder only at
+ * under half its rms). With none within, the lowest rms of all.
  */
 export function fitAuto(points: Float32Array, normals: Float32Array, noise: number): ShapeFit {
   const plane = fitShape(points, normals, 'plane', noise);
-  if (plane?.within) return plane;
+  // No fit keeps more than every point, so a plane keeping over 0.9 of them always wins.
+  if (plane?.within && plane.support > 0.9) return plane;
   const cylinder = fitShape(points, normals, 'cylinder', noise);
   const cone = fitShape(points, normals, 'cone', noise);
   const sphere = fitShape(points, normals, 'sphere', noise);
-  const within = (fit: ShapeFit | null) => (fit?.within ? fit : null);
-  const [tube, taper] = [within(cylinder), within(cone)];
-  const round = taper && (!tube || taper.rms < tube.rms / 2) ? taper : tube;
+  const all = [plane, cylinder, cone, sphere];
   const best = (fits: (ShapeFit | null)[]) =>
     fits.reduce<ShapeFit | null>((a, b) => (b && (!a || b.rms < a.rms) ? b : a), null);
-  const result = best([round, within(sphere)]) ?? best([plane, cylinder, cone, sphere]);
+  const most = Math.max(0, ...all.map((fit) => (fit?.within ? fit.support : 0)));
+  const near = (fit: ShapeFit | null) => (fit?.within && fit.support >= 0.9 * most ? fit : null);
+  if (near(plane)) return plane!;
+  const [tube, taper] = [near(cylinder), near(cone)];
+  const round = taper && (!tube || taper.rms < tube.rms / 2) ? taper : tube;
+  const result = best([round, near(sphere)]) ?? best(all);
   if (!result) throw new Error('These points do not define a surface.');
   return result;
 }
@@ -827,38 +887,55 @@ export function projectToShape(
   }
 }
 
-/** Solves the 6x6 system `a x = b` in place by Gaussian elimination; false if rank deficient. */
-function solve6(a: Float64Array, b: Float64Array) {
-  let largest = 0;
-  for (let c = 0; c < 6; c++) largest = Math.max(largest, Math.abs(a[c * 7]));
-  const tiny = 1e-12 * largest;
-  for (let c = 0; c < 6; c++) {
-    let pivot = c;
-    for (let r = c + 1; r < 6; r++)
-      if (Math.abs(a[r * 6 + c]) > Math.abs(a[pivot * 6 + c])) pivot = r;
-    if (!(Math.abs(a[pivot * 6 + c]) > tiny)) return false;
-    if (pivot !== c) {
-      for (let k = 0; k < 6; k++) {
-        const t = a[c * 6 + k];
-        a[c * 6 + k] = a[pivot * 6 + k];
-        a[pivot * 6 + k] = t;
+/** Relative size below which a pivot of the quadric's QR adds no term the points support. */
+const pivotTolerance = 1e-6;
+
+/**
+ * Residual sum of squares of the least squares fit of `z` by the richest model the six columns of
+ * `a` (column-major, `rows` per column: 1, x, y, x^2, xy, y^2) support. Householder QR pivots the
+ * plane terms first and then the quadratic terms by size, and stops at the first pivot below
+ * `pivotTolerance` of the first. Overwrites `a` and `z`; NaN when even a plane is unsupported or
+ * no residual is left.
+ */
+function heightResidual(a: Float64Array, z: Float64Array, rows: number) {
+  let first = 0,
+    rank = 0;
+  for (let k = 0; k < 6; k++) {
+    let pivot = k,
+      largest = -1;
+    for (let c = k; c <= (k < 3 ? k : 5); c++) {
+      let sum = 0;
+      for (let r = k; r < rows; r++) sum += a[c * rows + r] ** 2;
+      if (sum > largest) ((largest = sum), (pivot = c));
+    }
+    const size = Math.sqrt(largest);
+    if (k === 0) first = size;
+    if (!(size > pivotTolerance * first)) break;
+    if (pivot !== k)
+      for (let r = 0; r < rows; r++) {
+        const t = a[k * rows + r];
+        a[k * rows + r] = a[pivot * rows + r];
+        a[pivot * rows + r] = t;
       }
-      const t = b[c];
-      b[c] = b[pivot];
-      b[pivot] = t;
-    }
-    for (let r = c + 1; r < 6; r++) {
-      const f = a[r * 6 + c] / a[c * 6 + c];
-      for (let k = c; k < 6; k++) a[r * 6 + k] -= f * a[c * 6 + k];
-      b[r] -= f * b[c];
-    }
+    // Householder reflection taking column k below the diagonal to zero.
+    const head = a[k * rows + k];
+    const alpha = head > 0 ? -size : size;
+    a[k * rows + k] = head - alpha;
+    const length = largest - head * head + (head - alpha) ** 2;
+    const reflect = (column: Float64Array, offset: number) => {
+      let projection = 0;
+      for (let r = k; r < rows; r++) projection += a[k * rows + r] * column[offset + r];
+      const f = (2 * projection) / length;
+      for (let r = k; r < rows; r++) column[offset + r] -= f * a[k * rows + r];
+    };
+    for (let c = k + 1; c < 6; c++) reflect(a, c * rows);
+    reflect(z, 0);
+    rank = k + 1;
   }
-  for (let r = 5; r >= 0; r--) {
-    let sum = b[r];
-    for (let k = r + 1; k < 6; k++) sum -= a[r * 6 + k] * b[k];
-    b[r] = sum / a[r * 6 + r];
-  }
-  return true;
+  if (rank < 3 || rows <= rank) return NaN;
+  let squared = 0;
+  for (let r = rank; r < rows; r++) squared += z[r] * z[r];
+  return squared;
 }
 
 const maximumSamples = 2000;
@@ -866,7 +943,8 @@ const maximumSamples = 2000;
 /**
  * Surface roughness at the scale of `rings` rings: the median over sampled vertices of the RMS
  * residual of a quadric height field fitted to each vertex's neighbourhood, so curvature is
- * absorbed and ripple and noise remain.
+ * absorbed and ripple and noise remain. A neighbourhood too narrow for the quadric drops the terms
+ * it cannot support, down to a plane.
  */
 export function estimateNoise(
   mesh: RefineMesh,
@@ -883,9 +961,8 @@ export function estimateNoise(
   const stamp = new Uint32Array(weldedCount);
   let gathered = new Uint32Array(256);
   const normal = new Float32Array(3);
-  const normalMatrix = new Float64Array(36);
-  const rhs = new Float64Array(6);
-  const row = new Float64Array(6);
+  let design = new Float64Array(256 * 6),
+    heights = new Float64Array(256);
   let used = 0;
   for (let s = 0; s < samples; s++) {
     const i = Math.floor(s * stride);
@@ -913,8 +990,8 @@ export function estimateNoise(
       }
       ringStart = ringEnd;
     }
-    // A quadric needs more than six points to leave a residual; rank is checked by the solve.
-    if (count <= 6) continue;
+    // A plane needs more than three points to leave a residual; rank is checked by the QR.
+    if (count <= 3) continue;
     let nx = 0,
       ny = 0,
       nz = 0,
@@ -943,10 +1020,12 @@ export function estimateNoise(
       const v = gathered[g] * 3;
       spread += (position[v] - cx) ** 2 + (position[v + 1] - cy) ** 2 + (position[v + 2] - cz) ** 2;
     }
-    // Local coordinates are scaled to unit RMS radius so the normal equations stay conditioned.
+    // Local coordinates are scaled to unit RMS radius so the pivots compare like with like.
     const scale = Math.sqrt(spread / count) || 1;
-    normalMatrix.fill(0);
-    rhs.fill(0);
+    if (design.length < count * 6) {
+      design = new Float64Array(count * 12);
+      heights = new Float64Array(count * 2);
+    }
     for (let g = 0; g < count; g++) {
       const v = gathered[g] * 3;
       const dx = position[v] - cx,
@@ -954,32 +1033,16 @@ export function estimateNoise(
         dz = position[v + 2] - cz;
       const x = (dx * u[0] + dy * u[1] + dz * u[2]) / scale;
       const y = (dx * w[0] + dy * w[1] + dz * w[2]) / scale;
-      const z = (dx * n[0] + dy * n[1] + dz * n[2]) / scale;
-      row[0] = 1;
-      row[1] = x;
-      row[2] = y;
-      row[3] = x * x;
-      row[4] = x * y;
-      row[5] = y * y;
-      for (let r = 0; r < 6; r++) {
-        rhs[r] += row[r] * z;
-        for (let c = 0; c < 6; c++) normalMatrix[r * 6 + c] += row[r] * row[c];
-      }
+      design[g] = 1;
+      design[count + g] = x;
+      design[2 * count + g] = y;
+      design[3 * count + g] = x * x;
+      design[4 * count + g] = x * y;
+      design[5 * count + g] = y * y;
+      heights[g] = (dx * n[0] + dy * n[1] + dz * n[2]) / scale;
     }
-    if (!solve6(normalMatrix, rhs)) continue;
-    let squared = 0;
-    for (let g = 0; g < count; g++) {
-      const v = gathered[g] * 3;
-      const dx = position[v] - cx,
-        dy = position[v + 1] - cy,
-        dz = position[v + 2] - cz;
-      const x = (dx * u[0] + dy * u[1] + dz * u[2]) / scale;
-      const y = (dx * w[0] + dy * w[1] + dz * w[2]) / scale;
-      const z = (dx * n[0] + dy * n[1] + dz * n[2]) / scale;
-      const fit =
-        rhs[0] + rhs[1] * x + rhs[2] * y + rhs[3] * x * x + rhs[4] * x * y + rhs[5] * y * y;
-      squared += (z - fit) ** 2;
-    }
+    const squared = heightResidual(design, heights, count);
+    if (!Number.isFinite(squared)) continue;
     residuals[used++] = Math.sqrt(squared / count) * scale;
   }
   return median(residuals.subarray(0, used));
