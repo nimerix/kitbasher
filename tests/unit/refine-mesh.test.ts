@@ -9,12 +9,19 @@ import {
   writeRefinedGeometry,
 } from '../../src/core/refine-mesh';
 import {
+  changedTriangles,
   changedVertices,
   closed,
   duplicatesAgree,
   extent,
+  fanNormalError,
+  hasNaN,
   modelOf,
+  nearWeldSeam,
   outwardFraction,
+  splitEdge,
+  tetrahedron,
+  wideFan,
 } from '../helpers/refine';
 import { softBox } from '../helpers/soft-edges';
 
@@ -189,4 +196,92 @@ it('carries colour in the source array type and normalization', () => {
   expect(color.normalized).toBe(true);
   expect(color.itemSize).toBe(4);
   expect(color.array).toEqual(values);
+});
+
+describe.each(cases)('closed cuts, %s', (_, options) => {
+  const indexed = 'indexed' in options;
+  const sources = [
+    ['tetrahedron', tetrahedron(indexed)],
+    ['soft box', softBox([2, 1.5, 1], 0.3, options)],
+  ] as const;
+  it.each(sources)('writes a split edge of a %s back valid and closed', (_, source) => {
+    const mesh = buildRefineMesh(source, new Matrix4());
+    const triangles = mesh.triangleCount;
+    const { other } = splitEdge(mesh, 0);
+    const out = writeRefinedGeometry(source, new Matrix4(), mesh);
+    const box = out.boundingBox!,
+      sphere = out.boundingSphere!;
+    expect(
+      hasNaN(
+        out.getAttribute('position').array,
+        out.getAttribute('normal').array,
+        [...box.min.toArray(), ...box.max.toArray()],
+        [...sphere.center.toArray(), sphere.radius],
+      ),
+    ).toBe(false);
+    expect(closed(out)).toBe(true);
+    expect((out.index?.count ?? out.getAttribute('position').count) / 3).toBe(triangles + 2);
+    expect(changedTriangles(source, out, [0, other])).toEqual([]);
+    expect(duplicatesAgree(out, mesh)).toBe(true);
+  });
+});
+
+describe.each(cases)('near-weld seams, %s', (_, options) => {
+  it('writes fan normals that match the faces as written', () => {
+    const source = nearWeldSeam('indexed' in options);
+    const mesh = buildRefineMesh(source, new Matrix4());
+    const centre = mesh.weldOf[0];
+    moveVertex(mesh, centre, mesh.position[centre * 3], mesh.position[centre * 3 + 1], 1e-6);
+    const out = writeRefinedGeometry(source, new Matrix4(), mesh);
+    expect(fanNormalError(out, mesh, centre)).toBeLessThan(0.5);
+  });
+});
+
+it('copies untouched values in their own storage', () => {
+  const source = softBox([2, 1.5, 1], 0.3, { indexed: true });
+  const count = source.getAttribute('position').count;
+  const position = Float64Array.from(source.getAttribute('position').array, (v) => v + 1e-9);
+  source.setAttribute('position', new BufferAttribute(position, 3));
+  const colors = Uint32Array.from({ length: count * 3 }, (_, i) => 16777217 + i);
+  source.setAttribute('color', new BufferAttribute(colors, 3));
+  const mesh = buildRefineMesh(source, new Matrix4());
+  moveVertex(mesh, 7, mesh.position[21] + 0.1, mesh.position[22], mesh.position[23]);
+  const out = writeRefinedGeometry(source, new Matrix4(), mesh);
+  const written = out.getAttribute('position').array;
+  expect(written).toBeInstanceOf(Float64Array);
+  for (let g = 0; g < count; g++)
+    if (mesh.weldOf[g] !== 7)
+      for (let axis = 0; axis < 3; axis++)
+        expect(written[g * 3 + axis]).toBe(position[g * 3 + axis]);
+  const color = out.getAttribute('color').array;
+  expect(color).toBeInstanceOf(Uint32Array);
+  expect(color).toEqual(colors);
+  expect(color[0]).toBe(16777217);
+});
+
+it('writes back a touched vertex with 50,000 triangles around it quickly', () => {
+  const source = wideFan(50_000);
+  const mesh = buildRefineMesh(source, new Matrix4());
+  const centre = mesh.weldOf[0];
+  moveVertex(mesh, centre, 0, 0, 0.1);
+  const start = performance.now();
+  const out = writeRefinedGeometry(source, new Matrix4(), mesh);
+  expect(performance.now() - start).toBeLessThan(2000);
+  expect(out.getAttribute('normal').getZ(0)).toBeGreaterThan(0.99);
+});
+
+it('places unmoved vertices at their translated world position', () => {
+  const matrix = new Matrix4().compose(
+    new Vector3(5.5, -1.25, 0.75),
+    new Quaternion().setFromAxisAngle(new Vector3(0, 1, 0), 0.3),
+    new Vector3(1, 2, -1),
+  );
+  const source = softBox([2, 1.5, 1], 0.3);
+  const mesh = buildRefineMesh(source, matrix);
+  const position = source.getAttribute('position');
+  for (const g of [0, 100, position.count - 1]) {
+    const expected = new Vector3().fromBufferAttribute(position, g).applyMatrix4(matrix);
+    const world = new Vector3().fromArray(mesh.position, mesh.weldOf[g] * 3);
+    expect(world.distanceTo(expected)).toBeLessThan(1e-5);
+  }
 });

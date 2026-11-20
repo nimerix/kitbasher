@@ -1,4 +1,10 @@
-import { BufferAttribute, BufferGeometry, Matrix3, type Matrix4, type TypedArray } from 'three';
+import {
+  BufferAttribute,
+  BufferGeometry,
+  type InterleavedBufferAttribute,
+  type Matrix4,
+  type TypedArray,
+} from 'three';
 import { weldedPositionIndex } from './mesh-topology';
 
 const unused = 0xffffffff;
@@ -224,6 +230,59 @@ export function moveVertex(
   mesh.touched[welded] = 1;
 }
 
+/** `array` itself when it holds `length` values, otherwise a copy with room to grow. */
+function room<T extends Float32Array | Uint32Array | Uint8Array>(array: T, length: number): T {
+  if (array.length >= length) return array;
+  const grown = new (array.constructor as new (length: number) => T)(
+    Math.max(length, array.length * 2),
+  );
+  grown.set(array);
+  return grown;
+}
+
+/** Appends a welded vertex at a world position, marked touched. */
+export function addWeldedVertex(mesh: RefineMesh, x: number, y: number, z: number): number {
+  const welded = mesh.weldedCount++;
+  mesh.position = room(mesh.position, mesh.weldedCount * 3);
+  mesh.touched = room(mesh.touched, mesh.weldedCount);
+  mesh.crease = room(mesh.crease, mesh.weldedCount);
+  mesh.crease[welded] = 0;
+  moveVertex(mesh, welded, x, y, z);
+  return welded;
+}
+
+/** Appends a geometry vertex of `welded`, with `color` when the mesh carries colour. */
+export function addGeometryVertex(
+  mesh: RefineMesh,
+  welded: number,
+  color?: ArrayLike<number>,
+): number {
+  const vertex = mesh.vertexCount++;
+  mesh.weldOf = room(mesh.weldOf, mesh.vertexCount);
+  mesh.weldOf[vertex] = welded;
+  if (mesh.color) {
+    mesh.color = room(mesh.color, mesh.vertexCount * mesh.colorSize);
+    for (let k = 0; k < mesh.colorSize; k++)
+      mesh.color[vertex * mesh.colorSize + k] = color ? color[k] : 0;
+  }
+  return vertex;
+}
+
+/** Sets the geometry vertices of a triangle's corners. */
+export function setTriangle(mesh: RefineMesh, triangle: number, a: number, b: number, c: number) {
+  mesh.corners[triangle * 3] = a;
+  mesh.corners[triangle * 3 + 1] = b;
+  mesh.corners[triangle * 3 + 2] = c;
+}
+
+/** Appends a triangle of three geometry vertices. */
+export function addTriangle(mesh: RefineMesh, a: number, b: number, c: number): number {
+  const triangle = mesh.triangleCount++;
+  mesh.corners = room(mesh.corners, mesh.triangleCount * 3);
+  setTriangle(mesh, triangle, a, b, c);
+  return triangle;
+}
+
 /** Triangles among those around `vertices` whose normal now opposes its normal at `before`. */
 export function foldedTriangles(
   mesh: RefineMesh,
@@ -250,19 +309,46 @@ export function foldedTriangles(
 /**
  * Splits the triangles around one welded vertex into fans: triangles joined across an edge from
  * `welded`, except an edge whose two ends both have `crease`. Returns the fan of each triangle.
+ * `owner` is scratch space of -1 per welded vertex, left as found.
  */
-function fansAround(mesh: RefineMesh, welded: number, triangles: Uint32Array) {
+function fansAround(mesh: RefineMesh, welded: number, triangles: Uint32Array, owner: Int32Array) {
   const fan = Int32Array.from(triangles, (_, i) => i);
-  const root = (i: number): number => (fan[i] === i ? i : (fan[i] = root(fan[i])));
-  const others = Array.from(triangles, (t) =>
-    ([0, 1, 2] as const).map((k) => weldedCorner(mesh, t, k)).filter((w) => w !== welded),
-  );
+  const root = (i: number) => {
+    while (fan[i] !== i) i = fan[i] = fan[fan[i]];
+    return i;
+  };
   const blocked = mesh.crease[welded] === 1;
   for (let i = 0; i < triangles.length; i++)
-    for (let j = i + 1; j < triangles.length; j++)
-      if (others[i].some((w) => others[j].includes(w) && !(blocked && mesh.crease[w])))
-        fan[root(i)] = root(j);
+    for (const k of [0, 1, 2] as const) {
+      const w = weldedCorner(mesh, triangles[i], k);
+      if (w === welded || (blocked && mesh.crease[w])) continue;
+      if (owner[w] < 0) owner[w] = i;
+      else fan[root(i)] = root(owner[w]);
+    }
+  for (const t of triangles)
+    for (const k of [0, 1, 2] as const) owner[weldedCorner(mesh, t, k)] = -1;
   return Int32Array.from(fan, (_, i) => root(i));
+}
+
+type Attribute = BufferAttribute | InterleavedBufferAttribute;
+
+/** An empty attribute of `count` items in the same array type, item size and normalization. */
+function blankLike(attribute: Attribute, count: number) {
+  const Array = attribute.array.constructor as new (length: number) => TypedArray;
+  return new BufferAttribute(
+    new Array(count * attribute.itemSize),
+    attribute.itemSize,
+    attribute.normalized,
+  );
+}
+
+/** Copies item `from` of `source` into item `to` of `target` without converting it. */
+function copyItem(source: Attribute, from: number, target: BufferAttribute, to: number) {
+  const size = target.itemSize;
+  const interleaved = 'isInterleavedBufferAttribute' in source;
+  const array = interleaved ? source.data.array : source.array;
+  const base = interleaved ? from * source.data.stride + source.offset : from * size;
+  for (let k = 0; k < size; k++) target.array[to * size + k] = array[base + k];
 }
 
 export function writeRefinedGeometry(
@@ -272,14 +358,29 @@ export function writeRefinedGeometry(
 ): BufferGeometry {
   const sourcePosition = source.getAttribute('position');
   const sourceNormal = source.getAttribute('normal');
-  const { weldOf, corners, touched, triangleCount, vertexCount } = mesh;
+  const { weldOf, corners, touched, triangleCount, vertexCount, weldedCount } = mesh;
+  const sourceVertexCount = mesh.sourceVertexCount;
   const cornerCount = triangleCount * 3;
 
-  // Mesh-local position of every touched welded vertex, computed once so duplicates share bits.
+  // The source vertex whose position and normal each geometry vertex copies, or unused when moved.
+  const representative = new Uint32Array(weldedCount).fill(unused);
+  for (let g = 0; g < sourceVertexCount; g++) {
+    const v = weldOf[g];
+    if (v !== unused && representative[v] === unused) representative[v] = g;
+  }
+  const copies = new Uint32Array(vertexCount);
+  for (let g = 0; g < vertexCount; g++) {
+    const v = weldOf[g];
+    if (v === unused) copies[g] = g;
+    else if (touched[v] || representative[v] === unused) copies[g] = unused;
+    else copies[g] = g < sourceVertexCount ? g : representative[v];
+  }
+
+  // Mesh-local position of every moved welded vertex, computed once so duplicates share bits.
   const inverse = matrixWorld.clone().invert().elements;
-  const local = new Float32Array(mesh.weldedCount * 3);
-  for (let v = 0; v < mesh.weldedCount; v++) {
-    if (!touched[v]) continue;
+  const local = new Float64Array(weldedCount * 3);
+  for (let v = 0; v < weldedCount; v++) {
+    if (!touched[v] && representative[v] !== unused) continue;
     const x = mesh.position[v * 3],
       y = mesh.position[v * 3 + 1],
       z = mesh.position[v * 3 + 2];
@@ -288,36 +389,38 @@ export function writeRefinedGeometry(
     local[v * 3 + 2] = inverse[2] * x + inverse[6] * y + inverse[10] * z + inverse[14];
   }
 
-  // Outward world normal of each corner at a touched vertex, from its fan; world to local by Mᵀ.
-  const toLocal = new Matrix3().setFromMatrix4(matrixWorld).transpose().elements;
+  const written = (g: number, axis: number) =>
+    copies[g] === unused
+      ? local[weldOf[g] * 3 + axis]
+      : sourcePosition.getComponent(copies[g], axis);
+
+  // Normal of each corner at a moved vertex: area-weighted over its fan of faces as written.
   const cornerNormal = new Float32Array(cornerCount * 3);
   const cornerFan = new Int32Array(cornerCount).fill(-1);
   const { triangleStart, trianglesOf } = trianglesAround(mesh);
-  const cross = new Float64Array(3);
-  for (let v = 0; v < mesh.weldedCount; v++) {
+  const owner = new Int32Array(weldedCount).fill(-1);
+  const cross = (t: number, out: Float64Array, offset: number) => {
+    const [a, b, c] = [0, 1, 2].map((k) => corners[t * 3 + k]);
+    const u = [0, 1, 2].map((axis) => written(b, axis) - written(a, axis)),
+      w = [0, 1, 2].map((axis) => written(c, axis) - written(a, axis));
+    out[offset] += u[1] * w[2] - u[2] * w[1];
+    out[offset + 1] += u[2] * w[0] - u[0] * w[2];
+    out[offset + 2] += u[0] * w[1] - u[1] * w[0];
+  };
+  for (let v = 0; v < weldedCount; v++) {
     if (!touched[v]) continue;
     const triangles = trianglesOf.subarray(triangleStart[v], triangleStart[v + 1]);
-    const fan = fansAround(mesh, v, triangles);
+    const fan = fansAround(mesh, v, triangles, owner);
     const sum = new Float64Array(triangles.length * 3);
-    for (let i = 0; i < triangles.length; i++) {
-      faceCross(mesh, mesh.position, triangles[i], cross);
-      for (let axis = 0; axis < 3; axis++) sum[fan[i] * 3 + axis] += cross[axis];
-    }
-    for (let i = 0; i < triangles.length; i++) {
-      const t = triangles[i];
-      const [x, y, z] = sum.subarray(fan[i] * 3, fan[i] * 3 + 3);
+    for (let i = 0; i < triangles.length; i++) cross(triangles[i], sum, fan[i] * 3);
+    for (let i = 0; i < triangles.length; i++)
       for (const k of [0, 1, 2] as const) {
-        const c = t * 3 + k;
+        const c = triangles[i] * 3 + k;
         if (weldOf[corners[c]] !== v) continue;
         cornerFan[c] = fan[i];
-        normalizeInto(
-          toLocal[0] * x + toLocal[3] * y + toLocal[6] * z,
-          toLocal[1] * x + toLocal[4] * y + toLocal[7] * z,
-          toLocal[2] * x + toLocal[5] * y + toLocal[8] * z,
-          cornerNormal.subarray(c * 3, c * 3 + 3),
-        );
+        const f = fan[i] * 3;
+        normalizeInto(sum[f], sum[f + 1], sum[f + 2], cornerNormal.subarray(c * 3, c * 3 + 3));
       }
-    }
   }
 
   // Output vertex of each corner, and the geometry vertex and corner each output vertex copies.
@@ -358,43 +461,38 @@ export function writeRefinedGeometry(
     normals.set(appendedNormal, vertexCount);
     normalFrom = normals;
   } else {
+    // One output vertex per corner, so an unsplit source triangle keeps its own slots.
     from = corners.subarray(0, cornerCount);
     normalFrom = Int32Array.from(cornerFan, (fan, c) => (fan >= 0 ? c : -1));
   }
 
   const count = from.length;
-  const position = new Float32Array(count * 3);
-  const normal = new Float32Array(count * 3);
+  const outPosition = blankLike(sourcePosition, count);
+  const outNormal = blankLike(sourceNormal, count);
   for (let i = 0; i < count; i++) {
     const g = from[i];
-    const v = weldOf[g];
-    if (v !== unused && touched[v]) position.set(local.subarray(v * 3, v * 3 + 3), i * 3);
-    else {
-      position[i * 3] = sourcePosition.getX(g);
-      position[i * 3 + 1] = sourcePosition.getY(g);
-      position[i * 3 + 2] = sourcePosition.getZ(g);
-    }
+    const copy = copies[g];
+    if (copy !== unused) copyItem(sourcePosition, copy, outPosition, i);
+    else outPosition.setXYZ(i, written(g, 0), written(g, 1), written(g, 2));
     const c = normalFrom[i];
-    if (c >= 0) normal.set(cornerNormal.subarray(c * 3, c * 3 + 3), i * 3);
-    else {
-      normal[i * 3] = sourceNormal.getX(g);
-      normal[i * 3 + 1] = sourceNormal.getY(g);
-      normal[i * 3 + 2] = sourceNormal.getZ(g);
-    }
+    const normalSource = copy !== unused ? copy : g < sourceVertexCount ? g : unused;
+    if (c >= 0)
+      outNormal.setXYZ(i, cornerNormal[c * 3], cornerNormal[c * 3 + 1], cornerNormal[c * 3 + 2]);
+    else if (normalSource !== unused) copyItem(sourceNormal, normalSource, outNormal, i);
   }
 
   const result = new BufferGeometry();
-  result.setAttribute('position', new BufferAttribute(position, 3));
-  result.setAttribute('normal', new BufferAttribute(normal, 3));
+  result.setAttribute('position', outPosition);
+  result.setAttribute('normal', outNormal);
   const sourceColor = source.getAttribute('color');
   if (mesh.color && sourceColor) {
     const size = mesh.colorSize;
-    const ColorArray = (sourceColor.array as TypedArray).constructor as new (
-      length: number,
-    ) => TypedArray;
-    const color = new BufferAttribute(new ColorArray(count * size), size, sourceColor.normalized);
-    for (let i = 0; i < count; i++)
-      for (let k = 0; k < size; k++) color.setComponent(i, k, mesh.color[from[i] * size + k]);
+    const color = blankLike(sourceColor, count);
+    for (let i = 0; i < count; i++) {
+      const g = from[i];
+      if (g < sourceVertexCount) copyItem(sourceColor, g, color, i);
+      else for (let k = 0; k < size; k++) color.setComponent(i, k, mesh.color[g * size + k]);
+    }
     result.setAttribute('color', color);
   }
   if (index) result.setIndex(new BufferAttribute(index, 1));

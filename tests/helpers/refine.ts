@@ -1,9 +1,13 @@
-import { type BufferGeometry, Matrix4 } from 'three';
+import { BufferAttribute, BufferGeometry, Matrix4, Vector3 } from 'three';
 import { hasClosedEdges, weldedPositionIndex } from '../../src/core/mesh-topology';
 import {
   type RefineMesh,
+  addGeometryVertex,
+  addTriangle,
+  addWeldedVertex,
   buildRefineMesh,
   buildTopology,
+  setTriangle,
   triangleNormal,
   weldedCorner,
 } from '../../src/core/refine-mesh';
@@ -166,4 +170,145 @@ export function outwardFraction(mesh: RefineMesh, centre: Vec3) {
     if (dot > 0) outward++;
   }
   return outward / mesh.triangleCount;
+}
+
+/** Closed regular tetrahedron with outward winding and flat normals per face. */
+export function tetrahedron(indexed: boolean) {
+  const points = [1, 1, 1, -1, -1, 1, -1, 1, -1, 1, -1, -1];
+  const faces = [0, 1, 2, 0, 3, 1, 0, 2, 3, 1, 3, 2];
+  const geometry = new BufferGeometry();
+  geometry.setAttribute('position', new BufferAttribute(new Float32Array(points), 3));
+  geometry.setIndex(faces);
+  const result = indexed ? geometry : geometry.toNonIndexed();
+  result.computeVertexNormals();
+  return result;
+}
+
+/**
+ * Splits the welded edge from corner 0 to corner 1 of `triangle` at its midpoint, replacing both
+ * triangles on it with two each. Returns the new welded vertex and the other triangle on the edge.
+ */
+export function splitEdge(mesh: RefineMesh, triangle: number) {
+  const a = weldedCorner(mesh, triangle, 0),
+    b = weldedCorner(mesh, triangle, 1);
+  let other = -1,
+    k = 0;
+  for (let t = 0; t < mesh.triangleCount && other < 0; t++)
+    for (k = 0; k < 3; k++)
+      if (
+        weldedCorner(mesh, t, k as 0 | 1 | 2) === b &&
+        weldedCorner(mesh, t, ((k + 1) % 3) as 0 | 1 | 2) === a
+      ) {
+        other = t;
+        break;
+      }
+  const p = (v: number) => [0, 1, 2].map((axis) => mesh.position[v * 3 + axis]);
+  const [pa, pb] = [p(a), p(b)];
+  const middle = addWeldedVertex(mesh, ...(pa.map((v, axis) => (v + pb[axis]) / 2) as Vec3));
+  const split = (t: number, first: number) => {
+    const g = [0, 1, 2].map((i) => mesh.corners[t * 3 + ((first + i) % 3)]);
+    const m = addGeometryVertex(mesh, middle);
+    // The new triangle names fresh duplicates of its untouched corners, as an unindexed cut would.
+    const [b, c] = [g[1], g[2]].map((v) => addGeometryVertex(mesh, mesh.weldOf[v]));
+    setTriangle(mesh, t, g[0], m, g[2]);
+    addTriangle(mesh, m, b, c);
+  };
+  split(triangle, 0);
+  split(other, k);
+  return { middle, other };
+}
+
+/** True when any value of the arrays is NaN. */
+export function hasNaN(...arrays: ArrayLike<number>[]) {
+  return arrays.some((array) => Array.prototype.some.call(array, Number.isNaN));
+}
+
+/** Corner `k` of triangle `t` as written: its output vertex. */
+const outputVertex = (geometry: BufferGeometry, t: number, k: number) =>
+  geometry.index ? geometry.index.getX(t * 3 + k) : t * 3 + k;
+
+/** Source triangles, other than `except`, whose written corners differ from the source in any bit. */
+export function changedTriangles(
+  source: BufferGeometry,
+  written: BufferGeometry,
+  except: number[],
+) {
+  const changed: number[] = [];
+  const triangles = (source.index?.count ?? source.getAttribute('position').count) / 3;
+  for (let t = 0; t < triangles; t++) {
+    if (except.includes(t)) continue;
+    const same = [0, 1, 2].every((k) =>
+      ['position', 'normal'].every((name) => {
+        const before = source.getAttribute(name).array,
+          after = written.getAttribute(name).array;
+        const i = outputVertex(source, t, k),
+          j = outputVertex(written, t, k);
+        return [0, 1, 2].every((axis) => Object.is(before[i * 3 + axis], after[j * 3 + axis]));
+      }),
+    );
+    if (!same) changed.push(t);
+  }
+  return changed;
+}
+
+/** Angle in degrees between the written normal at each corner of `welded` and the area-weighted
+ * normal of the written faces around it. Returns the largest. */
+export function fanNormalError(written: BufferGeometry, mesh: RefineMesh, welded: number) {
+  const position = written.getAttribute('position'),
+    normal = written.getAttribute('normal');
+  const at = (v: number) => new Vector3().fromBufferAttribute(position, v);
+  const sum = new Vector3();
+  const corners: number[] = [];
+  for (let t = 0; t < mesh.triangleCount; t++)
+    for (const k of [0, 1, 2] as const)
+      if (weldedCorner(mesh, t, k) === welded) {
+        const [a, b, c] = [0, 1, 2].map((i) => at(outputVertex(written, t, i)));
+        sum.add(b.sub(a).cross(c.sub(a)));
+        corners.push(outputVertex(written, t, k));
+      }
+  sum.normalize();
+  return Math.max(
+    ...corners.map(
+      (v) => (new Vector3().fromBufferAttribute(normal, v).angleTo(sum) * 180) / Math.PI,
+    ),
+  );
+}
+
+/**
+ * A flat hexagonal fan around the origin, 2e-5 across, cut along the x axis by a seam whose
+ * duplicate vertices on the far side sit 4.9e-6 higher: close enough to weld.
+ */
+export function nearWeldSeam(indexed: boolean) {
+  const r = 2e-5,
+    lift = 4.9e-6;
+  const ring = Array.from({ length: 6 }, (_, i) => [
+    r * Math.cos((i * Math.PI) / 3),
+    r * Math.sin((i * Math.PI) / 3),
+    0,
+  ]);
+  // Vertices: 0 centre, 1-6 ring, 7 centre below, 8 and 9 ring 0 and 3 below.
+  const points = [[0, 0, 0], ...ring, [0, 0, lift], [r, 0, lift], [-r, 0, lift]];
+  const faces = [0, 1, 2, 0, 2, 3, 0, 3, 4, 7, 9, 5, 7, 5, 6, 7, 6, 8];
+  const geometry = new BufferGeometry();
+  geometry.setAttribute('position', new BufferAttribute(new Float32Array(points.flat()), 3));
+  geometry.setIndex(faces);
+  const result = indexed ? geometry : geometry.toNonIndexed();
+  result.computeVertexNormals();
+  return result;
+}
+
+/** An indexed flat fan of `count` triangles around one centre vertex. */
+export function wideFan(count: number) {
+  const points = [0, 0, 0];
+  for (let i = 0; i < count; i++) {
+    const angle = (i * 2 * Math.PI) / count;
+    points.push(Math.cos(angle), Math.sin(angle), 0);
+  }
+  const faces: number[] = [];
+  for (let i = 0; i < count; i++) faces.push(0, 1 + i, 1 + ((i + 1) % count));
+  const geometry = new BufferGeometry();
+  geometry.setAttribute('position', new BufferAttribute(new Float32Array(points), 3));
+  geometry.setIndex(faces);
+  geometry.computeVertexNormals();
+  return geometry;
 }
