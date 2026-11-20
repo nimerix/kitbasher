@@ -1,7 +1,6 @@
 # Restore: sharp edges and clean surfaces on scanned parts
 
-Status: draft, awaiting approval. Date: 2026-11-19. "Restore" is a working name (see Open
-questions).
+Status: approved 2026-11-19. Date: 2026-11-19.
 
 Lines marked (product owner) record what the product owner said in the intent interview.
 Everything else is proposed here and open to change.
@@ -440,11 +439,11 @@ session undo and redo; Apply, scene undo, Cancel.
 
 ## Open questions
 
-1. **"Follow an arc" for a region.** This spec reads it as Sweep: a constant cross-section
-   carried along an arc or spline, which covers the pipe elbows and hose on part 57. Is
-   that what you meant, or did you mean a surface that is an arc in one direction only?
-2. **Recessed detail.** Should grooves and dents inside a flattened region be kept like
-   rivets are (assumption 5), or filled?
-3. **After Apply.** Guides and regions are baked and gone, as with Warp (assumption 1). Is
-   that acceptable, or do you need to reopen them later?
-4. **Name.** Is "Restore" the right name for the tool?
+None open. The spec was approved as written, so its readings of the four questions it
+raised stand:
+
+1. **"Follow an arc" for a region** is Sweep: a constant cross-section carried along an arc
+   or spline.
+2. **Recessed detail** inside a flattened region is kept, like rivets are (assumption 5).
+3. **After Apply**, guides and regions are baked and gone, as with Warp (assumption 1).
+4. **Name.** The tool is called Restore.
