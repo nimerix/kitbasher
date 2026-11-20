@@ -1,4 +1,5 @@
 import type { GuidePoint } from '../../src/core/refine-band';
+import { drawnCurve } from '../../src/core/refine-curve';
 import type { RefineProposal } from '../../src/core/refine-detect';
 import type { EdgeInput } from '../../src/core/refine-edge';
 import type { RefineMesh } from '../../src/core/refine-mesh';
@@ -101,4 +102,70 @@ export function proposalPositions(mesh: RefineMesh, proposal: RefineProposal): V
       positions.push([mesh.position[w], mesh.position[w + 1], mesh.position[w + 2]]);
     }
   return positions;
+}
+
+/** The guide as drawn: a closed arc as its full circle, any other guide by `drawnCurve`. */
+export function drawnPoints(input: EdgeInput): Vec3[] {
+  const [segment] = input.segments;
+  const flat = segment.points.flatMap((p) => p.position);
+  if (!input.closed) {
+    const { points } = drawnCurve(segment.kind, flat, 0.02);
+    return Array.from({ length: points.length / 3 }, (_, i) => [
+      points[i * 3],
+      points[i * 3 + 1],
+      points[i * 3 + 2],
+    ]);
+  }
+  // The circle through the three points, drawn whole.
+  const [a, b, c] = segment.points.map((p) => p.position);
+  const u = [b[0] - a[0], b[1] - a[1], b[2] - a[2]],
+    v = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
+  const n = [u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]];
+  const nn = n[0] ** 2 + n[1] ** 2 + n[2] ** 2;
+  const uu = u[0] ** 2 + u[1] ** 2 + u[2] ** 2,
+    vv = v[0] ** 2 + v[1] ** 2 + v[2] ** 2;
+  // Offset of the centre from a: (|u|^2 (v x n) + |v|^2 (n x u)) / (2 |n|^2).
+  const o = [0, 1, 2].map(
+    (k) =>
+      (uu * (v[(k + 1) % 3] * n[(k + 2) % 3] - v[(k + 2) % 3] * n[(k + 1) % 3]) +
+        vv * (n[(k + 1) % 3] * u[(k + 2) % 3] - n[(k + 2) % 3] * u[(k + 1) % 3])) /
+      (2 * nn),
+  );
+  const radius = Math.hypot(o[0], o[1], o[2]);
+  const e1 = o.map((x) => -x / radius);
+  const nl = Math.sqrt(nn);
+  const e2 = [0, 1, 2].map(
+    (k) => (n[(k + 1) % 3] * e1[(k + 2) % 3] - n[(k + 2) % 3] * e1[(k + 1) % 3]) / nl,
+  );
+  const count = Math.ceil((2 * Math.PI * radius) / 0.02);
+  return Array.from({ length: count + 1 }, (_, i) => {
+    const t = (2 * Math.PI * i) / count;
+    return [0, 1, 2].map(
+      (k) => a[k] + o[k] + radius * (Math.cos(t) * e1[k] + Math.sin(t) * e2[k]),
+    ) as Vec3;
+  });
+}
+
+/** Length of a polyline. */
+export function polylineLength(points: Vec3[]) {
+  let length = 0;
+  for (let i = 1; i < points.length; i++)
+    length += Math.hypot(
+      points[i][0] - points[i - 1][0],
+      points[i][1] - points[i - 1][1],
+      points[i][2] - points[i - 1][2],
+    );
+  return length;
+}
+
+/** Height of a dome of radius 3 over the origin, with a round dent of depth 0.25 and radius 0.8 at (0.3, 0.2). */
+export function dentedDome(x: number, z: number) {
+  const u = Math.hypot(x - 0.3, z - 0.2) / 0.8;
+  return Math.sqrt(9 - x * x - z * z) - 3 - (u < 1 ? 0.25 * (1 - u * u) ** 2 : 0);
+}
+
+/** Height of a plate with a round pocket 0.3 deep and 0.9 in radius at the origin, its wall 0.1 wide. */
+export function pocketedPlate(x: number, z: number) {
+  const t = Math.min(1, Math.max(0, (0.95 - Math.hypot(x, z)) / 0.1));
+  return -0.3 * t * t * (3 - 2 * t);
 }

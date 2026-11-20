@@ -1,6 +1,6 @@
 import { EigenvalueDecomposition, Matrix } from 'ml-matrix';
 import type { GuidePoint } from './refine-band';
-import type { GuideKind } from './refine-curve';
+import { type GuideKind, drawnCurve } from './refine-curve';
 import { VertexNormals, vertexCurvature } from './refine-curvature';
 import type { EdgeInput } from './refine-edge';
 import {
@@ -32,20 +32,27 @@ export interface DetectOptions {
 }
 export const detectDefaults = { sensitivity: 0.5, minLength: 1.5 };
 
-/** Curvature is read over this many median edge lengths. */
+/** Curvature is read over this many median edge lengths: the curvature scale. */
 const curvatureEdges = 4;
 /** An edge vertex bends along the edge by at most this fraction of its bend across it. */
 const edgeRatio = 0.4;
 /**
- * The flanks of an edge are read from the band's half-width plus the curvature scale out, over this
- * many mm across and along, at stations this many mm apart; where both bend the crest's way by more
- * than `tubeRatio` of it, the piece follows a tube.
+ * Across an edge the bend falls below `fallRatio` of its peak (the most within one curvature scale)
+ * on both sides within `fallReach` curvature scales, and the surface turns by at most `maxTurn`
+ * degrees between those two places: a narrow band between two flatter flanks. A tube bends on all
+ * the way round. Where the bend dips below `valleyRatio` of the peak and rises again to another
+ * ridge, the band ends at the dip, provided the bend falls within reach of it.
  */
-const flankDepth = 0.15;
-const flankSpacing = 0.5;
-const tubeRatio = 0.5;
+const fallRatio = 0.5;
+const fallReach = 3;
+const maxTurn = 150;
+const valleyRatio = 0.8;
+/** The ridge of a band: its vertices bending at least this fraction of the peak across them. */
+const ridgeRatio = 0.85;
+/** A path along a band costs this many times more where it leaves the ridge. */
+const offRidge = 25;
 /** mm. A band's half-width is measured over the band within this of its spine. */
-const tubeReach = 0.5;
+const widthReach = 0.5;
 /** Neighbouring edge vertices whose edge directions differ by more than this are not one band. */
 const joinCosine = 0.8;
 /** A band turning more than this many degrees within its turn window is split there. */
@@ -53,10 +60,12 @@ const splitTurn = 30;
 /** The turn window is twice the band's half-width, but at least this many edge lengths. */
 const turnEdges = 4;
 /**
- * A ring shorter than this many `minLength`, or a piece bending round a circle that short, rings a
- * dome or a rivet rather than following an edge.
+ * An open end is carried on, up to this many curvature scales, to where it passes within half a
+ * curvature scale of another edge: the curvature scale hides that much of an edge at a corner.
  */
-const domeRing = 3;
+const meetReach = 3;
+/** A piece is proposed when it is drawn at least `minLength` long and spans this many `minLength`. */
+const spanRatio = 1;
 /** Spline guide points are this many band half-widths apart. */
 const splineSpacing = 8;
 /** Region growth refits when the region has grown by this factor, on at most this many points. */
@@ -159,6 +168,9 @@ interface Context {
   k2: Float32Array;
   along: Float32Array;
   kMin: number;
+  /** Per welded vertex: 1 on an edge band, and 1 on a band's ridge. */
+  onEdge: Uint8Array;
+  ridge: Uint8Array;
   /** Mean surface area per vertex, mm^2. */
   vertexArea: number;
   normals: VertexNormals;
@@ -179,9 +191,11 @@ export function detectFeatures(
   progress.at(0);
   const step = medianEdgeLength(mesh);
   const { inScope, scope, triangleInScope } = scopeOf(mesh, options.triangles);
-  const normals = new VertexNormals(mesh, topology);
-  const local = vertexCurvature(mesh, topology, curvatureEdges * step, scope, normals, (done) =>
-    progress.at((0.5 * done) / scope.length),
+  // With paint, everything reads only the painted triangles: a gap in the paint is a gap in the mesh.
+  const looked = triangleInScope ? paintedTopology(mesh, topology, triangleInScope) : topology;
+  const normals = new VertexNormals(mesh, looked);
+  const local = vertexCurvature(mesh, looked, curvatureEdges * step, scope, normals, (done) =>
+    progress.at((0.45 * done) / scope.length),
   );
   const n = mesh.weldedCount;
   const k1 = new Float32Array(n),
@@ -194,7 +208,7 @@ export function detectFeatures(
   });
   const context: Context = {
     mesh,
-    topology,
+    topology: looked,
     noise,
     options,
     progress,
@@ -206,13 +220,16 @@ export function detectFeatures(
     k2,
     along,
     kMin: 1 / (0.15 + 1.35 * options.sensitivity),
+    onEdge: new Uint8Array(n),
+    ridge: new Uint8Array(n),
     vertexArea: areaOf(mesh, triangleInScope) / Math.max(1, scope.length),
     normals,
     stamp: new Int32Array(n),
     mark: 0,
   };
-  const edges = proposeEdges(context, 0.5, 0.6);
-  const regions = proposeRegions(context, 0.6, 1);
+  markEdgeVertices(context, 0.45, 0.5);
+  const { proposals: edges, proposed } = proposeEdges(context, 0.5, 0.6);
+  const regions = proposeRegions(context, proposed, 0.6, 1);
   progress.at(1);
   return [...edges, ...regions];
 }
@@ -235,6 +252,44 @@ function scopeOf(mesh: RefineMesh, triangles: Uint32Array | null) {
   const scope: number[] = [];
   for (let v = 0; v < mesh.weldedCount; v++) if (inScope[v]) scope.push(v);
   return { inScope, scope: Uint32Array.from(scope), triangleInScope };
+}
+
+/** The topology of the painted triangles alone: the painted triangles and edges around each vertex. */
+function paintedTopology(
+  mesh: RefineMesh,
+  topology: RefineTopology,
+  painted: Uint8Array,
+): RefineTopology {
+  const n = mesh.weldedCount;
+  const triangleStart = new Uint32Array(n + 1);
+  const triangles: number[] = [];
+  const neighbourStart = new Uint32Array(n + 1);
+  const neighbours: number[] = [];
+  const near: number[] = [];
+  for (let v = 0; v < n; v++) {
+    near.length = 0;
+    for (let i = topology.triangleStart[v]; i < topology.triangleStart[v + 1]; i++) {
+      const t = topology.trianglesOf[i];
+      if (!painted[t]) continue;
+      triangles.push(t);
+      for (const k of [0, 1, 2] as const) {
+        const w = weldedCorner(mesh, t, k);
+        if (w !== v) near.push(w);
+      }
+    }
+    near.sort((a, b) => a - b);
+    near.forEach((w, i) => {
+      if (i === 0 || w !== near[i - 1]) neighbours.push(w);
+    });
+    triangleStart[v + 1] = triangles.length;
+    neighbourStart[v + 1] = neighbours.length;
+  }
+  return {
+    triangleStart,
+    trianglesOf: Uint32Array.from(triangles),
+    neighbourStart,
+    neighbours: Uint32Array.from(neighbours),
+  };
 }
 
 function triangleArea(mesh: RefineMesh, t: number) {
@@ -264,53 +319,196 @@ const distanceBetween = (p: Float64Array, a: number, b: number) =>
 // ---------------------------------------------------------------------------------------------
 // Edges
 
-/** Bands of edge vertices: joined over mesh edges where they bend the same way along one direction. */
-function edgeBands(context: Context) {
-  const { mesh, topology, scope, k1, k2, along, kMin } = context;
-  const n = mesh.weldedCount;
-  const onEdge = new Uint8Array(n);
-  for (const v of scope) {
+/**
+ * Marks the edge vertices: bent at least `kMin` across and little along, where the bend across
+ * falls away on both sides and the surface between turns as two faces meeting do, not round a tube.
+ * Also marks the ridge of each band: its vertices bending nearly as much as the peak across them.
+ */
+function markEdgeVertices(context: Context, from: number, to: number) {
+  const { mesh, topology, scope, k1, k2, along, kMin, normals, onEdge, ridge, step, progress } =
+    context;
+  const p = mesh.position;
+  const { neighbourStart, neighbours } = topology;
+  const scale = curvatureEdges * step;
+  const reach = fallReach * scale;
+  // A walk goes on past valleys to at most three reaches, and advances at least half an edge a step.
+  const most = Math.ceil((6 * reach) / step) + 4;
+  const visited = [new Int32Array(most), new Int32Array(most)];
+  const distance = [new Float64Array(most), new Float64Array(most)];
+  const count = [0, 0];
+  const cut = [false, false];
+  /** Walks from `v` straight on over the surface along (hx, hy, hz), for up to `reach` mm. */
+  const walk = (v: number, side: number, hx: number, hy: number, hz: number) => {
+    let u = v,
+      travelled = 0;
+    count[side] = 0;
+    cut[side] = false;
+    while (travelled < 3 * reach && count[side] < most) {
+      let best = -1,
+        bestCos = 0.5,
+        bestLength = 0;
+      for (let j = neighbourStart[u]; j < neighbourStart[u + 1]; j++) {
+        const w = neighbours[j];
+        const ex = p[w * 3] - p[u * 3],
+          ey = p[w * 3 + 1] - p[u * 3 + 1],
+          ez = p[w * 3 + 2] - p[u * 3 + 2];
+        const length = Math.hypot(ex, ey, ez);
+        const cos = (ex * hx + ey * hy + ez * hz) / length;
+        if (cos > bestCos) [best, bestCos, bestLength] = [w, cos, length];
+      }
+      if (best < 0) {
+        cut[side] = true;
+        return;
+      }
+      travelled += bestLength * bestCos;
+      u = best;
+      visited[side][count[side]] = u;
+      distance[side][count[side]++] = travelled;
+      // Keep the heading in the tangent plane as the surface turns.
+      const n = normals.of(u);
+      const d = hx * n[u * 3] + hy * n[u * 3 + 1] + hz * n[u * 3 + 2];
+      hx -= d * n[u * 3];
+      hy -= d * n[u * 3 + 1];
+      hz -= d * n[u * 3 + 2];
+      const length = Math.hypot(hx, hy, hz);
+      if (!(length > 0)) {
+        cut[side] = true;
+        return;
+      }
+      hx /= length;
+      hy /= length;
+      hz /= length;
+    }
+  };
+  const fall = [0, 0];
+  for (let i = 0; i < scope.length; i++) {
+    if ((i & 1023) === 0) progress.at(from + ((to - from) * i) / scope.length);
+    const v = scope[i];
     const k = Math.abs(k1[v]);
-    if (k >= kMin && Math.abs(k2[v]) <= edgeRatio * k) onEdge[v] = 1;
+    if (k < kMin || Math.abs(k2[v]) > edgeRatio * k) continue;
+    const sign = Math.sign(k1[v]);
+    const n = normals.of(v);
+    const nx = n[v * 3],
+      ny = n[v * 3 + 1],
+      nz = n[v * 3 + 2];
+    const ax = along[v * 3],
+      ay = along[v * 3 + 1],
+      az = along[v * 3 + 2];
+    let cx = ny * az - nz * ay,
+      cy = nz * ax - nx * az,
+      cz = nx * ay - ny * ax;
+    const length = Math.hypot(cx, cy, cz);
+    if (!(length > 0)) continue;
+    cx /= length;
+    cy /= length;
+    cz /= length;
+    walk(v, 0, cx, cy, cz);
+    walk(v, 1, -cx, -cy, -cz);
+    let peak = k;
+    for (let side = 0; side < 2; side++)
+      for (let j = 0; j < count[side] && distance[side][j] <= scale; j++)
+        peak = Math.max(peak, sign * k1[visited[side][j]]);
+    let flanked = true;
+    for (let side = 0; side < 2 && flanked; side++) {
+      fall[side] = -1;
+      let fell = false,
+        since = 0,
+        low = Infinity,
+        lowAt = -1,
+        lowDistance = 0;
+      for (let j = 0; j < count[side]; j++) {
+        const u = visited[side][j],
+          bend = sign * k1[u],
+          d = distance[side][j];
+        if (bend < fallRatio * peak) {
+          fell = true;
+          if (fall[side] < 0) fall[side] = u;
+          break;
+        }
+        if (d - since > reach) break;
+        if (bend >= ridgeRatio * peak) {
+          if (low < valleyRatio * peak) {
+            if (fall[side] < 0) fall[side] = lowAt;
+            since = lowDistance;
+          }
+          low = Infinity;
+        } else if (bend < low) [low, lowAt, lowDistance] = [bend, u, d];
+      }
+      // Where the surface or the paint ends, the band ends with it.
+      const last = count[side] ? distance[side][count[side] - 1] : 0;
+      if (!fell && cut[side] && last - since <= reach) {
+        fell = true;
+        if (fall[side] < 0) fall[side] = count[side] ? visited[side][count[side] - 1] : v;
+      }
+      flanked = fell;
+    }
+    if (!flanked) continue;
+    const a = normals.of(fall[0]).subarray(fall[0] * 3, fall[0] * 3 + 3);
+    const b = normals.of(fall[1]).subarray(fall[1] * 3, fall[1] * 3 + 3);
+    const cos = a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+    if ((Math.acos(Math.min(1, Math.max(-1, cos))) * 180) / Math.PI > maxTurn) continue;
+    onEdge[v] = 1;
+    if (k >= ridgeRatio * peak) ridge[v] = 1;
   }
+  progress.at(to);
+}
+
+/**
+ * Bands of edge vertices, one per ridge: ridge vertices joined over mesh edges where they bend the
+ * same way along one direction, and every other edge vertex given to the ridge nearest it over the
+ * band. Two crests side by side are two bands, however close.
+ */
+function edgeBands(context: Context) {
+  const { mesh, topology, scope, k1, along, onEdge, ridge } = context;
+  const n = mesh.weldedCount;
+  const { neighbourStart, neighbours } = topology;
+  const joined = (v: number, w: number) =>
+    onEdge[w] === 1 &&
+    k1[v] * k1[w] > 0 &&
+    Math.abs(
+      along[v * 3] * along[w * 3] +
+        along[v * 3 + 1] * along[w * 3 + 1] +
+        along[v * 3 + 2] * along[w * 3 + 2],
+    ) >= joinCosine;
   const parent = new Int32Array(n).fill(-1);
   const root = (v: number) => {
     while (parent[v] !== v) v = parent[v] = parent[parent[v]];
     return v;
   };
-  for (const v of scope) if (onEdge[v]) parent[v] = v;
-  const { neighbourStart, neighbours } = topology;
+  for (const v of scope) if (ridge[v]) parent[v] = v;
   for (const v of scope) {
-    if (!onEdge[v]) continue;
+    if (!ridge[v]) continue;
     for (let j = neighbourStart[v]; j < neighbourStart[v + 1]; j++) {
       const w = neighbours[j];
-      if (w < v || !onEdge[w] || k1[v] * k1[w] <= 0) continue;
-      const cos =
-        along[v * 3] * along[w * 3] +
-        along[v * 3 + 1] * along[w * 3 + 1] +
-        along[v * 3 + 2] * along[w * 3 + 2];
-      if (Math.abs(cos) < joinCosine) continue;
+      if (w < v || !ridge[w] || !joined(v, w)) continue;
       const a = root(v),
         b = root(w);
       if (a !== b) parent[a] = b;
     }
   }
-  const groups = new Map<number, number[]>();
-  for (const v of scope) {
-    if (!onEdge[v]) continue;
-    const r = root(v);
-    let group = groups.get(r);
-    if (!group) groups.set(r, (group = []));
-    group.push(v);
-  }
-  // Each band's vertices, and the band each welded vertex belongs to.
   const band = new Int32Array(n).fill(-1);
-  const bands: Uint32Array[] = [];
-  for (const members of groups.values()) {
-    for (const v of members) band[v] = bands.length;
-    bands.push(Uint32Array.from(members));
+  const ids = new Map<number, number>();
+  const queue: number[] = [];
+  for (const v of scope) {
+    if (!ridge[v]) continue;
+    const r = root(v);
+    let id = ids.get(r);
+    if (id === undefined) ids.set(r, (id = ids.size));
+    band[v] = id;
+    queue.push(v);
   }
-  return { bands, band };
+  for (let q = 0; q < queue.length; q++) {
+    const u = queue[q];
+    for (let j = neighbourStart[u]; j < neighbourStart[u + 1]; j++) {
+      const w = neighbours[j];
+      if (band[w] >= 0 || !joined(u, w)) continue;
+      band[w] = band[u];
+      queue.push(w);
+    }
+  }
+  const groups: number[][] = Array.from({ length: ids.size }, () => []);
+  for (const v of scope) if (band[v] >= 0) groups[band[v]].push(v);
+  return { bands: groups.map((g) => Uint32Array.from(g)), band };
 }
 
 interface BandGraph {
@@ -332,7 +530,7 @@ function shortest(
   curvature: number,
   blocked?: Uint8Array,
 ) {
-  const { mesh, topology, k1 } = context;
+  const { mesh, topology, k1, ridge } = context;
   const { members, local, id, band } = graph;
   const cost = new Float64Array(members.length).fill(Infinity);
   const previous = new Int32Array(members.length).fill(-1);
@@ -350,6 +548,7 @@ function shortest(
       if (blocked?.[k]) continue;
       let step = distanceBetween(mesh.position, v, w);
       if (curvature > 0) step *= (curvature / Math.max(Math.abs(k1[w]), 1e-9)) ** 2;
+      if (!ridge[w]) step *= offRidge;
       const total = cost[i] + step;
       if (total < cost[k]) {
         cost[k] = total;
@@ -361,9 +560,16 @@ function shortest(
   return { cost, previous };
 }
 
-function farthest(cost: Float64Array) {
-  let best = 0;
-  for (let i = 0; i < cost.length; i++) if (cost[i] !== Infinity && cost[i] > cost[best]) best = i;
+/** The ridge vertex of a band farthest by `cost`. */
+function farthest(context: Context, graph: BandGraph, cost: Float64Array) {
+  let best = -1;
+  for (let i = 0; i < cost.length; i++)
+    if (
+      context.ridge[graph.members[i]] &&
+      cost[i] !== Infinity &&
+      (best < 0 || cost[i] > cost[best])
+    )
+      best = i;
   return best;
 }
 
@@ -394,10 +600,12 @@ function spineOf(context: Context, graph: BandGraph) {
   const { members } = graph;
   let peak = 0;
   for (const v of members) peak = Math.max(peak, Math.abs(k1[v]));
-  const a = farthest(shortest(context, graph, 0, 0).cost);
-  const b = farthest(shortest(context, graph, a, 0).cost);
+  const start = members.findIndex((v) => context.ridge[v] === 1);
+  if (start < 0) return null;
+  const a = farthest(context, graph, shortest(context, graph, start, 0).cost);
+  const b = farthest(context, graph, shortest(context, graph, a, 0).cost);
   const along = shortest(context, graph, a, peak);
-  if (along.cost[b] === Infinity) return null;
+  if (a === b || along.cost[b] === Infinity) return null;
   const path = walkBack(along.previous, b);
   const points = path.flatMap((i) => [
     ...mesh.position.subarray(members[i] * 3, members[i] * 3 + 3),
@@ -435,10 +643,10 @@ function spineOf(context: Context, graph: BandGraph) {
   }
   return { path: path.map((i) => members[i]), closed: false, halfWidth };
 
-  /** Half the area of the band within `tubeReach` of a path, over the path's length. */
+  /** Half the area of the band within `widthReach` of a path, over the path's length. */
   function halfWidthOf(along: number[], length: number) {
     let count = 0;
-    for (const inside of within(context, graph, along, tubeReach)) count += inside;
+    for (const inside of within(context, graph, along, widthReach)) count += inside;
     return Math.max(context.step, (count * context.vertexArea) / Math.max(2 * length, 1e-9));
   }
 }
@@ -469,8 +677,8 @@ function within(context: Context, graph: BandGraph, sources: number[], reach: nu
 }
 
 /**
- * The spine's vertices moved to the |k1|^2-weighted centre of the band vertices within `radius`, so
- * the guide follows the middle of a wide band rather than the path's zigzag. An open spine's ends
+ * The spine's vertices moved to the weighted centre of the band's vertices within `radius`, so the
+ * guide follows the middle of a wide band rather than the path's zigzag, and never another band's. An open spine's ends
  * are then carried out along it as far as its end vertices reach.
  */
 function centredSpine(
@@ -480,7 +688,7 @@ function centredSpine(
   closed: boolean,
   radius: number,
 ) {
-  const { mesh, topology, k1, kMin, inScope, stamp } = context;
+  const { mesh, topology, k1, kMin, stamp } = context;
   const { neighbourStart, neighbours } = topology;
   const p = mesh.position;
   const sign = Math.sign(k1[graph.members[0]]);
@@ -503,7 +711,7 @@ function centredSpine(
       weight += w2;
       for (let j = neighbourStart[u]; j < neighbourStart[u + 1]; j++) {
         const w = neighbours[j];
-        if (!inScope[w] || stamp[w] === mark) continue;
+        if (graph.band[w] !== graph.id || stamp[w] === mark) continue;
         stamp[w] = mark;
         if (distanceBetween(p, v, w) <= radius) queue.push(w);
       }
@@ -805,95 +1013,48 @@ function core(points: number[], s: Float64Array, closed: boolean, margin: number
   );
 }
 
-/**
- * True when the surface bends nearly as much as the crest on both sides of a piece, past the band,
- * at most of the stations along it: a tube or a crown, not an edge between two faces.
- */
-function tubeLike(
-  context: Context,
-  path: number[],
-  points: number[],
-  closed: boolean,
-  halfWidth: number,
-) {
-  const { mesh, topology, k1, inScope, stamp, step } = context;
-  const p = mesh.position;
-  const { neighbourStart, neighbours } = topology;
-  const near = halfWidth + curvatureEdges * step + step;
-  const far = near + flankDepth;
-  const s = stations(points, closed);
-  const total = s[s.length - 1];
-  const count = Math.max(3, Math.ceil(total / flankSpacing));
-  const normal = context.normals;
-  let tubes = 0;
-  for (let k = 0; k < count; k++) {
-    const station = closed ? (total * k) / count : (total * (k + 0.5)) / count;
-    const centre = pointAt(points, s, station, closed);
-    const ahead = pointAt(points, s, station + step, closed),
-      behind = pointAt(points, s, station - step, closed);
-    const t = [0, 1, 2].map((a) => ahead[a] - behind[a]);
-    const tl = Math.hypot(t[0], t[1], t[2]);
-    if (!(tl > 0)) continue;
-    const v = nearestOnPath(path, points, centre);
-    const n = normal.of(v).subarray(v * 3, v * 3 + 3);
-    const b = [n[1] * t[2] - n[2] * t[1], n[2] * t[0] - n[0] * t[2], n[0] * t[1] - n[1] * t[0]];
-    const crest = k1[v];
-    const sums = [0, 0],
-      counts = [0, 0];
-    const mark = ++context.mark;
-    stamp[v] = mark;
-    const queue = [v];
-    for (let q = 0; q < queue.length; q++) {
-      const u = queue[q];
-      for (let j = neighbourStart[u]; j < neighbourStart[u + 1]; j++) {
-        const w = neighbours[j];
-        if (!inScope[w] || stamp[w] === mark) continue;
-        stamp[w] = mark;
-        const e = [p[w * 3] - centre[0], p[w * 3 + 1] - centre[1], p[w * 3 + 2] - centre[2]];
-        if (Math.hypot(e[0], e[1], e[2]) > far) continue;
-        queue.push(w);
-        const along = (e[0] * t[0] + e[1] * t[1] + e[2] * t[2]) / tl;
-        if (Math.abs(along) > flankDepth) continue;
-        const across = Math.hypot(e[0], e[1], e[2]) ** 2 - along * along;
-        if (across < near * near) continue;
-        const side = e[0] * b[0] + e[1] * b[1] + e[2] * b[2] > 0 ? 0 : 1;
-        sums[side] += k1[w] / crest;
-        counts[side]++;
-      }
-    }
-    if (
-      counts[0] &&
-      counts[1] &&
-      sums[0] / counts[0] > tubeRatio &&
-      sums[1] / counts[1] > tubeRatio
-    )
-      tubes++;
-  }
-  return tubes > count / 2;
+/** One piece of a spine between corners, fitted, before it is snapped and measured. */
+interface Piece {
+  path: number[];
+  /** Centred points along `path`, flat. */
+  points: number[];
+  closed: boolean;
+  halfWidth: number;
+  kind: GuideKind;
+  targets: Vec3[];
+  /** The triangle under each target once snapped to the surface, -1 before. */
+  triangles: number[];
+  circle: Circle | null;
+  /** Per end, where it meets another edge, or null. */
+  meets: [Vec3 | null, Vec3 | null];
+  /** Signed distance each end was carried on by. */
+  carried: [number, number];
+  /** The band the piece follows. */
+  members: Uint32Array;
 }
 
-/** A proposal for one piece of a spine, or null when it is too short or rings a dome. */
-function pieceProposal(
+/** RMS within which a fit is accepted. */
+function fitTolerance(context: Context) {
+  // Centring on a mesh leaves an error of a fraction of an edge even where the scan has no noise.
+  return Math.max(2 * context.noise, context.step / 8);
+}
+
+/** A piece of a spine, fitted as a line, then an arc, then a spline. */
+function fitPiece(
   context: Context,
   path: number[],
   points: number[],
   closed: boolean,
   halfWidth: number,
-  hidden: number,
   margin: number,
-): EdgeInput | null {
-  const { minLength } = context.options;
+  members: Uint32Array,
+): Piece | null {
   const length = polylineLength(points, closed);
-  if (length + hidden < minLength) return null;
-  const tolerance = 2 * context.noise;
+  if (!(length > 0)) return null;
+  const tolerance = fitTolerance(context);
   const s = stations(points, closed);
   const middle = core(points, s, closed, margin);
   const circle = fitCircle(middle);
-  const domeRadius = (domeRing * minLength) / (2 * Math.PI);
-  if (closed && length < domeRing * minLength) return null;
-  if (circle && circle.rms <= tolerance && circle.radius < domeRadius) return null;
-  if (tubeLike(context, path, points, closed, halfWidth)) return null;
-  const guide = (p: Vec3) => snap(context, nearestOnPath(path, points, p), p);
   const at = (station: number) => pointAt(points, s, station, closed);
   let kind: GuideKind;
   let targets: Vec3[];
@@ -920,140 +1081,30 @@ function pieceProposal(
     const open = length - 2 * halfWidth;
     const count = Math.max(3, Math.round(open / (splineSpacing * halfWidth)) + 1);
     targets = Array.from({ length: count }, (_, i) => at((open * i) / (count - 1)));
+    closed = false;
+    points = targets.flat();
   }
-  const guides = targets.map(guide);
-  if (guides.some((g) => !g)) return null;
-  const ring = closed && kind === 'arc';
   return {
-    segments: [{ kind, points: guides as GuidePoint[] }],
-    joints: ring ? ['smooth'] : [],
-    closed: ring,
-    width: null,
-    strength: 1,
+    path,
+    points,
+    closed: closed && kind === 'arc',
+    halfWidth,
+    kind,
+    targets,
+    triangles: targets.map(() => -1),
+    circle: kind === 'arc' ? circle : null,
+    meets: [null, null],
+    carried: [0, 0],
+    members,
   };
 }
 
-/**
- * True when the surface past an open spine's end, within the curvature scale, still bends at least
- * `kMin` on average: the band stopped because another edge meets it there, and the curvature scale
- * hides that much of the edge from the edge test.
- */
-function endsAtCorner(
-  context: Context,
-  graph: BandGraph,
-  path: number[],
-  points: number[],
-  end: number,
-  window: number,
-) {
-  const { mesh, topology, k1, inScope, step } = context;
-  const p = mesh.position;
-  const s = stations(points, false);
-  const here = pointAt(points, s, s[end], false);
-  const back = pointAt(points, s, end === 0 ? window : s[end] - window, false);
-  const out = [0, 1, 2].map((k) => here[k] - back[k]);
-  const length = Math.hypot(out[0], out[1], out[2]);
-  if (!(length > 0)) return false;
-  const reach = curvatureEdges * step;
-  const start = path[end];
-  const seen = new Set([start]);
-  const queue = [start];
-  let sum = 0,
-    count = 0;
-  for (let q = 0; q < queue.length; q++) {
-    const v = queue[q];
-    for (let j = topology.neighbourStart[v]; j < topology.neighbourStart[v + 1]; j++) {
-      const w = topology.neighbours[j];
-      if (seen.has(w) || !inScope[w]) continue;
-      seen.add(w);
-      if (distanceBetween(p, start, w) > reach) continue;
-      queue.push(w);
-      const ahead = [0, 1, 2].reduce((acc, k) => acc + (p[w * 3 + k] - here[k]) * out[k], 0);
-      if (graph.band[w] === graph.id || ahead <= 0) continue;
-      sum += Math.abs(k1[w]);
-      count++;
-    }
-  }
-  return count > 0 && sum / count >= context.kMin;
-}
-
-function proposeEdges(context: Context, from: number, to: number): RefineProposal[] {
-  const { mesh, step, progress } = context;
-  const { bands, band } = edgeBands(context);
-  const local = new Int32Array(mesh.weldedCount).fill(-1);
-  const proposals: RefineProposal[] = [];
-  let done = 0;
-  const total = bands.reduce((sum, members) => sum + members.length, 0);
-  // Bands still to trace, with their ids in `band`. A band whose spine leaves branches is peeled:
-  // what the spine covers is taken away and each branch left over is traced in turn.
-  const work = bands.map((members, id) => ({ members, id }));
-  let nextId = bands.length;
-  while (work.length) {
-    const { members, id } = work.pop()!;
-    progress.at(from + ((to - from) * done) / Math.max(total, 1));
-    // Too few vertices to span `minLength` even one triangle wide.
-    if (members.length * step < context.options.minLength) {
-      done += members.length;
-      continue;
-    }
-    members.forEach((v, i) => (local[v] = i));
-    const graph: BandGraph = { members, local, id, band };
-    const spine = spineOf(context, graph);
-    if (!spine) {
-      done += members.length;
-      continue;
-    }
-    proposals.push(...spineProposals(context, graph, spine));
-    const covered = within(
-      context,
-      graph,
-      spine.path.map((v) => local[v]),
-      2 * spine.halfWidth + step,
-    );
-    for (const branch of branches(context, graph, covered)) {
-      for (const v of branch) band[v] = nextId;
-      work.push({ members: branch, id: nextId++ });
-    }
-    members.forEach((v, i) => {
-      if (!covered[i]) return;
-      band[v] = -1;
-      done++;
-    });
-  }
-  progress.at(to);
-  return proposals;
-}
-
-/** Connected pieces of a band left once the vertices marked in `covered` are taken away. */
-function branches(context: Context, graph: BandGraph, covered: Uint8Array) {
-  const { neighbourStart, neighbours } = context.topology;
-  const { members, local, id, band } = graph;
-  const seen = covered.slice();
-  const found: Uint32Array[] = [];
-  for (let i = 0; i < members.length; i++) {
-    if (seen[i]) continue;
-    seen[i] = 1;
-    const piece = [members[i]];
-    for (let q = 0; q < piece.length; q++) {
-      const v = piece[q];
-      for (let j = neighbourStart[v]; j < neighbourStart[v + 1]; j++) {
-        const w = neighbours[j];
-        if (band[w] !== id || seen[local[w]]) continue;
-        seen[local[w]] = 1;
-        piece.push(w);
-      }
-    }
-    found.push(Uint32Array.from(piece));
-  }
-  return found;
-}
-
-/** The proposals along one spine: its pieces between corners. */
-function spineProposals(
+/** The pieces along one spine, between its corners. */
+function spinePieces(
   context: Context,
   graph: BandGraph,
   spine: NonNullable<ReturnType<typeof spineOf>>,
-): RefineProposal[] {
+): Piece[] {
   const { step } = context;
   const { path, closed, halfWidth } = spine;
   const radius = Math.max(1.5 * halfWidth, 2 * step);
@@ -1081,26 +1132,400 @@ function spineProposals(
     }
   }
   const whole = closed && !cuts.length;
-  const scale = curvatureEdges * step;
-  const hidden = closed
-    ? [0, 0]
-    : [0, path.length - 1].map((end) =>
-        endsAtCorner(context, graph, path, points, end, window) ? scale : 0,
-      );
-  const proposals: RefineProposal[] = [];
-  pieces.forEach((piece, k) => {
-    const input = pieceProposal(
+  const members = graph.members.slice();
+  return pieces.flatMap((piece) => {
+    const fitted = fitPiece(
       context,
       piece.map((i) => path[i]),
       piece.flatMap((i) => points.slice(i * 3, i * 3 + 3)),
       whole,
       halfWidth,
-      (k === 0 ? hidden[0] : 0) + (k === pieces.length - 1 ? hidden[1] : 0),
       radius,
+      members,
     );
-    if (input) proposals.push({ type: 'edge', input });
+    return fitted ? [fitted] : [];
   });
-  return proposals;
+}
+
+const sub = (a: Vec3, b: Vec3): Vec3 => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+const dot = (a: Vec3, b: Vec3) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+const along = (a: Vec3, d: Vec3, t: number): Vec3 => [
+  a[0] + t * d[0],
+  a[1] + t * d[1],
+  a[2] + t * d[2],
+];
+
+/** Closest points of segments a0-a1 and b0-b1, as parameters 0..1 along each. */
+function closestOfSegments(a0: Vec3, a1: Vec3, b0: Vec3, b1: Vec3) {
+  const d1 = sub(a1, a0),
+    d2 = sub(b1, b0),
+    r = sub(a0, b0);
+  const a = dot(d1, d1),
+    e = dot(d2, d2),
+    f = dot(d2, r);
+  const clamp = (x: number) => Math.min(1, Math.max(0, x));
+  let s = 0,
+    t = 0;
+  if (a <= 1e-18 && e <= 1e-18) return { s, t };
+  if (a <= 1e-18) t = clamp(f / e);
+  else {
+    const c = dot(d1, r);
+    if (e <= 1e-18) s = clamp(-c / a);
+    else {
+      const b = dot(d1, d2);
+      const denominator = a * e - b * b;
+      s = denominator > 1e-18 ? clamp((b * f - c * e) / denominator) : 0;
+      t = (b * s + f) / e;
+      if (t < 0) [t, s] = [0, clamp(-c / a)];
+      else if (t > 1) [t, s] = [1, clamp((b - c) / a)];
+    }
+  }
+  return { s, t };
+}
+
+/** The open end `end` of a piece: its point and the unit direction leading out of it. */
+function endOf(piece: Piece, end: 0 | 1, window: number) {
+  const { targets, points } = piece;
+  const point = end === 0 ? targets[0] : targets[targets.length - 1];
+  let back: Vec3;
+  if (piece.kind === 'line') back = end === 0 ? targets[1] : targets[0];
+  else {
+    const s = stations(points, false);
+    const total = s[s.length - 1];
+    const w = Math.min(window, total / 3);
+    back = pointAt(points, s, end === 0 ? w : total - w, false);
+    const tip = pointAt(points, s, end === 0 ? 0 : total, false);
+    const out = sub(tip, back);
+    const length = Math.hypot(...out);
+    return { point, out: out.map((x) => x / length) as Vec3 };
+  }
+  const out = sub(point, back);
+  const length = Math.hypot(...out);
+  return { point, out: out.map((x) => x / length) as Vec3 };
+}
+
+/**
+ * Carries each open end that meets another edge on to the meeting point: where its line out, up
+ * to `meetReach` curvature scales long, comes closest to another piece or to another end's line
+ * out, when they pass within half a curvature scale.
+ */
+function meetEnds(context: Context, pieces: Piece[]) {
+  const scale = curvatureEdges * context.step;
+  const reach = meetReach * scale;
+  const gap = scale / 2;
+  const window = turnEdges * context.step;
+  interface End {
+    piece: number;
+    end: 0 | 1;
+    point: Vec3;
+    out: Vec3;
+  }
+  const ends: End[] = [];
+  pieces.forEach((piece, i) => {
+    if (piece.closed) return;
+    for (const end of [0, 1] as const) {
+      const at = endOf(piece, end, window);
+      // A piece too short to have a direction meets nothing.
+      if (at.out.every(Number.isFinite)) ends.push({ piece: i, end, ...at });
+    }
+  });
+  // Each piece as fitted: its drawn curve, or its centred points for a ring.
+  const curves = pieces.map((piece) =>
+    piece.closed
+      ? [...piece.points, ...piece.points.slice(0, 3)]
+      : Array.from(drawnCurve(piece.kind, piece.targets.flat(), context.step).points),
+  );
+  const boxes = curves.map((curve) => {
+    const lo: Vec3 = [Infinity, Infinity, Infinity],
+      hi: Vec3 = [-Infinity, -Infinity, -Infinity];
+    for (let i = 0; i < curve.length; i++) {
+      lo[i % 3] = Math.min(lo[i % 3], curve[i]);
+      hi[i % 3] = Math.max(hi[i % 3], curve[i]);
+    }
+    return { lo, hi };
+  });
+  const outward = (e: End): [Vec3, Vec3] => [
+    along(e.point, e.out, -gap),
+    along(e.point, e.out, reach),
+  ];
+  const crossing = Math.cos((splitTurn * Math.PI) / 180);
+  const meetings = ends.map((e) => {
+    const [a0, a1] = outward(e);
+    let best: { apart: number; at: number; meet: Vec3 } | null = null;
+    const consider = (b0: Vec3, b1: Vec3) => {
+      const d = sub(b1, b0);
+      // Edges meet at an angle: an edge carried on in line with another is one edge, not a corner.
+      if (Math.abs(dot(d, e.out)) > crossing * Math.hypot(...d)) return;
+      const { s, t } = closestOfSegments(a0, a1, b0, b1);
+      const p = along(a0, sub(a1, a0), s),
+        q = along(b0, d, t);
+      const apart = Math.hypot(...sub(p, q));
+      if (!(apart <= gap) || (best && apart >= best.apart)) return;
+      best = {
+        apart,
+        at: -gap + s * (reach + gap),
+        meet: [0, 1, 2].map((k) => (p[k] + q[k]) / 2) as Vec3,
+      };
+    };
+    curves.forEach((curve, j) => {
+      if (j === e.piece) return;
+      const { lo, hi } = boxes[j];
+      for (let k = 0; k < 3; k++)
+        if (e.point[k] < lo[k] - reach - gap || e.point[k] > hi[k] + reach + gap) return;
+      for (let i = 3; i < curve.length; i += 3)
+        consider(curve.slice(i - 3, i) as Vec3, curve.slice(i, i + 3) as Vec3);
+    });
+    for (const f of ends) if (f.piece !== e.piece) consider(...outward(f));
+    return best as { apart: number; at: number; meet: Vec3 } | null;
+  });
+  // Ends meeting at one corner meet at one point: the mean of their meeting points.
+  const corner = meetings.map((_, i) => i);
+  const find = (i: number): number => (corner[i] === i ? i : (corner[i] = find(corner[i])));
+  meetings.forEach((a, i) =>
+    meetings.forEach((b, j) => {
+      if (a && b && j > i && Math.hypot(...sub(a.meet, b.meet)) <= gap) corner[find(i)] = find(j);
+    }),
+  );
+  const sums = new Map<number, number[]>();
+  meetings.forEach((m, i) => {
+    if (!m) return;
+    const sum = sums.get(find(i)) ?? [0, 0, 0, 0];
+    for (let k = 0; k < 3; k++) sum[k] += m.meet[k];
+    sum[3]++;
+    sums.set(find(i), sum);
+  });
+  meetings.forEach((m, i) => {
+    if (!m) return;
+    const sum = sums.get(find(i))!;
+    const mean = [sum[0] / sum[3], sum[1] / sum[3], sum[2] / sum[3]] as Vec3;
+    // Each end stays on its own line out, at the point of it nearest the corner.
+    m.at = dot(sub(mean, ends[i].point), ends[i].out);
+    m.meet = along(ends[i].point, ends[i].out, m.at);
+  });
+  ends.forEach((e, i) => {
+    const meeting = meetings[i];
+    if (!meeting) return;
+    const piece = pieces[e.piece];
+    piece.meets[e.end] = meeting.meet;
+    piece.carried[e.end] = meeting.at;
+  });
+  for (const piece of pieces) {
+    if (piece.closed) continue;
+    const { targets } = piece;
+    if (piece.kind === 'arc' && piece.circle && (piece.meets[0] || piece.meets[1])) {
+      // The middle point stays on the circle, halfway along the carried arc.
+      const s = stations(piece.points, false);
+      const total = s[s.length - 1];
+      const middle = (total - piece.carried[0] + piece.carried[1]) / 2;
+      targets[1] = onCircle(piece.circle, pointAt(piece.points, s, middle, false));
+      piece.triangles[1] = -1;
+    }
+    for (const end of [0, 1] as const) {
+      const meet = piece.meets[end];
+      if (!meet) continue;
+      const k = end === 0 ? 0 : targets.length - 1;
+      if (piece.kind === 'spline' && piece.carried[end] > (splineSpacing * piece.halfWidth) / 2) {
+        if (end === 0) (targets.unshift(meet), piece.triangles.unshift(-1));
+        else (targets.push(meet), piece.triangles.push(-1));
+      } else [targets[k], piece.triangles[k]] = [meet, -1];
+    }
+  }
+}
+
+/** The proposal for a piece, or null when it is drawn shorter than `minLength` or spans too little. */
+function pieceInput(context: Context, piece: Piece): EdgeInput | null {
+  const { minLength } = context.options;
+  const { path, points, targets, triangles, kind, closed } = piece;
+  const guides: GuidePoint[] = [];
+  for (let i = 0; i < targets.length; i++) {
+    const meet = i === 0 ? piece.meets[0] : i === targets.length - 1 ? piece.meets[1] : null;
+    const p = targets[i];
+    if (triangles[i] >= 0) {
+      guides.push({ triangle: triangles[i], position: p });
+      continue;
+    }
+    const near = nearestOnPath(path, points, p);
+    let guide = snap(context, meet ? nearestVertex(context, near, p) : near, p);
+    if (!guide) return null;
+    if (meet) {
+      // Past a rounded corner the line out leaves the surface: the end goes back along it to where
+      // the surface is within three fit tolerances of the line, but never behind the piece's end.
+      const back = sub(targets[i === 0 ? 1 : i - 1], p);
+      const length = Math.hypot(...back);
+      const most = Math.min(length, Math.max(0, piece.carried[i === 0 ? 0 : 1]));
+      const close = 3 * fitTolerance(context);
+      let q = p;
+      for (let t = 0; Math.hypot(...sub(guide.position, q)) > close && t < most;) {
+        t = Math.min(most, t + context.step / 4);
+        q = along(p, back, t / length);
+        guide = snap(context, nearestVertex(context, nearestOnPath(path, points, q), q), q);
+        if (!guide) return null;
+      }
+      // The end stays on its own line where the surface is within reach of it, else on the surface.
+      if (Math.hypot(...sub(guide.position, q)) <= close)
+        guide = { triangle: guide.triangle, position: q };
+    }
+    guides.push(guide);
+  }
+  const flat = guides.flatMap((g) => g.position);
+  let length: number, span: number;
+  if (closed) {
+    const circle = fitCircle(flat);
+    if (!circle) return null;
+    length = 2 * Math.PI * circle.radius;
+    span = 2 * circle.radius;
+  } else {
+    const drawn = drawnCurve(kind, flat, context.step).points;
+    length = polylineLength(Array.from(drawn), false);
+    span = 0;
+    for (let i = 0; i < drawn.length; i += 3)
+      for (let j = i + 3; j < drawn.length; j += 3)
+        span = Math.max(
+          span,
+          Math.hypot(drawn[i] - drawn[j], drawn[i + 1] - drawn[j + 1], drawn[i + 2] - drawn[j + 2]),
+        );
+  }
+  if (length < minLength || span < spanRatio * minLength) return null;
+  return {
+    segments: [{ kind, points: guides }],
+    joints: closed ? ['smooth'] : [],
+    closed,
+    width: null,
+    strength: 1,
+  };
+}
+
+/**
+ * Moves a piece's points onto the surface; false when one has no surface in scope near it. A line
+ * is refitted to the surface under its middle, away from any rounded corner at its ends, and keeps
+ * its ends on it.
+ */
+function snapPiece(context: Context, piece: Piece) {
+  const { path, points, targets, triangles } = piece;
+  const onSurface = (p: Vec3) => snap(context, nearestOnPath(path, points, p), p);
+  if (piece.kind === 'line') {
+    const [a, b] = targets;
+    const on: number[] = [];
+    for (let k = 0; k <= 16; k++) {
+      const guide = onSurface(along(a, sub(b, a), 0.1 + (0.8 * k) / 16));
+      if (!guide) return false;
+      on.push(...guide.position);
+    }
+    const { mean, vectors } = principalAxes(on);
+    const d = vectors[0];
+    for (let i = 0; i < 2; i++) {
+      targets[i] = along(mean, d, dot(sub(targets[i], mean), d));
+      const guide = onSurface(targets[i]);
+      if (!guide) return false;
+      triangles[i] = guide.triangle;
+    }
+    return true;
+  }
+  for (let i = 0; i < targets.length; i++) {
+    const guide = onSurface(targets[i]);
+    if (!guide) return false;
+    targets[i] = guide.position;
+    triangles[i] = guide.triangle;
+  }
+  return true;
+}
+
+/** The vertex nearest `p`, found downhill over the surface from `from`. */
+function nearestVertex(context: Context, from: number, p: Vec3) {
+  const { mesh, topology } = context;
+  const q = mesh.position;
+  const d = (v: number) => Math.hypot(q[v * 3] - p[0], q[v * 3 + 1] - p[1], q[v * 3 + 2] - p[2]);
+  let v = from,
+    best = d(v);
+  for (;;) {
+    let next = -1;
+    for (let j = topology.neighbourStart[v]; j < topology.neighbourStart[v + 1]; j++) {
+      const w = topology.neighbours[j];
+      const e = d(w);
+      if (e < best) [best, next] = [e, w];
+    }
+    if (next < 0) return v;
+    v = next;
+  }
+}
+
+function proposeEdges(context: Context, from: number, to: number) {
+  const { mesh, step, progress } = context;
+  const { bands, band } = edgeBands(context);
+  const local = new Int32Array(mesh.weldedCount).fill(-1);
+  const pieces: Piece[] = [];
+  let done = 0;
+  const total = bands.reduce((sum, members) => sum + members.length, 0);
+  // Bands still to trace, with their ids in `band`. A band whose spine leaves branches is peeled:
+  // what the spine covers is taken away and each branch left over is traced in turn.
+  const work: { members: Uint32Array; id: number }[] = bands.map((members, id) => ({
+    members,
+    id,
+  }));
+  let nextId = bands.length;
+  while (work.length) {
+    const { members, id } = work.pop()!;
+    progress.at(from + ((to - from) * done) / Math.max(total, 1));
+    members.forEach((v, i) => (local[v] = i));
+    const graph: BandGraph = { members, local, id, band };
+    const spine = spineOf(context, graph);
+    if (!spine) {
+      done += members.length;
+      continue;
+    }
+    for (const piece of spinePieces(context, graph, spine))
+      if (snapPiece(context, piece)) pieces.push(piece);
+    const covered = within(
+      context,
+      graph,
+      spine.path.map((v) => local[v]),
+      2 * spine.halfWidth + step,
+    );
+    for (const branch of branches(context, graph, covered)) {
+      for (const v of branch) band[v] = nextId;
+      work.push({ members: branch, id: nextId++ });
+    }
+    members.forEach((v, i) => {
+      if (!covered[i]) return;
+      band[v] = -1;
+      done++;
+    });
+  }
+  meetEnds(context, pieces);
+  const proposals: RefineProposal[] = [];
+  const proposed = new Uint8Array(mesh.weldedCount);
+  for (const piece of pieces) {
+    const input = pieceInput(context, piece);
+    if (!input) continue;
+    proposals.push({ type: 'edge', input });
+    for (const v of piece.members) proposed[v] = 1;
+  }
+  progress.at(to);
+  return { proposals, proposed };
+}
+
+/** Connected pieces of a band left once the vertices marked in `covered` are taken away. */
+function branches(context: Context, graph: BandGraph, covered: Uint8Array) {
+  const { neighbourStart, neighbours } = context.topology;
+  const { members, local, id, band } = graph;
+  const seen = covered.slice();
+  const found: Uint32Array[] = [];
+  for (let i = 0; i < members.length; i++) {
+    if (seen[i]) continue;
+    seen[i] = 1;
+    const piece = [members[i]];
+    for (let q = 0; q < piece.length; q++) {
+      const v = piece[q];
+      for (let j = neighbourStart[v]; j < neighbourStart[v + 1]; j++) {
+        const w = neighbours[j];
+        if (band[w] !== id || seen[local[w]]) continue;
+        seen[local[w]] = 1;
+        piece.push(w);
+      }
+    }
+    found.push(Uint32Array.from(piece));
+  }
+  return found;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1197,8 +1622,14 @@ function regionArea(...args: Parameters<typeof regionTriangles>) {
   return area;
 }
 
-function proposeRegions(context: Context, from: number, to: number): RefineProposal[] {
-  const { mesh, topology, scope, inScope, k1, kMin, noise, progress, triangleInScope } = context;
+function proposeRegions(
+  context: Context,
+  proposed: Uint8Array,
+  from: number,
+  to: number,
+): RefineProposal[] {
+  const { mesh, topology, scope, inScope, k1, kMin, noise, progress, triangleInScope, onEdge } =
+    context;
   const { minLength } = context.options;
   const { normals } = context;
   const order = Uint32Array.from(scope).sort((a, b) => Math.abs(k1[a]) - Math.abs(k1[b]));
@@ -1214,6 +1645,7 @@ function proposeRegions(context: Context, from: number, to: number): RefinePropo
   const seedRadius = Math.max(minLength / 2, 4 * context.step);
   let members = new Uint32Array(1024);
   const proposals: RefineProposal[] = [];
+  const found: { kind: ShapeKind; triangles: number[] }[] = [];
   let id = 0;
   for (const seed of order) {
     report();
@@ -1237,7 +1669,7 @@ function proposeRegions(context: Context, from: number, to: number): RefinePropo
       const v = members[head];
       for (let j = neighbourStart[v]; j < neighbourStart[v + 1]; j++) {
         const w = neighbours[j];
-        if (!inScope[w] || region[w] >= 0) continue;
+        if (!inScope[w] || region[w] >= 0 || onEdge[w]) continue;
         if (distanceBetween(mesh.position, seed, w) > seedRadius) continue;
         consume(w);
         region[w] = label;
@@ -1270,7 +1702,8 @@ function proposeRegions(context: Context, from: number, to: number): RefinePropo
         const v = members[head];
         for (let j = neighbourStart[v]; j < neighbourStart[v + 1]; j++) {
           const w = neighbours[j];
-          if (!inScope[w] || region[w] >= 0) continue;
+          // A region never grows across an edge band.
+          if (!inScope[w] || region[w] >= 0 || onEdge[w]) continue;
           const d = shapeDistance(
             shape,
             mesh.position[w * 3],
@@ -1310,6 +1743,19 @@ function proposeRegions(context: Context, from: number, to: number): RefinePropo
       shape = final.shape;
       fitted = count;
     }
+    if (final?.within) {
+      // Membership is checked again against the shape the region was finished with.
+      const shape = final.shape;
+      let kept = 0;
+      for (let i = 0; i < count; i++) {
+        const v = members[i];
+        const p = mesh.position;
+        if (Math.abs(shapeDistance(shape, p[v * 3], p[v * 3 + 1], p[v * 3 + 2])) <= tolerance)
+          members[kept++] = v;
+        else region[v] = -1;
+      }
+      count = kept;
+    }
     const triangles = regionTriangles(
       mesh,
       region,
@@ -1319,11 +1765,16 @@ function proposeRegions(context: Context, from: number, to: number): RefinePropo
       topology,
       triangleInScope,
     );
-    if (!final?.within) {
+    let area = 0;
+    for (const t of triangles) area += triangleArea(mesh, t);
+    if (!final?.within || area <= minLength * minLength) {
       release();
       continue;
     }
-    const kind = final.shape.kind;
+    found.push({ kind: final.shape.kind, triangles });
+  }
+  const kept = fillHoles(context, found, proposed);
+  for (const { kind, triangles } of kept)
     proposals.push({
       type: 'region',
       input: {
@@ -1336,7 +1787,114 @@ function proposeRegions(context: Context, from: number, to: number): RefinePropo
         blend: null,
       },
     });
-  }
   progress.at(to);
   return proposals;
+}
+
+/** The triangle across each edge of `t`, or -1 where the mesh, or the paint, ends there. */
+function acrossEdges(context: Context, t: number, out: Int32Array) {
+  const { mesh, topology } = context;
+  const { triangleStart, trianglesOf } = topology;
+  for (let k = 0; k < 3; k++) {
+    const a = weldedCorner(mesh, t, k as 0 | 1 | 2),
+      b = weldedCorner(mesh, t, ((k + 1) % 3) as 0 | 1 | 2);
+    out[k] = -1;
+    for (let i = triangleStart[a]; i < triangleStart[a + 1] && out[k] < 0; i++) {
+      const u = trianglesOf[i];
+      if (u === t) continue;
+      for (const j of [0, 1, 2] as const) if (weldedCorner(mesh, u, j) === b) out[k] = u;
+    }
+  }
+}
+
+/**
+ * Gives each region the holes in it: pieces of surface enclosed by the region and smaller than it,
+ * such as rivets standing on a plate, so that keeping detail carries them. A hole whose rim is
+ * mostly a proposed edge (a pocket or a through hole) is left out. A region whose triangles go to
+ * a larger one's hole is taken into it; what is left of it is dropped when below the minimum area.
+ */
+function fillHoles(
+  context: Context,
+  regions: { kind: ShapeKind; triangles: number[] }[],
+  proposed: Uint8Array,
+) {
+  const { mesh, options } = context;
+  const { neighbourStart, neighbours } = context.topology;
+  const owner = new Int32Array(mesh.triangleCount).fill(-1);
+  regions.forEach((r, i) => r.triangles.forEach((t) => (owner[t] = i)));
+  const order = regions
+    .map((_, i) => i)
+    .sort((a, b) => regions[b].triangles.length - regions[a].triangles.length);
+  // Per triangle: 2 * pass while being flooded, 2 * pass + 1 once known to reach outside.
+  const seen = new Int32Array(mesh.triangleCount).fill(-1);
+  const across = new Int32Array(3);
+  const inScope = (t: number) => !context.triangleInScope || context.triangleInScope[t] === 1;
+  order.forEach((r, pass) => {
+    const region = regions[r];
+    const size = region.triangles.length;
+    const flooding = 2 * pass,
+      outside = 2 * pass + 1;
+    const holes: number[][] = [];
+    for (const t of region.triangles) {
+      acrossEdges(context, t, across);
+      for (const start of across) {
+        if (start < 0 || owner[start] === r || seen[start] === flooding || seen[start] === outside)
+          continue;
+        const hole = [start];
+        seen[start] = flooding;
+        let open = false;
+        for (let q = 0; q < hole.length && !open; q++) {
+          acrossEdges(context, hole[q], across);
+          for (const u of across) {
+            if (u < 0 || !inScope(u) || seen[u] === outside) open = true;
+            else if (owner[u] !== r && seen[u] !== flooding) {
+              seen[u] = flooding;
+              hole.push(u);
+            }
+          }
+          if (hole.length >= size) open = true;
+        }
+        if (open) for (const u of hole) seen[u] = outside;
+        else holes.push(hole);
+        acrossEdges(context, t, across);
+      }
+    }
+    if (!holes.length) return;
+    const onRegion = new Uint8Array(mesh.weldedCount);
+    for (const t of region.triangles)
+      for (const k of [0, 1, 2] as const) onRegion[weldedCorner(mesh, t, k)] = 1;
+    const taken = new Set<number>();
+    for (const hole of holes) {
+      // The rim: the hole's corners on the region. A rim corner is on an edge when it or a
+      // neighbour belongs to a band that was proposed.
+      const rim = new Set<number>();
+      for (const t of hole)
+        for (const k of [0, 1, 2] as const) {
+          const v = weldedCorner(mesh, t, k);
+          if (onRegion[v]) rim.add(v);
+        }
+      let edge = 0;
+      for (const v of rim) {
+        let near = proposed[v] === 1;
+        for (let j = neighbourStart[v]; j < neighbourStart[v + 1] && !near; j++)
+          near = proposed[neighbours[j]] === 1;
+        if (near) edge++;
+      }
+      if (2 * edge >= rim.size) continue;
+      for (const t of hole) {
+        if (owner[t] >= 0) taken.add(t);
+        owner[t] = r;
+        region.triangles.push(t);
+      }
+    }
+    if (taken.size)
+      for (const other of regions)
+        if (other !== region) other.triangles = other.triangles.filter((t) => !taken.has(t));
+  });
+  const least = options.minLength * options.minLength;
+  return regions.filter((r) => {
+    let area = 0;
+    for (const t of r.triangles) area += triangleArea(mesh, t);
+    return r.triangles.length > 0 && area > least;
+  });
 }
