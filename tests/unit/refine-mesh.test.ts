@@ -14,6 +14,7 @@ import {
   buildRefineMesh,
   cloneRefineMesh,
   foldedTriangles,
+  medianEdgeLength,
   moveVertex,
   setTriangle,
   vertexNormal,
@@ -631,6 +632,15 @@ it('restores each duplicate of a vertex left in place from its own source bits',
   moveVertex(mesh, v, x, y, z);
   const written = writeRefinedGeometry(source, matrix, mesh).getAttribute('position');
   expect(bytesOf(written.array as Float32Array)).toEqual(bytesOf(array));
+});
+
+it('measures its median edge length in world space', () => {
+  const box = softBox([2, 1.5, 1], 0.3);
+  const step = medianEdgeLength(buildRefineMesh(box, new Matrix4()));
+  expect(step).toBeGreaterThan(0.04);
+  expect(step).toBeLessThan(0.08);
+  const doubled = medianEdgeLength(buildRefineMesh(box, new Matrix4().makeScale(2, 2, 2)));
+  expect(doubled).toBeCloseTo(2 * step, 9);
 });
 
 describe('clearance', () => {

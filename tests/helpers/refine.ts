@@ -12,7 +12,7 @@ import {
 import { Matrix, solve } from 'ml-matrix';
 import { hasClosedEdges, weldedPositionIndex } from '../../src/core/mesh-topology';
 import { BandZone, type EdgeBand, type GuidePoint } from '../../src/core/refine-band';
-import { type Shape, estimateNoise } from '../../src/core/refine-fit';
+import { type Shape, estimateNoise, noiseRings } from '../../src/core/refine-fit';
 import {
   type RefineMesh,
   addGeometryVertex,
@@ -20,6 +20,7 @@ import {
   addWeldedVertex,
   buildRefineMesh,
   buildTopology,
+  medianEdgeLength,
   setTriangle,
   triangleNormal,
   vertexNormal,
@@ -103,10 +104,16 @@ export function radii(geometry: BufferGeometry) {
   return result;
 }
 
-/** The working model the Refine modules take: mesh, topology and noise. */
+/** The working model the Refine modules take: mesh, topology, noise and median edge length. */
 export function modelFrom(mesh: RefineMesh) {
   const topology = buildTopology(mesh);
-  return { mesh, topology, noise: estimateNoise(mesh, topology) };
+  const step = medianEdgeLength(mesh);
+  return {
+    mesh,
+    topology,
+    noise: estimateNoise(mesh, topology, undefined, noiseRings(step)),
+    step,
+  };
 }
 
 export function modelOf(geometry: BufferGeometry, matrix = new Matrix4()) {

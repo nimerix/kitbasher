@@ -31,6 +31,9 @@ const rounds = 10;
 const minimumPoints: Record<ShapeKind, number> = { plane: 3, sphere: 4, cylinder: 5, cone: 6 };
 /** Floor of the noise in mm, so exact data keeps its points and passes at zero noise. */
 const exact = 1e-9;
+/** Medians closer than this, in units of the scaled cloud, are equal to rounding. */
+const medianTie = 1e-12;
+
 /** Chance of drawing at least one sample wholly on a surface that holds half of the points. */
 const confidence = 0.999;
 /** Most points a seed candidate is scored on. */
@@ -372,26 +375,33 @@ function robust<M extends Scorer>(
   };
   let state: Float64Array | null = null,
     least = Infinity,
+    most = -1,
     settled = false;
   const consider = (candidates: (Float64Array | null)[]) => {
     for (const candidate of candidates) {
       if (!candidate || !candidate.every(Number.isFinite)) continue;
       scorer.residuals(candidate, distance);
       let near = 0,
-        below = 0;
+        below = 0,
+        level = 0;
       for (let i = 0; i < scored.count; i++) {
         distance[i] = Math.abs(distance[i]);
         if (distance[i] <= noise) near++;
         if (distance[i] < least) below++;
+        if (distance[i] <= least + medianTie) level++;
       }
       // The median is below the least so far only when more than half of the values are.
-      const better = below > (scored.count - 1) >> 1;
+      const lower = below > (scored.count - 1) >> 1;
+      // Two samples that each fit their own points exactly tie on the median; more points wins.
+      const tied = !lower && level > (scored.count - 1) >> 1 && near > most;
+      const better = lower || tied;
       // Nearly all of the sample alone can be far fewer of the cloud.
       const settles = near > settling * scored.count && confirmed(candidate);
       if (!(better || settles) || !allowed(candidate)) continue;
       if (settles) settled = true;
       if (better) {
         least = median(distance);
+        most = near;
         state = candidate;
       }
     }
@@ -403,11 +413,13 @@ function robust<M extends Scorer>(
   const ones = new Float64Array(size).fill(1),
     picked = new Uint32Array(size);
   const sample = () => consider(fitter.starts(subset(scored, picked), ones));
-  if (half >= size) {
+  if (n > size) {
     let p = 1;
-    for (let i = 0; i < size; i++) p *= (half - i) / (n - i);
-    // The 0.999 chance is stated for clouds of at least 4 * size points.
-    const draws = p < 1 ? Math.ceil(Math.log(1 - confidence) / Math.log(1 - p)) : 1;
+    for (let i = 0; i < size; i++) p *= Math.max(0, half - i) / (n - i);
+    // The 0.999 chance is stated for clouds of at least 4 * size points. When half the cloud
+    // cannot hold a minimal sample the chance is 0, and every subset of so small a cloud is tried.
+    const draws =
+      p <= 0 ? Infinity : p < 1 ? Math.ceil(Math.log(1 - confidence) / Math.log(1 - p)) : 1;
     if (subsets(n, size) <= draws) {
       for (let k = 0; k < size; k++) picked[k] = k;
       for (;;) {
@@ -1057,6 +1069,9 @@ function heightResidual(a: Float64Array, z: Float64Array, rows: number) {
 }
 
 const maximumSamples = 2000;
+
+/** Rings spanning about 0.4 mm at an edge length of `step`, so noise is read at one real scale. */
+export const noiseRings = (step: number) => Math.min(24, Math.max(4, Math.round(0.4 / step)));
 
 /**
  * Surface roughness at the scale of `rings` rings: the median over sampled vertices of the RMS

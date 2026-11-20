@@ -154,6 +154,27 @@ function trianglesAround(mesh: RefineMesh) {
   return { triangleStart: start, trianglesOf: triangles };
 }
 
+/** Median length of the mesh's triangle edges, from at most 20,000 evenly spaced triangles. */
+export function medianEdgeLength(mesh: RefineMesh): number {
+  const { position, triangleCount } = mesh;
+  const stride = Math.max(1, Math.ceil(triangleCount / 20000));
+  const lengths: number[] = [];
+  for (let t = 0; t < triangleCount; t += stride)
+    for (let k = 0; k < 3; k++) {
+      const a = weldedCorner(mesh, t, k as 0 | 1 | 2) * 3,
+        b = weldedCorner(mesh, t, ((k + 1) % 3) as 0 | 1 | 2) * 3;
+      lengths.push(
+        Math.hypot(
+          position[a] - position[b],
+          position[a + 1] - position[b + 1],
+          position[a + 2] - position[b + 2],
+        ),
+      );
+    }
+  lengths.sort((x, y) => x - y);
+  return lengths.length ? lengths[lengths.length >> 1] : 0;
+}
+
 export function buildTopology(mesh: RefineMesh): RefineTopology {
   const { triangleStart, trianglesOf } = trianglesAround(mesh);
   const { weldedCount, triangleCount, weldOf, corners } = mesh;

@@ -10,6 +10,7 @@ import {
   fitShape,
   projectToShape,
   shapeDistance,
+  noiseRings,
 } from '../../src/core/refine-fit';
 import {
   type SurfaceSample,
@@ -178,6 +179,29 @@ describe('fitShape whichever way the normals face', () => {
       expect(into.rms).toBeLessThan(1e-4);
     }
   });
+});
+
+it('fits a six-point sphere through its five points and past one stray', () => {
+  const on = [
+    [3, 0, 0],
+    [0, 3, 0],
+    [0, 0, 3],
+    [-3, 0, 0],
+    [0, -2.4, 1.8],
+  ];
+  const points = new Float32Array([...on.flat(), 1, 1, 7]);
+  const normals = new Float32Array([...on.flat().map((v) => v / 3), 0, 0, 1]);
+  const fit = fitShape(points, normals, 'sphere', 0.004)!;
+  const sphere = fit.shape as Extract<Shape, { kind: 'sphere' }>;
+  expect(Math.abs(sphere.radius - 3)).toBeLessThan(1e-3);
+  expect(Math.hypot(...sphere.center)).toBeLessThan(1e-3);
+  expect(fit.within).toBe(true);
+});
+
+it('reads noise over the same real distance at any mesh density', () => {
+  expect(noiseRings(0.066)).toBe(6);
+  expect(noiseRings(0.012)).toBe(24);
+  expect(noiseRings(1)).toBe(4);
 });
 
 describe('fitShape support', () => {
