@@ -363,13 +363,12 @@ function storedItem(attribute: Attribute, i: number): TypedArray {
 function blankLike(attribute: Attribute, count: number): Attribute {
   const size = attribute.itemSize;
   const array = new (attribute.array.constructor as ArrayType)(count * size);
-  if (isInterleaved(attribute))
-    return new InterleavedBufferAttribute(
-      new InterleavedBuffer(array, size),
-      size,
-      0,
-      attribute.normalized,
-    );
+  if (isInterleaved(attribute)) {
+    // The source's own classes, so a subclass keeps its accessors.
+    const Buffer = attribute.data.constructor as typeof InterleavedBuffer;
+    const Interleaved = attribute.constructor as typeof InterleavedBufferAttribute;
+    return new Interleaved(new Buffer(array, size), size, 0, attribute.normalized);
+  }
   const Class = attribute.constructor as new (
     array: TypedArray,
     itemSize: number,

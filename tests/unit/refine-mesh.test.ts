@@ -543,6 +543,24 @@ describe.each(cases)('promoted storage, %s', (_, options) => {
     }
   });
 
+  it('keeps an interleaved subclass when a triangle is only reordered', () => {
+    class TaggedBuffer extends InterleavedBuffer {}
+    class Tagged extends InterleavedBufferAttribute {}
+    const source = cornerTetrahedron(
+      indexed,
+      (points) => new Tagged(new TaggedBuffer(new Int16Array(points), 3), 3, 0),
+    );
+    const mesh = buildRefineMesh(source, new Matrix4());
+    const [p, q, r] = mesh.corners.slice(0, 3);
+    setTriangle(mesh, 0, q, r, p);
+    const position = writeRefinedGeometry(source, new Matrix4(), mesh).getAttribute('position');
+    expect(position.array).toBeInstanceOf(Int16Array);
+    // An indexed reorder only rewrites the index, and three's own clone returns the base class.
+    if (indexed) return;
+    expect(position).toBeInstanceOf(Tagged);
+    expect((position as Tagged).data).toBeInstanceOf(TaggedBuffer);
+  });
+
   it('carries a NaN normal of an untouched vertex bit for bit', () => {
     const source = cornerTetrahedron(indexed);
     const mesh = buildRefineMesh(source, new Matrix4());

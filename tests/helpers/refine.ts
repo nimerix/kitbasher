@@ -334,7 +334,7 @@ export function wideFan(count: number) {
  */
 export function cornerTetrahedron(
   indexed: boolean,
-  store: (points: number[]) => BufferAttribute = (points) =>
+  store: (points: number[]) => BufferAttribute | InterleavedBufferAttribute = (points) =>
     new BufferAttribute(new Float32Array(points), 3),
 ) {
   const geometry = new BufferGeometry();
