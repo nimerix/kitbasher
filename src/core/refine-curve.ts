@@ -8,10 +8,10 @@ export type GuideJoint = 'sharp' | 'smooth';
  * the point count or a few sampled points.
  */
 export interface EdgeCurve {
-  /** Polyline at most `step` apart. */
-  points: Float32Array;
+  /** Polyline at most `step` apart, in world space. */
+  points: Float64Array;
   /** Distance along the curve at each point. */
-  lengths: Float32Array;
+  lengths: Float64Array;
   /** 1 at points that are sharp joints. */
   corner: Uint8Array;
   closed: boolean;
@@ -41,26 +41,25 @@ const pointAt = (flat: ArrayLike<number>, i: number): V3 => [
 ];
 const clamp = (x: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, x));
 
-/** `step` less the worst Float32 rounding of a gap between coordinates up to `extent` in size. */
-const safeStep = (step: number, extent: number) => step - 4 * extent * 2 ** -24;
-
-function extentOf(flat: ArrayLike<number>) {
-  let extent = 0;
-  for (let i = 0; i < flat.length; i++) extent = Math.max(extent, Math.abs(flat[i]));
-  return extent;
+/** Equal segments of at most `step` along a span of `length`. */
+function segmentsFor(length: number, step: number) {
+  const segments = Math.max(1, Math.ceil(length / step));
+  if (!(segments <= 5_000_000)) throw new RangeError('This guide is too long for its step.');
+  return segments;
 }
 
-function makeCurve(flat: ArrayLike<number>, closed: boolean, corner?: Uint8Array): EdgeCurve {
-  const points = Float32Array.from(flat);
+/** A curve over `points`, which it keeps. */
+function makeCurve(points: Float64Array, closed: boolean, corner?: Uint8Array): EdgeCurve {
   const count = points.length / 3;
-  const lengths = new Float32Array(count);
+  const lengths = new Float64Array(count);
   let total = 0;
   for (let i = 1; i < count; i++) {
-    total += Math.hypot(
+    const [dx, dy, dz] = [
       points[i * 3] - points[i * 3 - 3],
       points[i * 3 + 1] - points[i * 3 - 2],
       points[i * 3 + 2] - points[i * 3 - 1],
-    );
+    ];
+    total += Math.sqrt(dx * dx + dy * dy + dz * dz);
     lengths[i] = total;
   }
   return { points, lengths, corner: corner ?? new Uint8Array(count), closed };
@@ -86,9 +85,9 @@ function resample(flat: ArrayLike<number>, step: number) {
   const lengths = cumulative(flat);
   const count = lengths.length;
   const total = lengths[count - 1];
-  if (!(total > 0)) return [flat[0], flat[1], flat[2]];
-  const segments = Math.max(1, Math.ceil(total / safeStep(step, extentOf(flat))));
-  const result: number[] = [];
+  if (!(total > 0)) return Float64Array.of(flat[0], flat[1], flat[2]);
+  const segments = segmentsFor(total, step);
+  const result = new Float64Array((segments + 1) * 3);
   let j = 0;
   for (let i = 0; i <= segments; i++) {
     const s = (total * i) / segments;
@@ -96,7 +95,7 @@ function resample(flat: ArrayLike<number>, step: number) {
     const span = lengths[j + 1] - lengths[j];
     const f = i === segments ? 1 : span > 0 ? clamp((s - lengths[j]) / span, 0, 1) : 0;
     for (let axis = 0; axis < 3; axis++)
-      result.push(flat[j * 3 + axis] + (flat[j * 3 + 3 + axis] - flat[j * 3 + axis]) * f);
+      result[i * 3 + axis] = flat[j * 3 + axis] + (flat[j * 3 + 3 + axis] - flat[j * 3 + axis]) * f;
   }
   return result;
 }
@@ -146,18 +145,17 @@ function arcPoints(
   step: number,
   full: boolean,
 ) {
-  const spacing = safeStep(step, norm(centre) + r);
-  const segments = Math.max(1, Math.ceil((r * Math.abs(sweep)) / spacing));
+  const segments = segmentsFor(r * Math.abs(sweep), step);
   const result: number[] = [];
   for (let i = 0; i < (full ? segments : segments + 1); i++) {
     const t = (sweep * i) / segments;
     const [c, s] = [Math.cos(t), Math.sin(t)];
     for (let a = 0; a < 3; a++) result.push(centre[a] + r * (c * u[a] + s * v[a]));
   }
-  return result;
+  return Float64Array.from(result);
 }
 
-function fitLine(samples: Float32Array, step: number) {
+function fitLine(samples: ArrayLike<number>, step: number) {
   const count = samples.length / 3;
   const { mean, axes } = principal(samples);
   let direction = axes[0];
@@ -204,7 +202,7 @@ function fitCircle2(a: Float64Array, b: Float64Array) {
   return { cx, cy, r };
 }
 
-function fitArc(samples: Float32Array, step: number) {
+function fitArc(samples: ArrayLike<number>, step: number) {
   const count = samples.length / 3;
   const { mean, axes, values } = principal(samples);
   // Samples with no spread across their line hold no curvature to fit.
@@ -237,7 +235,8 @@ function fitArc(samples: Float32Array, step: number) {
   const span = Math.PI * 2 - gap;
   // The circle only resolves curvature when its sagitta over the samples beats their scatter.
   if (r * (1 - Math.cos(span / 2)) <= scatter) return fitLine(samples, step);
-  const median = gaps.sort((x, y) => x - y)[count >> 1];
+  gaps.sort((x, y) => x - y);
+  const median = count % 2 ? gaps[count >> 1] : (gaps[count / 2 - 1] + gaps[count / 2]) / 2;
   const full = gap <= 3 * median;
   const wrap = (t: number) => ((t % (Math.PI * 2)) + Math.PI * 2) % (Math.PI * 2);
   let start: number, sweep: number;
@@ -281,7 +280,12 @@ function basis(controls: number, degree: number, t: number, out: Float64Array) {
 }
 
 /** Least squares clamped B-spline with `controls` control points, of degree up to 3. */
-function splineThrough(samples: Float32Array, params: Float64Array, mean: V3, controls: number) {
+function splineThrough(
+  samples: ArrayLike<number>,
+  params: Float64Array,
+  mean: V3,
+  controls: number,
+) {
   const count = samples.length / 3;
   const degree = Math.min(3, controls - 1);
   const weights = new Float64Array(4);
@@ -311,7 +315,7 @@ function segmentDistance(p: V3, a: V3, b: V3) {
 }
 
 /** Whether every point of `flat` (spread evenly over the samples' chord) lies within `limit` of their polyline. */
-function staysNear(flat: number[], samples: Float32Array, chord: Float64Array, limit: number) {
+function staysNear(flat: number[], samples: ArrayLike<number>, chord: Float64Array, limit: number) {
   const count = samples.length / 3,
     dense = flat.length / 3;
   const total = chord[count - 1];
@@ -331,7 +335,7 @@ function staysNear(flat: number[], samples: Float32Array, chord: Float64Array, l
   return true;
 }
 
-function fitSpline(samples: Float32Array, controls: number, step: number) {
+function fitSpline(samples: ArrayLike<number>, controls: number, step: number) {
   const count = samples.length / 3;
   const chord = cumulative(samples);
   const total = chord[count - 1];
@@ -357,12 +361,12 @@ function fitSpline(samples: Float32Array, controls: number, step: number) {
 /** `controls` is the number of points the user placed; it sets a spline's freedom. */
 export function fitCurve(
   kind: GuideKind,
-  samples: Float32Array,
+  samples: ArrayLike<number>,
   controls: number,
   step: number,
 ): EdgeCurve {
   const count = samples.length / 3;
-  if (count < 2) return makeCurve(samples, false);
+  if (count < 2) return makeCurve(new Float64Array(samples), false);
   if (kind === 'arc' && count >= 3) return fitArc(samples, step);
   if (kind === 'spline') return fitSpline(samples, controls, step);
   return fitLine(samples, step);
@@ -383,204 +387,308 @@ function circleThrough(p0: V3, p1: V3, p2: V3) {
   return { centre, normal: unit(n), radius: norm(offset) };
 }
 
-/**
- * A straight run `o + d t` or a circular arc `c + r (cos t u + sin t v)` for t in [lo, hi], with
- * a bounding sphere (infinite radius for an unbounded run).
- */
-type Run = { lo: number; hi: number; centre: V3; radius: number } & (
-  | {
-      arc: false;
-      o: V3;
-      d: V3;
-      /** Station of t = 0. */
-      base: number;
-      /** The t nearest the joint, preferred among equally close points. */
-      anchor: number;
-    }
-  | { arc: true; c: V3; u: V3; v: V3; r: number }
-);
+/** Gaps within this of the smallest are ties, settled by nearness to the nominal joint. */
+const tie = 1e-9;
+/** Circle angles are sampled this many times a turn to bracket each local minimum of a gap. */
+const turnSamples = 720;
+const turn = Math.PI * 2;
 
-const runPoint = (run: Run, t: number): V3 =>
-  run.arc
-    ? ([0, 1, 2].map(
-        (k) => run.c[k] + run.r * (Math.cos(t) * run.u[k] + Math.sin(t) * run.v[k]),
-      ) as V3)
-    : [run.o[0] + run.d[0] * t, run.o[1] + run.d[1] * t, run.o[2] + run.d[2] * t];
-const runStation = (run: Run, t: number) => (run.arc ? run.r * t : run.base + t);
-
-/** The parameter of the point of `run` nearest `p`, exactly. */
-function nearestOnRun(run: Run, p: V3) {
-  if (!run.arc) return clamp(dot(sub(p, run.o), run.d), run.lo, run.hi);
-  const w = sub(p, run.c);
-  const turn = Math.PI * 2;
-  const angle =
-    run.lo + ((((Math.atan2(dot(w, run.v), dot(w, run.u)) - run.lo) % turn) + turn) % turn);
-  if (angle <= run.hi) return angle;
-  return angle - run.hi <= run.lo + turn - angle ? run.hi : run.lo;
-}
-
-/** Runs of one side of a curve, with a sphere around them all. */
-interface Group {
-  runs: Run[];
+/** A straight piece `o + d t` (d unit, or zero for a point) for t in [lo, hi], at station `base + t`. */
+interface Straight {
+  o: V3;
+  d: V3;
+  lo: number;
+  hi: number;
+  base: number;
+  /** Bounding sphere; infinite radius when unbounded. */
   centre: V3;
   radius: number;
 }
 
-/** A lower bound on the distance between two bounded or single-run groups. */
-function gapBetween(g: Group | Run, h: Group | Run) {
-  const single = (x: Group | Run) => ('runs' in x ? x.runs[0] : x);
-  if (Number.isFinite(g.radius) && Number.isFinite(h.radius))
-    return Math.max(0, distance(g.centre, h.centre) - g.radius - h.radius);
-  if (Number.isFinite(g.radius)) {
-    const run = single(h);
-    return Math.max(0, distance(g.centre, runPoint(run, nearestOnRun(run, g.centre))) - g.radius);
-  }
-  if (Number.isFinite(h.radius)) return gapBetween(h, g);
-  return 0;
+/** Consecutive pieces `first` to `last` of a straight carrier, inside one sphere. */
+interface Group {
+  first: number;
+  last: number;
+  centre: V3;
+  radius: number;
 }
 
-function groupOf(runs: Run[]): Group {
-  if (runs.length === 1) return { runs, centre: runs[0].centre, radius: runs[0].radius };
-  const low = [Infinity, Infinity, Infinity],
-    high = [-Infinity, -Infinity, -Infinity];
-  for (const run of runs)
-    for (let a = 0; a < 3; a++) {
-      low[a] = Math.min(low[a], run.centre[a] - run.radius);
-      high[a] = Math.max(high[a], run.centre[a] + run.radius);
-    }
-  const centre = [0, 1, 2].map((a) => (low[a] + high[a]) / 2) as V3;
+/** A curve's analytic carrier: its infinite line, its full circle, or its polyline with end rays. */
+type Carrier =
+  | { kind: 'straight'; pieces: Straight[]; groups: Group[] }
+  | { kind: 'circle'; c: V3; u: V3; v: V3; r: number };
+
+const straightPoint = (x: Straight, t: number): V3 => [
+  x.o[0] + x.d[0] * t,
+  x.o[1] + x.d[1] * t,
+  x.o[2] + x.d[2] * t,
+];
+const nearestOnStraight = (x: Straight, p: V3) =>
+  clamp(dot(x.d, x.d) > 0 ? dot(sub(p, x.o), x.d) / dot(x.d, x.d) : 0, x.lo, x.hi);
+
+function straightPiece(o: V3, d: V3, lo: number, hi: number, base: number): Straight {
+  const bounded = Number.isFinite(lo) && Number.isFinite(hi);
   return {
-    runs,
-    centre,
-    radius: Math.max(...runs.map((r) => distance(r.centre, centre) + r.radius)),
+    o,
+    d,
+    lo,
+    hi,
+    base,
+    centre: bounded ? ([0, 1, 2].map((k) => o[k] + (d[k] * (lo + hi)) / 2) as V3) : o,
+    radius: bounded ? (norm(d) * (hi - lo)) / 2 : Infinity,
   };
 }
 
-/** Distances that differ by less than this are equally close. */
-const tolerance = 1e-7;
-
-/** The closest approach found so far between the end of curve A and the start of curve B. */
-class Approach {
-  lengthA: number;
-  low = Infinity;
-  distance = Infinity;
-  reach = Infinity;
-  stationA = 0;
-  stationB = 0;
-  pointA: V3 = [0, 0, 0];
-  pointB: V3 = [0, 0, 0];
-  constructor(lengthA: number) {
-    this.lengthA = lengthA;
-  }
-  /** Among points within `tolerance` of the closest, keeps the one nearest both curves' ends. */
-  offer(stationA: number, pointA: V3, stationB: number, pointB: V3) {
-    const d = distance(pointA, pointB);
-    const reach = Math.abs(stationA - this.lengthA) + Math.abs(stationB);
-    this.low = Math.min(this.low, d);
-    if (d > this.low + tolerance) return;
-    if (this.distance <= this.low + tolerance && reach >= this.reach) return;
-    Object.assign(this, { distance: d, reach, stationA, stationB, pointA, pointB });
-  }
+function groupOf(pieces: Straight[], first: number, last: number): Group {
+  if (first === last)
+    return { first, last, centre: pieces[first].centre, radius: pieces[first].radius };
+  const low = [Infinity, Infinity, Infinity],
+    high = [-Infinity, -Infinity, -Infinity];
+  for (let k = first; k <= last; k++)
+    for (let a = 0; a < 3; a++) {
+      low[a] = Math.min(low[a], pieces[k].centre[a] - pieces[k].radius);
+      high[a] = Math.max(high[a], pieces[k].centre[a] + pieces[k].radius);
+    }
+  const centre = [0, 1, 2].map((a) => (low[a] + high[a]) / 2) as V3;
+  let radius = 0;
+  for (let k = first; k <= last; k++)
+    radius = Math.max(radius, distance(pieces[k].centre, centre) + pieces[k].radius);
+  return { first, last, centre, radius };
 }
 
-/** Closed form closest approach of two straight runs, including their boundaries and anchors. */
-function straightPair(x: Run & { arc: false }, y: Run & { arc: false }, best: Approach) {
+/** A lower bound on the gap between a sphere (or an unbounded piece) and another. */
+function sphereGap(pa: Straight[], g: Group, pb: Straight[], h: Group) {
+  if (Number.isFinite(g.radius) && Number.isFinite(h.radius))
+    return Math.max(0, distance(g.centre, h.centre) - g.radius - h.radius);
+  if (Number.isFinite(g.radius)) {
+    const x = pb[h.first];
+    return Math.max(
+      0,
+      distance(g.centre, straightPoint(x, nearestOnStraight(x, g.centre))) - g.radius,
+    );
+  }
+  if (Number.isFinite(h.radius)) return sphereGap(pb, h, pa, g);
+  return 0;
+}
+
+/**
+ * The closest pair of two straight pieces, exactly: their squared gap is a convex quadratic over
+ * the parameter box, so its minimum is the free one or the best of each edge's own minimum.
+ */
+function piecePair(x: Straight, y: Straight, nominal: V3): [number, number] {
   const r = sub(x.o, y.o);
   const [a, b, e, c, f] = [dot(x.d, x.d), dot(x.d, y.d), dot(y.d, y.d), dot(x.d, r), dot(y.d, r)];
   const forX = (t: number) => clamp(a > 0 ? (b * t - c) / a : 0, x.lo, x.hi);
   const forY = (s: number) => clamp(e > 0 ? (b * s + f) / e : 0, y.lo, y.hi);
-  const offer = (s: number, t: number) =>
-    best.offer(runStation(x, s), runPoint(x, s), runStation(y, t), runPoint(y, t));
   const denominator = a * e - b * b;
-  if (denominator > 1e-12 * a * e) {
+  if (denominator > 1e-14 * a * e) {
     const [s, t] = [(b * f - c * e) / denominator, (a * f - b * c) / denominator];
-    if (s >= x.lo && s <= x.hi && t >= y.lo && t <= y.hi) offer(s, t);
+    if (s >= x.lo && s <= x.hi && t >= y.lo && t <= y.hi) return [s, t];
+    let best: [number, number] = [0, 0],
+      gap = Infinity;
+    const offer = (s: number, t: number) => {
+      const g = distance(straightPoint(x, s), straightPoint(y, t));
+      if (g < gap) [gap, best] = [g, [s, t]];
+    };
+    for (const s of [x.lo, x.hi]) if (Number.isFinite(s)) offer(s, forY(s));
+    for (const t of [y.lo, y.hi]) if (Number.isFinite(t)) offer(forX(t), t);
+    return best;
   }
-  for (const s of [x.lo, x.hi, clamp(x.anchor, x.lo, x.hi)])
-    if (Number.isFinite(s)) offer(s, forY(s));
-  for (const t of [y.lo, y.hi, clamp(y.anchor, y.lo, y.hi)])
-    if (Number.isFinite(t)) offer(forX(t), t);
+  // Parallel: every overlapping pair is equally close, so take the one level with the nominal joint.
+  const t = forY(clamp(a > 0 ? dot(sub(nominal, x.o), x.d) / a : 0, x.lo, x.hi));
+  return [forX(t), t];
+}
+
+/** A closest approach: points on A and B, their carrier parameters and their gap. */
+interface Candidate {
+  gap: number;
+  a: V3;
+  b: V3;
+  ta: number;
+  tb: number;
 }
 
 /**
- * Closest approach of a bounded run `x` to a run `y`, by branch and bound over x's parameter:
- * the exact distance to y is Lipschitz in it, so an interval is dropped only when it cannot hold
- * a closer point.
+ * Every local minimum of the gap between two straight carriers, each limited to the pieces in
+ * its range [from, to]. Piece pairs are skipped only when their bounding spheres cannot come
+ * within `tie` of the closest found.
  */
-function sweepPair(x: Run, y: Run, xIsA: boolean, best: Approach) {
-  const lipschitz = x.arc ? x.r : norm(x.d);
-  const evaluate = (t: number) => {
-    const px = runPoint(x, t);
-    const u = nearestOnRun(y, px);
-    const py = runPoint(y, u);
-    if (xIsA) best.offer(runStation(x, t), px, runStation(y, u), py);
-    else best.offer(runStation(y, u), py, runStation(x, t), px);
-    return distance(px, py);
+function straightApproach(
+  A: Straight[],
+  groupsA: Group[],
+  rangeA: [number, number],
+  B: Straight[],
+  groupsB: Group[],
+  rangeB: [number, number],
+  nominal: V3,
+  found: Candidate[],
+) {
+  let best = Infinity;
+  const pairGap = (i: number, j: number) => {
+    const [s, t] = piecePair(A[i], B[j], nominal);
+    return { s, t, gap: distance(straightPoint(A[i], s), straightPoint(B[j], t)) };
   };
-  evaluate(x.lo);
-  if (!(x.hi > x.lo) || lipschitz === 0) return;
-  evaluate(x.hi);
-  const queue = [x.lo, x.hi];
-  for (let head = 0, budget = 1 << 14; head < queue.length && budget > 0; head += 2, budget--) {
-    const [lo, hi] = [queue[head], queue[head + 1]];
-    const middle = (lo + hi) / 2;
-    const width = lipschitz * (hi - lo);
-    if (evaluate(middle) - width / 2 > best.low + tolerance || width <= tolerance) continue;
-    queue.push(lo, middle, middle, hi);
-  }
-}
-
-function runPair(x: Run, y: Run, best: Approach) {
-  if (!x.arc && !y.arc) return straightPair(x, y, best);
-  const cost = (run: Run) => (run.arc ? run.r : 1) * (run.hi - run.lo);
-  if (cost(x) <= cost(y)) sweepPair(x, y, true, best);
-  else sweepPair(y, x, false, best);
-}
-
-/** Exact closest approach between two sides, visiting group pairs in order of their lower bounds. */
-function closestApproach(ends: Group[], starts: Group[], best: Approach) {
-  const pairs = ends
-    .flatMap((g) => starts.map((h) => ({ g, h, bound: gapBetween(g, h) })))
+  // Pieces that share the point at t on piece k: undefined where the range cuts the carrier.
+  const sharing = (pieces: Straight[], k: number, t: number, [from, to]: [number, number]) => {
+    const result = [k];
+    if (t === pieces[k].lo && Number.isFinite(t)) {
+      if (k - 1 < from) return undefined;
+      result.push(k - 1);
+    }
+    if (t === pieces[k].hi && Number.isFinite(t)) {
+      if (k + 1 > to) return undefined;
+      result.push(k + 1);
+    }
+    return result;
+  };
+  // Each pair's gap is convex, so a pair's minimum is a local minimum overall exactly when every
+  // pair sharing that point has no lower minimum.
+  const isLocalMinimum = (i: number, j: number, s: number, t: number, gap: number) => {
+    const [around, beside] = [sharing(A, i, s, rangeA), sharing(B, j, t, rangeB)];
+    if (!around || !beside) return false;
+    const slack = 1e-12 * (1 + Math.max(...straightPoint(A[i], s).map(Math.abs)));
+    for (const k of around)
+      for (const l of beside)
+        if ((k !== i || l !== j) && pairGap(k, l).gap < gap - slack) return false;
+    return true;
+  };
+  const pairs = groupsA
+    .flatMap((g) => groupsB.map((h) => ({ g, h, bound: sphereGap(A, g, B, h) })))
     .sort((p, q) => p.bound - q.bound);
   for (const { g, h, bound } of pairs) {
-    if (bound > best.low + tolerance) break;
-    for (const x of g.runs)
-      for (const y of h.runs) if (gapBetween(x, y) <= best.low + tolerance) runPair(x, y, best);
+    if (bound > best + tie) break;
+    for (let i = Math.max(g.first, rangeA[0]); i <= Math.min(g.last, rangeA[1]); i++)
+      for (let j = Math.max(h.first, rangeB[0]); j <= Math.min(h.last, rangeB[1]); j++) {
+        const [x, y] = [A[i], B[j]];
+        if (distance(x.centre, y.centre) - x.radius - y.radius > best + tie) continue;
+        const { s, t, gap } = pairGap(i, j);
+        if (gap > best + tie || !isLocalMinimum(i, j, s, t, gap)) continue;
+        best = Math.min(best, gap);
+        const [a, b] = [straightPoint(A[i], s), straightPoint(B[j], t)];
+        found.push({ gap, a, b, ta: A[i].base + s, tb: B[j].base + t });
+      }
   }
 }
 
-/** A curve with its analytic extension, as the runs near each of its ends. */
-interface Guide {
-  length: number;
-  at(station: number): V3;
-  /** Points strictly between two stations. */
-  inner(from: number, to: number, step: number): number[];
-  ends: Group[];
-  starts: Group[];
+const circlePoint = (c: Carrier & { kind: 'circle' }, t: number): V3 =>
+  [0, 1, 2].map((k) => c.c[k] + c.r * (Math.cos(t) * c.u[k] + Math.sin(t) * c.v[k])) as V3;
+
+/** The nearest point of a carrier to `p`, with its parameter. */
+function nearestOn(carrier: Carrier, p: V3) {
+  if (carrier.kind === 'circle') {
+    const w = sub(p, carrier.c);
+    const t = Math.atan2(dot(w, carrier.v), dot(w, carrier.u));
+    return { t, point: circlePoint(carrier, t) };
+  }
+  const { pieces, groups } = carrier;
+  const order = groups
+    .map((g) => ({ g, bound: Math.max(0, distance(p, g.centre) - g.radius) }))
+    .sort((x, y) => x.bound - y.bound);
+  let best = Infinity,
+    t = 0,
+    point: V3 = p;
+  for (const { g, bound } of order) {
+    if (bound >= best) break;
+    for (let k = g.first; k <= g.last; k++) {
+      const s = nearestOnStraight(pieces[k], p);
+      const q = straightPoint(pieces[k], s);
+      const gap = distance(p, q);
+      if (gap < best) [best, t, point] = [gap, pieces[k].base + s, q];
+    }
+  }
+  return { t, point };
 }
 
-const forever = Infinity;
+/**
+ * Every local minimum of the gap from a circle to another carrier, as a function of the circle's
+ * angle: bracketed by sampling the whole turn, then narrowed by golden section to 1e-10 mm.
+ */
+function circleApproach(
+  circle: Carrier & { kind: 'circle' },
+  other: Carrier,
+  circleIsA: boolean,
+  found: Candidate[],
+) {
+  const at = (t: number) => {
+    const p = circlePoint(circle, t);
+    const q = nearestOn(other, p);
+    return { p, q, gap: distance(p, q.point) };
+  };
+  const h = turn / turnSamples;
+  const gaps = Float64Array.from({ length: turnSamples }, (_, i) => at(i * h).gap);
+  const brackets: number[] = [];
+  for (let i = 0; i < turnSamples; i++) {
+    const [before, after] = [
+      gaps[(i + turnSamples - 1) % turnSamples],
+      gaps[(i + 1) % turnSamples],
+    ];
+    if (gaps[i] <= before && gaps[i] <= after) brackets.push(i);
+  }
+  brackets.sort((i, j) => gaps[i] - gaps[j]);
+  const ratio = (Math.sqrt(5) - 1) / 2;
+  let best = Infinity;
+  for (const i of brackets) {
+    // The gap changes by at most r per radian, which bounds it over the bracket.
+    if (gaps[i] - circle.r * h > best + tie) break;
+    let [lo, hi] = [(i - 1) * h, (i + 1) * h];
+    let [x, y] = [hi - ratio * (hi - lo), lo + ratio * (hi - lo)];
+    let [fx, fy] = [at(x).gap, at(y).gap];
+    while (circle.r * (hi - lo) > 1e-10) {
+      if (fx <= fy) {
+        [hi, y, fy] = [y, x, fx];
+        x = hi - ratio * (hi - lo);
+        if (!(x > lo && x < y)) break;
+        fx = at(x).gap;
+      } else {
+        [lo, x, fx] = [x, y, fy];
+        y = lo + ratio * (hi - lo);
+        if (!(y > x && y < hi)) break;
+        fy = at(y).gap;
+      }
+    }
+    const t = fx <= fy ? x : y;
+    const { p, q, gap } = at(t);
+    best = Math.min(best, gap);
+    found.push(
+      circleIsA
+        ? { gap, a: p, b: q.point, ta: t, tb: q.t }
+        : { gap, a: q.point, b: p, ta: q.t, tb: t },
+    );
+  }
+}
+
+/** Appends the points after `a` along the straight span to `b`, at most `step` apart. */
+function straightRun(a: V3, b: V3, step: number, out: number[]) {
+  const length = distance(a, b);
+  if (!(length > 0)) return;
+  const segments = segmentsFor(length, step);
+  for (let k = 1; k < segments; k++)
+    for (let axis = 0; axis < 3; axis++) out.push(a[axis] + ((b[axis] - a[axis]) * k) / segments);
+  out.push(...b);
+}
+
+/** A curve with its carrier, the carrier parameters of its fitted ends, and how to trace it. */
+interface Guide {
+  carrier: Carrier;
+  first: V3;
+  last: V3;
+  head: number;
+  tail: number;
+  /** Appends the points after `a` (at t0) along the carrier up to `b` (at t1). */
+  run(t0: number, t1: number, a: V3, b: V3, step: number, out: number[]): void;
+}
 
 function straightGuide(first: V3, last: V3): Guide {
   const length = distance(first, last);
   const d: V3 = length > 0 ? unit(sub(last, first)) : [0, 0, 0];
-  const run = (lo: number, hi: number, anchor: number): Run => ({
-    arc: false,
-    o: first,
-    d,
-    lo,
-    hi,
-    base: 0,
-    anchor,
-    centre: first,
-    radius: length > 0 ? forever : 0,
-  });
+  const pieces = [straightPiece(first, d, -Infinity, Infinity, 0)];
   return {
-    length,
-    at: (s) => [first[0] + d[0] * s, first[1] + d[1] * s, first[2] + d[2] * s],
-    inner: () => [],
-    ends: [groupOf([length > 0 ? run(length / 2, forever, length) : run(0, 0, 0)])],
-    starts: [groupOf([length > 0 ? run(-forever, length / 2, 0) : run(0, 0, 0)])],
+    carrier: { kind: 'straight', pieces, groups: [groupOf(pieces, 0, 0)] },
+    first,
+    last,
+    head: 0,
+    tail: length,
+    run: (_t0, _t1, a, b, step, out) => straightRun(a, b, step, out),
   };
 }
 
@@ -596,98 +704,60 @@ function circleGuide(curve: EdgeCurve): Guide {
   const angle = (q: V3) => Math.atan2(dot(sub(q, c), v), dot(sub(q, c), u));
   if (angle(pointAt(p, 1)) < 0) v = scaled(v, -1);
   let sweep = angle(last);
-  if (sweep <= 0) sweep += Math.PI * 2;
-  const run = (lo: number, hi: number): Run => ({
-    arc: true,
-    c,
-    u,
-    v,
-    r,
-    lo,
-    hi,
-    centre: c,
-    radius: r,
-  });
-  const at = (s: number): V3 => runPoint(run(0, 0), s / r);
+  if (sweep <= 0) sweep += turn;
+  const carrier = { kind: 'circle' as const, c, u, v, r };
   return {
-    length: r * sweep,
-    at,
-    inner: (from, to, step) => {
-      const pieces = Math.ceil((to - from) / (step / 4));
-      const result: number[] = [];
-      for (let i = 1; i < pieces; i++) result.push(...at(from + ((to - from) * i) / pieces));
-      return result;
+    carrier,
+    first,
+    last,
+    head: 0,
+    tail: sweep,
+    run: (t0, t1, a, b, step, out) => {
+      const length = r * Math.abs(t1 - t0);
+      const segments = length > 0 ? segmentsFor(length, step) : 1;
+      for (let k = 1; k < segments; k++)
+        out.push(...circlePoint(carrier, t0 + ((t1 - t0) * k) / segments));
+      if (segments > 1 || distance(a, b) > 0) out.push(...b);
     },
-    // Each end reaches half way round the rest of the circle, so the two cover it once.
-    ends: [groupOf([run(sweep / 2, sweep / 2 + Math.PI)])],
-    starts: [groupOf([run(sweep / 2 - Math.PI, sweep / 2)])],
   };
 }
 
 function polylineGuide(curve: EdgeCurve): Guide {
-  const p = Float64Array.from(curve.points),
+  const p = curve.points,
     count = p.length / 3;
   const [first, last] = [pointAt(p, 0), pointAt(p, count - 1)];
-  if (count < 2) return straightGuide(first, last);
   const lengths = cumulative(p);
   const length = lengths[count - 1];
   const [head, tail] = [unit(sub(pointAt(p, 1), first)), unit(sub(last, pointAt(p, count - 2)))];
-  const segment = (k: number): Run => {
+  const pieces = [straightPiece(first, head, -Infinity, 0, 0)];
+  for (let k = 0; k < count - 1; k++) {
     const [a, b] = [pointAt(p, k), pointAt(p, k + 1)];
-    const span = distance(a, b);
-    return {
-      arc: false,
-      o: a,
-      d: unit(sub(b, a)),
-      lo: 0,
-      hi: span,
-      base: lengths[k],
-      anchor: 0,
-      centre: [0, 1, 2].map((i) => (a[i] + b[i]) / 2) as V3,
-      radius: span / 2,
-    };
-  };
-  const blocks = (runs: Run[]) => {
-    const size = Math.max(8, Math.ceil(Math.sqrt(runs.length)));
-    const result: Group[] = [];
-    for (let i = 0; i < runs.length; i += size) result.push(groupOf(runs.slice(i, i + size)));
-    return result;
-  };
-  const ray = (o: V3, d: V3, lo: number, hi: number, base: number): Run => ({
-    arc: false,
-    o,
-    d,
-    lo,
-    hi,
-    base,
-    anchor: 0,
-    centre: o,
-    radius: forever,
-  });
-  const segments = Array.from({ length: count - 1 }, (_, k) => segment(k));
+    pieces.push(straightPiece(a, unit(sub(b, a)), 0, distance(a, b), lengths[k]));
+  }
+  pieces.push(straightPiece(last, tail, 0, Infinity, length));
+  const size = Math.max(8, Math.ceil(Math.sqrt(count - 1)));
+  const groups = [groupOf(pieces, 0, 0)];
+  for (let k = 1; k < count; k += size)
+    groups.push(groupOf(pieces, k, Math.min(count - 1, k + size - 1)));
+  groups.push(groupOf(pieces, count, count));
   return {
-    length,
-    at: (s) => {
-      if (s <= 0) return [first[0] + head[0] * s, first[1] + head[1] * s, first[2] + head[2] * s];
-      if (s >= length) return runPoint(ray(last, tail, 0, forever, length), s - length);
-      let k = 0;
-      while (k < count - 2 && lengths[k + 1] < s) k++;
-      return runPoint(segments[k], s - lengths[k]);
+    carrier: { kind: 'straight', pieces, groups },
+    first,
+    last,
+    head: 0,
+    tail: length,
+    run: (t0, t1, a, b, step, out) => {
+      let from = a;
+      const [low, high] = [Math.min(t0, t1), Math.max(t0, t1)];
+      for (let i = 0; i < count; i++) {
+        const k = t1 >= t0 ? i : count - 1 - i;
+        if (lengths[k] <= low || lengths[k] >= high) continue;
+        const vertex = pointAt(p, k);
+        straightRun(from, vertex, step, out);
+        from = vertex;
+      }
+      straightRun(from, b, step, out);
     },
-    inner: (from, to) => {
-      const result: number[] = [];
-      for (let k = 0; k < count; k++)
-        if (lengths[k] > from && lengths[k] < to) result.push(...pointAt(p, k));
-      return result;
-    },
-    ends: [
-      ...blocks(segments.filter((_, k) => lengths[k + 1] > length / 2)),
-      groupOf([ray(last, tail, 0, forever, length)]),
-    ],
-    starts: [
-      groupOf([ray(first, head, -forever, 0, 0)]),
-      ...blocks(segments.filter((_, k) => lengths[k] < length / 2)),
-    ],
   };
 }
 
@@ -699,8 +769,54 @@ function guideOf(curve: EdgeCurve, kind: GuideKind): Guide {
 }
 
 /**
- * Trims or extends neighbours to where they come closest and joins them into one curve. A single
- * curve that is already closed comes back unchanged.
+ * The closest approach between the carriers of A and B. The smallest local minimum wins; minima
+ * within `tie` of it go to the pair nearest the nominal joint. A curve joined to itself is split
+ * at its middle vertex so that its two ends meet rather than any point meeting itself.
+ */
+function approach(A: Guide, B: Guide, self: boolean): Candidate {
+  const nominal = [0, 1, 2].map((k) => (A.last[k] + B.first[k]) / 2) as V3;
+  const found: Candidate[] = [];
+  const [a, b] = [A.carrier, B.carrier];
+  if (a.kind === 'circle') circleApproach(a, b, true, found);
+  else if (b.kind === 'circle') circleApproach(b, a, false, found);
+  else {
+    const all = (pieces: Straight[]): [number, number] => [0, pieces.length - 1];
+    const middle = a.pieces.length >> 1;
+    const split = self && a.pieces.length > 3;
+    straightApproach(
+      a.pieces,
+      a.groups,
+      split ? [middle, a.pieces.length - 1] : all(a.pieces),
+      b.pieces,
+      b.groups,
+      split ? [0, middle - 1] : all(b.pieces),
+      nominal,
+      found,
+    );
+  }
+  let smallest = Infinity;
+  for (const c of found) smallest = Math.min(smallest, c.gap);
+  let best: Candidate = {
+    gap: distance(A.last, B.first),
+    a: A.last,
+    b: B.first,
+    ta: A.tail,
+    tb: B.head,
+  };
+  let nearest = Infinity;
+  for (const c of found) {
+    if (c.gap > smallest + tie) continue;
+    const away = distance(c.a, nominal) + distance(c.b, nominal);
+    if (away < nearest) [nearest, best] = [away, c];
+  }
+  return best;
+}
+
+/**
+ * Trims or extends neighbours to where they come closest and joins them into one curve. Each
+ * neighbour keeps its shape: it is trimmed or extended along its own carrier to its own closest
+ * point, and a straight bridge through their midpoint, the joint, closes any remaining gap. A
+ * single curve that is already closed comes back unchanged.
  */
 export function joinCurves(
   curves: EdgeCurve[],
@@ -710,37 +826,57 @@ export function joinCurves(
   step: number,
 ): EdgeCurve {
   const n = curves.length;
+  if (n === 1 && curves[0].points.length <= 3)
+    return makeCurve(new Float64Array(curves[0].points), false);
   if (n === 1 && curves[0].closed)
-    return makeCurve(curves[0].points, true, Uint8Array.from(curves[0].corner));
+    return makeCurve(new Float64Array(curves[0].points), true, Uint8Array.from(curves[0].corner));
   if (joints.length !== (closed ? n : n - 1))
     throw new Error('A path needs one joint between each pair of neighbouring curves.');
   const guides = curves.map((curve, i) => guideOf(curve, kinds[i]));
-  const starts: ({ station: number; point: V3 } | undefined)[] = guides.map(() => undefined);
+  type End = { t: number; point: V3; joint?: V3 };
+  const starts: (End | undefined)[] = guides.map(() => undefined);
   const ends = [...starts];
   joints.forEach((_, k) => {
-    const [A, B] = [guides[k], guides[(k + 1) % n]];
-    const best = new Approach(A.length);
-    closestApproach(A.ends, B.starts, best);
-    const middle = [0, 1, 2].map((a) => (best.pointA[a] + best.pointB[a]) / 2) as V3;
-    ends[k] = { station: best.stationA, point: middle };
-    starts[(k + 1) % n] = { station: best.stationB, point: middle };
+    const [i, j] = [k, (k + 1) % n];
+    const best = approach(guides[i], guides[j], i === j);
+    const joint = [0, 1, 2].map((a) => (best.a[a] + best.b[a]) / 2) as V3;
+    ends[i] = { t: best.ta, point: best.a, joint };
+    starts[j] = { t: best.tb, point: best.b, joint };
   });
   const flat: number[] = [],
     corner: number[] = [];
   guides.forEach((guide, i) => {
-    const from = starts[i] ?? { station: 0, point: guide.at(0) };
-    const to = ends[i] ?? { station: guide.length, point: guide.at(guide.length) };
-    const piece = [...from.point, ...guide.inner(from.station, to.station, step), ...to.point];
-    const points = resample(piece, step);
+    const from = starts[i] ?? { t: guide.head, point: guide.first };
+    const to = ends[i] ?? { t: guide.tail, point: guide.last };
+    let [t0, t1] = [from.t, to.t];
+    if (guide.carrier.kind === 'circle') {
+      // Joints on a circle are taken within half a turn of the arc's middle.
+      const middle = (guide.head + guide.tail) / 2;
+      const near = (t: number) => t - turn * Math.round((t - middle) / turn);
+      if (starts[i]) t0 = near(t0);
+      if (ends[i]) t1 = near(t1);
+      // A circle closed on itself meets itself at one point, a whole turn on.
+      if (n === 1) t1 = t0 + turn;
+    }
+    const bridged = (end: End) => end.joint !== undefined && distance(end.joint, end.point) > tie;
+    const piece = [...(from.joint ?? from.point)];
+    let a = from.joint ?? from.point;
+    if (bridged(from)) {
+      straightRun(a, from.point, step, piece);
+      a = from.point;
+    }
+    const b = bridged(to) ? to.point : (to.joint ?? to.point);
+    guide.run(t0, t1, a, b, step, piece);
+    if (bridged(to)) straightRun(b, to.joint!, step, piece);
     const keepLast = !closed && i === n - 1;
-    const count = points.length / 3 - (keepLast ? 0 : 1);
+    const count = piece.length / 3 - (keepLast ? 0 : 1);
     const sharp = i > 0 || closed ? joints[(i + n - 1) % n] === 'sharp' : false;
     for (let k = 0; k < count; k++) {
-      flat.push(points[k * 3], points[k * 3 + 1], points[k * 3 + 2]);
+      flat.push(piece[k * 3], piece[k * 3 + 1], piece[k * 3 + 2]);
       corner.push(k === 0 && sharp ? 1 : 0);
     }
   });
-  return makeCurve(flat, closed, Uint8Array.from(corner));
+  return makeCurve(Float64Array.from(flat), closed, Uint8Array.from(corner));
 }
 
 /** Bounding spheres of runs of segments, for pruning the closest point search. */
@@ -814,7 +950,7 @@ export function closestOnCurve(
   x: number,
   y: number,
   z: number,
-  out: Float32Array,
+  out: Float32Array | Float64Array,
 ): number {
   const p = curve.points,
     count = p.length / 3;
@@ -865,7 +1001,11 @@ export function closestOnCurve(
   return curve.lengths[bestSegment] + span * bestF;
 }
 
-export function curveTangent(curve: EdgeCurve, station: number, out: Float32Array): void {
+export function curveTangent(
+  curve: EdgeCurve,
+  station: number,
+  out: Float32Array | Float64Array,
+): void {
   const p = curve.points,
     count = p.length / 3;
   if (count < 2) {
@@ -903,7 +1043,7 @@ export function curveTangent(curve: EdgeCurve, station: number, out: Float32Arra
 }
 
 /** Catmull-Rom (centripetal) through the points, densely sampled. */
-function catmullRom(points: Float32Array, step: number) {
+function catmullRom(points: ArrayLike<number>, step: number) {
   const count = points.length / 3;
   const at = (i: number) => pointAt(points, Math.min(count - 1, Math.max(0, i)));
   const flat: number[] = [];
@@ -933,9 +1073,9 @@ function catmullRom(points: Float32Array, step: number) {
 }
 
 /** The guide the user drew, before any fitting: a chord, a circle through three points, or Catmull-Rom. */
-export function drawnCurve(kind: GuideKind, points: Float32Array, step: number): EdgeCurve {
+export function drawnCurve(kind: GuideKind, points: ArrayLike<number>, step: number): EdgeCurve {
   const count = points.length / 3;
-  if (count < 2) return makeCurve(points, false);
+  if (count < 2) return makeCurve(new Float64Array(points), false);
   let [first, last] = [pointAt(points, 0), pointAt(points, count - 1)];
   if (kind === 'arc' && count >= 3) {
     const middle = pointAt(points, count >> 1);

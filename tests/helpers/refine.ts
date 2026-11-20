@@ -736,7 +736,10 @@ export function angleDeg(a: ArrayLike<number>, b: ArrayLike<number>) {
 }
 
 /** Farthest any of the flat xyz points lies by the distance function `fn`. */
-export function maxDistance(points: Float32Array, fn: (x: number, y: number, z: number) => number) {
+export function maxDistance(
+  points: ArrayLike<number>,
+  fn: (x: number, y: number, z: number) => number,
+) {
   let farthest = 0;
   for (let i = 0; i < points.length; i += 3)
     farthest = Math.max(farthest, fn(points[i], points[i + 1], points[i + 2]));
@@ -745,7 +748,7 @@ export function maxDistance(points: Float32Array, fn: (x: number, y: number, z: 
 
 /** Root mean square of the distance function `fn` over the points of a curve. */
 export function rms(
-  curve: { points: Float32Array },
+  curve: { points: ArrayLike<number> },
   fn: (x: number, y: number, z: number) => number,
 ) {
   let sum = 0;
@@ -851,7 +854,7 @@ export function rectangleSides(width: number, depth: number, noise: number) {
 }
 
 /** Points of a curve marked as sharp corners. */
-export function cornersOf(curve: { points: Float32Array; corner: Uint8Array }) {
+export function cornersOf(curve: { points: ArrayLike<number>; corner: Uint8Array }) {
   const result: Vec3[] = [];
   curve.corner.forEach((sharp, i) => {
     if (sharp) result.push([curve.points[i * 3], curve.points[i * 3 + 1], curve.points[i * 3 + 2]]);
@@ -871,7 +874,7 @@ export function nearestRectangleCorner(point: Vec3, width: number, depth: number
 }
 
 /** Longest distance between consecutive points of a curve, including the closing span. */
-export function largestGap(curve: { points: Float32Array; closed: boolean }) {
+export function largestGap(curve: { points: ArrayLike<number>; closed: boolean }) {
   const p = curve.points,
     count = p.length / 3;
   let largest = 0;
