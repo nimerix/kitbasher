@@ -729,10 +729,11 @@ function exactApproach(A: Carrier, B: Carrier, nominal: V3): Candidate[] | undef
       });
     }
     // The circles can meet only on the line where their planes cross.
+    // Measured from the first centre: far from the origin the plane offsets would cancel.
     const k = dot(na, nb),
-      [ha, hb] = [dot(na, A.c), dot(nb, B.c)];
+      hb = dot(nb, sub(B.c, A.c));
     const o = [0, 1, 2].map(
-      (axis) => ((ha - hb * k) * na[axis] + (hb - ha * k) * nb[axis]) / (1 - k * k),
+      (axis) => A.c[axis] + (hb * (nb[axis] - k * na[axis])) / (1 - k * k),
     ) as V3;
     return lineMeetsCircle(o, unit(line), -Infinity, Infinity, A)
       .map(({ point }) => meeting(A, B, point, point))
@@ -890,7 +891,8 @@ function approach(A: Guide, B: Guide, self: boolean): Candidate {
   const exact = exactApproach(a, b, nominal);
   const found: Candidate[] = [];
   // A true meeting always beats a nonzero gap, so the search runs only when there is none.
-  if (exact?.length) found.push(...exact);
+  // Appended one at a time: a spread of many crossings overflows the stack.
+  if (exact?.length) for (const candidate of exact) found.push(candidate);
   else if (a.kind === 'circle') circleApproach(a, b, true, found);
   else if (b.kind === 'circle') circleApproach(b, a, false, found);
   else {
