@@ -87,6 +87,24 @@ describe('solveEdge and applyEdge on a path', () => {
     expect(closedMesh(out)).toBe(true);
   });
 
+  it.each([1, 2, 4, 5, 7, 8])(
+    'closes the four-segment path on the box made with seed %i, nothing straddling or folded',
+    (seed) => {
+      const model = modelOf(softBox([2, 1.5, 1], 0.3, { seed }));
+      const solve = solveEdge(model.mesh, model.topology, perimeter(model.mesh), model.noise)!;
+      const out = cloneRefineMesh(model.mesh, true);
+      const result = applyEdge(out, model.topology, solve, 1, true);
+      const chain = result.cut!.chain;
+      expect(result.pieces).toBe(1);
+      expect(loops(out, chain)).toEqual([chain.length]);
+      for (const corner of boxCorners)
+        expect(nearestChainDistance(out, chain, corner)).toBeLessThan(0.02);
+      expect(result.skipped).toHaveLength(0);
+      expect(result.folded).toHaveLength(0);
+      expect(closedMesh(out)).toBe(true);
+    },
+  );
+
   it('treats the face inside the path as one flat surface', () => {
     const { model, solve, out } = appliedPerimeter();
     const weights = moveWeights(model.mesh, model.topology, solve);

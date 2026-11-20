@@ -1293,17 +1293,17 @@ function frameOf(mesh: RefineMesh, topology: RefineTopology, solve: EdgeSolve): 
   );
   const held = new Uint8Array(vertices.length);
   const pinned = new Uint8Array(vertices.length);
-  // A vertex takes its zone in its owner's band; one outside that band, its first zone elsewhere
-  // that is not Beyond. A joint's vertex that no band moves is Soft: at a corner of three faces
-  // within the soft half-width of the face the segments share, below that held, the rounding
-  // between the two faces they do not share left as it is; elsewhere within `cornerClear` soft
-  // half-widths of the solved edge. At a tied end the earlier edge's creased vertices join the cut
+  // A vertex takes its zone in its owner's band, or where that band leaves it Beyond or does not
+  // reach it, its first zone elsewhere that is not Beyond. A joint's vertex that no band moves is
+  // Soft: at a corner of three faces within the soft half-width of the face the segments share,
+  // below that held, the rounding between the two faces they do not share left as it is; elsewhere
+  // within `cornerClear` soft half-widths of the solved edge. At a tied end the earlier edge's creased vertices join the cut
   // but stay where they are.
   const zone = Uint8Array.from(places, (list, k) => {
     let found: number = BandZone.Beyond;
     for (let j = 0; j < list.length; j += 2) {
       const z = bands[list[j]].zone[list[j + 1]];
-      if (list[j] === owner[k]) {
+      if (list[j] === owner[k] && z !== BandZone.Beyond) {
         found = z;
         break;
       }
@@ -1850,9 +1850,8 @@ export function applyEdge(
   const surfaces = surfacesOf(mesh, topology, solve, frame);
   const weights = frameWeights(mesh, topology, solve, frame, surfaces);
 
-  // A path of several segments reads its cut where the vertices started, signed by the side they go
-  // to, and faces each child by its own side: where its vertices end, a corner keeps the rounding
-  // between two faces off the corrected surfaces, and the field leaves straddlers there.
+  // A path of several segments faces each child by its own side: a corner keeps the rounding
+  // between two faces off both corrected surfaces, so the nearer one does not tell how it faces.
   const path = solve.bands.length > 1;
   const move = new Float64Array(count * 3);
   const moved = new Uint8Array(count);
@@ -1891,10 +1890,6 @@ export function applyEdge(
       if (side !== nearer) apart = 0;
     }
     apartAt[i] = apart;
-    if (path) {
-      const start = surface.distance(0, p[0], p[1], p[2]) - surface.distance(1, p[0], p[1], p[2]);
-      apartAt[i] = apart >= 0 ? Math.abs(start) : -Math.abs(start);
-    }
     moved[i] = +(move[i * 3] !== 0 || move[i * 3 + 1] !== 0 || move[i * 3 + 2] !== 0);
   }
   const changed: number[] = [];
@@ -1978,18 +1973,32 @@ export function applyEdge(
     return { changed: Uint32Array.from(changed), cut: null, skipped: empty, folded, pieces: 0 };
   }
 
-  // One cut runs along the whole path, among vertices of more than `cutWeight`; each point on it
-  // moves toward the solved edge by its own weight, so the edge's sharpness fades with the weight.
+  // One cut runs along the whole path, among vertices of more than `cutWeight`, those a corner fade
+  // leaves where they are included; each point on it moves toward the solved edge by its own
+  // weight, so the edge's sharpness fades with the weight.
   const cutting: number[] = [];
-  for (const [v, i] of indexOf) if (moved[i] && weights[i] > cutWeight) cutting.push(v);
-  const vertices = Uint32Array.from(cutting);
+  for (const [v, i] of indexOf) if (weights[i] > cutWeight) cutting.push(v);
+  // A vertex a corner holds still, between cut vertices on both sides, is where the zero set
+  // passes: the chain runs through it where it stands.
+  const stays: number[] = [];
+  frame.vertices.forEach((v, k) => {
+    if (!frame.held[k]) return;
+    let sides = 0;
+    for (let j = topology.neighbourStart[v]; j < topology.neighbourStart[v + 1]; j++) {
+      const i = indexOf.get(topology.neighbours[j]);
+      if (i !== undefined && weights[i] > cutWeight)
+        sides |= apartAt[i] > 0 ? 1 : apartAt[i] < 0 ? 2 : 0;
+    }
+    if (sides === 3) stays.push(v);
+  });
+  const vertices = Uint32Array.from([...cutting, ...stays]);
   const field = new Float32Array(vertices.length);
   const cells = new Map<number, number[]>();
   const cellOf = (x: number, y: number, z: number) =>
     Math.imul(Math.floor(x / edge), 73856093) ^
     Math.imul(Math.floor(y / edge), 19349663) ^
     Math.imul(Math.floor(z / edge), 83492791);
-  vertices.forEach((v, k) => {
+  cutting.forEach((v, k) => {
     const [x, y, z] = [position[v * 3], position[v * 3 + 1], position[v * 3 + 2]];
     field[k] = apartAt[indexOf.get(v)!];
     const key = cellOf(x, y, z);
@@ -2032,7 +2041,7 @@ export function applyEdge(
   };
 
   const on = new Float64Array(3);
-  const kept: number[] = [];
+  const kept: number[] = [...stays];
   for (const [v, i] of indexOf) if (frame.pinned[i]) kept.push(v);
   const keptAt = new Set(
     kept.map((v) => `${position[v * 3]},${position[v * 3 + 1]},${position[v * 3 + 2]}`),
