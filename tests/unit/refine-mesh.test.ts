@@ -612,12 +612,45 @@ describe.each([
   );
 });
 
+it('restores each duplicate of a vertex left in place from its own source bits', () => {
+  const source = softBox([2, 1.5, 1], 0.3);
+  const welded = buildRefineMesh(source, new Matrix4()).weldedCount;
+  const array = source.getAttribute('position').array as Float32Array;
+  const bits = new Uint32Array(array.buffer, array.byteOffset, array.length);
+  // One Float32 step on one duplicate: inside the weld tolerance, so it still welds.
+  let g = 0;
+  for (; ; g++) {
+    bits[g * 3] += 1;
+    if (buildRefineMesh(source, new Matrix4()).weldedCount === welded) break;
+    bits[g * 3] -= 1;
+  }
+  const matrix = farMatrix();
+  const mesh = buildRefineMesh(source, matrix);
+  const v = mesh.weldOf[g];
+  const [x, y, z] = mesh.position.subarray(v * 3, v * 3 + 3);
+  moveVertex(mesh, v, x, y, z);
+  const written = writeRefinedGeometry(source, matrix, mesh).getAttribute('position');
+  expect(bytesOf(written.array as Float32Array)).toEqual(bytesOf(array));
+});
+
 describe('clearance', () => {
   const box = softBox([2, 1.5, 1], 0.3);
   it('is 1e-4 scaled by the matrix norm for a small part', () => {
     expect(buildRefineMesh(box, new Matrix4()).clearance).toBeCloseTo(1e-4 * Math.sqrt(3), 9);
     const scaled = buildRefineMesh(box, new Matrix4().makeScale(100, 100, 100)).clearance;
     expect(Math.abs(scaled - 100 * 1e-4 * Math.sqrt(3))).toBeLessThan(1e-9);
+  });
+  it('counts a source vertex that no triangle uses', () => {
+    const indexed = softBox([2, 1.5, 1], 0.3, { indexed: true });
+    for (const name of ['position', 'normal']) {
+      const array = indexed.getAttribute(name).array as Float32Array;
+      const grown = new Float32Array(array.length + 3);
+      grown.set(array);
+      if (name === 'position') grown[array.length] = 1e6;
+      indexed.setAttribute(name, new BufferAttribute(grown, 3));
+    }
+    const expected = 16 * 1e6 * 2 ** -23 * Math.sqrt(3);
+    expect(buildRefineMesh(indexed, new Matrix4()).clearance).toBeCloseTo(expected, 6);
   });
   it('is copied by a clone', () => {
     const mesh = buildRefineMesh(box, farMatrix());

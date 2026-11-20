@@ -62,10 +62,11 @@ export function buildRefineMesh(geometry: BufferGeometry, matrixWorld: Matrix4):
   let largest = 0;
   // Each welded vertex takes the lowest geometry vertex's position, as write-back's representative.
   for (let vertex = 0; vertex < vertexCount; vertex++) {
-    const welded = weldOf[vertex];
-    if (welded === unused) continue;
+    // Every stored vertex counts: an unreferenced one still sets the scale write-back rounds at.
     for (let axis = 0; axis < 3; axis++)
       largest = Math.max(largest, Math.abs(decoded(position, vertex, axis)));
+    const welded = weldOf[vertex];
+    if (welded === unused) continue;
     if (seen[welded]) continue;
     seen[welded] = 1;
     worldOf(position, vertex, e, world, welded * 3);
@@ -582,7 +583,7 @@ export function writeRefinedGeometry(
     const g = from[i];
     const v = weldOf[g];
     if (copies[g] !== unused) position.copy(copies[g], i);
-    else if (restored[v]) position.copy(representative[v], i);
+    else if (restored[v]) position.copy(g < sourceVertexCount ? g : representative[v], i);
     else outPosition.setXYZ(i, local[v * 3], local[v * 3 + 1], local[v * 3 + 2]);
   }
 
