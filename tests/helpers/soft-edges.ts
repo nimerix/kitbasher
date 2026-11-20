@@ -284,11 +284,24 @@ function inCircle(a: Vec2, b: Vec2, c: Vec2, d: Vec2) {
   return ax * (by * lc - lb * cy) - ay * (bx * lc - lb * cx) + la * (bx * cy - by * cx) > 0;
 }
 
+/** A loop, because spreading a fine fixture's points into Math.min overflows the stack. */
+function bounds(points: Vec2[]) {
+  let x0 = Infinity,
+    x1 = -Infinity,
+    y0 = Infinity,
+    y1 = -Infinity;
+  for (const [x, y] of points) {
+    if (x < x0) x0 = x;
+    if (x > x1) x1 = x;
+    if (y < y0) y0 = y;
+    if (y > y1) y1 = y;
+  }
+  return [x0, x1, y0, y1];
+}
+
 /** Counter-clockwise Delaunay triangles of `points`, by Bowyer-Watson insertion with a walk. */
 function delaunay(points: Vec2[]) {
-  const xs = points.map((p) => p[0]),
-    ys = points.map((p) => p[1]);
-  const [x0, x1, y0, y1] = [Math.min(...xs), Math.max(...xs), Math.min(...ys), Math.max(...ys)];
+  const [x0, x1, y0, y1] = bounds(points);
   const [cx, cy, size] = [(x0 + x1) / 2, (y0 + y1) / 2, 100 * Math.max(x1 - x0, y1 - y0)];
   const n = points.length;
   const all: Vec2[] = [...points, [cx - size, cy - size], [cx + size, cy - size], [cx, cy + size]];
@@ -388,9 +401,7 @@ function cap(surface: Surface, rim: number[], z: number, up: boolean, step: numb
   );
   // Keeping interior points out of every rim edge's diametral circle makes each rim edge Delaunay.
   const clearance = 0.6 * longest;
-  const xs = outline.map((p) => p[0]),
-    ys = outline.map((p) => p[1]);
-  const [x0, x1, y0, y1] = [Math.min(...xs), Math.max(...xs), Math.min(...ys), Math.max(...ys)];
+  const [x0, x1, y0, y1] = bounds(outline);
   const row = (step * Math.sqrt(3)) / 2;
   const interior: Vec2[] = [];
   for (let j = 0, y = y0; y <= y1; j++, y = y0 + j * row)
