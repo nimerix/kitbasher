@@ -4,7 +4,7 @@
 
 **Goal:** A desktop Refine tool that rebuilds softened edges as idealized ones from line, arc and spline guides, smooths, flattens or shape-snaps painted regions while keeping detail, offers crease, flatten and smooth brushes, and proposes guides and regions automatically.
 
-**Architecture:** Pure typed-array modules in `src/core/refine-*.ts` work on a `RefineMesh`: the part welded into world space, able to move vertices and cut triangles while staying closed. One surface fitter (plane, cylinder, cone, sphere) serves edge flanks, regions and detection. The store owns one Refine session beside Warp's: a working model that accepted features are baked into, a draft that previews pending ones without cutting, session undo and redo, and Apply. A worker builds the model and runs detection. The viewport and inspector draw the session.
+**Architecture:** Pure typed-array modules in `src/core/refine-*.ts` work on a `RefineMesh`: the part welded into world space, able to move vertices and cut triangles while staying closed. One surface fitter (plane, cylinder, cone, sphere, sweep) serves edge flanks, regions and detection. The store owns one Refine session beside Warp's: a working model that accepted features are baked into, a draft that previews pending ones without cutting, session undo and redo, and Apply. A worker builds the model and runs detection. The viewport and inspector draw the session.
 
 **Tech Stack:** TypeScript, React, Three.js, three-mesh-bvh, zustand, ml-matrix, Vitest, Playwright. No new dependencies.
 
@@ -33,7 +33,7 @@
 
 1. Unindexed STL scans (both reference parts): after moves and cuts, welded duplicates share bits and the mesh stays closed. Tests in Tasks 2 and 3 run every case on indexed and unindexed input.
 2. A mirrored or non-uniformly scaled part (`scale: [1, 2, -1]`): a refined edge still meets the spec tolerances in world space and normals face outward. Tests in Tasks 2 and 7.
-3. A guide placed where there is no edge, or between faces less than 15 degrees apart: nothing changes and the user is told `No edge found under this guide. Move it onto the rounded edge or change Width.` Tests in Tasks 7 and 14.
+3. A guide placed where there is no edge, or between faces less than 15 degrees apart: nothing changes and the user is told `No edge found under this guide. Move it onto the rounded edge or change Width.` Tests in Tasks 7 and 15.
 4. A thin feature, where Width reaches a second softened edge or the far side of a wall: only the edge under the guide is rebuilt. Test in Task 6.
 5. Smoothing a region painted across an accepted edge: the edge stays crisp. Test in Task 9.
 
@@ -51,6 +51,7 @@
 | `src/core/refine-band.ts` (new) | The band around a guide: stations, soft zone, flanks, width estimate. |
 | `src/core/refine-edge.ts` (new) | Flank fitting, edge solve, rebuild, joints, ends. |
 | `src/core/refine-smooth.ts`, `src/core/refine-region.ts` (new) | Non-shrinking smoothing; Smooth, Flatten and Shape with detail and blend. |
+| `src/core/refine-sweep.ts` (new) | Sweep fit and projection. |
 | `src/core/refine-paint.ts`, `src/core/refine-brush.ts` (new) | Triangles and vertices under a brush; smooth and flatten dabs; crease strokes. |
 | `src/core/refine-curvature.ts`, `src/core/refine-detect.ts` (new) | Curvature; proposals. |
 | `src/core/refine-model.ts`, `src/core/refine.worker.ts`, `src/core/refine-job.ts` (new) | `RefineModel`; build and detect off the main thread. |
@@ -754,7 +755,7 @@ export const smoothPasses = (strength: number) => Math.round(strength * 40);
 
 // refine-region.ts
 export type Treatment = 'smooth' | 'flatten' | 'shape';
-export type RegionShape = 'auto' | 'cylinder' | 'cone' | 'sphere';
+export type RegionShape = 'auto' | 'cylinder' | 'cone' | 'sphere' | 'sweep';
 export interface RegionInput {
   triangles: Uint32Array;
   treatment: Treatment;
@@ -773,7 +774,7 @@ export interface RegionSolve {
   weight: Float32Array;
   detail: Uint8Array;
   /** What the surface was fitted as; null for Smooth. */
-  fitted: ShapeKind | null;
+  fitted: ShapeKind | 'sweep' | null;
 }
 /** Null when the region is too small to fit or is all detail. */
 export function solveRegion(mesh: RefineMesh, topology: RefineTopology, input: RegionInput, noise: number): RegionSolve | null;
@@ -784,7 +785,7 @@ Rules:
 
 - Region vertices are the welded vertices of `triangles`. A vertex also used by a triangle outside the region is a border vertex with weight 0, and is never written.
 - Weight rises by smoothstep from 0 at the border to 1 at surface distance `blend` (Dijkstra over `neighbours`), then is multiplied by `strength`.
-- Flatten fits a plane, Shape fits the chosen kind with `fitShape`, or `fitAuto`. Base vertices' targets are their projections.
+- Flatten fits a plane, Shape fits the chosen kind with `fitShape`, or `fitAuto` (`'sweep'` is added in Task 10; Auto never picks it). Base vertices' targets are their projections.
 - Detail, when `keepDetail`: vertices farther than `detail` from the fitted surface, on either side. Each connected island of them is moved rigidly by the mean displacement of the base vertices ringing it.
 - Smooth: targets come from `smoothVertices` with `smoothPasses(1)` on a copy; weight carries strength. With `keepDetail`, detail is whatever stands off a copy smoothed with 4 × the passes by more than `detail`, and is carried the same way. Vertices with `crease` have weight 0.
 
@@ -853,7 +854,64 @@ it('returns null for a region too small to fit', () => {
 
 ---
 
-### Task 10: Brushes
+### Task 10: Sweep
+
+**Files:**
+- Create: `src/core/refine-sweep.ts`
+- Modify: `src/core/refine-region.ts` (accept `shape: 'sweep'`)
+- Test: `tests/unit/refine-sweep.test.ts`
+
+**Interfaces:**
+- Consumes: Tasks 4, 5, 9.
+- Produces:
+```ts
+export interface Sweep {
+  /** The centre line: an arc when one fits within noise, else a spline. */
+  path: EdgeCurve;
+  pathKind: 'arc' | 'spline';
+  /** Radius of the cross-section at 64 evenly spaced angles about the path, in the path's rotation-minimising frame. */
+  profile: Float32Array;
+  /** True when the profile is a circle within noise; it is then replaced by its mean. */
+  round: boolean;
+}
+export function fitSweep(points: Float32Array, normals: Float32Array, noise: number): { sweep: Sweep; rms: number } | null;
+export function projectToSweep(sweep: Sweep, x: number, y: number, z: number, out: Float32Array): void;
+```
+
+Rules: split the points into slabs along their longest principal axis, each about 8 × the local edge length thick; fit a cylinder to each with `fitShape`; chain the cylinders' axis points by nearest neighbour into an ordered centre line; fit it with `fitCurve('arc', …)` and fall back to `'spline'` when the arc's rms exceeds 2 × noise. The profile is the robust median radius per angle bin over all stations. Null with fewer than three slabs.
+
+- [ ] **Step 1: Write the failing tests**
+
+```ts
+it('recovers an elbow as a round tube on an arc', () => {
+  const { points, normals } = patch(softElbow(4, 1), (x, y, z) => true, { skipCaps: true });
+  const { sweep } = fitSweep(points, normals, 0.004)!;
+  expect(sweep.pathKind).toBe('arc');
+  expect(sweep.round).toBe(true);
+  expect(Math.abs(mean(sweep.profile) - 1)).toBeLessThan(0.01);
+  expect(maxDistance(sweep.path.points, (x, y, z) => Math.abs(Math.hypot(x, z) - 4) + Math.abs(y))).toBeLessThan(0.04);
+});
+it('snaps an elbow region onto the true torus', () => {
+  const model = modelOf(softElbow(4, 1));
+  const solve = solveRegion(model.mesh, model.topology, { triangles: tubeTriangles(model.mesh), treatment: 'shape', shape: 'sweep', strength: 1, keepDetail: true, detail: null, blend: null }, model.noise)!;
+  expect(solve.fitted).toBe('sweep');
+  const out = cloneRefineMesh(model.mesh, false);
+  applyRegion(out, solve);
+  for (const i of indicesWhere(solve, (w, d) => w === 1 && d === 0))
+    expect(torusDistance(out, solve.vertices[i], 4, 1)).toBeLessThan(0.005);
+});
+it('follows a spline when the centre line is not an arc', () => { /* an S-bend tube from softElbow halves: pathKind 'spline', rms within 2 * noise */ });
+it('returns null for a patch with no tube in it', () => { /* a flat face */ });
+```
+
+- [ ] **Step 2: Run** `npx vitest run tests/unit/refine-sweep.test.ts`. Expect FAIL.
+- [ ] **Step 3: Implement** the module and the `'sweep'` branch in `solveRegion`.
+- [ ] **Step 4: Run** this test and `tests/unit/refine-region.test.ts`. Expect PASS.
+- [ ] **Step 5: Commit** `(feat) Snap Refine regions to a sweep along an arc or spline`.
+
+---
+
+### Task 11: Brushes
 
 **Files:**
 - Create: `src/core/refine-paint.ts`, `src/core/refine-brush.ts`
@@ -917,7 +975,7 @@ it('ignores a stroke shorter than the radius', () => { expect(creaseInput(shortS
 
 ---
 
-### Task 11: Detection
+### Task 12: Detection
 
 **Files:**
 - Create: `src/core/refine-curvature.ts`, `src/core/refine-detect.ts`
@@ -1006,14 +1064,14 @@ it('stops when aborted and reports progress', () => { /* abort after the first r
 
 ---
 
-### Task 12: Model, worker and jobs
+### Task 13: Model, worker and jobs
 
 **Files:**
 - Create: `src/core/refine-model.ts`, `src/core/refine.worker.ts`, `src/core/refine-job.ts`
 - Test: `tests/unit/refine-job.test.ts`
 
 **Interfaces:**
-- Consumes: Tasks 2, 4, 11.
+- Consumes: Tasks 2, 4, 12.
 - Produces:
 ```ts
 // refine-model.ts
@@ -1060,14 +1118,14 @@ it('detects through the job and reports progress', async () => { /* 12 edge prop
 
 ---
 
-### Task 13: Session lifecycle in the store
+### Task 14: Session lifecycle in the store
 
 **Files:**
 - Modify: `src/core/types.ts:7-18` (add `'refine'` to `Tool`), `src/core/store.ts`, `src/core/commands.ts:43-65,117-133`, `src/xr/runtime.ts:230-235`
 - Test: `tests/unit/refine-session.test.ts`
 
 **Interfaces:**
-- Consumes: Task 12.
+- Consumes: Task 13.
 - Produces (in `src/core/store.ts`):
 ```ts
 export type RefineMode = 'edge' | 'region' | 'brush' | 'detect';
@@ -1170,14 +1228,14 @@ it('routes undo to the session only while it has steps', async () => { /* undoTa
 
 ---
 
-### Task 14: Session features: guides, regions, brushes and detection
+### Task 15: Session features: guides, regions, brushes and detection
 
 **Files:**
 - Modify: `src/core/store.ts`
 - Test: `tests/unit/refine-session.test.ts` (extend)
 
 **Interfaces:**
-- Consumes: Tasks 7 to 13.
+- Consumes: Tasks 7 to 14.
 - Produces (store actions):
 ```ts
 setRefineMode(mode: RefineMode): void;
@@ -1290,7 +1348,7 @@ it('never applies a proposal that was not accepted', async () => {
 
 ---
 
-### Task 15: Tool wiring and the panel
+### Task 16: Tool wiring and the panel
 
 **Files:**
 - Create: `src/components/RefineControls.tsx`
@@ -1298,7 +1356,7 @@ it('never applies a proposal that was not accepted', async () => {
 - Test: `tests/unit/refine-wiring.test.ts`
 
 **Interfaces:**
-- Consumes: Tasks 13, 14.
+- Consumes: Tasks 14, 15.
 - Produces: `export function RefineControls()` (no props; reads `useEditor((s) => s.refine)` as `WarpControls` does).
 
 Wiring, each beside its Warp counterpart:
@@ -1319,7 +1377,7 @@ Panel, as the spec's sketch:
 - Not started: a Start button and the reason it cannot start, as `WarpControls` does.
 - A four-way mode switch: Edge, Region, Brush, Detect (`RadioGroup` from `ui.tsx`).
 - **Edge:** kind (Line, Arc, Spline); Width as a `LogRangeInput` 0.1 to 5 mm with an Auto toggle (null); Strength 0 to 100 %, how loosely the edge follows the guide's line, arc or spline; Joints (Sharp, Smooth); Dismiss and Accept.
-- **Region:** `SurfaceBrushControls` with `fitted={{ radius: refineBrushRadius, range: fittedSizeRange(partSize(part)), set: setRefineBrushRadius }}`; a `Make region` button, enabled when triangles are painted; treatment (Smooth, Flatten, Shape); for Shape a select of Auto, Cylinder, Cone, Sphere, and the fitted name when Auto (`Fits a cylinder`); Strength 0 to 100 %; Keep detail switch with an Offset field in mm and an Auto toggle (how far a feature must deviate from the surface, raised or recessed, to be preserved); Blend in mm with an Auto toggle; Dismiss and Accept.
+- **Region:** `SurfaceBrushControls` with `fitted={{ radius: refineBrushRadius, range: fittedSizeRange(partSize(part)), set: setRefineBrushRadius }}`; a `Make region` button, enabled when triangles are painted; treatment (Smooth, Flatten, Shape); for Shape a select of Auto, Cylinder, Cone, Sphere, Sweep, and the fitted name when Auto (`Fits a cylinder`); Strength 0 to 100 %; Keep detail switch with an Offset field in mm and an Auto toggle (how far a feature must deviate from the surface, raised or recessed, to be preserved); Blend in mm with an Auto toggle; Dismiss and Accept.
 - **Brush:** Crease, Flatten, Smooth; radius (same fitted control); Strength 0 to 100 %.
 - **Detect:** Whole part or Painted area; Sensitivity 0 to 100 %; Minimum length in mm; `Find edges and surfaces`, which becomes `Cancel` with progress while running; with proposals present, `Accept selected` and `Dismiss selected`.
 - Footer: `${accepted} accepted · ${pending} proposed`; a fold warning when `folds.length > 0` (`${n} triangles fold over. Undo the last step or reduce Width.`); Cancel (calls `cancelRefine()` then `setTool('select')`) and Apply (disabled unless `refineEdited`).
@@ -1339,21 +1397,21 @@ it('maps the key action to the tool', () => {
 
 - [ ] **Step 2: Run** `npx vitest run tests/unit/refine-wiring.test.ts`. Expect FAIL.
 - [ ] **Step 3: Implement** the wiring and the panel.
-- [ ] **Step 4: Run** the test and `npm run build`. Expect PASS and a clean type check. Unit tests do not render components here; the panel is covered end to end in Tasks 16 and 17.
+- [ ] **Step 4: Run** the test and `npm run build`. Expect PASS and a clean type check. Unit tests do not render components here; the panel is covered end to end in Tasks 17 and 18.
 - [ ] **Step 5: Commit** `(feat) Add the Refine tool button, shortcut and panel`.
 
 ---
 
-### Task 16: Viewport: preview, pointer handling and overlay
+### Task 17: Viewport: preview, pointer handling and overlay
 
 **Files:**
 - Create: `src/components/RefineOverlay.tsx`, `src/components/RefinePointer.tsx`
 - Modify: `src/components/Viewport.tsx:162-189,207-221,243-254,297-341,1145-1151,1277-1279`, `src/components/CameraNavigation.tsx:32-37`, `src/components/SurfacePainter.tsx` (`PaintCursor` radius)
-- Create: `tests/e2e/refine.spec.ts`, `tests/e2e/helpers/refine.ts` (the fixture, helpers and first test described in Task 17)
+- Create: `tests/e2e/refine.spec.ts`, `tests/e2e/helpers/refine.ts` (the fixture, helpers and first test described in Task 18)
 - Test: `tests/e2e/refine.spec.ts`, test `guides a straight edge, accepts it and applies it`
 
 **Interfaces:**
-- Consumes: Tasks 13 to 15.
+- Consumes: Tasks 14 to 16.
 - Produces:
 ```ts
 // RefineOverlay.tsx
@@ -1379,7 +1437,7 @@ export function RefinePointerController({ pressed }: { pressed: () => boolean })
   - folded triangles in the warning colour Warp uses.
   Mount it beside `WarpOverlay` (`Viewport.tsx:1145`), inside the non-headset block, with `<RefinePointerController pressed={gizmoWasPressed} />`.
 
-- [ ] **Step 1: Write the failing test**: the fixture, `openRefine`, `clickSurface` and the first test from Task 17.
+- [ ] **Step 1: Write the failing test**: the fixture, `openRefine`, `clickSurface` and the first test from Task 18.
 - [ ] **Step 2: Run** `npx playwright test tests/e2e/refine.spec.ts`. Expect FAIL (clicks place no points).
 - [ ] **Step 3: Implement** the preview swap and raycast in `PartMesh`; click, paint and pointer routing; `RefinePointer.tsx`; `RefineOverlay.tsx`.
 - [ ] **Step 4: Run** the spec, `npm run build` and `npm test`. Expect PASS.
@@ -1387,10 +1445,10 @@ export function RefinePointerController({ pressed }: { pressed: () => boolean })
 
 ---
 
-### Task 17: End-to-end tests
+### Task 18: End-to-end tests
 
 **Files:**
-- Modify: `tests/e2e/refine.spec.ts`, `tests/e2e/helpers/refine.ts` (started in Task 16)
+- Modify: `tests/e2e/refine.spec.ts`, `tests/e2e/helpers/refine.ts` (started in Task 17)
 - Test: itself.
 
 **Interfaces:**
@@ -1398,7 +1456,7 @@ export function RefinePointerController({ pressed }: { pressed: () => boolean })
 
 Fixture: an inline `kitbasher` version 1 scene with one part, `softBox([4, 3, 2], 0.6, { step: 0.2, ripple: 0.04, noise: 0.008 })` serialized with `serializeGeometry`, named `Scanned block`. `tests/e2e/helpers/refine.ts` exports `openRefine(page)` (opens the scene, selects the part, presses `1`, `Home`, `e`, and waits for the panel's mode switch) and `clickSurface(page, world)`.
 
-- [ ] **Step 1: Write the remaining tests** (the first is already in place from Task 16)
+- [ ] **Step 1: Write the remaining tests** (the first is already in place from Task 17)
 
 ```ts
 test('guides a straight edge, accepts it and applies it', async ({ page }) => {
@@ -1440,7 +1498,7 @@ test('says so when a guide finds no edge', async ({ page }) => {
 
 ---
 
-### Task 18: Documentation
+### Task 19: Documentation
 
 **Files:**
 - Modify: `src/docs/assembly-guides.ts`, `src/docs/content.ts:80-111`, `src/docs/changelog.ts`, `docs/design.md:56-61`
@@ -1469,7 +1527,7 @@ test('says so when a guide finds no edge', async ({ page }) => {
 
 ---
 
-### Task 19: Performance and the reference parts
+### Task 20: Performance and the reference parts
 
 **Files:**
 - Create: `tests/unit/refine-benchmark.test.ts`, `tests/e2e/refine-reference.spec.ts`

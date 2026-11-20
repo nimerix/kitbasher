@@ -215,6 +215,9 @@ accepts, brush strokes and edits. These steps are session-local, as in Warp.
    - **Flatten** snaps the area to a true plane.
    - **Shape** snaps the area to a cylinder, cone or sphere. Auto picks the one that fits
      best and names it, and the user can override it.
+   - **Sweep**, also under Shape, snaps the area to a constant cross-section carried along
+     an arc or spline, for pipe elbows and hoses. The user chooses it; Auto does not.
+     (product owner)
 3. **Strength** sets how loosely the area follows the treatment, from no change to fully
    on the shape.
 4. **Keep detail** is on by default. Detail standing off the fitted surface is outlined in
@@ -441,8 +444,6 @@ session undo and redo; Apply, scene undo, Cancel.
 - Leaving a chosen radius or chamfer on a refined edge. Not asked for.
 - Headset and MCP support. Follows Warp.
 - Refining several parts in one session. One part at a time keeps Apply's guards simple.
-- Snapping a region to a tube or other section carried along a curve, for pipe elbows and
-  hoses. Not asked for; Smooth covers them.
 
 ## Open questions
 
@@ -450,7 +451,8 @@ None open. The product owner answered the four questions the draft raised:
 
 1. **"Follow an arc"** is about edges, not regions: it is a constant spline that represents
    the edge of the corner. The guide's arc and spline kinds cover it, and Strength is its
-   looseness. The Sweep shape the draft proposed for regions is removed.
+   looseness. The Sweep shape the draft proposed for regions is kept as an additional
+   feature, at the product owner's request.
 2. **Preserved detail** is controlled by an offset: how far a feature deviates from the
    surface decides whether it is preserved.
 3. **After Apply**, guides and regions are baked and gone, as with Warp.
