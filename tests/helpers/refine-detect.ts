@@ -1,4 +1,4 @@
-import { BufferAttribute, BufferGeometry } from 'three';
+import { BufferAttribute, BufferGeometry, Triangle, Vector3 } from 'three';
 import type { GuidePoint } from '../../src/core/refine-band';
 import { drawnCurve } from '../../src/core/refine-curve';
 import type { RefineProposal } from '../../src/core/refine-detect';
@@ -245,4 +245,37 @@ export function collar(slot = 0) {
   const geometry = new BufferGeometry();
   geometry.setAttribute('position', new BufferAttribute(Float32Array.from(triangles), 3));
   return geometry;
+}
+
+/** Raises a strap 0.34 mm proud across `collar`'s rings within `half` radians of +x, in place. */
+export function strapped(geometry: BufferGeometry, half: number) {
+  const position = geometry.getAttribute('position');
+  for (let i = 0; i < position.count; i++) {
+    const x = position.getX(i),
+      z = position.getZ(i);
+    const t = Math.min(1, Math.max(0, (Math.abs(Math.atan2(z, x)) - half) / 0.04));
+    const f = 1 + (0.34 * (1 - t * t * (3 - 2 * t))) / Math.hypot(x, z);
+    position.setX(i, x * f);
+    position.setZ(i, z * f);
+  }
+  return geometry;
+}
+
+/** Distance from `p` to the nearest of `triangles`. */
+export function distanceToTriangles(mesh: RefineMesh, p: Vec3, triangles: ArrayLike<number>) {
+  let best = Infinity;
+  const corner = (t: number, k: number): Vec3 => {
+    const w = mesh.weldOf[mesh.corners[t * 3 + k]] * 3;
+    return [mesh.position[w], mesh.position[w + 1], mesh.position[w + 2]];
+  };
+  for (let i = 0; i < triangles.length; i++) {
+    const t = triangles[i];
+    const q = new Triangle(
+      new Vector3(...corner(t, 0)),
+      new Vector3(...corner(t, 1)),
+      new Vector3(...corner(t, 2)),
+    ).closestPointToPoint(new Vector3(...p), new Vector3());
+    best = Math.min(best, q.distanceTo(new Vector3(...p)));
+  }
+  return best;
 }

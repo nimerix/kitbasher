@@ -73,8 +73,16 @@ const refitGrowth = 1.5;
 const fitSample = 512;
 /** The first refits of a growing region choose the kind afresh; later ones keep it. */
 const openRefits = 2;
-/** Two neighbouring regions join when their union keeps this fraction of points within noise. */
-const joinSupport = 0.95;
+/**
+ * Two neighbouring regions are one surface when the fit to both is as good as each alone (rms no
+ * more than `joinRms` times the larger of their own), neither sits to one side of it (mean signed
+ * residual within the noise), and, for planes, their own planes agree within `joinAngle` degrees
+ * and the noise in offset. A curved shape fitted to part of a surface extrapolates too loosely to
+ * compare directly (two halves of one dome fit radii 0.05 mm apart), so for curved shapes the
+ * joint fit's tests are the agreement.
+ */
+const joinRms = 1.2;
+const joinAngle = 0.5;
 /** Times growth may go on with a different kind of shape. */
 const maxSwitches = 2;
 /** Progress is reported at least this often, as a fraction of the run. */
@@ -1376,8 +1384,61 @@ function joinArcs(context: Context, pieces: Piece[]) {
       Math.max(1.5 * halfWidth, 2 * context.step),
       members,
     );
-    return merged?.kind === 'arc' && snapPiece(context, merged) ? merged : null;
+    if (merged?.kind !== 'arc' || !snapPiece(context, merged)) return null;
+    // The joined arc must be edge all along, the stretch between the two pieces included, on the
+    // surface in scope.
+    const circle = fitCircle(merged.targets.flat());
+    if (!circle) return null;
+    const [head, middle, tail] = merged.targets;
+    const start = angleOn(circle, head);
+    const wrap = (x: number) => ((x % (2 * Math.PI)) + 2 * Math.PI) % (2 * Math.PI);
+    const toMiddle = wrap(angleOn(circle, middle) - start),
+      toEnd = wrap(angleOn(circle, tail) - start);
+    const sweep = toMiddle < toEnd ? toEnd : toEnd - 2 * Math.PI;
+    return edgeOnArc(context, circle, start, sweep, merged.path[0]) ? merged : null;
   }
+}
+
+/**
+ * True when the shorter stretch of `circle` between the angles of `p` and `q` is edge all along:
+ * at every sample the surface in scope lies under the circle (within three fit tolerances along
+ * its normal, not off to its side past the paint) and an edge vertex is at or next to the
+ * nearest vertex. A strap, a slot or a gap in the paint across the stretch fails it.
+ */
+function edgeBetween(context: Context, circle: Circle, p: Vec3, q: Vec3, from: number) {
+  const a = angleOn(circle, p);
+  const sweep = angleOn(circle, q) - a;
+  return edgeOnArc(context, circle, a, Math.atan2(Math.sin(sweep), Math.cos(sweep)), from);
+}
+
+/** True when the arc of `circle` from angle `a` round by `sweep` is edge all along: see `edgeBetween`. */
+function edgeOnArc(context: Context, circle: Circle, a: number, sweep: number, from: number) {
+  const { topology, onEdge } = context;
+  const count = Math.max(1, Math.ceil(Math.abs(sweep * circle.radius) / (context.step / 2)));
+  for (let k = 0; k <= count; k++) {
+    const at = onCircle(circle, along(circle.centre, rotated(circle, a + (sweep * k) / count), 1));
+    from = nearestVertex(context, from, at);
+    if (!onSurface(context, at, from)) return false;
+    let edge = onEdge[from] === 1;
+    for (let j = topology.neighbourStart[from]; j < topology.neighbourStart[from + 1] && !edge; j++)
+      edge = onEdge[topology.neighbours[j]] === 1;
+    if (!edge) return false;
+  }
+  return true;
+}
+
+/**
+ * The surface point in scope under `q`, found from vertex `from`, or null when the surface there is
+ * more than three fit tolerances from `q` along its normal or off to its side (past the paint).
+ */
+function onSurface(context: Context, q: Vec3, from: number) {
+  const guide = snap(context, nearestVertex(context, from, q), q);
+  if (!guide) return null;
+  const off = sub(q, guide.position);
+  const n = faceNormal(context.mesh, guide.triangle);
+  const normal = dot(off, n);
+  const side = Math.hypot(...off.map((x, k) => x - normal * n[k]));
+  return Math.abs(normal) <= 3 * fitTolerance(context) && side <= context.step / 8 ? guide : null;
 }
 
 /** Angles about a circle's centre in its plane. */
@@ -1400,7 +1461,8 @@ function carryEnds(context: Context, piece: Piece) {
     last = targets[targets.length - 1];
   const ring = !piece.closed && Math.hypot(...sub(first, last)) <= scale;
   const circle = piece.kind === 'arc' ? fitCircle(targets.flat()) : null;
-  if (ring && circle) {
+  const end = piece.path[piece.path.length - 1];
+  if (ring && circle && edgeBetween(context, circle, last, first, end)) {
     // An arc whose ends almost touch is the whole ring, drawn through three points at thirds.
     const a = angleOn(circle, first);
     piece.closed = true;
@@ -1411,18 +1473,6 @@ function carryEnds(context: Context, piece: Piece) {
     return snapPiece(context, piece);
   }
   if (piece.closed || ring) return true;
-  const close = 3 * fitTolerance(context);
-  const lateral = context.step / 8;
-  /** True when the surface in scope is under `q`: near it, and not off to its side past the paint. */
-  const onScope = (q: Vec3, from: number) => {
-    const guide = snap(context, nearestVertex(context, from, q), q);
-    if (!guide) return null;
-    const off = sub(q, guide.position);
-    const n = faceNormal(context.mesh, guide.triangle);
-    const normal = dot(off, n);
-    const side = Math.hypot(...off.map((x, k) => x - normal * n[k]));
-    return Math.abs(normal) <= close && side <= lateral ? guide : null;
-  };
   // An arc's direction of travel round its circle: the way that passes its middle point.
   let sweep = 0,
     start = 0;
@@ -1433,7 +1483,6 @@ function carryEnds(context: Context, piece: Piece) {
       toEnd = wrap(angleOn(circle, last) - start);
     sweep = toMiddle < toEnd ? toEnd : toEnd - 2 * Math.PI;
   }
-  const grown = [0, 0];
   const ends: (Vec3 | null)[] = [null, null];
   for (const end of [0, 1] as const) {
     const carry = piece.carried[end];
@@ -1448,10 +1497,9 @@ function carryEnds(context: Context, piece: Piece) {
         const angle = end === 0 ? start - turn : start + sweep + turn;
         q = onCircle(circle, along(circle.centre, rotated(circle, angle), 1));
       } else q = along(tip, out, t);
-      const guide = onScope(q, from);
+      const guide = onSurface(context, q, from);
       if (!guide) break;
       from = weldedCorner(context.mesh, guide.triangle, 0);
-      grown[end] = t;
       ends[end] = q;
       if (piece.kind === 'spline') continue;
       targets[end === 0 ? 0 : targets.length - 1] = q;
@@ -1461,21 +1509,14 @@ function carryEnds(context: Context, piece: Piece) {
   if (piece.kind === 'spline')
     for (const end of [0, 1] as const) {
       const q = ends[end];
-      if (!q) continue;
+      // A point closer to the end than half the spline's spacing would crowd it: not added.
+      const tip = end === 0 ? targets[0] : targets[targets.length - 1];
+      if (!q || Math.hypot(...sub(q, tip)) < (splineSpacing * piece.halfWidth) / 2) continue;
       const guide = snap(context, nearestOnPath(piece.path, piece.points, q), q);
       if (!guide) continue;
       if (end === 0) (targets.unshift(q), triangles.unshift(guide.triangle));
       else (targets.push(q), triangles.push(guide.triangle));
     }
-  if (circle && (grown[0] || grown[1])) {
-    // The middle point stays on the circle, halfway round the grown arc.
-    const turn0 = (Math.sign(sweep) * grown[0]) / circle.radius,
-      turn1 = (Math.sign(sweep) * grown[1]) / circle.radius;
-    const middle = start - turn0 + (sweep + turn0 + turn1) / 2;
-    const q = onCircle(circle, along(circle.centre, rotated(circle, middle), 1));
-    const guide = snap(context, nearestOnPath(piece.path, piece.points, q), q);
-    if (guide) [targets[1], triangles[1]] = [guide.position, guide.triangle];
-  }
   return true;
 }
 
@@ -1505,14 +1546,18 @@ function pieceInput(context: Context, piece: Piece): EdgeInput | null {
   const { minLength } = context.options;
   const { path, points, targets, triangles, kind, closed } = piece;
   const guides: GuidePoint[] = [];
+  // With paint, every point goes to the nearest point of the painted surface.
   for (let i = 0; i < targets.length; i++) {
-    if (triangles[i] >= 0) {
-      guides.push({ triangle: triangles[i], position: targets[i] });
-      continue;
-    }
-    const guide = snap(context, nearestOnPath(path, points, targets[i]), targets[i]);
+    const from =
+      triangles[i] >= 0
+        ? weldedCorner(context.mesh, triangles[i], 0)
+        : nearestOnPath(path, points, targets[i]);
+    const guide = snap(context, nearestVertex(context, from, targets[i]), targets[i]);
     if (!guide) return null;
-    guides.push(guide);
+    // Without paint a point already placed (a line's end, a carried end) keeps its place on its
+    // curve, within the fit tolerance of the surface: off a rounded corner, toward the true edge.
+    const placed = triangles[i] >= 0 && !context.triangleInScope;
+    guides.push(placed ? { triangle: guide.triangle, position: targets[i] } : guide);
   }
   const flat = guides.flatMap((g) => g.position);
   let length: number, span: number;
@@ -2051,8 +2096,8 @@ function fillHoles(
 }
 
 /**
- * Joins neighbouring regions of one kind whose triangles together fit one shape, nearly all within
- * the growth tolerance: growth from two seeds can stop short of each other on one surface.
+ * Joins neighbouring regions of one kind that are one surface (`sameSurface`): growth from two seeds
+ * can stop short of each other on one surface.
  */
 function joinRegions(context: Context, regions: { kind: ShapeKind; triangles: number[] }[]) {
   const { mesh, topology, normals } = context;
@@ -2089,14 +2134,71 @@ function joinRegions(context: Context, regions: { kind: ShapeKind; triangles: nu
     const a = find(x),
       b = find(y);
     if (a === b) continue;
-    const union = [...corners[a], ...corners[b]];
-    const fit = tryFit(context, normals, union, union.length, regions[a].kind);
-    if (!fit?.within || fit.support < joinSupport) continue;
+    const sample = (set: Set<number>) => {
+      const list = [...set];
+      return sampleOf(context, normals, list, list.length);
+    };
+    if (!sameSurface(regions[a].kind, sample(corners[a]), sample(corners[b]), context.noise))
+      continue;
     into[b] = a;
-    regions[a].triangles.push(...regions[b].triangles);
+    // Appended one by one: a spread of a large region would overflow the call stack.
+    for (const t of regions[b].triangles) regions[a].triangles.push(t);
     regions[b].triangles = [];
     for (const v of corners[b]) corners[a].add(v);
   }
   for (let i = regions.length - 1; i >= 0; i--)
     if (!regions[i].triangles.length) regions.splice(i, 1);
+}
+
+interface Sample {
+  points: Float32Array;
+  directions: Float32Array;
+}
+
+/** Signed distances of a sample's points from `shape`: their mean, and their rms. */
+function residuals(shape: Shape, { points }: Sample) {
+  let sum = 0,
+    squares = 0;
+  const count = points.length / 3;
+  for (let i = 0; i < count; i++) {
+    const d = shapeDistance(shape, points[i * 3], points[i * 3 + 1], points[i * 3 + 2]);
+    sum += d;
+    squares += d * d;
+  }
+  return { mean: sum / count, rms: Math.sqrt(squares / count) };
+}
+
+/**
+ * True when samples of two neighbouring regions are one surface of `kind`: see `joinRms`. A step, a
+ * fold or a taper leaves each side consistently to one side of the joint fit, or the joint fit
+ * worse than either alone.
+ */
+export function sameSurface(kind: ShapeKind, a: Sample, b: Sample, noise: number) {
+  const fit = (s: Sample) => {
+    try {
+      return fitShape(s.points, s.directions, kind, noise);
+    } catch {
+      return null;
+    }
+  };
+  const both: Sample = {
+    points: new Float32Array(a.points.length + b.points.length),
+    directions: new Float32Array(a.directions.length + b.directions.length),
+  };
+  both.points.set(a.points);
+  both.points.set(b.points, a.points.length);
+  both.directions.set(a.directions);
+  both.directions.set(b.directions, a.directions.length);
+  const [own, other, joint] = [fit(a), fit(b), fit(both)];
+  if (!own?.within || !other?.within || !joint?.within) return false;
+  if (joint.rms > joinRms * Math.max(own.rms, other.rms, 1e-9)) return false;
+  if (Math.abs(residuals(joint.shape, a).mean) > noise) return false;
+  if (Math.abs(residuals(joint.shape, b).mean) > noise) return false;
+  if (own.shape.kind !== 'plane' || other.shape.kind !== 'plane') return true;
+  const cos = Math.abs(dot(own.shape.normal, other.shape.normal));
+  return (
+    cos >= Math.cos((joinAngle * Math.PI) / 180) &&
+    Math.abs(residuals(other.shape, a).mean) <= noise &&
+    Math.abs(residuals(own.shape, b).mean) <= noise
+  );
 }

@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import { vertexCurvature } from '../../src/core/refine-curvature';
-import { type RefineProposal, detectDefaults, detectFeatures } from '../../src/core/refine-detect';
+import {
+  type RefineProposal,
+  detectDefaults,
+  detectFeatures,
+  sameSurface,
+} from '../../src/core/refine-detect';
 import { solveEdge } from '../../src/core/refine-edge';
 import { type RefineMesh, medianEdgeLength, weldedCorner } from '../../src/core/refine-mesh';
 import type { Vec3 } from '../../src/core/types';
@@ -10,6 +15,8 @@ import {
   boxCrestVertices,
   collar,
   collarCrest,
+  distanceToTriangles,
+  strapped,
   dentedDome,
   drawnPoints,
   guidePoints,
@@ -492,5 +499,134 @@ describe('detectFeatures within paint and past false bands', () => {
     expect(a).toBe(b);
     expect(inNear / near.length).toBeGreaterThan(0.9);
     expect(inFar / far.length).toBeGreaterThan(0.9);
+  });
+});
+
+describe('detectFeatures across interruptions', () => {
+  const onRim = (p: Vec3, height: number) =>
+    Math.hypot(Math.hypot(p[0], p[2]) - collarCrest.radius, p[1] - height) < 0.14;
+  const rimArcs = (found: RefineProposal[], height: number) =>
+    edgesOf(found).filter(
+      (e) =>
+        e.input.segments[0].kind === 'arc' &&
+        guidePoints(e.input).every((g) => onRim(g.position, height)),
+    );
+
+  it('leaves a rim open where a strap crosses it', () => {
+    const half = 0.07;
+    const { mesh, topology, noise } = modelOf(strapped(collar(), half));
+    const found = detectFeatures(mesh, topology, noise, defaults);
+    for (const height of collarCrest.heights) {
+      const arcs = rimArcs(found, height);
+      expect(arcs.length).toBeGreaterThan(0);
+      for (const e of arcs) {
+        expect(e.input.closed).toBe(false);
+        for (const p of drawnPoints(e.input))
+          expect(Math.abs(Math.atan2(p[2], p[0]))).toBeGreaterThanOrEqual(0.8 * half);
+      }
+    }
+  });
+
+  it('keeps two pieces of one circle apart across gaps in the paint', () => {
+    const half = 0.05;
+    const { mesh, topology, noise } = modelOf(collar());
+    const triangles = trianglesWhere(
+      mesh,
+      (x, _, z) => Math.abs(Math.atan2(z, Math.abs(x))) > half,
+    );
+    const found = detectFeatures(mesh, topology, noise, { ...defaults, triangles });
+    const arcs = rimArcs(found, collarCrest.heights[1]);
+    expect(arcs.length).toBeGreaterThan(0);
+    for (const e of arcs)
+      for (const p of drawnPoints(e.input))
+        expect(Math.abs(Math.atan2(p[2], Math.abs(p[0])))).toBeGreaterThanOrEqual(0.8 * half);
+  });
+
+  it('puts every control point on a painted triangle', () => {
+    const ramp = (d: number) => {
+      if (d <= -0.05) return 0.65;
+      if (d < 0.05) return 0.65 - (d + 0.05) ** 2 / 0.2;
+      if (d <= 0.6) return 0.65 - d;
+      if (d < 0.7) return (0.7 - d) ** 2 / 0.2;
+      return 0;
+    };
+    const { mesh, topology } = modelOf(
+      heightField(
+        3,
+        (x, z) => {
+          const delta = Math.abs(x - z);
+          return ramp(Math.max(x, z) + (delta < 0.1 ? (0.1 - delta) ** 2 / 0.4 : 0));
+        },
+        clean,
+      ),
+    );
+    for (const gap of [0.05, 0.1, 0.2, 0.3]) {
+      const triangles = trianglesWhere(mesh, (x, _, z) => x <= -gap || z <= -gap);
+      const painted = new Set(triangles);
+      for (const e of edgesOf(detectFeatures(mesh, topology, 0.014, { ...defaults, triangles })))
+        for (const g of guidePoints(e.input)) {
+          expect(painted.has(g.triangle)).toBe(true);
+          expect(distanceToTriangles(mesh, g.position, [g.triangle])).toBeLessThan(1e-6);
+        }
+    }
+  });
+});
+
+describe('sameSurface', () => {
+  const noise = 0.014;
+  /** A grid of `count` x `count` points of `at(u, v)`, u and v in 0..1, with seeded noise. */
+  const patch = (at: (u: number, v: number) => { p: Vec3; n: Vec3 }, seed: number) => {
+    const count = 20;
+    const points = new Float32Array(count * count * 3),
+      directions = new Float32Array(count * count * 3);
+    let x = seed;
+    const next = () => ((x = (x * 1103515245 + 12345) % 2147483648) / 2147483648) * 2 - 1;
+    for (let i = 0; i < count; i++)
+      for (let j = 0; j < count; j++) {
+        const { p, n } = at(i / (count - 1), j / (count - 1));
+        const e = 0.008 * next();
+        const k = (i * count + j) * 3;
+        points.set([p[0] + e * n[0], p[1] + e * n[1], p[2] + e * n[2]], k);
+        directions.set(n, k);
+      }
+    return { points, directions };
+  };
+  const plate = (x0: number, height: number, tilt: number, seed: number) =>
+    patch((u, v) => {
+      const x = x0 + 2 * u;
+      return {
+        p: [x, height + Math.tan(tilt) * Math.max(0, x), -1 + 2 * v],
+        n: [-Math.sin(tilt) * (x > 0 ? 1 : 0), 1, 0].map((c, _, a) => c / Math.hypot(...a)) as Vec3,
+      };
+    }, seed);
+  const tube = (y0: number, taper: number, seed: number) =>
+    patch((u, v) => {
+      const y = y0 + 2 * u,
+        a = Math.PI * v;
+      const r = 1 + Math.tan(taper) * Math.max(0, y);
+      return { p: [r * Math.cos(a), y, r * Math.sin(a)], n: [Math.cos(a), 0, Math.sin(a)] };
+    }, seed);
+  const dome = (from: number, to: number, seed: number) =>
+    patch((u, v) => {
+      const polar = from + (to - from) * u,
+        a = 2 * Math.PI * v;
+      const n: Vec3 = [
+        Math.sin(polar) * Math.cos(a),
+        Math.cos(polar),
+        Math.sin(polar) * Math.sin(a),
+      ];
+      return { p: n.map((c) => 3 * c) as Vec3, n };
+    }, seed);
+  const degree = Math.PI / 180;
+
+  it('joins one plate split by a seam and one dome split into a cap and a ring', () => {
+    expect(sameSurface('plane', plate(-2, 0, 0, 1), plate(0, 0, 0, 2), noise)).toBe(true);
+    expect(sameSurface('sphere', dome(0, 0.35, 3), dome(0.35, 0.6, 4), noise)).toBe(true);
+  });
+
+  it('keeps apart a 0.05 mm step, a 2 degree fold and a 1 degree taper', () => {
+    expect(sameSurface('plane', plate(-2, 0, 0, 1), plate(0, 0.05, 0, 2), noise)).toBe(false);
+    expect(sameSurface('plane', plate(-2, 0, 0, 1), plate(0, 0, 2 * degree, 2), noise)).toBe(false);
+    expect(sameSurface('cylinder', tube(-2, 0, 5), tube(0, 1 * degree, 6), noise)).toBe(false);
   });
 });
