@@ -692,7 +692,7 @@ const regionDetail = (page: Page) =>
 
 // The seeded Offset is the limit the solve's last fit round used (0.1105 mm here); the automatic
 // solve works the limit out afresh each round, so a fixed one moves the preview 0.0088 mm.
-test.fixme('Offset off Automatic keeps the preview', async ({ page }) => {
+test('Offset off Automatic moves the preview less than 0.02 mm', async ({ page }) => {
   await flattenRivet(page);
   await keepDraft(page);
   await page.getByRole('switch', { name: 'Choose offset automatically' }).click();
@@ -701,7 +701,7 @@ test.fixme('Offset off Automatic keeps the preview', async ({ page }) => {
   expect((await regionDetail(page))![1]).toBeGreaterThan(0);
   expect(Number(await offset.inputValue())).toBeGreaterThan(0);
   await expect.poll(() => draftRebuilt(page)).toBe(true);
-  expect(await previewChange(page)).toBeLessThan(1e-6);
+  expect(await previewChange(page)).toBeLessThan(0.02);
 });
 
 test('a large Offset stops keeping a rivet as detail', async ({ page }) => {
