@@ -226,6 +226,8 @@ const area = (p: Float64Array, out: Float64Array) => {
  * surface should have at its centroid on its side of the zero set (the field's sign there), or,
  * without `facing`, the normal of the triangle it is cut from. `beside` gives the side of a vertex
  * the field does not cover, so a chain edge beside it can still be told to carry the zero set.
+ * `stationary` vertices keep their exact position: the zero set is never snapped to one, one on it
+ * already stays where it stands, and it is touched only where a triangle around it is split.
  */
 export function cutAlongField(
   mesh: RefineMesh,
@@ -244,6 +246,7 @@ export function cutAlongField(
   snap = 0.25,
   facing?: (x: number, y: number, z: number, side: 1 | -1, out: Float64Array) => void,
   beside?: (v: number) => number,
+  stationary?: Set<number>,
 ): CutResult {
   const { neighbourStart, neighbours, triangleStart, trianglesOf } = topology;
   const weldedCount = mesh.weldedCount;
@@ -322,6 +325,11 @@ export function cutAlongField(
       b = edgeB[i];
     if (isZero(a) || isZero(b)) continue;
     const v = edgeT[i] < snap ? a : b;
+    // A stationary vertex is never snapped to; the edge is split instead.
+    if (stationary?.has(v)) {
+      clamped[i] = 1;
+      continue;
+    }
     if (!canSnap(v)) {
       clamped[i] = 1;
       continue;
@@ -347,7 +355,9 @@ export function cutAlongField(
     if (!zero[i]) continue;
     const [a, b, t] = pointEdge.subarray(i * 3, i * 3 + 3);
     creased[i] = +(place(point[i * 3], point[i * 3 + 1], point[i * 3 + 2], out, a, b, t) !== false);
-    placedAt.set(out, i * 3);
+    if (stationary?.has(welded[i]))
+      placedAt.set(mesh.position.subarray(welded[i] * 3, welded[i] * 3 + 3), i * 3);
+    else placedAt.set(out, i * 3);
     placed[i] = 1;
   }
   const splitT = new Float64Array(edgeT.length).fill(NaN);
@@ -1002,6 +1012,11 @@ export function cutAlongField(
   for (let k = 0; k < count; k++) {
     if (!zero[k]) continue;
     const v = welded[k];
+    if (stationary?.has(v)) {
+      chain.push(v);
+      mesh.crease[v] = creased[k];
+      continue;
+    }
     if (placed[k]) moveVertex(mesh, v, placedAt[k * 3], placedAt[k * 3 + 1], placedAt[k * 3 + 2]);
     mesh.touched[v] = 1;
     mesh.crease[v] = creased[k];
@@ -1093,6 +1108,13 @@ export function cutAlongField(
     });
     for (const [t, list] of owned) children.set(t, list);
   }
+  // A stationary chain vertex is touched only where a triangle around it was split.
+  if (stationary)
+    for (const v of chain) {
+      if (!stationary.has(v)) continue;
+      for (let i = triangleStart[v]; i < triangleStart[v + 1] && !mesh.touched[v]; i++)
+        if (children.has(trianglesOf[i])) mesh.touched[v] = 1;
+    }
 
   // Sides after the cut: chain vertices are on the zero set, other vertices keep their field sign.
   const total = mesh.weldedCount;

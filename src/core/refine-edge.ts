@@ -102,6 +102,11 @@ export interface EdgeResult {
   folded: Uint32Array;
   /** Connected pieces of the cut's chain, from its `edges`; 0 without a cut. */
   pieces: number;
+  /**
+   * Vertices the band leaves out that the cut passes between where they stand: never moved, their
+   * position bits exactly the source's.
+   */
+  stationary: Uint32Array;
 }
 
 /** Deepest the solved edge may lie below or above the surface, as a fraction of the band's width. */
@@ -1951,7 +1956,14 @@ export function applyEdge(
   cut: boolean,
 ): EdgeResult {
   if (!(strength > 0))
-    return { changed: empty, cut: null, skipped: empty, folded: empty, pieces: 0 };
+    return {
+      changed: empty,
+      cut: null,
+      skipped: empty,
+      folded: empty,
+      pieces: 0,
+      stationary: empty,
+    };
   const { position } = mesh;
   const frame = frameOf(mesh, topology, solve);
   const { edge } = frame;
@@ -2082,7 +2094,14 @@ export function applyEdge(
   if (!cut) {
     const around = trianglesAround(topology, turned(changed), null);
     const folded = foldedAgainst(mesh, around, facing, sideAt, normalAt);
-    return { changed: Uint32Array.from(changed), cut: null, skipped: empty, folded, pieces: 0 };
+    return {
+      changed: Uint32Array.from(changed),
+      cut: null,
+      skipped: empty,
+      folded,
+      pieces: 0,
+      stationary: empty,
+    };
   }
 
   // One cut runs along the whole path, among vertices of more than `cutWeight`, those a corner fade
@@ -2212,7 +2231,8 @@ export function applyEdge(
   };
 
   const on = new Float64Array(3);
-  const kept: number[] = [...stays, ...aside];
+  const kept: number[] = [...stays];
+  const stationary = new Set(aside);
   for (const [v, i] of indexOf) if (frame.pinned[i]) kept.push(v);
   const keptAt = new Set(
     kept.map((v) => `${position[v * 3]},${position[v * 3 + 1]},${position[v * 3 + 2]}`),
@@ -2265,13 +2285,26 @@ export function applyEdge(
         candidate,
         facing,
         beside,
+        stationary,
       ).skipped.length;
       if (left < fewest) [fewest, snap] = [left, candidate];
       if (!left) break;
     }
   }
-  const cutResult = cutAlongField(mesh, topology, vertices, field, placer, snap, facing, beside);
-  const result = frame.corners.length ? splitCorners(mesh, frame, cutResult, strength) : cutResult;
+  const cutResult = cutAlongField(
+    mesh,
+    topology,
+    vertices,
+    field,
+    placer,
+    snap,
+    facing,
+    beside,
+    stationary,
+  );
+  const result = frame.corners.length
+    ? splitCorners(mesh, frame, cutResult, strength, stationary)
+    : cutResult;
   const all = new Set(changed);
   for (const v of result.chain) {
     all.add(v);
@@ -2286,6 +2319,7 @@ export function applyEdge(
     skipped: result.skipped,
     folded: foldedAgainst(mesh, around, facing, sideAt, normalAt),
     pieces: chainPieces(result.edges),
+    stationary: Uint32Array.from(aside),
   };
 }
 
@@ -2384,7 +2418,13 @@ function chainPieces(pairs: Uint32Array) {
  * of the triangles around it: a chain vertex moves; inside a chain edge the edge is split there, its
  * two triangles into four. Returns the cut with any new vertices.
  */
-function splitCorners(mesh: RefineMesh, frame: Frame, cut: CutResult, strength: number): CutResult {
+function splitCorners(
+  mesh: RefineMesh,
+  frame: Frame,
+  cut: CutResult,
+  strength: number,
+  stationary: Set<number>,
+): CutResult {
   const { position } = mesh;
   const at = (w: number) => [position[w * 3], position[w * 3 + 1], position[w * 3 + 2]];
   const area = (p: number[][]) =>
@@ -2406,6 +2446,8 @@ function splitCorners(mesh: RefineMesh, frame: Frame, cut: CutResult, strength: 
       const d = Math.hypot(...[0, 1, 2].map((k) => pa[k] + t * ab[k] - corner.point[k]));
       if (d > corner.soft) continue;
       const option = t <= 0 || t >= 1 ? { a: t <= 0 ? a : b, b: -1, t: 0, d } : { a, b, t, d };
+      // A stationary vertex is not moved to the corner.
+      if (option.b < 0 && stationary.has(option.a)) continue;
       found.set(`${option.a},${option.b}`, option);
     }
     return [...found.values()].sort((p, q) => p.d - q.d || p.a - q.a || p.b - q.b);

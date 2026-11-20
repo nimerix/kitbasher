@@ -8,8 +8,8 @@ import {
   moveWeights,
   solveEdge,
 } from '../../src/core/refine-edge';
-import { type RefineMesh, cloneRefineMesh } from '../../src/core/refine-mesh';
-import type { GuidePoint } from '../../src/core/refine-band';
+import { type RefineMesh, cloneRefineMesh, vertexNormal } from '../../src/core/refine-mesh';
+import { BandZone, type GuidePoint, estimateWidth } from '../../src/core/refine-band';
 import { type GuideKind, closestOnCurve } from '../../src/core/refine-curve';
 import {
   closedMesh,
@@ -677,3 +677,152 @@ const rimCase = () => {
     solve: solveEdge(model.mesh, model.topology, inputOf('arc', points), model.noise)!,
   };
 };
+
+/**
+ * A 0.4 mm step with a 0.045 mm rounding, its top bent toward a neighbouring edge 0.30 mm away
+ * over the middle, with the band's own zones forced Beyond where `beyond` holds: a stretch the band
+ * leaves out.
+ */
+function bridgedStep(beyond: (p: number[], zone: number) => boolean) {
+  const geometry = extrudedProfile(
+    [
+      [-1.5, 0],
+      [-0.3, 0],
+      [-0.3, 0.4],
+      [0.3, 0.4],
+      [0.3, 0],
+      [1.5, 0],
+    ],
+    [0, 0.15, 0.045, 0],
+    5,
+    { ripple: 0, noise: 0.004 },
+  );
+  const attribute = geometry.getAttribute('position');
+  for (let i = 0; i < attribute.count; i++) {
+    const [x, z] = [attribute.getX(i), attribute.getZ(i)];
+    const blend = Math.max(0, Math.min(1, (0.85 - Math.abs(z)) / 0.55));
+    attribute.setX(i, x + 0.3 * blend * Math.max(0, Math.min(1, (0.3 - x) / 0.6)));
+  }
+  geometry.computeVertexNormals();
+  const model = modelOf(geometry);
+  const radius = 0.045;
+  const points = [-2, 2].map((z) =>
+    pointOn(model.mesh, [
+      0.3 - radius + radius / Math.SQRT2,
+      0.4 - radius + radius / Math.SQRT2,
+      z,
+    ]),
+  );
+  const width = estimateWidth(model.mesh, model.topology, 'line', points, model.noise);
+  const input: EdgeInput = {
+    segments: [{ kind: 'line', points }],
+    joints: [],
+    closed: false,
+    width,
+    strength: 1,
+  };
+  const solve = solveEdge(model.mesh, model.topology, input, model.noise)!;
+  const at = (v: number) => [0, 1, 2].map((a) => model.mesh.position[v * 3 + a]);
+  const bands = solve.bands.map((band) => {
+    const zone = band.zone.slice();
+    band.vertices.forEach((v, k) => {
+      if (beyond(at(v), zone[k])) zone[k] = BandZone.Beyond;
+    });
+    return { ...band, zone };
+  });
+  return { model, solve: { ...solve, bands }, at };
+}
+/** The forced stretch: the top's vertices beside the edge over the middle 0.38 mm. */
+const leftOut = (p: number[]) => Math.abs(p[2]) < 0.19 && p[0] < 0.284 && p[1] > 0.33;
+
+describe('a cut through a stretch the band leaves out', () => {
+  it('bridges the stretch and leaves its vertices exactly where they are', () => {
+    const { model, solve } = bridgedStep(leftOut);
+    const out = cloneRefineMesh(model.mesh, true);
+    const result = applyEdge(out, model.topology, solve, 1, true);
+    expect(result.pieces).toBe(1);
+    expect(result.skipped).toHaveLength(0);
+    expect(result.folded).toHaveLength(0);
+    const beyond = solve.bands[0].vertices.filter(
+      (_, k) => solve.bands[0].zone[k] === BandZone.Beyond,
+    );
+    for (const v of beyond)
+      for (let a = 0; a < 3; a++)
+        expect(Object.is(out.position[v * 3 + a], model.mesh.position[v * 3 + a])).toBe(true);
+  });
+
+  it("takes in no vertex farther than half the band's width from the edge", () => {
+    // Every vertex of the top over the middle is left out, near the edge and far from it.
+    const { model, solve } = bridgedStep((p) => Math.abs(p[2]) < 0.19 && p[1] > 0.33);
+    const out = cloneRefineMesh(model.mesh, true);
+    const result = applyEdge(out, model.topology, solve, 1, true);
+    const on = new Float64Array(3);
+    for (const v of result.stationary) {
+      const [x, y, z] = [0, 1, 2].map((a) => model.mesh.position[v * 3 + a]);
+      closestOnCurve(solve.curve, x, y, z, on);
+      expect(Math.hypot(x - on[0], y - on[1], z - on[2])).toBeLessThanOrEqual(solve.width / 2);
+    }
+  });
+
+  it('takes in no vertex off both corrected surfaces', () => {
+    const { model, solve } = bridgedStep(leftOut);
+    const before = cloneRefineMesh(model.mesh, true);
+    const kept = applyEdge(before, model.topology, solve, 1, true).stationary;
+    expect(kept.length).toBeGreaterThan(0);
+    // Those vertices moved 0.05 mm into the part along their normals, away from both corrected
+    // surfaces, which meet outside the rounding: far past 3 local of either.
+    const raised = cloneRefineMesh(model.mesh, true);
+    const normal = new Float32Array(3);
+    for (const v of kept) {
+      vertexNormal(model.mesh, model.topology, v, normal);
+      for (let a = 0; a < 3; a++) raised.position[v * 3 + a] -= 0.05 * normal[a];
+    }
+    const result = applyEdge(raised, model.topology, solve, 1, true);
+    for (const v of kept) expect(result.stationary).not.toContain(v);
+  });
+
+  it('takes in a vertex only next to a cut vertex across the edge from it', () => {
+    const { model, solve } = bridgedStep(leftOut);
+    const out = cloneRefineMesh(model.mesh, true);
+    const result = applyEdge(out, model.topology, solve, 1, true);
+    const [near0, near1] = correctedFlanks(model.mesh, model.topology, solve);
+    const side = (v: number) => {
+      const [x, y, z] = [0, 1, 2].map((a) => model.mesh.position[v * 3 + a]);
+      return Math.sign(near0(x, y, z) - near1(x, y, z));
+    };
+    const band = solve.bands[0];
+    const zoneOf = new Map(Array.from(band.vertices, (v, k) => [v, band.zone[k]]));
+    const weights = moveWeights(model.mesh, model.topology, solve);
+    const weightOf = new Map(Array.from(band.vertices, (v, k) => [v, weights[k]]));
+    expect(result.stationary.length).toBeGreaterThan(0);
+    for (const v of result.stationary) {
+      const across: number[] = [];
+      for (
+        let j = model.topology.neighbourStart[v];
+        j < model.topology.neighbourStart[v + 1];
+        j++
+      ) {
+        const u = model.topology.neighbours[j];
+        if (
+          zoneOf.get(u) !== BandZone.Beyond &&
+          (weightOf.get(u) ?? 0) > 0.05 &&
+          side(u) !== side(v)
+        )
+          across.push(u);
+      }
+      expect(across.length).toBeGreaterThan(0);
+    }
+  });
+
+  it('takes in no vertex past where the cut already crosses at an open end', () => {
+    // Left out near each end of the guide as well as in the middle.
+    const { model, solve } = bridgedStep(
+      (p) => leftOut(p) || (Math.abs(p[2]) > 1.6 && p[1] > 0.33),
+    );
+    const out = cloneRefineMesh(model.mesh, true);
+    const result = applyEdge(out, model.topology, solve, 1, true);
+    for (const v of result.stationary)
+      expect(Math.abs(model.mesh.position[v * 3 + 2])).toBeLessThan(1.6);
+    expect(result.pieces).toBe(1);
+  });
+});
