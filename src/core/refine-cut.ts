@@ -28,6 +28,11 @@ interface Split {
 /** A child is collapsed below this fraction of its parent's area, or below `tinyArea`. */
 const collapsedFraction = 1e-6;
 const tinyArea = 1e-12;
+/** A planned chain vertex closer than this to any other vertex would merge with it on export. */
+const coincident = 1e-4;
+
+const cellKey = (x: number, y: number, z: number) =>
+  Math.imul(x, 73856093) ^ Math.imul(y, 19349663) ^ Math.imul(z, 83492791);
 
 /**
  * Children of a triangle whose edges `cut` (edge k runs from corner k to k + 1) are split. A child
@@ -77,7 +82,8 @@ const area = (p: Float64Array) => {
  * `place` maps a point on the zero set to its final position. The mesh must be a topology clone.
  * `field[i]` is the value at `vertices[i]`; `topology` describes the mesh before the cut.
  * The whole cut is planned on final positions first; a split or snap that would collapse a triangle
- * is revised or dropped, and the triangles left straddling are reported in `skipped`.
+ * or land on another vertex is revised or dropped, and the triangles left straddling are reported
+ * in `skipped`.
  */
 export function cutAlongField(
   mesh: RefineMesh,
@@ -230,6 +236,74 @@ export function cutAlongField(
     }
     return true;
   };
+  // Revises every planned chain vertex within `coincident` of another vertex's final position, the
+  // later of two chain vertices. Chain vertices sit in a spatial hash under the 27 cells around their
+  // own, so each other vertex needs one lookup.
+  const reviseCoincident = () => {
+    const ids: number[] = [];
+    const at: number[] = [];
+    for (let v = 0; v < weldedCount; v++)
+      if (placed[v]) {
+        ids.push(v);
+        at.push(placedAt[v * 3], placedAt[v * 3 + 1], placedAt[v * 3 + 2]);
+      }
+    const firstSplit = ids.length;
+    for (let i = 0; i < edgeT.length; i++)
+      if (!Number.isNaN(splitT[i])) {
+        ids.push(i);
+        at.push(splitAt[i * 3], splitAt[i * 3 + 1], splitAt[i * 3 + 2]);
+      }
+    const cells = new Map<number, number[]>();
+    const cell = (x: number) => Math.floor(x / coincident);
+    const nearest = (x: number, y: number, z: number, before: number) => {
+      for (const e of cells.get(cellKey(cell(x), cell(y), cell(z))) ?? [])
+        if (
+          e < before &&
+          Math.hypot(at[e * 3] - x, at[e * 3 + 1] - y, at[e * 3 + 2] - z) < coincident
+        )
+          return e;
+      return -1;
+    };
+    const clash = new Uint8Array(ids.length);
+    for (let e = 0; e < ids.length; e++) {
+      const [x, y, z] = [at[e * 3], at[e * 3 + 1], at[e * 3 + 2]];
+      if (nearest(x, y, z, e) >= 0) clash[e] = 1;
+      const [cx, cy, cz] = [cell(x), cell(y), cell(z)];
+      for (let dx = -1; dx <= 1; dx++)
+        for (let dy = -1; dy <= 1; dy++)
+          for (let dz = -1; dz <= 1; dz++) {
+            const key = cellKey(cx + dx, cy + dy, cz + dz);
+            const list = cells.get(key);
+            if (list) list.push(e);
+            else cells.set(key, [e]);
+          }
+    }
+    for (let v = 0; v < weldedCount; v++) {
+      if (placed[v]) continue;
+      const e = nearest(
+        mesh.position[v * 3],
+        mesh.position[v * 3 + 1],
+        mesh.position[v * 3 + 2],
+        ids.length,
+      );
+      if (e >= 0) clash[e] = 1;
+    }
+    let revised = false;
+    for (let e = 0; e < ids.length; e++) {
+      if (!clash[e]) continue;
+      revised = true;
+      if (e >= firstSplit) {
+        const i = ids[e];
+        if (splitT[i] !== 0.5) planSplit(i, 0.5);
+        else splitT[i] = NaN;
+      } else {
+        const v = ids[e];
+        placed[v] = 0;
+        if (value[v] !== 0) zero[v] = 0;
+      }
+    }
+    return revised;
+  };
   for (let revised = true; revised;) {
     revised = false;
     for (const t of touched) {
@@ -247,6 +321,7 @@ export function cutAlongField(
         }
       }
     }
+    if (!revised) revised = reviseCoincident();
   }
 
   const chain: number[] = [];

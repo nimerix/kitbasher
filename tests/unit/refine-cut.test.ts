@@ -112,7 +112,8 @@ const seeded = (seed: number) => () => {
 it.each(cases)(
   'cuts random planes through the box closed and reports what straddles, %s',
   (_, options) => {
-    const { mesh, topology } = modelOf(softBox([2, 1.5, 1], 0.3, options));
+    const geometry = softBox([2, 1.5, 1], 0.3, options);
+    const { mesh, topology } = modelOf(geometry);
     const next = seeded(20261119);
     for (let plane = 0; plane < 50; plane++) {
       const n = [next() - 0.5, next() - 0.5, next() - 0.5];
@@ -129,6 +130,7 @@ it.each(cases)(
         out.set([x - f * nx, y - f * ny, z - f * nz]);
       });
       expect(closedMesh(cut)).toBe(true);
+      expect(closed(writeRefinedGeometry(geometry, new Matrix4(), cut))).toBe(true);
       expect(meshMinTriangleArea(cut)).toBeGreaterThanOrEqual(1e-12);
       expect(straddling(cut, fn, 1e-6)).toBe(result.skipped.length);
     }
@@ -154,6 +156,33 @@ it('leaves a chord between two snapped vertices out of the segments', () => {
   );
   expect(segments).not.toContain([px, py].sort().join());
   expect(edgeLoops(result.edges, result.chain)).toEqual([result.chain.length]);
+});
+
+it('drops a midpoint retry that lands on an unrelated vertex', () => {
+  // The -x corner sits on the midpoint of the +x to +z edge. Only +x is positive, barely, so every
+  // split next to it collapses, is retried at t = 0.5, and the +x to +z retry lands on that corner.
+  const geometry = octahedron(false);
+  const position = geometry.getAttribute('position');
+  for (let i = 0; i < position.count; i++)
+    if (position.getX(i) === -1) position.setXYZ(i, 0.5, 0, 0.5);
+  geometry.computeVertexNormals();
+  const { mesh, topology } = modelOf(geometry);
+  const cut = cloneRefineMesh(mesh, true);
+  const ids = Uint32Array.from({ length: cut.weldedCount }, (_, i) => i);
+  const p = (i: number, axis: number) => cut.position[i * 3 + axis];
+  const px = ids.find((i) => p(i, 0) === 1)!,
+    pz = ids.find((i) => p(i, 2) === 1)!;
+  const field = Float32Array.from(ids, (i) => (i === px ? 1e-9 : -1));
+  const result = cutAlongField(cut, topology, ids, field, (x, y, z, out) => out.set([x, y, z]), 0);
+  expect(result.chain.length).toBe(3);
+  expect(closedMesh(cut)).toBe(true);
+  expect(closed(writeRefinedGeometry(geometry, new Matrix4(), cut))).toBe(true);
+  const onDroppedEdge = Array.from({ length: cut.triangleCount }, (_, t) => t).filter((t) => {
+    const corners = [0, 1, 2].map((k) => cut.weldOf[cut.corners[t * 3 + k]]);
+    return corners.includes(px) && corners.includes(pz);
+  });
+  expect(onDroppedEdge.length).toBe(2);
+  expect([...result.skipped]).toEqual(onDroppedEdge);
 });
 
 const ramp = (x: number) => (x + 2) / 4;
