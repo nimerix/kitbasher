@@ -195,10 +195,18 @@ export function buildTopology(mesh: RefineMesh): RefineTopology {
   const neighbourStart = new Uint32Array(weldedCount + 1);
   let written = 0;
   for (let v = 0; v < weldedCount; v++) {
-    const row = raw.subarray(start[v], start[v + 1]).sort();
+    const from = start[v],
+      to = start[v + 1];
+    // Insertion sort in place: rows are a few entries long.
+    for (let i = from + 1; i < to; i++) {
+      const value = raw[i];
+      let j = i - 1;
+      for (; j >= from && raw[j] > value; j--) raw[j + 1] = raw[j];
+      raw[j + 1] = value;
+    }
     neighbourStart[v] = written;
-    for (let i = 0; i < row.length; i++)
-      if (i === 0 || row[i] !== row[i - 1]) raw[written++] = row[i];
+    for (let i = from; i < to; i++)
+      if (i === from || raw[i] !== raw[i - 1]) raw[written++] = raw[i];
   }
   neighbourStart[weldedCount] = written;
   return { triangleStart, trianglesOf, neighbourStart, neighbours: raw.slice(0, written) };
@@ -448,11 +456,39 @@ function vertexOutput(attribute: Attribute, count: number, promote: boolean) {
     target = new BufferAttribute(new Array(count * size), size, normalized);
   }
   const bitwise = target.array.constructor === attribute.array.constructor;
-  const copy = (from: number, to: number) => {
-    if (bitwise) target.array.set(storedItem(attribute, from), to * size);
-    else for (let k = 0; k < size; k++) target.array[to * size + k] = decoded(attribute, from, k);
-  };
+  const words = bitwise && copyWords(attribute, target);
+  const copy = words
+    ? words
+    : (from: number, to: number) => {
+        if (bitwise) target.array.set(storedItem(attribute, from), to * size);
+        else
+          for (let k = 0; k < size; k++) target.array[to * size + k] = decoded(attribute, from, k);
+      };
   return { target, copy };
+}
+
+/**
+ * For two plain attributes of one array type and item size: copies item `from` of `source` to item
+ * `to` of `target` as unsigned words, so every bit is kept, NaN payloads included. Null otherwise.
+ */
+function copyWords(source: Attribute, target: Attribute) {
+  if (isInterleaved(source) || isInterleaved(target)) return null;
+  const a = source.array,
+    b = target.array;
+  if (a.constructor !== b.constructor || source.itemSize !== target.itemSize) return null;
+  const bytes = a.BYTES_PER_ELEMENT;
+  const View = bytes === 1 ? Uint8Array : bytes === 2 ? Uint16Array : Uint32Array;
+  const per = Math.max(1, bytes / 4);
+  const view = (array: TypedArray) =>
+    new View(array.buffer as ArrayBuffer, array.byteOffset, array.length * per);
+  const from = view(a),
+    to = view(b);
+  const size = source.itemSize * per;
+  return (i: number, j: number) => {
+    const f = i * size,
+      t = j * size;
+    for (let k = 0; k < size; k++) to[t + k] = from[f + k];
+  };
 }
 
 /** True when nothing was moved, created or rewired, so the source can be returned as it is. */
@@ -465,10 +501,15 @@ function unchanged(mesh: RefineMesh) {
   return true;
 }
 
+/**
+ * `topology`, when given, is the one `buildTopology` made for `mesh`'s weld map and corners, whose
+ * triangle lists are then read instead of built again.
+ */
 export function writeRefinedGeometry(
   source: BufferGeometry,
   matrixWorld: Matrix4,
   mesh: RefineMesh,
+  topology?: Pick<RefineTopology, 'triangleStart' | 'trianglesOf'>,
 ): BufferGeometry {
   const sourcePosition = source.getAttribute('position');
   const sourceNormal = source.getAttribute('normal');
@@ -537,7 +578,7 @@ export function writeRefinedGeometry(
   }
 
   // Fan of each triangle around a moved vertex, aligned with `trianglesOf`, and of each corner.
-  const { triangleStart, trianglesOf } = trianglesAround(mesh);
+  const { triangleStart, trianglesOf } = topology ?? trianglesAround(mesh);
   const triangleFan = new Int32Array(trianglesOf.length);
   const cornerFan = new Int32Array(cornerCount).fill(-1);
   const owner = new Int32Array(weldedCount).fill(-1);
@@ -656,10 +697,13 @@ export function writeRefinedGeometry(
   if (mesh.color && sourceColor) {
     const size = mesh.colorSize;
     const color = blankLike(sourceColor, count);
+    const words = copyWords(sourceColor, color);
     for (let i = 0; i < count; i++) {
       const g = from[i];
-      if (g < sourceVertexCount) color.array.set(storedItem(sourceColor, g), i * size);
-      else for (let k = 0; k < size; k++) encode(color, i, k, mesh.color[g * size + k]);
+      if (g >= sourceVertexCount)
+        for (let k = 0; k < size; k++) encode(color, i, k, mesh.color[g * size + k]);
+      else if (words) words(g, i);
+      else color.array.set(storedItem(sourceColor, g), i * size);
     }
     result.setAttribute('color', color);
   }

@@ -3314,8 +3314,8 @@ export const useEditor = create<EditorState>((set, get) => ({
     abortRefineJobs();
     // A stroke under way was never accepted: it is dropped, not applied.
     releaseRefineState();
-    const { mesh } = refine.model;
-    const geometry = writeRefinedGeometry(refine.source, partMatrix(part), mesh);
+    const { mesh, topology } = refine.model;
+    const geometry = writeRefinedGeometry(refine.source, partMatrix(part), mesh, topology);
     // Without a cut, triangle t is still the source's, so its tree only needs new bounds.
     if (mesh.corners === refine.start?.mesh.corners) refitWarpTree(refine.source, geometry);
     const refined: Part = { ...part, geometry, source: `Refine · ${part.source}` };
@@ -5399,7 +5399,7 @@ async function buildRefine(refine: RefineSession, part: Part, controller: AbortC
   if (!refineJobs.delete(controller) || current?.id !== refine.id) return;
   let preview: BufferGeometry;
   try {
-    preview = writeRefinedGeometry(refine.source, matrix, model.mesh);
+    preview = writeRefinedGeometry(refine.source, matrix, model.mesh, model.topology);
   } catch (error) {
     failed(error);
     return;
@@ -5447,6 +5447,15 @@ useEditor.subscribe(({ refine }) => {
     refitWarpTree(refine.source, preview);
 });
 
+/** The model's topology when `mesh` has its weld map and corners, for writeRefinedGeometry. */
+const sameLayout = (model: RefineModel, mesh: RefineMesh) =>
+  mesh.corners === model.mesh.corners &&
+  mesh.weldOf === model.mesh.weldOf &&
+  mesh.triangleCount === model.mesh.triangleCount &&
+  mesh.weldedCount === model.mesh.weldedCount
+    ? model.topology
+    : undefined;
+
 /**
  * Brings the preview to the draft, or to the model without one. A change of positions only is
  * written into the preview's attributes; any other change writes a new preview in its place.
@@ -5466,7 +5475,7 @@ function showRefine(refine: RefineSession): RefineSession {
     previewMeshes.set(preview, mesh);
     return refine;
   }
-  const next = writeRefinedGeometry(source, matrix, mesh);
+  const next = writeRefinedGeometry(source, matrix, mesh, sameLayout(model, mesh));
   previewMeshes.set(next, mesh);
   givePickingTree(next, mesh.corners, source, refine.start?.mesh.corners, preview);
   disposeRefinePreview(preview);
