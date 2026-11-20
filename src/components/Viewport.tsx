@@ -302,7 +302,9 @@ const PartMesh = memo(function PartMesh({
         );
         const adding = event.shiftKey || event.metaKey || event.ctrlKey;
         if (!region) {
-          if (!adding && refine.selected.length) state.selectRefine([]);
+          // A click that paints where to look leaves the selection alone.
+          const painting = refine.detect.where === 'painted';
+          if (!adding && !painting && refine.selected.length) state.selectRefine([]);
         } else if (!adding) state.selectRefine([region.id]);
         else
           state.selectRefine(

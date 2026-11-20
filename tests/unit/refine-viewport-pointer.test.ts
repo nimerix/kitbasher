@@ -2,11 +2,15 @@ import { describe, expect, it } from 'vitest';
 import {
   bindingBroken,
   chooseCandidate,
+  draftMoved,
   gestureBinding,
-  HeldPath,
   longestRun,
+  pressGesture,
   surfaceAllowance,
+  surfaceReady,
 } from '../../src/components/RefinePointer';
+import { BufferAttribute, BufferGeometry } from 'three';
+import { workerIndexTriangles } from '../../src/core/spatial-index';
 import type { RefineSession } from '../../src/core/store';
 import type { GuidePoint } from '../../src/core/refine-band';
 
@@ -62,33 +66,44 @@ describe('the depth allowance of Refine picking', () => {
   });
 });
 
-describe('holding a gesture path while the picking index builds', () => {
-  const at = (x: number, release = false) => ({ x, y: 0, release });
+describe('the gate on starting a Refine gesture', () => {
+  /** A preview of `triangles` triangles, with or without its picking index. */
+  const preview = (triangles: number, indexed: boolean) => {
+    const geometry = new BufferGeometry();
+    geometry.setIndex(new BufferAttribute(new Uint32Array(triangles * 3), 1));
+    if (indexed) geometry.boundsTree = {} as BufferGeometry['boundsTree'];
+    return geometry;
+  };
+  const session = (geometry: BufferGeometry) =>
+    ({
+      refine: {
+        id: 's1',
+        partId: 'block',
+        stage: 'ready',
+        mode: 'brush',
+        brush: { kind: 'smooth', strength: 0.5 },
+        preview: geometry,
+      } as RefineSession,
+    }) as Parameters<typeof pressGesture>[0];
 
-  it('handles positions at once while the index is ready', () => {
-    const path = new HeldPath();
-    expect(path.add(at(1), true)).toEqual([at(1)]);
-    expect(path.waiting).toBe(false);
+  it('starts nothing while a dense preview has no index', () => {
+    const state = session(preview(workerIndexTriangles + 1, false));
+    expect(surfaceReady(state.refine)).toBe(false);
+    expect(pressGesture(state, true)).toBeNull();
+    expect(pressGesture(state, false)).toBeNull();
   });
 
-  it('holds positions until ready, then gives them back in order before the live one', () => {
-    const path = new HeldPath();
-    expect(path.add(at(1), false)).toEqual([]);
-    expect(path.add(at(2), false)).toEqual([]);
-    expect(path.waiting).toBe(true);
-    expect(path.flush(false)).toEqual([]);
-    expect(path.add(at(3), true)).toEqual([at(1), at(2), at(3)]);
-    expect(path.waiting).toBe(false);
-    expect(path.add(at(4), true)).toEqual([at(4)]);
+  it('starts a gesture once the preview has its index, read from the geometry each time', () => {
+    const geometry = preview(workerIndexTriangles + 1, false);
+    const state = session(geometry);
+    expect(pressGesture(state, true)).toBeNull();
+    geometry.boundsTree = {} as BufferGeometry['boundsTree'];
+    expect(pressGesture(state, true)).toMatchObject({ session: 's1', kind: 'smooth' });
+    expect(pressGesture(state, false)).toMatchObject({ session: 's1', kind: null });
   });
 
-  it('replays a release that came before the index, last', () => {
-    const path = new HeldPath();
-    path.add(at(1), false);
-    path.add(at(2, true), false);
-    expect(path.released).toBe(true);
-    expect(path.flush(true)).toEqual([at(1), at(2, true)]);
-    expect(path.waiting).toBe(false);
+  it('starts a gesture on a preview small enough to pick without an index', () => {
+    expect(pressGesture(session(preview(1000, false)), true)).not.toBeNull();
   });
 });
 
@@ -137,5 +152,34 @@ describe('the runs of a crease stroke', () => {
     expect(longestRun([run(0, 1), run(5, 5.5, 9), run(20, 21)])).toEqual(run(5, 5.5, 9));
     expect(longestRun([run(0, 2), run(5, 7)])).toEqual(run(0, 2));
     expect(longestRun([run(3)])).toEqual(run(3));
+  });
+});
+
+describe('the surface a selected guide draft moved', () => {
+  // Two triangles over welded vertices 0 to 3; the draft moves vertex 3 and adds vertex 4.
+  const mesh = (position: number[], corners: number[], weldedCount: number) =>
+    ({
+      position: Float64Array.from(position),
+      weldedCount,
+      weldOf: Uint32Array.from({ length: weldedCount }, (_, i) => i),
+      corners: Uint32Array.from(corners),
+      triangleCount: corners.length / 3,
+    }) as unknown as RefineSession['draft'] & object;
+  const model = mesh([0, 0, 0, 1, 0, 0, 0, 1, 0, 1, 1, 0], [0, 1, 2, 1, 3, 2], 4);
+  const moved = mesh([0, 0, 0, 1, 0, 0, 0, 1, 0, 1, 1, 0.2], [0, 1, 2, 1, 3, 2], 4);
+  const cut = mesh([0, 0, 0, 1, 0, 0, 0, 1, 0, 1, 1, 0, 0.5, 0.5, 0], [0, 1, 2, 1, 3, 4], 5);
+  const session = (draft: typeof model | null) =>
+    ({ draft, model: { mesh: model } }) as unknown as Parameters<typeof draftMoved>[0];
+
+  it('marks only triangles with a corner the draft moved or made', () => {
+    expect(draftMoved(session(moved), 0)).toBe(false);
+    expect(draftMoved(session(moved), 1)).toBe(true);
+    expect(draftMoved(session(cut), 0)).toBe(false);
+    expect(draftMoved(session(cut), 1)).toBe(true);
+  });
+
+  it('marks nothing without a draft', () => {
+    expect(draftMoved(session(null), 1)).toBe(false);
+    expect(draftMoved(session(model), 1)).toBe(false);
   });
 });
