@@ -1,5 +1,12 @@
-import type { BufferGeometry } from 'three';
-import { weldedPositionIndex } from '../../src/core/mesh-topology';
+import { type BufferGeometry, Matrix4 } from 'three';
+import { hasClosedEdges, weldedPositionIndex } from '../../src/core/mesh-topology';
+import {
+  type RefineMesh,
+  buildRefineMesh,
+  buildTopology,
+  triangleNormal,
+  weldedCorner,
+} from '../../src/core/refine-mesh';
 import type { Vec3 } from '../../src/core/types';
 
 function corner(geometry: BufferGeometry, triangle: number, k: number) {
@@ -76,4 +83,87 @@ export function radii(geometry: BufferGeometry) {
     );
   }
   return result;
+}
+
+/** The working model the Refine modules take: mesh, topology and noise. */
+export function modelFrom(mesh: RefineMesh) {
+  return { mesh, topology: buildTopology(mesh), noise: 0.004 };
+}
+
+export function modelOf(geometry: BufferGeometry, matrix = new Matrix4()) {
+  return modelFrom(buildRefineMesh(geometry, matrix));
+}
+
+/** True when every welded edge is shared by exactly two triangles. */
+export function closed(geometry: BufferGeometry) {
+  const { indices, vertices } = weldedPositionIndex(geometry);
+  return hasClosedEdges(indices, vertices);
+}
+
+const bits = (array: ArrayLike<number>) => {
+  const floats = array as Float32Array;
+  return new Uint32Array(floats.buffer, floats.byteOffset, floats.length);
+};
+
+/** True when every written vertex of one welded vertex has the same position bits. */
+export function duplicatesAgree(geometry: BufferGeometry, mesh: RefineMesh) {
+  const position = bits(geometry.getAttribute('position').array);
+  const first = new Map<number, number>();
+  for (let i = 0; i < mesh.triangleCount * 3; i++) {
+    const vertex = geometry.index ? geometry.index.getX(i) : i;
+    const welded = mesh.weldOf[mesh.corners[i]];
+    const seen = first.get(welded);
+    if (seen === undefined) first.set(welded, vertex);
+    else
+      for (let axis = 0; axis < 3; axis++)
+        if (position[seen * 3 + axis] !== position[vertex * 3 + axis]) return false;
+  }
+  return true;
+}
+
+/** Source vertices whose written position or normal bits differ from the source. */
+export function changedVertices(source: BufferGeometry, written: BufferGeometry) {
+  const changed: number[] = [];
+  const attributes = ['position', 'normal'].map((name) => [
+    bits(source.getAttribute(name).array),
+    bits(written.getAttribute(name).array),
+  ]);
+  for (let vertex = 0; vertex < source.getAttribute('position').count; vertex++)
+    if (
+      attributes.some(([before, after]) =>
+        [0, 1, 2].some((axis) => before[vertex * 3 + axis] !== after[vertex * 3 + axis]),
+      )
+    )
+      changed.push(vertex);
+  return changed;
+}
+
+/** Size of the bounding box of the first `count` points of a position array. */
+export function extent(position: Float32Array, count = position.length / 3) {
+  const low = [Infinity, Infinity, Infinity],
+    high = [-Infinity, -Infinity, -Infinity];
+  for (let i = 0; i < count; i++)
+    for (let axis = 0; axis < 3; axis++) {
+      low[axis] = Math.min(low[axis], position[i * 3 + axis]);
+      high[axis] = Math.max(high[axis], position[i * 3 + axis]);
+    }
+  return high.map((value, axis) => value - low[axis]);
+}
+
+/** Fraction of triangles whose normal points away from `centre`. */
+export function outwardFraction(mesh: RefineMesh, centre: Vec3) {
+  const normal = new Float32Array(3);
+  let outward = 0;
+  for (let t = 0; t < mesh.triangleCount; t++) {
+    triangleNormal(mesh, t, normal);
+    let dot = 0;
+    for (let axis = 0; axis < 3; axis++) {
+      let centroid = 0;
+      for (const k of [0, 1, 2] as const)
+        centroid += mesh.position[weldedCorner(mesh, t, k) * 3 + axis] / 3;
+      dot += normal[axis] * (centroid - centre[axis]);
+    }
+    if (dot > 0) outward++;
+  }
+  return outward / mesh.triangleCount;
 }
