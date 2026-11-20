@@ -600,10 +600,23 @@ interface EditorState {
   undoRefine: () => void;
   redoRefine: () => void;
   setRefineMode: (mode: RefineMode) => void;
-  /** Also updates the selected pending edges' width, strength and ends. */
-  setRefineEdge: (options: Partial<RefineSession['edge']>) => void;
-  /** Also updates the selected pending regions. */
-  setRefineRegion: (options: Partial<RefineSession['region']>) => void;
+  /**
+   * Kind and joint are always for the next segment. Width, strength and ends go to the selected
+   * pending edges when there are any, each with its own entry of `each` on top, and otherwise to
+   * the next edge's defaults.
+   */
+  setRefineEdge: (
+    options: Partial<RefineSession['edge']>,
+    each?: Record<string, Partial<Pick<EdgeInput, 'width' | 'strength' | 'ends'>>>,
+  ) => void;
+  /**
+   * Goes to the selected pending regions when there are any, each with its own entry of `each` on
+   * top, and otherwise to the next region's defaults.
+   */
+  setRefineRegion: (
+    options: Partial<RefineSession['region']>,
+    each?: Record<string, Partial<RefineSession['region']>>,
+  ) => void;
   setRefineBrush: (options: Partial<RefineSession['brush']>) => void;
   setRefineDetect: (options: Partial<Omit<RefineSession['detect'], 'running'>>) => void;
   /** Adds a point to the guide being drawn, starting one if none is selected. `close` is set when the point is the path's first point. */
@@ -3328,28 +3341,33 @@ export const useEditor = create<EditorState>((set, get) => ({
     const { refine } = get();
     if (refine) set({ painting: false, refine: { ...refine, mode, drawing: false } });
   },
-  setRefineEdge: (options) => {
+  setRefineEdge: (options, each = {}) => {
     const { refine } = get();
     if (!refine) return;
-    const edge = { ...refine.edge, ...options };
-    const patch: Partial<EdgeInput> = {};
-    for (const key of ['width', 'strength', 'ends'] as const)
-      if (key in options) Object.assign(patch, { [key]: edge[key] });
-    const features = updateSelected(refine, (proposal) =>
-      proposal.type === 'edge' ? { type: 'edge', input: { ...proposal.input, ...patch } } : null,
-    );
+    const { kind, joint, ...feature } = options;
+    const next = { ...(kind ? { kind } : {}), ...(joint ? { joint } : {}) };
+    const touched = Object.keys(feature).length > 0 || Object.keys(each).length > 0;
+    const features = touched
+      ? updateSelected(refine, (proposal, id) =>
+          proposal.type === 'edge'
+            ? { type: 'edge', input: { ...proposal.input, ...feature, ...each[id] } }
+            : null,
+        )
+      : refine.features;
+    const edited = features !== refine.features;
+    const edge = { ...refine.edge, ...next, ...(edited ? {} : feature) };
     set({ refine: { ...refine, edge, features } });
     scheduleRefineDraft();
   },
-  setRefineRegion: (options) => {
+  setRefineRegion: (options, each = {}) => {
     const { refine } = get();
     if (!refine) return;
-    const region = { ...refine.region, ...options };
-    const features = updateSelected(refine, (proposal) =>
+    const features = updateSelected(refine, (proposal, id) =>
       proposal.type === 'region'
-        ? { type: 'region', input: { ...proposal.input, ...options } }
+        ? { type: 'region', input: { ...proposal.input, ...options, ...each[id] } }
         : null,
     );
+    const region = features === refine.features ? { ...refine.region, ...options } : refine.region;
     set({ refine: { ...refine, region, features } });
     scheduleRefineDraft();
   },
@@ -3550,6 +3568,11 @@ export const useEditor = create<EditorState>((set, get) => ({
     const features = refine.features.filter((f) => f.state !== 'pending' || !wanted.has(f.id));
     if (features.length === refine.features.length) return;
     const kept = new Set(features.map((f) => f.id));
+    if (failures.session === refine.id)
+      failures = {
+        session: refine.id,
+        known: new Map([...failures.known].filter(([id]) => kept.has(id))),
+      };
     commitRefine({
       features,
       selected: refine.selected.filter((id) => kept.has(id)),
@@ -5485,18 +5508,40 @@ function solveProposal<P extends RefineProposal>(
   return solve as Solve;
 }
 
-/** The feature whose draft last failed to solve and why, so a settings change does not repeat it. */
-let unsolved: { session: string; id: string; notice: string } | null = null;
-
 /**
- * Whether a feature's failure to solve is news: not the last failure reported unless that feature
- * has solved since.
+ * Folds one solve pass into the failures already reported, by feature id: a feature that solved
+ * is dropped; one failing for a reason not on record is news. News also drops the features not
+ * failing in this pass, so a feature that fails after another one did is reported again.
  */
-function reportUnsolved(session: string, id: string, notice: string) {
-  if (unsolved?.session === session && unsolved.id === id && unsolved.notice === notice)
-    return false;
-  unsolved = { session, id, notice };
-  return true;
+export function reportFailures(
+  known: ReadonlyMap<string, string>,
+  pass: readonly { id: string; notice: string | null }[],
+) {
+  const next = new Map(known);
+  const news: string[] = [];
+  for (const { id, notice } of pass)
+    if (notice === null) next.delete(id);
+    else if (known.get(id) !== notice) news.push(notice);
+  if (news.length)
+    for (const id of next.keys()) if (!pass.some((p) => p.id === id && p.notice)) next.delete(id);
+  for (const { id, notice } of pass) if (notice !== null) next.set(id, notice);
+  return { known: next, news };
+}
+
+/** The failures last reported in a session, shared by the preview and Accept. */
+let failures: { session: string; known: ReadonlyMap<string, string> } = {
+  session: '',
+  known: new Map(),
+};
+
+/** Records a solve pass of the session and returns the notices it should raise. */
+function solvePass(session: string, pass: { id: string; notice: string | null }[]) {
+  const { known, news } = reportFailures(
+    failures.session === session ? failures.known : new Map(),
+    pass,
+  );
+  failures = { session, known };
+  return news;
 }
 
 /**
@@ -5515,17 +5560,15 @@ function acceptFeatures(
   let folds = noFolds,
     skipped = noFolds;
   const byId = new Map(features.map((f) => [f.id, f]));
-  const notices = new Set<string>();
+  const pass: { id: string; notice: string | null }[] = [];
   let accepted = false;
   for (const target of targets) {
     const feature = byId.get(target.id)!;
     const proposal = feature.feature;
     if (proposal.type === 'edge') {
       const solve = solvable(proposal.input) ? solveProposal(model, model.mesh, proposal) : null;
-      if (!solve) {
-        notices.add(noEdgeNotice);
-        continue;
-      }
+      pass.push({ id: feature.id, notice: solve ? null : noEdgeNotice });
+      if (!solve) continue;
       const mesh = cloneRefineMesh(model.mesh, true);
       const result = edge.applyEdge(mesh, model.topology, solve, proposal.input.strength, true);
       const children = result.cut?.children;
@@ -5555,10 +5598,8 @@ function acceptFeatures(
       });
     } else {
       const solve = solveProposal(model, model.mesh, proposal);
-      if (!solve) {
-        notices.add(smallRegionNotice);
-        continue;
-      }
+      pass.push({ id: feature.id, notice: solve ? null : smallRegionNotice });
+      if (!solve) continue;
       const mesh = cloneRefineMesh(model.mesh, false);
       const changed = region.applyRegion(mesh, solve);
       folds = union(folds, foldedTriangles(mesh, model.topology, model.mesh.position, changed));
@@ -5567,7 +5608,10 @@ function acceptFeatures(
     }
     accepted = true;
   }
-  const { notify } = useEditor.getState();
+  const { notify, toast } = useEditor.getState();
+  // A press that changed nothing says why, once, unless that notice is already showing.
+  const notices = new Set(solvePass(refine.id, pass));
+  for (const { notice } of pass) if (notice && toast?.message !== notice) notices.add(notice);
   for (const notice of notices) notify(notice, 'info');
   if (!accepted) return;
   commitRefine({
@@ -5633,7 +5677,7 @@ function rebuildRefineDraft() {
   const mesh = cloneRefineMesh(model.mesh, false);
   const moved: Uint32Array[] = [];
   const curves = new Map<string, EdgeCurve | undefined>();
-  const notices: string[] = [];
+  const pass: { id: string; notice: string | null }[] = [];
   for (const { id, feature: proposal } of features) {
     // Until something moves, the draft's surface is the model's, whose solves are kept.
     const on = moved.some((m) => m.length) ? mesh : model.mesh;
@@ -5648,13 +5692,11 @@ function rebuildRefineDraft() {
         moved.push(
           edge.applyEdge(mesh, model.topology, solve, proposal.input.strength, false).changed,
         );
-      else if (reportUnsolved(refine.id, id, noEdgeNotice)) notices.push(noEdgeNotice);
-      if (solve && unsolved?.id === id) unsolved = null;
+      pass.push({ id, notice: solve ? null : noEdgeNotice });
     } else {
       const solve = solveProposal(model, on, proposal);
       if (solve) moved.push(region.applyRegion(mesh, solve));
-      else if (reportUnsolved(refine.id, id, smallRegionNotice)) notices.push(smallRegionNotice);
-      if (solve && unsolved?.id === id) unsolved = null;
+      pass.push({ id, notice: solve ? null : smallRegionNotice });
     }
   }
   const curved = refine.features.map((f) => {
@@ -5667,7 +5709,7 @@ function rebuildRefineDraft() {
   draftMoves.set(mesh, { base: model.mesh, moved: changed });
   useEditor.setState({ refine: showDraft({ ...refine, features: curved }, mesh, changed) });
   const { notify } = useEditor.getState();
-  for (const notice of notices) notify(notice, 'info');
+  for (const notice of solvePass(refine.id, pass)) notify(notice, 'info');
 }
 
 /**
@@ -5789,16 +5831,23 @@ function drawnGuide(refine: RefineSession) {
 const withProposal = (refine: RefineSession, id: string, feature: RefineProposal) =>
   refine.features.map((f) => (f.id === id ? { ...f, feature } : f));
 
-/** The features with each selected pending one's proposal replaced by `change`'s, unless null. */
+/**
+ * The features with each selected pending one's proposal replaced by `change`'s, unless null; the
+ * same array when `change` replaced none.
+ */
 function updateSelected(
   refine: RefineSession,
-  change: (proposal: RefineProposal) => RefineProposal | null,
+  change: (proposal: RefineProposal, id: string) => RefineProposal | null,
 ) {
   const selected = new Set(refine.selected);
-  return refine.features.map((f) => {
-    const feature = f.state === 'pending' && selected.has(f.id) ? change(f.feature) : null;
-    return feature ? { ...f, feature } : f;
+  let changed = false;
+  const features = refine.features.map((f) => {
+    const feature = f.state === 'pending' && selected.has(f.id) ? change(f.feature, f.id) : null;
+    if (!feature) return f;
+    changed = true;
+    return { ...f, feature };
   });
+  return changed ? features : refine.features;
 }
 
 /**

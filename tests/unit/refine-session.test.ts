@@ -608,7 +608,8 @@ describe('refine guides', () => {
     const drafts: Float64Array[] = [];
     for (const end of ['hold', 'taper'] as const) {
       editor().setRefineEdge({ ends: [end, end] });
-      expect(session().edge.ends).toEqual([end, end]);
+      // The selected edge takes them; the next edge's defaults stay as they were.
+      expect(session().edge.ends).toEqual([null, null]);
       expect(edgeInput().ends).toEqual([end, end]);
       expect(solveEdge(mesh, topology, edgeInput(), noise)!.ends).toEqual([end, end]);
       drafts.push(session().draft!.position.slice());

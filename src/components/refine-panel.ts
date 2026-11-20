@@ -50,6 +50,32 @@ export function manualStart(start: number, range: { min: number; max: number }) 
   return { value, adjusted: value !== start };
 }
 
+/** Each target's first manual value from its own start, and whether any was held to the range. */
+export function manualStarts(
+  targets: readonly { id: string; start: number }[],
+  range: { min: number; max: number },
+) {
+  const each: Record<string, number> = {};
+  let adjusted = false;
+  for (const { id, start } of targets) {
+    const seeded = manualStart(start, range);
+    each[id] = seeded.value;
+    adjusted ||= seeded.adjusted;
+  }
+  return { each, adjusted };
+}
+
+/** An edge's pair of ends with one end changed and the other kept. */
+export function withEnd(
+  ends: readonly [EdgeEnd | null, EdgeEnd | null] | undefined,
+  index: 0 | 1,
+  end: EdgeEnd | null,
+): [EdgeEnd | null, EdgeEnd | null] {
+  const next: [EdgeEnd | null, EdgeEnd | null] = [ends?.[0] ?? null, ends?.[1] ?? null];
+  next[index] = end;
+  return next;
+}
+
 /**
  * What the mode's Dismiss, Accept, Delete and Enter act on: the selected pending features of the
  * mode's kind, any kind in Detect, and none in Brush.

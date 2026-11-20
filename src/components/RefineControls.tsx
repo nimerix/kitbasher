@@ -11,7 +11,7 @@ import { useShallow } from 'zustand/react/shallow';
 import { LoaderCircle, TriangleAlert } from 'lucide-react';
 import { isTaskActive, useActivity } from '../core/activity';
 import { fittedSizeRange, partSize } from '../core/geometry';
-import type { EdgeEnd, EdgeInput, EdgeSolve } from '../core/refine-edge';
+import type { EdgeInput, EdgeSolve } from '../core/refine-edge';
 import type { RegionInput, RegionSolve, RegionShape, Treatment } from '../core/refine-region';
 import {
   refineBrushRadius,
@@ -30,10 +30,12 @@ import {
   fittedLabel,
   foldWarning,
   manualStart,
+  manualStarts,
   refineTargets,
   shared,
   skippedWarning,
   targetKey,
+  withEnd,
 } from './refine-panel';
 import { SurfaceBrushControls } from './SurfaceBrushControls';
 import { LogRangeInput, NumericInput, RadioGroup, Section, Switch } from './ui';
@@ -74,64 +76,116 @@ function currentTarget() {
 const ownedBy = (target: string) => () => currentTarget() === target;
 
 /**
- * A slider value shown while dragged and set once, when let go or changed by key. Escape drops it,
- * and the rest of that drag is ignored; so is a value whose target is no longer the panel's.
+ * One slider's edit. Unless `live`, a value is shown while dragged and set once, when let go or
+ * changed by key; a blur during a drag waits for the release. A live edit sets each value and
+ * remembers, through `begin`, how to put back what it started from. Escape cancels the edit (a
+ * live one with one write back) and the rest of that drag is ignored; so is a value whose target
+ * is no longer the panel's. A press on a mixed slider starts at `least`, the value it shows.
  */
-function useReleaseDraft(owned: () => boolean, onSet: (value: number) => void) {
+function useSliderEdit({
+  owned,
+  onSet,
+  live = false,
+  begin,
+  mixed = false,
+  least = 0,
+}: {
+  owned: () => boolean;
+  onSet: (value: number) => void;
+  live?: boolean;
+  begin?: () => () => void;
+  mixed?: boolean;
+  least?: number;
+}) {
   const [draft, setDraft] = useState<number | null>(null);
-  const pending = useRef<number | null>(null);
-  const cancelled = useRef(false);
-  const latest = useRef({ owned, onSet });
-  latest.current = { owned, onSet };
+  const edit = useRef({
+    pending: null as number | null,
+    restore: null as (() => void) | null,
+    dragging: false,
+    cancelled: false,
+  });
+  const latest = useRef({ owned, onSet, live, begin });
+  latest.current = { owned, onSet, live, begin };
   const row = useRef<HTMLElement | null>(null);
+  const finish = useRef(() => {});
+  finish.current = () => {
+    const current = edit.current;
+    const next = current.pending;
+    current.pending = null;
+    current.restore = null;
+    current.dragging = false;
+    setDraft(null);
+    if (next !== null && latest.current.owned()) latest.current.onSet(next);
+  };
   useEffect(() => {
     const element = row.current!;
-    // A range input fires a native change when it is let go, by pointer or by key.
-    const end = (event: Event) => {
-      if (!isSlider(event.target)) return;
-      const next = pending.current;
-      pending.current = null;
-      setDraft(null);
-      if (next !== null && latest.current.owned()) latest.current.onSet(next);
+    // A range input fires a native change when it is let go, by pointer or by key, and when it
+    // blurs; a drag ends at the pointer's release instead.
+    const changed = (event: Event) => {
+      if (isSlider(event.target) && !edit.current.dragging) finish.current();
     };
-    element.addEventListener('change', end);
-    element.addEventListener('focusout', end);
+    const blurred = (event: Event) => {
+      if (isSlider(event.target) && !edit.current.dragging) finish.current();
+    };
+    element.addEventListener('change', changed);
+    element.addEventListener('focusout', blurred);
     return () => {
-      element.removeEventListener('change', end);
-      element.removeEventListener('focusout', end);
+      element.removeEventListener('change', changed);
+      element.removeEventListener('focusout', blurred);
     };
   }, []);
+  const change = (next: number) => {
+    const current = edit.current;
+    const { owned, onSet, live, begin } = latest.current;
+    if (current.cancelled || !owned()) return;
+    if (!live) {
+      current.pending = next;
+      setDraft(next);
+      return;
+    }
+    current.restore ??= begin?.() ?? null;
+    onSet(next);
+  };
   return {
     draft,
+    hidden: mixed && draft === null,
+    change,
     row: (element: HTMLElement | null) => {
       row.current = element;
     },
-    change: (next: number) => {
-      if (cancelled.current) return;
-      pending.current = next;
-      setDraft(next);
-    },
     onPointerDown: (event: PointerEvent) => {
-      if (isSlider(event.target)) cancelled.current = false;
+      if (!isSlider(event.target) || event.button !== 0) return;
+      const current = edit.current;
+      current.cancelled = false;
+      current.dragging = true;
+      window.addEventListener('pointerup', () => edit.current.dragging && finish.current(), {
+        once: true,
+      });
+      if (mixed && draft === null) change(least);
     },
     onKeyDown: (event: KeyboardEvent) => {
       if (!isSlider(event.target)) return;
+      const current = edit.current;
       if (event.key !== 'Escape') {
-        cancelled.current = false;
+        current.cancelled = false;
         return;
       }
-      if (pending.current === null) return;
+      if (current.pending === null && !current.restore) return;
       event.preventDefault();
-      pending.current = null;
-      cancelled.current = true;
+      const { restore } = current;
+      current.pending = null;
+      current.restore = null;
+      current.cancelled = true;
       setDraft(null);
+      restore?.();
     },
   };
 }
 
 /**
  * A slider with a number field. A percent setting holds 0 to 1 and shows 0 to 100; a setting with
- * `range` is in mm on a logarithmic slider. Unless `live`, a drag sets its value once on release.
+ * `range` is in mm on a logarithmic slider. Unless `live`, a drag sets its value once on release;
+ * a live one gives `begin` to put the value back on Escape.
  */
 function SliderSetting({
   label,
@@ -139,6 +193,7 @@ function SliderSetting({
   mixed = false,
   range,
   live = false,
+  begin,
   owned,
   onSet,
 }: {
@@ -147,13 +202,20 @@ function SliderSetting({
   mixed?: boolean;
   range?: { min: number; max: number };
   live?: boolean;
+  begin?: () => () => void;
   owned: () => boolean;
   onSet: (value: number) => void;
 }) {
-  const slider = useReleaseDraft(owned, onSet);
-  const change = (next: number) => (live ? owned() && onSet(next) : slider.change(next));
+  const slider = useSliderEdit({
+    owned,
+    onSet,
+    live,
+    begin,
+    mixed,
+    least: range ? range.min : 0,
+  });
   const shown = slider.draft ?? value;
-  const hidden = mixed && slider.draft === null;
+  const { hidden } = slider;
   return (
     <label
       className="warp-point-setting"
@@ -169,7 +231,7 @@ function SliderSetting({
           min={range.min}
           max={range.max}
           mixed={hidden}
-          onChange={change}
+          onChange={slider.change}
         />
       ) : (
         <input
@@ -181,7 +243,7 @@ function SliderSetting({
           max={100}
           step={1}
           value={hidden ? 0 : Math.round(shown * 100)}
-          onChange={(event) => change(Number(event.target.value) / 100)}
+          onChange={(event) => slider.change(Number(event.target.value) / 100)}
         />
       )}
       <NumericInput
@@ -200,47 +262,72 @@ function SliderSetting({
 
 const fieldRange = { min: 0, max: 100 };
 
+/** A switch on its own row, marked Mixed when the targets disagree; a click sets them all. */
+function SwitchRow({
+  title,
+  label,
+  checked,
+  mixed,
+  onChange,
+}: {
+  title: string;
+  label: string;
+  checked: boolean;
+  mixed: boolean;
+  onChange: (checked: boolean) => void;
+}) {
+  return (
+    <div className="appearance-row">
+      <span>{title}</span>
+      <span className="refine-switch">
+        {mixed ? <small>Mixed</small> : null}
+        <Switch label={label} checked={checked && !mixed} onChange={onChange} />
+      </span>
+    </div>
+  );
+}
+
 /**
- * A switch that hands a setting to the solver (null), and the setting itself once it is off,
- * starting from `start` held to `range`. It is on when every target is automatic.
+ * A switch that hands a setting to the solver (null), and the setting itself once it is off. It
+ * is on when every target is automatic. Turning it off runs `seed`, which writes each target's
+ * start and says whether any was held to the control's range; the hint stays until a manual edit.
  */
 function AutoSetting({
   label,
   values,
-  start,
-  range,
+  seed,
   onSet,
   children,
 }: {
   label: string;
   values: readonly (number | null)[];
-  /** What the solver used, where a setting turned off starts. */
-  start: () => number;
-  range: { min: number; max: number };
+  seed: () => boolean;
   onSet: (value: number | null) => void;
-  children: (value: number, mixed: boolean) => ReactNode;
+  children: (value: number, mixed: boolean, set: (value: number) => void) => ReactNode;
 }) {
-  const [adjusted, setAdjusted] = useState<number | null>(null);
+  const [adjusted, setAdjusted] = useState(false);
   const auto = values.every((v) => v === null);
   const value = values.find((v) => v !== null) ?? 0;
   const mixed = values.some((v) => v !== values[0]);
+  const set = (value: number) => {
+    setAdjusted(false);
+    onSet(value);
+  };
   return (
     <>
-      <div className="appearance-row">
-        <span>Automatic {label.toLowerCase()}</span>
-        <Switch
-          label={`Choose ${label.toLowerCase()} automatically`}
-          checked={auto}
-          onChange={(on) => {
-            if (on) return onSet(null);
-            const seeded = manualStart(start(), range);
-            setAdjusted(seeded.adjusted ? seeded.value : null);
-            onSet(seeded.value);
-          }}
-        />
-      </div>
-      {auto ? null : children(value, mixed)}
-      {!auto && !mixed && adjusted === value ? (
+      <SwitchRow
+        title={`Automatic ${label.toLowerCase()}`}
+        label={`Choose ${label.toLowerCase()} automatically`}
+        checked={auto}
+        mixed={!auto && values.includes(null)}
+        onChange={(on) => {
+          setAdjusted(false);
+          if (on) onSet(null);
+          else setAdjusted(seed());
+        }}
+      />
+      {auto ? null : children(value, mixed, set)}
+      {!auto && adjusted ? (
         <p className="anchor-help" role="status">
           Adjusted to the nearest allowed value.
         </p>
@@ -350,13 +437,45 @@ function EdgeControls({ view, targets, owned }: ModeProps) {
     settingOf(inputs, (i) => i.ends?.[k] ?? null, view.edge.ends[k]),
   );
   const closed = inputs.length > 0 && inputs.every((i) => i.closed);
-  const first = targets[0];
-  const firstSolve = first ? (refineSolved(editor().refine!, first) as EdgeSolve | null) : null;
-  const solve = targets.length === 1 ? firstSolve : null;
+  const solveOf = (f: RefineFeature) => refineSolved(editor().refine!, f) as EdgeSolve | null;
+  const solve = targets.length === 1 ? solveOf(targets[0]) : null;
+  // Each target keeps its own other end.
   const setEnd = (index: 0 | 1, choice: (typeof endChoices)[number]) => {
-    const next: [EdgeEnd | null, EdgeEnd | null] = [ends[0].value, ends[1].value];
-    next[index] = choice === 'auto' ? null : choice;
-    editor().setRefineEdge({ ends: next });
+    const end = choice === 'auto' ? null : choice;
+    if (!targets.length)
+      return editor().setRefineEdge({ ends: withEnd(view.edge.ends, index, end) });
+    const each = Object.fromEntries(
+      targets.map((f, i) => [f.id, { ends: withEnd(inputs[i].ends, index, end) }]),
+    );
+    editor().setRefineEdge({}, each);
+  };
+  const seedWidths = () => {
+    const rule = autoRule('width', view.model!);
+    if (!targets.length) {
+      const start = manualStart(rule, widthRange);
+      editor().setRefineEdge({ width: start.value });
+      return start.adjusted;
+    }
+    const { each, adjusted } = manualStarts(
+      targets.map((f) => ({ id: f.id, start: solveOf(f)?.width ?? rule })),
+      widthRange,
+    );
+    editor().setRefineEdge(
+      {},
+      Object.fromEntries(Object.entries(each).map(([id, width]) => [id, { width }])),
+    );
+    return adjusted;
+  };
+  // A live Strength edit puts back each target's own value on Escape.
+  const beginStrength = () => {
+    if (!targets.length) {
+      const saved = view.edge.strength;
+      return () => editor().setRefineEdge({ strength: saved });
+    }
+    const each = Object.fromEntries(
+      targets.map((f, i) => [f.id, { strength: inputs[i].strength }]),
+    );
+    return () => editor().setRefineEdge({}, each);
   };
   return (
     <>
@@ -373,18 +492,17 @@ function EdgeControls({ view, targets, owned }: ModeProps) {
       <AutoSetting
         label="Width"
         values={widths}
-        start={() => firstSolve?.width ?? autoRule('width', view.model!)}
-        range={widthRange}
+        seed={seedWidths}
         onSet={(width) => editor().setRefineEdge({ width })}
       >
-        {(width, mixed) => (
+        {(width, mixed, set) => (
           <SliderSetting
             label="Width"
             value={width}
             mixed={mixed}
             range={widthRange}
             owned={owned}
-            onSet={(width) => editor().setRefineEdge({ width })}
+            onSet={set}
           />
         )}
       </AutoSetting>
@@ -393,6 +511,7 @@ function EdgeControls({ view, targets, owned }: ModeProps) {
         value={strength.value}
         mixed={strength.mixed}
         live
+        begin={beginStrength}
         owned={owned}
         onSet={(strength) => editor().setRefineEdge({ strength })}
       />
@@ -468,7 +587,7 @@ function BrushRadius() {
   });
   const range = fittedSizeRange(size);
   const set = (value: number) => editor().setRefineBrushRadius(value);
-  const slider = useReleaseDraft(always, set);
+  const slider = useSliderEdit({ owned: always, onSet: set });
   const shown = slider.draft ?? radius;
   return (
     <div
@@ -534,6 +653,13 @@ function RegionControls({ view, targets, owned }: ModeProps) {
       : null;
   const model = view.model!;
   const set = (options: Partial<RefineSession['region']>) => editor().setRefineRegion(options);
+  // Selected regions all start from the model's rule until the solver reports what it used.
+  const seed =
+    (setting: 'detail' | 'blend' | 'scale', range: { min: number; max: number }) => () => {
+      const start = manualStart(autoRule(setting, model), range);
+      set({ [setting]: start.value });
+      return start.adjusted;
+    };
   const smooth = !treatment.mixed && treatment.value === 'smooth';
   const fitted = !shape.mixed && shape.value === 'auto' ? fittedLabel(solve?.fitted ?? null) : null;
   return (
@@ -591,30 +717,28 @@ function RegionControls({ view, targets, owned }: ModeProps) {
         owned={owned}
         onSet={(strength) => set({ strength })}
       />
-      <div className="appearance-row">
-        <span>Keep detail</span>
-        <Switch
-          label="Keep detail"
-          checked={keepDetail.value && !keepDetail.mixed}
-          onChange={(keepDetail) => set({ keepDetail })}
-        />
-      </div>
+      <SwitchRow
+        title="Keep detail"
+        label="Keep detail"
+        checked={keepDetail.value}
+        mixed={keepDetail.mixed}
+        onChange={(keepDetail) => set({ keepDetail })}
+      />
       {keepDetail.value && !keepDetail.mixed ? (
         <>
           <AutoSetting
             label="Offset"
             values={values((i) => i.detail)}
-            start={() => autoRule('detail', model)}
-            range={fieldRange}
+            seed={seed('detail', fieldRange)}
             onSet={(detail) => set({ detail })}
           >
-            {(detail, mixed) => (
+            {(detail, mixed, setDetail) => (
               <MillimetreField
                 label="Offset"
                 value={detail}
                 mixed={mixed}
                 owned={owned}
-                onSet={(detail) => set({ detail })}
+                onSet={setDetail}
               />
             )}
           </AutoSetting>
@@ -626,17 +750,16 @@ function RegionControls({ view, targets, owned }: ModeProps) {
       <AutoSetting
         label="Blend"
         values={values((i) => i.blend)}
-        start={() => autoRule('blend', model)}
-        range={fieldRange}
+        seed={seed('blend', fieldRange)}
         onSet={(blend) => set({ blend })}
       >
-        {(blend, mixed) => (
+        {(blend, mixed, setBlend) => (
           <MillimetreField
             label="Blend"
             value={blend}
             mixed={mixed}
             owned={owned}
-            onSet={(blend) => set({ blend })}
+            onSet={setBlend}
           />
         )}
       </AutoSetting>
@@ -645,18 +768,17 @@ function RegionControls({ view, targets, owned }: ModeProps) {
           <AutoSetting
             label="Reach"
             values={values((i) => i.scale ?? null)}
-            start={() => autoRule('scale', model)}
-            range={reachRange}
+            seed={seed('scale', reachRange)}
             onSet={(scale) => set({ scale })}
           >
-            {(scale, mixed) => (
+            {(scale, mixed, setScale) => (
               <SliderSetting
                 label="Reach"
                 value={scale}
                 mixed={mixed}
                 range={reachRange}
                 owned={owned}
-                onSet={(scale) => set({ scale })}
+                onSet={setScale}
               />
             )}
           </AutoSetting>
@@ -686,6 +808,10 @@ function BrushControls({ view, owned }: ModeProps) {
         label="Strength"
         value={view.brush.strength}
         live
+        begin={() => {
+          const saved = view.brush.strength;
+          return () => editor().setRefineBrush({ strength: saved });
+        }}
         owned={owned}
         onSet={(strength) => editor().setRefineBrush({ strength })}
       />
@@ -719,6 +845,10 @@ function DetectControls({ view, targets, owned }: ModeProps) {
         label="Sensitivity"
         value={detect.sensitivity}
         live
+        begin={() => {
+          const saved = detect.sensitivity;
+          return () => editor().setRefineDetect({ sensitivity: saved });
+        }}
         owned={owned}
         onSet={(sensitivity) => editor().setRefineDetect({ sensitivity })}
       />

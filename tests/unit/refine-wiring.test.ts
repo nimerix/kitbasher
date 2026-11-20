@@ -9,15 +9,18 @@ import {
   fittedLabel,
   foldWarning,
   manualStart,
+  manualStarts,
   refineTargets,
   shared,
   skippedWarning,
   targetKey,
+  withEnd,
 } from '../../src/components/refine-panel';
 import type { EdgeSolve } from '../../src/core/refine-edge';
 import {
   drawingRefineGuide,
   refineSolved,
+  reportFailures,
   useEditor,
   type RefineFeature,
   type RefineSession,
@@ -89,11 +92,100 @@ describe('Refine panel text', () => {
     expect(manualStart(25, range)).toEqual({ value: 5, adjusted: true });
   });
 
+  it('starts each target from its own value and says whether any was held', () => {
+    const range = { min: 0.1, max: 5 };
+    expect(
+      manualStarts(
+        [
+          { id: 'a', start: 0.45 },
+          { id: 'b', start: 0.431 },
+        ],
+        range,
+      ),
+    ).toEqual({ each: { a: 0.45, b: 0.431 }, adjusted: false });
+    expect(
+      manualStarts(
+        [
+          { id: 'a', start: 0.45 },
+          { id: 'b', start: 0.01 },
+        ],
+        range,
+      ),
+    ).toEqual({ each: { a: 0.45, b: 0.1 }, adjusted: true });
+    expect(manualStarts([], range)).toEqual({ each: {}, adjusted: false });
+  });
+
+  it('changes one end of a pair and keeps the other', () => {
+    expect(withEnd([null, 'taper'], 0, 'hold')).toEqual(['hold', 'taper']);
+    expect(withEnd(['hold', 'hold'], 1, null)).toEqual(['hold', null]);
+    expect(withEnd(undefined, 1, 'taper')).toEqual([null, 'taper']);
+  });
+
   it('shows a shared value, or the first marked mixed', () => {
     expect(shared([0.4, 0.4], 1)).toEqual({ value: 0.4, mixed: false });
     expect(shared([0.4, 0.8], 1)).toEqual({ value: 0.4, mixed: true });
     expect(shared([null, 2], 1)).toEqual({ value: null, mixed: true });
     expect(shared([], 1)).toEqual({ value: 1, mixed: false });
+  });
+});
+
+describe('Refine failure notices', () => {
+  const small = 'too small';
+  const noEdge = 'no edge';
+  const run = (passes: { id: string; notice: string | null }[][]) => {
+    let known: ReadonlyMap<string, string> = new Map();
+    return passes.map((pass) => {
+      const result = reportFailures(known, pass);
+      known = result.known;
+      return result.news;
+    });
+  };
+
+  it('reports a failure once while the feature keeps failing for the same reason', () => {
+    const fail = [{ id: 'a', notice: small }];
+    expect(run([fail, fail, fail])).toEqual([[small], [], []]);
+  });
+
+  it('reports two features failing together once each, then not on the next pass', () => {
+    const both = [
+      { id: 'a', notice: small },
+      { id: 'b', notice: small },
+    ];
+    expect(run([both, both])).toEqual([[small, small], []]);
+  });
+
+  it('reports again after the feature solved, or failed for another reason', () => {
+    expect(
+      run([
+        [{ id: 'a', notice: small }],
+        [{ id: 'a', notice: null }],
+        [{ id: 'a', notice: small }],
+      ]),
+    ).toEqual([[small], [], [small]]);
+    expect(run([[{ id: 'a', notice: small }], [{ id: 'a', notice: noEdge }]])).toEqual([
+      [small],
+      [noEdge],
+    ]);
+  });
+
+  it('reports a feature again after a different feature failed in between', () => {
+    expect(
+      run([
+        [{ id: 'a', notice: noEdge }],
+        [{ id: 'b', notice: noEdge }],
+        [{ id: 'a', notice: noEdge }],
+      ]),
+    ).toEqual([[noEdge], [noEdge], [noEdge]]);
+  });
+
+  it('keeps a failure not in the pass when nothing new failed', () => {
+    expect(
+      run([
+        [{ id: 'a', notice: small }],
+        [{ id: 'b', notice: null }],
+        [{ id: 'a', notice: small }],
+      ]),
+    ).toEqual([[small], [], []]);
   });
 });
 
@@ -187,6 +279,65 @@ describe('Refine store helpers for the panel and keys', () => {
     expect(noEdge()).toBe(3);
     editor().setRefineEdge({ strength: 0.3 });
     expect(noEdge()).toBe(3);
+  });
+
+  it('raises no notice again for regions that keep failing, from an edit or Accept', async () => {
+    setup([boxPart()], ['box']);
+    await ready();
+    const notify = vi.fn(editor().notify);
+    useEditor.setState({ notify });
+    editor().setRefineMode('region');
+    for (const triangle of [0, 20]) {
+      useEditor.setState({ refine: { ...session(), triangles: [triangle] } });
+      editor().makeRefineRegion();
+    }
+    editor().selectRefine(session().features.map((f) => f.id));
+    const small = () =>
+      notify.mock.calls.filter(([message]) => message.startsWith('This area is too small')).length;
+    const before = small();
+    editor().setRefineRegion({ strength: 0.7 });
+    expect(small()).toBe(before);
+    editor().acceptRefine();
+    editor().acceptRefine();
+    expect(small()).toBe(before);
+    expect(session().features.every((f) => f.state === 'pending')).toBe(true);
+    // With the notice no longer showing, a press that changed nothing says why, once.
+    useEditor.setState({ toast: null });
+    editor().acceptRefine();
+    expect(small()).toBe(before + 1);
+  });
+
+  it('edits the selected features of a kind, or the defaults when none is selected', async () => {
+    setup([boxPart()], ['box']);
+    await ready();
+    editor().setRefineMode('region');
+    const region = () => {
+      const f = session().features.find((f) => f.id === session().selected[0])!.feature;
+      if (f.type !== 'region') throw new Error('not a region');
+      return f.input;
+    };
+    useEditor.setState({ refine: { ...session(), triangles: [0, 1, 2] } });
+    editor().makeRefineRegion();
+    editor().setRefineRegion({ strength: 0.25 });
+    expect(region().strength).toBe(0.25);
+    expect(session().region.strength).toBe(1);
+    editor().setRefineRegion({}, { [session().selected[0]]: { blend: 0.3 } });
+    expect(region().blend).toBe(0.3);
+    expect(session().region.blend).toBeNull();
+    editor().selectRefine([]);
+    editor().setRefineRegion({ strength: 0.5 });
+    expect(session().region.strength).toBe(0.5);
+
+    editor().setRefineMode('edge');
+    editor().addRefinePoint(crest(-1.2));
+    editor().addRefinePoint(crest(1.2));
+    const edge = () => selectedFeature().feature.input as { strength: number; ends?: unknown };
+    editor().setRefineEdge({ strength: 0.4, kind: 'arc' });
+    expect(edge().strength).toBe(0.4);
+    expect(session().edge).toMatchObject({ strength: 1, kind: 'arc' });
+    editor().setRefineEdge({}, { [session().selected[0]]: { ends: ['hold', null] } });
+    expect(edge().ends).toEqual(['hold', null]);
+    expect(session().edge.ends).toEqual([null, null]);
   });
 
   it('reads the solve the draft made, with the ends it chose', async () => {

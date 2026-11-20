@@ -6705,6 +6705,12 @@ optgroup {
 .refine-spaced {
   margin-top: 10px;
 }
+/* A switch with "Mixed" beside it when the selected features disagree. */
+.refine-switch {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
 /* Groups the brush radius field and slider for their release handling, without a box of its own. */
 .refine-brush-radius {
   display: contents;
