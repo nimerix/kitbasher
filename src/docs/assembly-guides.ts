@@ -326,7 +326,7 @@ export const assemblyGuides: DocArticle[] = [
     group: 'Build & assemble',
     icon: 'zap',
     intro:
-      'A scan of a small part often rounds off edges that should be sharp and leaves ripples on faces that should be flat or round. Refine rebuilds an edge from a guide you lay along it, treats a painted area so it is smooth, flat or a true shape while keeping rivets and other detail, and offers brushes for local fixes. Review a selected guide or region on the part, accept the ones you want, and choose Apply to save the accepted changes to the part.',
+      'A scan of a small part often rounds off edges that should be sharp and leaves ripples on faces that should be flat or round. Refine rebuilds an edge from a guide you lay along it, treats a painted area so it is smooth, flat or a true shape and can keep rivets and other detail, and offers brushes for local fixes. Review a selected guide or region on the part, accept the ones you want, and choose Apply to save the session’s working surface to the part.',
     image: referenceImages.refine,
     sections: [
       {
@@ -336,13 +336,13 @@ export const assemblyGuides: DocArticle[] = [
           'Refine works on one part at a time. Until you choose Apply, its changes stay in the session and the part itself is unchanged.',
         ],
         steps: [
-          'Select one visible, unlocked part and press E, or choose Refine in the toolbar.',
+          'Select one visible, unlocked part and press E, or choose Refine (the sparkles button) in the toolbar.',
           'Wait while the panel shows Preparing the surface…',
           'Choose a mode: Edge, Region, Brush, or Detect.',
         ],
         note: {
           title: 'What the settings change',
-          text: 'The settings in Edge and Region mode change the selected guides or regions of that kind. With none selected, they set up the next one you make. A setting that differs between selected features shows Mixed. The line above Cancel and Apply, such as 1 accepted · 1 proposed, counts what the session holds.',
+          text: 'Feature settings edit selected pending guides in Edge or selected pending regions in Region. With no matching pending selection, they set the defaults for the next feature. Different values show Mixed. If treatments differ, no Treatment option is selected. The line above Cancel and Apply, such as 1 accepted · 1 proposed, counts what the session holds.',
         },
       },
       {
@@ -367,9 +367,9 @@ export const assemblyGuides: DocArticle[] = [
         id: 'adjust-a-guide',
         title: 'Shape and adjust a guide',
         paragraphs: [
-          'Once a segment has its points, click farther along the edge to extend the selected guide with a new segment from its last point. Guide and Joints then apply to the next segment, and the panel says Applies to the next segment. Joints sets whether each new joint is Sharp, a corner, or Smooth.',
-          'Click the guide’s first point to close it into a loop. A single line cannot close. A three-point arc, a spline of three or more points, or a path of two or more segments can, though a closing segment cannot be an arc. Press Esc before a guide has all its points to discard it.',
-          'Drag the points of a selected guide along the surface to adjust it; the preview follows, and each drag is one undo step. Automatic width lets the tool estimate how far to either side of the guide it reads and rebuilds the surface. Turn it off to set Width yourself. Strength sets how loosely the edge follows the guide’s line, arc or spline, from no change to fully on it.',
+          'With one open pending guide selected, finish its current segment, pressing Enter for a spline. Click farther along the edge to start the next segment. Guide and Joints set how the next segment is drawn. The panel shows Applies to the next segment. Joints sets whether each new joint is Sharp, a corner, or Smooth.',
+          'Click the first handle of the selected open guide to close it. A single line cannot close. A three-point arc can close directly, and a spline you are still drawing can close after three points. On a multi-segment path, the starting point can finish the segment you are still drawing. If Refine needs to add a closing segment to a finished path, choose Line or Spline under Guide. Press Esc while placing an unfinished guide to discard it.',
+          'Drag the points of a selected guide along the surface to adjust it; the preview follows. Each completed drag that moves a handle is one undo step. Automatic width lets the tool estimate how far to either side of the guide it reads and rebuilds the surface. Turn it off to set Width yourself. Strength sets how loosely the edge follows the guide’s line, arc or spline, from no change to fully on it.',
           'Ends sets Start and End separately for an open guide; the larger point marks the start. Choose Hold when Auto fades an edge that should run sharp into a corner, and Fade when Auto holds one that should die away.',
         ],
         table: {
@@ -377,7 +377,7 @@ export const assemblyGuides: DocArticle[] = [
           rows: [
             [
               'Auto',
-              'The tool chooses Fade or Hold for that end and names its choice, such as Auto (Fade).',
+              'The tool chooses Fade or Hold for that end. When one selected guide has a fit, it names its choice, such as Auto (Fade).',
             ],
             ['Fade', 'Tapers the sharpness out along the edge toward that end.'],
             ['Hold', 'Keeps the edge sharp to the end of the guide.'],
@@ -394,12 +394,12 @@ export const assemblyGuides: DocArticle[] = [
           'In Region mode, paint the area to treat. Hold Alt or choose Erase to remove paint; [ and ] shrink or grow the brush.',
           'Choose Make region.',
           'Choose a Treatment: Smooth, Flatten, or Shape.',
-          'Adjust Strength, Keep detail, and Blend, then review the preview.',
+          'Adjust Strength, Keep detail, and Blend, then review the preview. To set Blend, turn off Automatic blend.',
           'Choose Accept, or Dismiss.',
         ],
         note: {
           title: 'When the area is too small',
-          text: 'The tool shows This area is too small to fit a surface. Paint more of it. Painting more does not enlarge a region you have made: dismiss it, paint the larger area, and choose Make region again. With Sweep, the same notice can also mean the tube’s cross-section is not constant.',
+          text: 'The tool shows This area is too small to fit a surface. Paint more of it. Painting more does not enlarge a region you have made: dismiss it, paint the larger area, and choose Make region again. With Sweep, this notice also appears when Sweep cannot fit the selected surface.',
         },
       },
       {
@@ -407,23 +407,23 @@ export const assemblyGuides: DocArticle[] = [
         title: 'Choose a treatment and keep detail',
         paragraphs: [
           'Strength sets how loosely the area follows the treatment, from no change to fully on it. Keep detail is on by default, and the raised and recessed details it will keep in the selected region are outlined. Offset sets how far a feature must deviate from the surface, raised or recessed, to be preserved. If the outline misses shallow engraving or low rivets, turn off Automatic offset and lower Offset.',
-          'Blend sets the width of the band at the region’s border where the change fades out, so the region does not end in a step. To set it yourself, turn off Automatic blend.',
+          'Blend sets how wide the transition at the region’s border is.',
         ],
         table: {
           headers: ['Treatment', 'Result'],
           rows: [
             [
               'Smooth',
-              'Removes ripples and keeps the scan’s curvature. Reach sets the longest ripple it removes: raise it for long waves, and leave Automatic reach on otherwise.',
+              'Smooths ripples while following the surface’s curvature. Reach sets the longest ripple it removes: raise it for long waves, and leave Automatic reach on otherwise.',
             ],
-            ['Flatten', 'Snaps the area to a true plane.'],
+            ['Flatten', 'Fits the area toward a true plane.'],
             [
               'Shape',
-              'Snaps the area to a Cylinder, Cone, or Sphere. Auto picks the one that fits best and names it, such as Fits a cylinder.',
+              'Choose Cylinder, Cone, or Sphere to set the shape, or Auto to let the tool choose. Auto can also choose a plane. For one selected region with a fit, the panel names it, for example Fits a cylinder.',
             ],
             [
               'Shape → Sweep',
-              'Snaps the area to a constant cross-section carried along a curve, for pipes and hoses. Choose it yourself: Auto never picks it. It can refuse a tube whose cross-section swells or tapers.',
+              'Fits the area toward a constant cross-section carried along a curve, for pipes and hoses. Choose it yourself: Auto never picks it. It can refuse a tube whose cross-section swells or tapers.',
             ],
           ],
         },
@@ -433,15 +433,15 @@ export const assemblyGuides: DocArticle[] = [
         title: 'Use the brushes',
         paragraphs: [
           'In Brush mode, choose Crease, Flatten, or Smooth, set Brush radius and Strength, and drag across the surface. [ and ] shrink or grow the brush. Brushes and paint act only on the surface in front of you.',
-          'Drag Crease along the rounding. On release it sharpens the edge it finds under the stroke. When the rounding is wider than the brush, the stroke becomes a selected guide instead and the tool shows The edge is wider than the brush. Check the preview, then accept it. Accept or dismiss it as you would any guide. If the stroke finds no edge, the tool shows the no-edge notice and nothing changes.',
-          'Flatten flattens the surface under the brush, and Smooth smooths it; edges the tool has rebuilt are held. A stroke that changes the surface is one step you can undo within the session. A stroke that changes nothing adds no step.',
+          'Drag Crease along the rounding. Crease sharpens on release if it can fit the edge within the brush width. If the edge needs a wider fit, Refine leaves a selected pending guide and shows The edge is wider than the brush. Check the preview, then accept it. In Brush mode, choose Accept or press Enter to keep the change. Choose Dismiss or press Delete to remove the guide. Press Esc to deselect it and keep it pending. If the stroke finds no edge, the tool shows the no-edge notice and nothing changes.',
+          'Flatten flattens the surface under the brush, and Smooth smooths it; edges the tool has rebuilt are held. A stroke that changes the surface is one step you can undo within the session. A stroke that finds nothing adds no step. A wide Crease stroke that leaves a pending guide adds one session undo step.',
         ],
       },
       {
         id: 'detect',
         title: 'Let Refine propose',
         paragraphs: [
-          'Detect looks for softened edges and surfaces and proposes guides and regions for you to review. Proposals are drawn on the part: edges as dashed guides and surfaces as tinted regions with a treatment already chosen.',
+          'Detect looks for softened edges and surfaces and proposes guides and regions for you to review. New proposals are drawn on the part: edges as dashed guides and surfaces as tinted regions with a treatment already chosen.',
         ],
         steps: [
           'In Detect mode, choose Whole part or Painted area under Look in. For Painted area, paint where to look.',
@@ -449,20 +449,20 @@ export const assemblyGuides: DocArticle[] = [
           'Choose Find edges and surfaces. Progress shows in the panel, and the Cancel button below it stops the search.',
           'Click a proposal to select it, or Shift-click to add it to the selection or remove it. Select all proposed selects every pending guide and region.',
           'To change a proposal’s settings, select it here, then switch to Edge for a guide or Region for a region.',
-          'Choose Accept selected or Dismiss selected.',
+          'In Detect, choose Accept selected or Dismiss selected. In Edge or Region, choose Accept or Dismiss for the selected features of that mode.',
         ],
         note: {
           title: 'Previewing and keeping proposals',
-          text: 'A selected proposal previews on the part. With more than 8 selected, the panel says Preview is off while more than 8 are selected. Accepting still works. Accept keeps a proposal in this session; the part changes when you choose Apply. Running Find edges and surfaces again replaces the proposals still pending, except ones you have edited. Proposals and handles hidden behind the part cannot be clicked: orbit to reach them.',
+          text: 'Select a pending proposal to preview its fit on the part. With more than 8 pending proposals selected, the preview is off. In Detect the panel says Preview is off while more than 8 are selected. Accepting still works. Accept selected keeps the changes that fit in the session’s working surface as one undo step. Each press of Accept or Accept selected shows at most one notice. Apply saves the working surface to the part. A completed search replaces untouched pending proposals from Detect. It keeps accepted features, edited proposals and guides or regions you made. It skips edges and regions those features already mostly cover.',
         },
       },
       {
         id: 'apply-or-cancel',
         title: 'Apply or cancel',
         paragraphs: [
-          'While the tool is open, Ctrl/⌘ + Z and Ctrl/⌘ + Shift + Z undo and redo session steps, such as placing or dragging guide points, painting, accepting, and strokes that change the surface. Changing a setting is not a step. Pressing Esc, or switching to another window, during a brush stroke or a drag of a guide point discards that stroke or drag, leaving nothing to undo.',
+          'While the tool is open, Ctrl/⌘ + Z and Ctrl/⌘ + Shift + Z undo and redo session steps, such as placing or dragging guide points, painting, accepting, and strokes that change the surface. These shortcuts use session history first. Changing a setting is not a step. Pressing Esc, or switching to another window, during a brush stroke or a drag of a guide point discards that stroke or drag, leaving nothing to undo.',
           'Apply saves the working surface to the part as one undo step in the scene. It becomes available once you have accepted a feature or made a stroke that changed the surface. Pins, anchors, joints, and other parts are not modified, and Refine stays open so you can continue.',
-          'Cancel discards the work you have not applied and leaves the tool. Leaving Refine any other way also discards it: when nothing is being drawn, Esc returns to Select, and the app shows Refinement discarded. Use Apply to keep it. Changes you applied earlier stay on the part.',
+          'Cancel discards the work you have not applied and leaves the tool. When Esc has nothing else to end, such as a stroke, a drag, an unfinished guide, or a waiting Crease guide, it returns to Select. Leaving Refine discards this session. If you leave with changes to the working surface, the app shows Refinement discarded. Use Apply to keep it. Changes you applied earlier stay on the part.',
         ],
       },
       {
@@ -473,12 +473,13 @@ export const assemblyGuides: DocArticle[] = [
           'On a plate with rivets, use a painted region with Flatten and Keep detail rather than the Flatten brush. The brush can flatten rivets, and clipping one can leave a step at its rim.',
           'A guide needs surface on both sides to work with. Lay it along the rounded edge itself. If the tool says no edge was found, move the guide onto the rounding or change Width.',
           'Where three faces meet, in a pocket or at a box corner, guide the edges separately if a path through the corner leaves a mark there.',
-          'Treat proposals as a starting point. Check them before accepting many at once, and dismiss any false edges on smooth tubes or scan dents.',
-          'Edges shorter than Minimum length are not proposed. Lower it to pick up short edges, and expect more short guides to check.',
-          'Detect proposes regions for plates, domes, and barrels it can see whole. Paint hoses, and surfaces broken up by straps, by hand.',
-          'On a hose that is not perfectly round, Sweep with Keep detail on holds more of the surface as detail; turning Keep detail off gives the cleaner tube.',
+          'Treat proposals as a starting point. Check them before accepting many at once. Where Detect proposes a guide on a smooth tube or across a scan dent, dismiss it.',
+          'Small hardware such as clips, flanges, and buckle lips is often shorter than Minimum length. Lower it to pick those up, and expect more short guides to check.',
+          'Detect finds plates, domes, and barrels it can see whole. Paint hoses, and any area Detect misses or splits, such as a surface crossed by straps or belts, by hand in sections.',
+          'Apply a Sweep once over an area. Re-applying the same Sweep to the same area can shift the surface slightly each time. If Keep detail outlines irregularities you want Sweep to remove, turn it off and compare the preview.',
+          'If a proposal or handle on the far side of the part or behind another part will not respond, turn the view so it faces you: only what is visible can be picked.',
           'A very large painted region can take a moment to preview after each change.',
-          'Just after you accept an edge on a very large part, strokes and paint may not start for a moment and the cursor shows busy; single clicks still work.',
+          'After you accept an edge on a very large part, the cursor can briefly show busy while Refine prepares the surface for picking. Wait before starting a brush stroke, painting a region, or dragging a handle. Single clicks to place points or select proposals still work.',
         ],
       },
     ],

@@ -187,7 +187,8 @@ try {
         .getEntriesByType('resource')
         .map((entry) => entry.name)
         .find((url) => /\/src\/core\/store\.ts(?:\?.*)?$/.test(url));
-      const { useEditor } = await import(store);
+      const { useEditor, refineSolved } = await import(store);
+      window.refineCapture = { useEditor, refineSolved };
       const { softBox } = await import('/tests/helpers/soft-edges.ts');
       const geometry = softBox([4, 3, 2], 0.6, { step: 0.2, ripple: 0.04, noise: 0.008 });
       useEditor.getState().setScene({
@@ -211,48 +212,67 @@ try {
       useEditor.getState().select('block');
     });
     await page.locator('.part-select[title="Scanned block"]').waitFor();
-    await page.keyboard.press('1');
-    await page.keyboard.press('Home');
-    const canvas = await page.locator('canvas').first().boundingBox();
-    const centre = { x: canvas.x + canvas.width / 2, y: canvas.y + canvas.height / 2 };
-    await page.mouse.move(centre.x, centre.y);
-    await page.mouse.down({ button: 'middle' });
-    await page.mouse.move(centre.x - 70, centre.y + 45, { steps: 12 });
-    await page.mouse.up({ button: 'middle' });
-    await page.keyboard.press('Home');
-    await page.mouse.wheel(0, -200);
-    await page.waitForTimeout(2000);
     await page.keyboard.press('e');
-    await expect(page.getByRole('radio', { name: 'Edge', exact: true })).toBeVisible({
-      timeout: 30000,
-    });
-    await page.waitForTimeout(800);
-    // The crest of a rounded edge of the block: 0.6 mm fillets on a block of half size 4, 3, 2.
-    const inset = 0.6 - 0.6 / Math.SQRT2;
-    const click = async (world) => {
-      const ndc = await page.evaluate(async (world) => {
+    await page.waitForFunction(
+      () => window.refineCapture.useEditor.getState().refine?.stage === 'ready',
+      null,
+      { timeout: 60000 },
+    );
+    await expect(page.getByRole('radio', { name: 'Edge', exact: true })).toBeChecked();
+    // A fixed pose that keeps both guides and their handles clear of the camera overlay.
+    const ndcOf = (world) =>
+      page.evaluate(async (world) => {
         const url = performance
           .getEntriesByType('resource')
           .map((entry) => entry.name)
           .find((url) => url.includes('/@react-three_fiber.js'));
         const root = (await import(url))._roots.get(document.querySelector('canvas')).store;
-        const { camera } = root.getState();
+        const { camera, controls, invalidate } = root.getState();
+        if (!world) {
+          camera.position.set(9, 6.6, 21);
+          camera.up.set(0, 1, 0);
+          controls.target.set(0, 0, 0);
+          controls.update();
+          invalidate();
+          await new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
+          return null;
+        }
         return camera.position.clone().fromArray(world).project(camera).toArray();
       }, world);
+    await ndcOf(null);
+    const canvas = await page.locator('canvas').first().boundingBox();
+    // The crest of a rounded edge of the block: 0.6 mm fillets on a block of half size 4, 3, 2.
+    const inset = 0.6 - 0.6 / Math.SQRT2;
+    const click = async (world) => {
+      const ndc = await ndcOf(world);
       await page.mouse.click(
         canvas.x + ((ndc[0] + 1) * canvas.width) / 2,
         canvas.y + ((1 - ndc[1]) * canvas.height) / 2,
       );
     };
+    const features = () =>
+      page.evaluate(() => {
+        const { useEditor, refineSolved } = window.refineCapture;
+        const refine = useEditor.getState().refine;
+        return refine.features.map((f) => ({
+          state: f.state,
+          selected: refine.selected.includes(f.id),
+          solved: !!refineSolved(refine, f),
+        }));
+      });
     await click([-3, 3 - inset, 2 - inset]);
     await click([3, 3 - inset, 2 - inset]);
-    await expect(page.getByText('0 accepted · 1 proposed')).toBeVisible({ timeout: 30000 });
+    await expect(page.getByText('0 accepted · 1 proposed')).toBeVisible();
     await page.getByRole('button', { name: 'Accept', exact: true }).click();
-    await expect(page.getByText('1 accepted · 0 proposed')).toBeVisible({ timeout: 30000 });
+    await expect
+      .poll(async () => (await features()).map((f) => f.state), { timeout: 30000 })
+      .toEqual(['accepted']);
     await click([4 - inset, 2, 2 - inset]);
     await click([4 - inset, -2, 2 - inset]);
-    await expect(page.getByText('1 accepted · 1 proposed')).toBeVisible({ timeout: 30000 });
-    await page.waitForTimeout(1500);
+    await expect
+      .poll(async () => (await features())[1], { timeout: 30000 })
+      .toEqual({ state: 'pending', selected: true, solved: true });
+    await expect(page.getByText('1 accepted · 1 proposed')).toBeVisible();
   });
   await capture('exploded-view', async (page) => {
     await page.getByRole('slider', { name: 'Exploded view amount' }).fill('65');
