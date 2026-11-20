@@ -1298,21 +1298,33 @@ export function zoneCount(band: EdgeBand, zone: BandZone) {
   return band.zone.reduce((count, z) => count + +(z === zone), 0);
 }
 
-/**
- * Farthest a flank vertex lies from its face: each flank is measured against whichever of the
- * planes y = `faceY` and z = `faceZ` it lies closer to overall.
- */
-export function maxFlankError(mesh: RefineMesh, band: EdgeBand, faceY = 1.5, faceZ = 1) {
+/** Farthest a vertex of `zone` lies from a face, given as the distance of a point to it. */
+export function maxZoneDistance(
+  mesh: RefineMesh,
+  band: EdgeBand,
+  zone: BandZone,
+  face: (p: Vec3) => number,
+) {
   let worst = 0;
-  for (const zone of [BandZone.Left, BandZone.Right]) {
-    let y = 0,
-      z = 0;
-    band.vertices.forEach((v, i) => {
-      if (band.zone[i] !== zone) return;
-      y = Math.max(y, Math.abs(mesh.position[v * 3 + 1] - faceY));
-      z = Math.max(z, Math.abs(mesh.position[v * 3 + 2] - faceZ));
-    });
-    worst = Math.max(worst, Math.min(y, z));
-  }
+  band.vertices.forEach((v, i) => {
+    if (band.zone[i] !== zone) return;
+    const p = mesh.position;
+    worst = Math.max(worst, face([p[v * 3], p[v * 3 + 1], p[v * 3 + 2]]));
+  });
   return worst;
+}
+
+/** Number of band vertices in one of `zones` at a point that `where` accepts. */
+export function countWhere(
+  mesh: RefineMesh,
+  band: EdgeBand,
+  zones: BandZone[],
+  where: (p: Vec3) => boolean,
+) {
+  let count = 0;
+  band.vertices.forEach((v, i) => {
+    const p = mesh.position;
+    if (zones.includes(band.zone[i]) && where([p[v * 3], p[v * 3 + 1], p[v * 3 + 2]])) count++;
+  });
+  return count;
 }

@@ -247,11 +247,18 @@ function boxLattice(
 
 type Raise = (point: Vec3, normal: Vec3) => void;
 
-function filletedBox(half: Vec3, fillet: number, options: SoftOptions | undefined, raise?: Raise) {
+/** A box lattice rounded by `fillet`, or by a radius that varies with x. */
+function filletedBox(
+  half: Vec3,
+  rounding: number | ((x: number) => number),
+  options: SoftOptions | undefined,
+  raise?: Raise,
+) {
   const surface = new Surface(options);
   const counts = half.map((h) => Math.max(1, Math.round((2 * h) / surface.options.step))) as Vec3;
   boxLattice(surface, counts, (c) => {
     const p = c.map((v, a) => -half[a] + (v * 2 * half[a]) / counts[a]);
+    const fillet = typeof rounding === 'number' ? rounding : rounding(p[0]);
     const q = p.map((v, a) => Math.min(Math.max(v, fillet - half[a]), half[a] - fillet));
     const normal = normalize([p[0] - q[0], p[1] - q[1], p[2] - q[2]]);
     const point = q.map((v, a) => v + fillet * normal[a]) as Vec3;
@@ -264,6 +271,63 @@ function filletedBox(half: Vec3, fillet: number, options: SoftOptions | undefine
 /** Box centred on the origin with every edge filleted. Its true shape is the sharp box of `half`. */
 export function softBox(half: Vec3, fillet: number, options?: SoftOptions) {
   return filletedBox(half, fillet, options).geometry();
+}
+
+/** softBox with its rounding growing linearly from `from` at x = -half[0] to `to` at x = half[0]. */
+export function taperedBox(half: Vec3, from: number, to: number, options?: SoftOptions) {
+  return filletedBox(
+    half,
+    (x) => from + ((to - from) * (x + half[0])) / (2 * half[0]),
+    options,
+  ).geometry();
+}
+
+/**
+ * softBox with space lifted by bulge * exp(-(x / 0.5)^2) * (y + half[1]) / (2 * half[1]): the top
+ * face y = half[1] carries a smooth bump along x and the edges beside it rise with it, while the
+ * faces z = +-half[2] stay flat.
+ */
+export function bulgedBox(half: Vec3, fillet: number, bulge: number, options?: SoftOptions) {
+  return filletedBox(half, fillet, options, (point) => {
+    point[1] += (bulge * Math.exp(-((point[0] / 0.5) ** 2)) * (point[1] + half[1])) / (2 * half[1]);
+  }).geometry();
+}
+
+/**
+ * An open sheet extruded z -2..2 whose profile folds into three flat layers 0.2 mm apart (y = 0, 0.2
+ * and 0.4, joined by folds of radius 0.1 at x = -2.1 and 2.1), then turns up into a wall at x = 0
+ * through a concave fillet of radius `fillet`. The top layer and the bottom layer face +y.
+ */
+export function foldedStrip(fillet: number, options?: SoftOptions) {
+  const surface = new Surface(options);
+  const { step } = surface.options;
+  const fold = 0.1;
+  const path = new Path(false);
+  path.line([2, 0], [-2.1, 0]);
+  path.arc([-2.1, fold], fold, -Math.PI / 2, -Math.PI);
+  path.line([-2.1, 0.2], [2.1, 0.2]);
+  path.arc([2.1, 0.2 + fold], fold, -Math.PI / 2, Math.PI);
+  path.line([2.1, 0.4], [fillet, 0.4]);
+  path.arc([fillet, 0.4 + fillet], fillet, -Math.PI / 2, -Math.PI / 2);
+  path.line([0, 0.4 + fillet], [0, 1.4]);
+  const columns = Math.round(path.length / step),
+    layers = Math.max(2, Math.round(4 / step));
+  const spacing = path.length / columns;
+  const grid: number[][] = [];
+  for (let l = 0; l <= layers; l++) {
+    const row: number[] = [];
+    for (let i = 0; i <= columns; i++) {
+      const inner = i > 0 && i < columns;
+      const { point, normal } = path.at((i + (inner ? surface.wobble() : 0)) * spacing);
+      const z = -2 + ((l + (l > 0 && l < layers ? surface.wobble() : 0)) * 4) / layers;
+      row.push(surface.add([point[0], point[1], z], [normal[0], normal[1], 0]));
+    }
+    grid.push(row);
+  }
+  for (let l = 0; l < layers; l++)
+    for (let i = 0; i < columns; i++)
+      surface.quad(grid[l][i], grid[l][i + 1], grid[l + 1][i + 1], grid[l + 1][i]);
+  return surface.geometry();
 }
 
 /** Twice the signed area of triangle a, b, c, positive when counter-clockwise. */
