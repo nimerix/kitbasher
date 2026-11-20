@@ -170,7 +170,7 @@ export function PaintCursor({ part, hit }: { part: Part; hit: SurfacePoint | nul
               ? pointAccent
               : erase
                 ? '#f18c8c'
-                : warpRegion
+                : warpRegion || refinePaint
                   ? warpRegionColor
                   : contactColors[index % contactColors.length]
           }

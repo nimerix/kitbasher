@@ -378,7 +378,19 @@ function Tints({ refine, part }: { refine: RefineSession; part: Part }) {
     const total = sets.reduce((sum, set) => sum + set.reduce((n, t) => n + t.length, 0), 0);
     const triangles = refine.model!.mesh.triangleCount;
     const corners = preview.index?.array;
-    const index = new Uint32Array(total * 3);
+    let attribute = geometry.index;
+    if (!attribute || attribute.array.length < total * 3) {
+      // Three keeps a replaced attribute's GPU buffer until its geometry is disposed. The position
+      // is the preview's own, so it is set aside first and the dispose frees only the old index.
+      if (attribute) {
+        geometry.deleteAttribute('position');
+        geometry.dispose();
+      }
+      const size = Math.max(total * 3, (attribute?.array.length ?? 0) * 2, 3 * 1024);
+      attribute = new BufferAttribute(new Uint32Array(size), 1);
+      geometry.setIndex(attribute);
+    }
+    const index = attribute.array as Uint32Array;
     geometry.clearGroups();
     let at = 0;
     sets.forEach((set, group) => {
@@ -395,7 +407,9 @@ function Tints({ refine, part }: { refine: RefineSession; part: Part }) {
       if (at > start) geometry.addGroup(start, at - start, group);
     });
     geometry.setAttribute('position', preview.getAttribute('position'));
-    geometry.setIndex(new BufferAttribute(index.subarray(0, at), 1));
+    attribute.clearUpdateRanges();
+    attribute.addUpdateRange(0, at);
+    attribute.needsUpdate = true;
     tint.mesh.visible = at > 0;
     invalidate();
     // The key stands for every set tinted.

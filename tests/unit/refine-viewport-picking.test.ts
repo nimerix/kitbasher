@@ -1,16 +1,29 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { BufferGeometry, type Intersection, Mesh, Raycaster, Vector3 } from 'three';
+import {
+  BufferAttribute,
+  BufferGeometry,
+  type Intersection,
+  Mesh,
+  Raycaster,
+  Vector3,
+} from 'three';
 import { MeshBVH } from 'three-mesh-bvh';
-import { pickRaycast } from '../../src/core/bvh';
+import { pickRaycast, type BvhRequest } from '../../src/core/bvh';
 import { triangleCount } from '../../src/core/geometry';
+import { workerIndexTriangles } from '../../src/core/spatial-index';
 import { useEditor } from '../../src/core/store';
+import { asPointerMove, previewRaycast } from '../../src/components/RefinePointer';
 import { boxPart, editor, ready, session, setup, surfacePoint } from '../helpers/refine-session';
 import { softBox } from '../helpers/soft-edges';
 
 afterEach(() => {
   editor().cancelRefine();
   useEditor.setState({ tool: 'select' });
+  vi.unstubAllGlobals();
 });
+
+/** The viewport's picking of a Refine preview. */
+const viewportPick = previewRaycast(pickRaycast);
 
 /** Rays down onto the top face and in onto the front face, over a grid across the box. */
 function rays() {
@@ -25,7 +38,8 @@ function rays() {
 
 /**
  * Every ray picks the same triangle at the same point with the picking the viewport uses (the
- * preview's own tree, kept by the store) as by testing every triangle of the preview.
+ * preview's own tree, kept by the store, or every triangle while that tree is built) as by testing
+ * every triangle of the preview.
  */
 function expectPickingMatches(preview: BufferGeometry) {
   const plain = new BufferGeometry();
@@ -38,7 +52,7 @@ function expectPickingMatches(preview: BufferGeometry) {
     ray.firstHitOnly = true;
     const picked: Intersection[] = [],
       exact: Intersection[] = [];
-    pickRaycast.call(viewport, ray, picked);
+    viewportPick.call(viewport, ray, picked);
     Mesh.prototype.raycast.call(everyTriangle, ray, exact);
     exact.sort((a, b) => a.distance - b.distance);
     expect(picked.length > 0).toBe(exact.length > 0);
@@ -89,4 +103,66 @@ describe('picking a Refine preview', () => {
     expect(triangleCount(session().preview!)).toBe(before);
     expectPickingMatches(session().preview!);
   });
+});
+
+/** Stands in for the index worker, holding each build until `release` runs it. */
+function holdIndexWorkers() {
+  const held: (() => void)[] = [];
+  class HeldWorker {
+    onmessage: ((event: { data: unknown }) => void) | null = null;
+    onerror = null;
+    onmessageerror = null;
+    postMessage({ positions, index, options }: BvhRequest) {
+      held.push(() => {
+        const geometry = new BufferGeometry();
+        geometry.setAttribute('position', new BufferAttribute(positions, 3));
+        if (index) geometry.setIndex(new BufferAttribute(index, 1));
+        const bvh = MeshBVH.serialize(new MeshBVH(geometry, options), { cloneBuffers: false });
+        this.onmessage?.({ data: { bvh: { ...bvh, index: null } } });
+      });
+    }
+    terminate() {}
+  }
+  vi.stubGlobal('Worker', HeldWorker);
+  return {
+    held: () => held.length,
+    release: () => held.splice(0).forEach((build) => build()),
+  };
+}
+
+describe('picking a dense Refine preview right after a cut', () => {
+  it('picks every triangle on a press or click until the new index arrives', async () => {
+    // Dense enough that a preview's index is built in a worker.
+    const geometry = softBox([2, 1.5, 1], 0.3, { step: 0.03 });
+    expect(triangleCount(geometry)).toBeGreaterThan(workerIndexTriangles);
+    geometry.boundsTree = new MeshBVH(geometry, { indirect: true });
+    setup([boxPart({ geometry })], ['box']);
+    await ready();
+    expect(session().preview!.boundsTree).toBeDefined();
+    expectPickingMatches(session().preview!);
+
+    const workers = holdIndexWorkers();
+    editor().setRefineMode('edge');
+    editor().addRefinePoint(crest(-1.6));
+    editor().addRefinePoint(crest(1.6));
+    editor().acceptRefine();
+    const cut = session().preview!;
+    expect(triangleCount(cut)).toBeGreaterThan(triangleCount(geometry));
+    await vi.waitFor(() => expect(workers.held()).toBe(1));
+    expect(cut.boundsTree).toBeUndefined();
+
+    // A press or a click tests every triangle; a pointer move finds nothing until the index is in.
+    expectPickingMatches(cut);
+    const ray = new Raycaster(new Vector3(0, 3, 0), new Vector3(0, -1, 0));
+    const moving: Intersection[] = [];
+    asPointerMove(() => viewportPick.call(new Mesh(cut), ray, moving));
+    expect(moving).toEqual([]);
+
+    workers.release();
+    await vi.waitFor(() => expect(cut.boundsTree).toBeDefined());
+    expectPickingMatches(cut);
+    const indexed: Intersection[] = [];
+    asPointerMove(() => viewportPick.call(new Mesh(cut), ray, indexed));
+    expect(indexed).toHaveLength(1);
+  }, 60_000);
 });

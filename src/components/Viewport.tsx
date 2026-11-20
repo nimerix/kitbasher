@@ -76,6 +76,7 @@ import {
   beginRefinePointer,
   endingRefinePointer,
   pressingRefineProposal,
+  refineSurfaceAt,
   previewRaycast,
   RefinePointerController,
 } from './RefinePointer';
@@ -227,7 +228,7 @@ const PartMesh = memo(function PartMesh({
     const pick = nearby ? nearbyRaycast(nearby.shows) : pickRaycast;
     const source = sourceRaycast(part.geometry, pick);
     // The store keeps the Refine preview's own picking tree current through every change.
-    if (refinePreview) return previewRaycast(pick);
+    if (refinePreview) return previewRaycast(pick, nearby?.shows);
     if (!warpPreview) return source;
     let indexedVersion = -1;
     return function (this: Mesh, ...args: Parameters<Mesh['raycast']>) {
@@ -374,6 +375,9 @@ const PartMesh = memo(function PartMesh({
             } else if (paintingRefine(state) && state.refine?.partId === part.id) {
               // A press on a proposal in Detect selects it on release instead.
               if (pressingRefineProposal()) return;
+              // As a brush stroke, only where the part is the first thing under the pointer.
+              const { clientX, clientY } = event.nativeEvent;
+              if (!refineSurfaceAt(part.id, clientX, clientY)) return;
               event.stopPropagation();
               state.paintRefineRegion(toSurface(event), event.faceIndex, event.altKey, true);
             } else if (beginWarpStroke(event, part.id) || beginRefinePointer(event, part.id))
@@ -396,6 +400,14 @@ const PartMesh = memo(function PartMesh({
             )
               return;
             event.stopPropagation();
+            // A Refine brush acts only where the part is the first thing under the pointer.
+            if (
+              refineBrush &&
+              !refineSurfaceAt(part.id, event.nativeEvent.clientX, event.nativeEvent.clientY)
+            ) {
+              setBrushHit(null);
+              return;
+            }
             const point = toSurface(event);
             setBrushHit(point);
             if (!state.painting || !(event.buttons & 1)) return;
