@@ -986,6 +986,58 @@ function splitCircle(mesh: RefineMesh, topology: RefineTopology, points: GuidePo
 }
 
 /**
+ * The segments' solved curves joined at the guide's own joints, for a path whose joints are all
+ * smooth: each runs between the points of it nearest the guide's joints, and each joint is the
+ * midpoint of the two curves' points nearest it. Where two neighbouring arcs lie on nearly one
+ * circle, where they come closest is no guide to where the user joined them. With the station at
+ * which each segment's stretch starts, as `EdgeSolve.bounds`. Null when a curve does not run from
+ * one joint to the next in its guide's direction.
+ */
+function joinAtGuides(curves: EdgeCurve[], segments: EdgeSegment[], closed: boolean) {
+  const n = curves.length;
+  const at = new Float64Array(3);
+  const joints = Array.from({ length: closed ? n : n - 1 }, (_, k) => {
+    const [i, j] = [k, (k + 1) % n];
+    const g = segments[j].points[0].position;
+    const end = closestOnCurve(curves[i], g[0], g[1], g[2], at);
+    const a = [at[0], at[1], at[2]];
+    const start = closestOnCurve(curves[j], g[0], g[1], g[2], at);
+    return { end, start, point: [0, 1, 2].map((c) => (a[c] + at[c]) / 2) };
+  });
+  const flat: number[] = [];
+  const firsts: number[] = [];
+  for (const [i, curve] of curves.entries()) {
+    const from = closed || i > 0 ? joints[(i + n - 1) % n] : null;
+    const to = closed || i < n - 1 ? joints[i] : null;
+    const [s0, s1] = [from ? from.start : 0, to ? to.end : curveLength(curve)];
+    if (!(s1 > s0)) return null;
+    firsts.push(flat.length / 3);
+    if (from) flat.push(...from.point);
+    curve.lengths.forEach((station, k) => {
+      if ((from ? station > s0 : station >= s0) && (to ? station < s1 : station <= s1))
+        flat.push(curve.points[k * 3], curve.points[k * 3 + 1], curve.points[k * 3 + 2]);
+    });
+  }
+  const points = Float64Array.from(flat);
+  const count = points.length / 3;
+  const lengths = new Float64Array(count);
+  for (let k = 1; k < count; k++)
+    lengths[k] =
+      lengths[k - 1] +
+      Math.hypot(
+        points[k * 3] - points[k * 3 - 3],
+        points[k * 3 + 1] - points[k * 3 - 2],
+        points[k * 3 + 2] - points[k * 3 - 1],
+      );
+  const curve: EdgeCurve = { points, lengths, corner: new Uint8Array(count), closed };
+  const starts = firsts.map((k) => lengths[k]);
+  const bounds = closed
+    ? [...starts, starts[0] + pathLength(curve)]
+    : [...starts, curveLength(curve)];
+  return { curve, bounds };
+}
+
+/**
  * Whether the path's edge goes on past its end at the guide's point `which` (0 first, 1 last) of
  * `part`: `taper` when the edge continues past it and no vertex already creased by an earlier
  * restore lies within two edge lengths of the end, else `hold`.
@@ -1061,6 +1113,7 @@ export function solveEdge(
 
   let curve: EdgeCurve;
   let bounds: number[];
+  let joined: ReturnType<typeof joinAtGuides>;
   if (n === 1) {
     curve = parts[0].curve;
     bounds = [0, curveLength(curve)];
@@ -1079,6 +1132,15 @@ export function solveEdge(
     );
     for (let i = 1; i < n; i++) while (bounds[i] < bounds[i - 1]) bounds[i] += total;
     bounds.push(bounds[0] + total);
+  } else if (
+    joints.every((joint) => joint === 'smooth') &&
+    (joined = joinAtGuides(
+      parts.map((part) => part.curve),
+      segments,
+      closed,
+    ))
+  ) {
+    ({ curve, bounds } = joined);
   } else {
     const curves = parts.map((part) => part.curve);
     const kinds = parts.map((part) => part.kind);
@@ -1666,6 +1728,22 @@ interface Surface {
 }
 type SurfaceAt = (x: number, y: number, z: number) => Surface;
 
+/** Side `side` of two segments' corrected surfaces mixed, `share` of the second; the other side `other`'s. */
+function mixedSide(
+  first: Surface,
+  second: Surface,
+  share: number,
+  side: number,
+  other: Surface,
+): Surface {
+  const both = mixed(first, second, share);
+  return {
+    target: (s, x, y, z, out) => (s === side ? both : other).target(s, x, y, z, out),
+    normal: (s, x, y, z, out) => (s === side ? both : other).normal(s, x, y, z, out),
+    distance: (s, x, y, z) => (s === side ? both : other).distance(s, x, y, z),
+  };
+}
+
 /** Two segments' corrected surfaces mixed, `share` of the second. */
 function mixed(first: Surface, second: Surface, share: number): Surface {
   const [p, q] = [
@@ -1719,7 +1797,35 @@ function surfacesOf(
   const reach = solve.width / 2;
   const total = pathLength(solve.curve);
   const at = new Float64Array(3);
+  // At a sharp joint a side whose two flanks are one face fitted twice: ownership turns at the
+  // corner's bisector, so that side is blended across the bisector over half the band's width.
+  const bisected = frame.corners.flatMap((corner) => {
+    const sides = [0, 1].filter(
+      (side) =>
+        !corner.apart[side] && solve.flanks[corner.from][side] !== solve.flanks[corner.to][side],
+    );
+    if (!sides.length) return [];
+    const tangent = new Float64Array(3);
+    curveTangent(solve.curve, corner.station - reach, tangent);
+    const into = [tangent[0], tangent[1], tangent[2]];
+    curveTangent(solve.curve, corner.station + reach, tangent);
+    // Normal of the bisector, pointing back along the segment before the joint.
+    const across = unit([0, 1, 2].map((a) => -into[a] - tangent[a]));
+    return sides.map((side) => ({ corner, side, across }));
+  });
   return (x, y, z) => {
+    for (const { corner, side, across } of bisected) {
+      const p = corner.point;
+      if (Math.hypot(x - p[0], y - p[1], z - p[2]) > solve.width) continue;
+      const before = (x - p[0]) * across[0] + (y - p[1]) * across[1] + (z - p[2]) * across[2];
+      return mixedSide(
+        of(corner.from),
+        of(corner.to),
+        smooth((reach - before) / (2 * reach)),
+        side,
+        of(frame.ownerAt(x, y, z)),
+      );
+    }
     if (smoothJoints.length) {
       const station = closestOnCurve(solve.curve, x, y, z, at);
       for (const joint of smoothJoints) {
@@ -1757,6 +1863,7 @@ function cornerFade(solve: EdgeSolve, frame: Frame, owner: number, side: number,
     if (!corner.apart[side] || (corner.from !== owner && corner.to !== owner)) continue;
     const near = Math.hypot(p[0] - corner.point[0], p[1] - corner.point[1], p[2] - corner.point[2]);
     if (near > jointReach * solve.width) continue;
+
     const flank = solve.flanks[corner.from === owner ? corner.to : corner.from][side];
     const other = flank.distance(p[0], p[1], p[2]);
     fade *= smooth((other - solve.flanks[owner][side].distance(p[0], p[1], p[2])) / corner.soft);

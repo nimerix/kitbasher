@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { GuidePoint } from '../../src/core/refine-band';
-import type { GuideJoint } from '../../src/core/refine-curve';
+import { type GuideJoint, closestOnCurve } from '../../src/core/refine-curve';
 import {
   type EdgeInput,
   type EdgeSegment,
@@ -260,6 +260,39 @@ describe('solveEdge and applyEdge on a path', () => {
       expect(Math.hypot(radius - 1.5, out.position[v * 3 + 1] - 1)).toBeLessThan(0.02);
     }
     expect(closedMesh(out)).toBe(true);
+  });
+
+  it('starts each segment of a closed rim of arcs at the joint the guide sets', () => {
+    // Three arcs round the cylinder's rim, unequal, meeting at smooth joints.
+    const model = modelOf(softCylinder(1.5, 1, 0.3));
+    const r = 1.2 + 0.3 / Math.SQRT2,
+      y = 0.7 + 0.3 / Math.SQRT2;
+    const at = (degrees: number) => {
+      const a = (degrees * Math.PI) / 180;
+      return pointOn(model.mesh, [r * Math.cos(a), y, r * Math.sin(a)]);
+    };
+    const stops = [0, 70, 150, 360];
+    const segments: EdgeSegment[] = [0, 1, 2].map((k) => ({
+      kind: 'arc',
+      points: [at(stops[k]), at((stops[k] + stops[k + 1]) / 2), at(stops[k + 1] % 360)],
+    }));
+    const solve = solveEdge(
+      model.mesh,
+      model.topology,
+      pathOf(segments, ['smooth', 'smooth', 'smooth'], true),
+      model.noise,
+    )!;
+    const total = solve.bounds[3] - solve.bounds[0];
+    const on = new Float64Array(3);
+    segments.forEach((segment, k) => {
+      const [x, y, z] = segment.points[0].position;
+      const station = closestOnCurve(solve.curve, x, y, z, on);
+      const apart = Math.abs(station - solve.bounds[k]);
+      expect(Math.min(apart, total - apart)).toBeLessThan(0.05);
+    });
+    const out = cloneRefineMesh(model.mesh, true);
+    const result = applyEdge(out, model.topology, solve, 1, true);
+    expect([result.pieces, result.skipped.length, result.folded.length]).toEqual([1, 0, 0]);
   });
 
   it('cuts one chain where two segments meet at a shallow joint', () => {
