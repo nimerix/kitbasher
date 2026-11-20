@@ -2,7 +2,7 @@ import { expect, type Page } from '@playwright/test';
 import { serializeGeometry } from '../../../src/core/geometry';
 import type { useEditor } from '../../../src/core/store';
 import type { Vec3 } from '../../../src/core/types';
-import { rivetedPlate, softBox } from '../../helpers/soft-edges';
+import { rivetedPlate, softBox, softCylinder } from '../../helpers/soft-edges';
 
 type EditorState = ReturnType<typeof useEditor.getState>;
 type Store = typeof import('../../../src/core/store');
@@ -49,6 +49,34 @@ export const plateFixture = {
       source: 'Riveted plate',
     },
   ],
+};
+
+/** A scanned cylinder about Y, radius 3, height 3, its rims rounded like the block's edges. */
+export const cylinder = { radius: 3, halfHeight: 1.5 };
+
+export const cylinderFixture = {
+  ...fixture,
+  parts: [
+    {
+      ...fixture.parts[0],
+      id: 'cylinder',
+      name: 'Scanned cylinder',
+      geometry: serializeGeometry(
+        softCylinder(cylinder.radius, cylinder.halfHeight, fillet, {
+          step: 0.2,
+          ripple: 0.04,
+          noise: 0.008,
+        }),
+      ),
+      source: 'Scanned cylinder',
+    },
+  ],
+};
+
+/** The crest of the cylinder's top rim at `angle` radians about Y from +x toward +z. */
+export const rimCrest = (angle: number): Vec3 => {
+  const r = cylinder.radius - inset;
+  return [r * Math.cos(angle), cylinder.halfHeight - inset, r * Math.sin(angle)];
 };
 
 /** The crest of the block's top front fillet at x. */
@@ -98,6 +126,92 @@ export async function inEditor<T, A = null>(
     },
     { body: read.toString(), args },
   );
+}
+
+/** How many notifications with `message` the app has raised since the page opened. */
+export async function noticeCount(page: Page, message: string): Promise<number> {
+  return page.evaluate(async (message) => {
+    const urls = performance.getEntriesByType('resource').map((entry) => entry.name);
+    const { useActivity } = await import(
+      urls.find((url) => /\/src\/core\/activity\.ts(?:\?.*)?$/.test(url))!
+    );
+    return useActivity
+      .getState()
+      .notifications.filter((n: { message: string }) => n.message === message).length;
+  }, message);
+}
+
+/** Largest distance of the session preview's vertices from the working surface they show, mm. */
+export const previewOffModel = (page: Page) =>
+  inStore(page, (s) => {
+    const { preview, model } = s.refine!;
+    const position = preview!.getAttribute('position');
+    const { weldOf, position: welded } = model!.mesh;
+    let most = 0;
+    for (let g = 0; g < position.count; g++) {
+      const v = weldOf[g] * 3;
+      most = Math.max(
+        most,
+        Math.abs(position.getX(g) - welded[v]),
+        Math.abs(position.getY(g) - welded[v + 1]),
+        Math.abs(position.getZ(g) - welded[v + 2]),
+      );
+    }
+    return most;
+  });
+
+/**
+ * The plane fitted to points by least squares, and the points' RMS and largest distance from it:
+ * the smallest eigenvector of their covariance, by Jacobi rotations.
+ */
+export function planeFit(points: readonly number[][]) {
+  const n = points.length;
+  const mean = [0, 1, 2].map((a) => points.reduce((s, p) => s + p[a], 0) / n);
+  const c = [0, 1, 2].map((i) =>
+    [0, 1, 2].map((j) => points.reduce((s, p) => s + (p[i] - mean[i]) * (p[j] - mean[j]), 0)),
+  );
+  const v = [
+    [1, 0, 0],
+    [0, 1, 0],
+    [0, 0, 1],
+  ];
+  for (let sweep = 0; sweep < 50; sweep++)
+    for (const [p, q] of [
+      [0, 1],
+      [0, 2],
+      [1, 2],
+    ]) {
+      if (Math.abs(c[p][q]) < 1e-30) continue;
+      const theta = (c[q][q] - c[p][p]) / (2 * c[p][q]);
+      const t = Math.sign(theta || 1) / (Math.abs(theta) + Math.sqrt(theta * theta + 1));
+      const cos = 1 / Math.sqrt(t * t + 1),
+        sin = t * cos;
+      for (let k = 0; k < 3; k++) {
+        const [a, b] = [c[k][p], c[k][q]];
+        c[k][p] = cos * a - sin * b;
+        c[k][q] = sin * a + cos * b;
+      }
+      for (let k = 0; k < 3; k++) {
+        const [a, b] = [c[p][k], c[q][k]];
+        c[p][k] = cos * a - sin * b;
+        c[q][k] = sin * a + cos * b;
+      }
+      for (let k = 0; k < 3; k++) {
+        const [a, b] = [v[k][p], v[k][q]];
+        v[k][p] = cos * a - sin * b;
+        v[k][q] = sin * a + cos * b;
+      }
+    }
+  const least = [0, 1, 2].reduce((m, i) => (c[i][i] < c[m][m] ? i : m), 0);
+  const normal = [v[0][least], v[1][least], v[2][least]];
+  const off = points.map((p) =>
+    Math.abs([0, 1, 2].reduce((s, a) => s + (p[a] - mean[a]) * normal[a], 0)),
+  );
+  return {
+    normal,
+    rms: Math.sqrt(off.reduce((s, d) => s + d * d, 0) / n),
+    max: Math.max(...off),
+  };
 }
 
 /** Screen position of a world point. */
