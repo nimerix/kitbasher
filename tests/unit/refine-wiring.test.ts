@@ -12,7 +12,6 @@ import {
   foldWarning,
   manualStart,
   manualStarts,
-  refineHoldsWork,
   refineLeaveHint,
   refineTargets,
   shared,
@@ -32,6 +31,7 @@ import {
   useEditor,
   type RefineFeature,
   type RefineSession,
+  refineHoldsWork,
 } from '../../src/core/store';
 import { boxPart, editor, ready, session, setup, surfacePoint } from '../helpers/refine-session';
 

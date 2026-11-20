@@ -555,7 +555,9 @@ test('Delete does not reach the scene, and Cancel leaves the part as it was', as
   expect(await partMesh(page)).toEqual(original);
 });
 
-test('a mode change keeps the work and leaving the tool discards it', async ({ page }) => {
+test('a mode change and Escape keep the work and leaving the tool discards it', async ({
+  page,
+}) => {
   await openRefine(page);
   const original = await partMesh(page);
   await acceptGuide(page);
@@ -563,6 +565,14 @@ test('a mode change keeps the work and leaving the tool discards it', async ({ p
   await page.getByRole('radio', { name: 'Edge', exact: true }).click();
   await expect(page.getByText('1 accepted · 0 proposed')).toBeVisible();
   await page.keyboard.press('Escape');
+  await expect(
+    page.getByText('Apply to keep your changes, or Cancel to discard them.'),
+  ).toBeVisible();
+  expect(await inStore(page, (s) => ({ tool: s.tool, held: !!s.refine }))).toEqual({
+    tool: 'refine',
+    held: true,
+  });
+  await page.keyboard.press('v');
   await expect(page.getByText('Refinement discarded. Use Apply to keep it.')).toBeVisible();
   expect(await inStore(page, (s) => ({ tool: s.tool, refine: s.refine }))).toEqual({
     tool: 'select',

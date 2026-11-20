@@ -49,8 +49,15 @@ import {
   Undo2,
   X,
 } from 'lucide-react';
-import { liveHost, liveSession, useEditor, type RefineMode, type WarpGizmo } from './core/store';
-import { refineHoldsWork, refineLeaveHint } from './components/refine-panel';
+import {
+  liveHost,
+  liveSession,
+  refineHoldsWork,
+  useEditor,
+  type RefineMode,
+  type WarpGizmo,
+} from './core/store';
+import { refineLeaveHint } from './components/refine-panel';
 import {
   chooseTransformTool,
   downloadCurrentScene,

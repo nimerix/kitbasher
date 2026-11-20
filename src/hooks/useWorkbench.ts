@@ -11,6 +11,7 @@ import {
   refineBrushRadius,
   useEditor,
   warpBrushRadius,
+  refineHoldsWork,
 } from '../core/store';
 import { readRecovery, saveRecovery } from '../core/recovery';
 import { driveAutosave, useDrive } from '../core/drive-sync';
@@ -18,7 +19,7 @@ import { chooseTransformTool, executeEditorCommand, shortcutCommand } from '../c
 import { isEditableTarget, keyboardContextMenu } from '../core/context-menu';
 import { actionRepeats, keyName, matchKeyAction } from '../core/keybindings';
 import { usePreferences } from '../core/preferences';
-import { refineHoldsWork, refineTargets } from '../components/refine-panel';
+import { refineTargets } from '../components/refine-panel';
 
 /** Key actions that choose a tool. */
 export const keyTools = {

@@ -117,18 +117,5 @@ export function extendsGuide(refine: Pick<RefineSession, 'mode' | 'features' | '
   );
 }
 
-/**
- * Whether ending the session would lose something the user made: accepted work not yet applied,
- * a pending feature they drew, made or edited, or painted triangles. Untouched detected proposals
- * do not count.
- */
-export const refineHoldsWork = (
-  refine: Pick<RefineSession, 'model' | 'start' | 'triangles' | 'features'>,
-) =>
-  // As refineEdited: the working surface is no longer the one the session started with.
-  refine.model !== refine.start ||
-  refine.triangles.length > 0 ||
-  refine.features.some((f) => f.state === 'pending' && (f.origin === 'hand' || f.edited === true));
-
 /** The status hint while Escape keeps the tool because the session holds work. */
 export const refineLeaveHint = 'Apply to keep your changes, or Cancel to discard them.';
