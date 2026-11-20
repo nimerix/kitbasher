@@ -360,7 +360,9 @@ describe('buildBand', () => {
       `buildBand ${built.toFixed(0)} ms, estimateWidth ${estimated.toFixed(0)} ms\n`,
     );
     expect(band.vertices.length).toBeGreaterThan(39000);
-    expect(built).toBeLessThan(300);
+    // About 190 ms alone: 6 times that catches a change of complexity, not load. The 300 ms frame of
+    // the original limit is held by the gated Refine benchmark.
+    expect(built).toBeLessThan(1200);
     expect(estimated).toBeLessThan(1500);
   }, 60000);
 });
@@ -529,7 +531,9 @@ describe('cost', () => {
     expect(band).not.toBeNull();
     expect(band.vertices.length).toBeGreaterThan(90000);
     expect(width).toBeGreaterThan(0);
-    expect(built).toBeLessThan(1000);
+    // About 340 ms alone: 7 times that catches a change of complexity, not load. The 1 s limit it
+    // had is held by the gated Refine benchmark.
+    expect(built).toBeLessThan(2500);
     expect(estimated).toBeLessThan(2000);
   }, 120000);
 });

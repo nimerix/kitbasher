@@ -610,6 +610,8 @@ describe.each([
         bytesOf(source.getAttribute('position').array as Float32Array),
       );
     },
+    // About 1.8 s alone for the Float64 unindexed case, over the default 5 s on a loaded machine.
+    30_000,
   );
 });
 

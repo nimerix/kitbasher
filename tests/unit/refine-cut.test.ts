@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { BufferAttribute, BufferGeometry, Matrix4, SphereGeometry, Vector3 } from 'three';
 import { weldedPositionIndex } from '../../src/core/mesh-topology';
-import { cloneRefineMesh, writeRefinedGeometry } from '../../src/core/refine-mesh';
+import { buildTopology, cloneRefineMesh, writeRefinedGeometry } from '../../src/core/refine-mesh';
 import { cutAlongField, remapTriangles } from '../../src/core/refine-cut';
 import {
   closed,
@@ -264,6 +264,8 @@ it.each(cases)(
         if (cut.touched[v]) expect(onChain.has(v)).toBe(true);
     }
   },
+  // 50 cuts per case, about 2 s alone and over the default 5 s on a loaded machine.
+  60_000,
 );
 
 it('leaves a chord between two snapped vertices out of the segments', () => {
@@ -398,7 +400,7 @@ it('remaps a painted set through the children map', () => {
   expect(remapped.size).toBe(new Set(children).size);
 });
 
-it('cuts a band of about 2,000 vertices in a mesh of 800,000 triangles in under 40 ms', () => {
+it('cuts a band of about 2,000 vertices in a mesh of 800,000 triangles in a fraction of a pass over it', () => {
   const { mesh, topology } = modelOf(new SphereGeometry(10, 640, 640));
   expect(mesh.triangleCount).toBeGreaterThanOrEqual(800_000);
   const band: number[] = [];
@@ -419,6 +421,15 @@ it('cuts a band of about 2,000 vertices in a mesh of 800,000 triangles in under 
     time = Math.min(time, performance.now() - start);
     expect(result.chain.length).toBeGreaterThan(0);
   }
-  console.log(`cutAlongField: ${ids.length} band vertices, ${time.toFixed(1)} ms`);
-  expect(time).toBeLessThan(40);
+  // Timed against one pass over the whole mesh, best of three alike, so load on the machine cancels.
+  let reference = Infinity;
+  for (let run = 0; run < 3; run++) {
+    const start = performance.now();
+    buildTopology(mesh);
+    reference = Math.min(reference, performance.now() - start);
+  }
+  console.log(
+    `cutAlongField: ${ids.length} band vertices, ${time.toFixed(1)} ms; buildTopology ${reference.toFixed(1)} ms`,
+  );
+  expect(time / reference).toBeLessThan(0.6);
 });
