@@ -45,6 +45,28 @@ describe('Refine brushes', () => {
     }
   });
 
+  it('fades the brush toward the facing limit instead of stopping at a step', () => {
+    const { mesh, topology } = modelOf(softBox([2, 1.5, 1], 0.3, exact));
+    const { triangle, position } = pointOn(mesh, [0, 1.5, 0.55]);
+    const radius = 0.8;
+    const { vertices, falloff } = verticesUnderBrush(mesh, topology, triangle, position, radius);
+    const inside = new Set(vertices);
+    const { neighbourStart, neighbours } = topology;
+    const distance = (v: number) =>
+      Math.hypot(...[0, 1, 2].map((a) => mesh.position[v * 3 + a] - position[a]));
+    let edge = 0;
+    vertices.forEach((v, i) => {
+      for (let j = neighbourStart[v]; j < neighbourStart[v + 1]; j++) {
+        const other = neighbours[j];
+        // Left out by where it faces, not by how far it is.
+        if (inside.has(other) || distance(other) > 0.9 * radius) continue;
+        edge++;
+        expect(falloff[i]).toBeLessThan(0.5 * (1 - (distance(v) / radius) ** 2) ** 2);
+      }
+    });
+    expect(edge).toBeGreaterThan(0);
+  });
+
   it('keeps a dab near the rim of a thin plate off its back face', () => {
     const model = modelOf(softBox([2, 0.125, 1.5], 0.05, exact));
     const dab = { ...dabAt(model.mesh, [1.63, 0.125, 0]), radius: 0.8 };

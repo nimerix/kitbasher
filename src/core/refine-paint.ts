@@ -8,6 +8,9 @@ import type { Vec3 } from './types';
  */
 export const facingAngle = 70;
 const facing = Math.cos((facingAngle * Math.PI) / 180);
+/** Degrees from the hit normal where the brush starts to fade toward `facingAngle`, so its edge is no step. */
+export const fadeAngle = 45;
+const fading = Math.cos((fadeAngle * Math.PI) / 180);
 
 /** Per topology: a visit stamp per welded vertex and per triangle, reused by every brush. */
 interface Marks {
@@ -156,8 +159,12 @@ export function walkUnderBrush(
   seed: number,
   center: Vec3,
   radius: number,
-): { vertices: Uint32Array; distance: Float64Array } {
-  const none = { vertices: new Uint32Array(0), distance: new Float64Array(0) };
+): { vertices: Uint32Array; distance: Float64Array; facing: Float64Array } {
+  const none = {
+    vertices: new Uint32Array(0),
+    distance: new Float64Array(0),
+    facing: new Float64Array(0),
+  };
   if (seed < 0 || seed >= mesh.triangleCount || !(radius > 0)) return none;
   const { position, corners, weldOf } = mesh;
   const { neighbourStart, neighbours, triangleStart, trianglesOf } = topology;
@@ -195,12 +202,14 @@ export function walkUnderBrush(
   nx /= size;
   ny /= size;
   nz /= size;
-  const faces = (v: number) =>
-    normalOf(v) && normal[0] * nx + normal[1] * ny + normal[2] * nz >= facing;
+  // Cosine of the angle between v's normal and the hit normal; -1 when v has no normal.
+  const turnOf = (v: number) =>
+    normalOf(v) ? normal[0] * nx + normal[1] * ny + normal[2] * nz : -1;
   const slots = slotsFor(mesh, topology);
   const visited: number[] = [];
   // Per visited vertex: its best distance so far, -1 when it does not face the brush.
   const best: number[] = [];
+  const turn: number[] = [];
   const done: boolean[] = [];
   const heap = new Heap();
   const offer = (w: number, d: number) => {
@@ -209,7 +218,8 @@ export function walkUnderBrush(
     if (i < 0) {
       i = slots[w] = visited.length;
       visited.push(w);
-      best.push(faces(w) ? Infinity : -1);
+      turn.push(turnOf(w));
+      best.push(turn[i] >= facing ? Infinity : -1);
       done.push(false);
     }
     if (best[i] < 0 || done[i] || d >= best[i]) return;
@@ -269,8 +279,9 @@ export function walkUnderBrush(
   found.sort((a, b) => a - b);
   const vertices = Uint32Array.from(found);
   const distance = Float64Array.from(found, (v) => best[slots[v]]);
+  const facingOf = Float64Array.from(found, (v) => turn[slots[v]]);
   for (const v of visited) slots[v] = -1;
-  return { vertices, distance };
+  return { vertices, distance, facing: facingOf };
 }
 
 /** Triangles connected to `seed` with a vertex within `radius` of `center`. */
@@ -299,6 +310,8 @@ export function trianglesUnderBrush(
  * Welded vertices connected to `seed`'s triangle within `radius`, with a (1 - (d/r)^2)^2 falloff each.
  * The footprint is measured along the surface (`walkUnderBrush`). The falloff takes d in a straight
  * line: exact on a flat face, free of the walk's edge-path excess, and within the footprint d < r.
+ * Between `fadeAngle` and `facingAngle` from the hit normal it eases to zero, so the footprint's edge
+ * on a turning surface leaves no step.
  */
 export function verticesUnderBrush(
   mesh: RefineMesh,
@@ -307,14 +320,15 @@ export function verticesUnderBrush(
   center: Vec3,
   radius: number,
 ): { vertices: Uint32Array; falloff: Float32Array } {
-  const { vertices } = walkUnderBrush(mesh, topology, seed, center, radius);
+  const { vertices, facing: turn } = walkUnderBrush(mesh, topology, seed, center, radius);
   const { position } = mesh;
-  const falloff = Float32Array.from(vertices, (v) => {
+  const falloff = Float32Array.from(vertices, (v, i) => {
     const dx = position[v * 3] - center[0],
       dy = position[v * 3 + 1] - center[1],
       dz = position[v * 3 + 2] - center[2];
     const u = 1 - (dx * dx + dy * dy + dz * dz) / (radius * radius);
-    return u * u;
+    const f = Math.min(1, Math.max(0, (turn[i] - facing) / (fading - facing)));
+    return u * u * f * f * (3 - 2 * f);
   });
   return { vertices, falloff };
 }
