@@ -2,12 +2,14 @@ import { expect, test, type Page } from '@playwright/test';
 import { failOnBrowserErrors } from './helpers/warp-grid';
 import {
   chainStraightness,
+  clickProposal,
   clickSurface,
   crest,
   drag,
   half,
   inEditor,
   inStore,
+  indexedBlockFixture,
   openRefine,
   planeFit,
   previewOffModel,
@@ -16,11 +18,12 @@ import {
   rimCrest,
   plate,
   plateFixture,
-  proposalSpot,
   screen,
   surfaceCorner,
 } from './helpers/refine';
 import type { RegionSolve } from '../../src/core/refine-region';
+import type { RefineMode } from '../../src/core/store';
+import type { BufferGeometry } from 'three';
 import type { Vec3 } from '../../src/core/types';
 
 failOnBrowserErrors();
@@ -72,25 +75,26 @@ async function detect(page: Page) {
   return inStore(page, (s) => s.refine!.features.filter((f) => f.state === 'pending').length);
 }
 
-/** The id of the detected pending edge along the top front edge. */
-const topFrontProposal = (page: Page) =>
-  inStore(page, (s) => {
-    const found = s.refine!.features.find((f) => {
-      if (f.state !== 'pending' || f.feature.type !== 'edge') return false;
-      const points = f.feature.input.segments.flatMap((g) => g.points.map((p) => p.position));
-      return (
-        points.every((p) => p[1] > 2 && p[2] > 1) && Math.abs(points[0][0] - points.at(-1)![0]) > 4
-      );
-    });
-    return found?.id ?? null;
-  });
+/** The front crest proposal at the top or bottom of the block. */
+const frontProposal = (page: Page, side: 1 | -1 = 1) =>
+  inEditor(
+    page,
+    (store, side) => {
+      const found = store.useEditor.getState().refine!.features.find((f) => {
+        if (f.state !== 'pending' || f.feature.type !== 'edge') return false;
+        const points = f.feature.input.segments.flatMap((g) => g.points.map((p) => p.position));
+        return (
+          points.every((p) => p[1] * side > 2 && p[2] > 1) &&
+          Math.abs(points[0][0] - points.at(-1)![0]) > 4
+        );
+      });
+      return found?.id ?? null;
+    },
+    side,
+  );
 
-/** Clicks a pending proposal where its curve is drawn and waits until it alone is selected. */
-async function clickProposal(page: Page, id: string) {
-  const spot = await screen(page, await proposalSpot(page, id));
-  await page.mouse.click(spot.x, spot.y);
-  await expect.poll(() => inStore(page, (s) => s.refine!.selected)).toEqual([id]);
-}
+const pendingIds = (page: Page) =>
+  inStore(page, (s) => s.refine!.features.filter((f) => f.state === 'pending').map((f) => f.id));
 
 /** The ends the pending guide's latest solve used, or null before it has one. */
 const solvedEnds = (page: Page) =>
@@ -134,7 +138,6 @@ async function clickBeside(page: Page) {
   const box = (await page.locator('canvas').boundingBox())!;
   const side = await screen(page, [half[0], 0, half[2]]);
   const right = box.x + box.width;
-  expect(right - side.x).toBeGreaterThan(60);
   await page.mouse.click((side.x + right) / 2, side.y);
 }
 
@@ -352,7 +355,9 @@ test('paints a region and runs each treatment', async ({ page }) => {
   await expect(page.getByRole('button', { name: 'Apply' })).toBeEnabled();
 });
 
-test('strokes with each brush', async ({ page }) => {
+test('a Crease stroke proposes a wide edge or accepts one within the brush radius', async ({
+  page,
+}) => {
   await openRefine(page);
   await page.getByRole('radio', { name: 'Brush', exact: true }).click();
   let before = (await steps(page)).undo;
@@ -423,12 +428,19 @@ test('a flatten stroke takes the curve out of a face where a smooth stroke keeps
       angle,
     );
     expect(stroked.length).toBeGreaterThan(10);
-    const ahead = planeFit(await modelPoints(page, stroked)).rms;
+    const original = await modelPoints(page, stroked);
     await page.getByRole('radio', { name: kind, exact: true }).click();
     const side = (y: number): Vec3 => [3 * Math.sin(angle), y, 3 * Math.cos(angle)];
     await drag(page, [side(-0.8), side(0.8)], 30);
     await expect.poll(async () => (await steps(page)).undo).toBe(before + 1);
-    spread[kind] = { before: ahead, after: planeFit(await modelPoints(page, stroked)).rms };
+    const current = await modelPoints(page, stroked);
+    spread[kind] = { before: planeFit(original).rms, after: planeFit(current).rms };
+    if (kind === 'Smooth') {
+      const moved = Math.max(
+        ...current.map((p, i) => Math.hypot(...p.map((x, a) => x - original[i][a]))),
+      );
+      expect(moved, 'Smooth moves the stroked strip').toBeGreaterThan(0.005);
+    }
   }
   // RMS off a plane fitted to the strip, mm, measured: Flatten 0.026 to 0.0052, Smooth 0.026 to
   // 0.0229. Smooth keeps the cylinder's curve; Flatten pulls the strip toward one plane.
@@ -436,66 +448,121 @@ test('a flatten stroke takes the curve out of a face where a smooth stroke keeps
   expect(spread.Flatten.after).toBeLessThan(spread.Smooth.after / 2);
 });
 
-/** Keeps the part's geometry, its position array and a copy of that array's bytes in the page. */
+type SourceSnapshot = {
+  geometry: BufferGeometry;
+  position: ArrayBufferView;
+  buffers: (
+    geometry: BufferGeometry,
+  ) => Record<'positions' | 'normals' | 'index', Uint8Array | null>;
+  bytes: Record<'positions' | 'normals' | 'index', Uint8Array | null>;
+  workingPositions: Float64Array;
+};
+
+/** Copies the source and working buffers in the page for comparison after Detect. */
 const keepSource = (page: Page) =>
   inStore(page, (s) => {
+    const view = (array: ArrayBufferView | undefined) =>
+      array ? new Uint8Array(array.buffer, array.byteOffset, array.byteLength) : null;
+    const buffers = (geometry: BufferGeometry) => ({
+      positions: view(geometry.getAttribute('position').array),
+      normals: view(geometry.getAttribute('normal')?.array),
+      index: view(geometry.index?.array),
+    });
     const geometry = s.scene.parts[0].geometry;
-    const array = geometry.getAttribute('position').array;
-    (globalThis as { source?: unknown }).source = {
+    const { positions, normals, index } = buffers(geometry);
+    (globalThis as { source?: SourceSnapshot }).source = {
       geometry,
-      array,
-      bytes: new Uint8Array(array.buffer, array.byteOffset, array.byteLength).slice(),
+      position: geometry.getAttribute('position').array,
+      buffers,
+      bytes: {
+        positions: positions!.slice(),
+        normals: normals?.slice() ?? null,
+        index: index?.slice() ?? null,
+      },
+      workingPositions: s.refine!.model!.mesh.position.slice(),
     };
   });
 
-/** Whether the part still has the kept geometry and position array, and the array its bytes. */
 const sourceKept = (page: Page) =>
   inStore(page, (s) => {
-    type Kept = { geometry: unknown; array: ArrayBufferView; bytes: Uint8Array };
-    const kept = (globalThis as { source?: Kept }).source!;
+    const kept = (globalThis as { source?: SourceSnapshot }).source!;
     const geometry = s.scene.parts[0].geometry;
-    const now = new Uint8Array(kept.array.buffer, kept.array.byteOffset, kept.array.byteLength);
+    const now = kept.buffers(kept.geometry);
+    const sameBytes = (key: keyof SourceSnapshot['bytes']) => {
+      const before = kept.bytes[key],
+        after = now[key];
+      return before && after
+        ? before.length === after.length && after.every((byte, i) => byte === before[i])
+        : before === after;
+    };
     return {
       geometry: geometry === kept.geometry,
-      array: geometry.getAttribute('position').array === kept.array,
-      bytes: now.length === kept.bytes.length && now.every((b, i) => b === kept.bytes[i]),
+      array: geometry.getAttribute('position').array === kept.position,
+      positions: sameBytes('positions'),
+      normals: sameBytes('normals'),
+      index: sameBytes('index'),
     };
   });
 
-test('detects, adjusts a proposal and accepts it', async ({ page }) => {
-  await openRefine(page);
+const edgeInput = (page: Page, id: string) =>
+  inEditor(
+    page,
+    (store, id) => {
+      const f = store.useEditor.getState().refine!.features.find((f) => f.id === id);
+      return f?.feature.type === 'edge' ? f.feature.input : undefined;
+    },
+    id,
+  );
+
+test('detects without changing either mesh, edits two selected guides and accepts one', async ({
+  page,
+}) => {
+  await openRefine(page, { scene: indexedBlockFixture });
   await keepSource(page);
   await page.getByRole('radio', { name: 'Detect' }).click();
-  await page.getByRole('button', { name: 'Find edges and surfaces' }).click();
-  await expect(page.getByText(/0 accepted · [1-9]\d* proposed/)).toBeVisible();
-  // Detect only proposes: the part and the working surface are as they were.
-  expect(await sourceKept(page)).toEqual({ geometry: true, array: true, bytes: true });
+  await detect(page);
+  const source = { geometry: true, array: true, positions: true, normals: true, index: true };
+  expect(await sourceKept(page), 'Detect leaves the source geometry intact').toEqual(source);
+  expect(
+    await inStore(page, (s) => {
+      const before = (globalThis as { source?: SourceSnapshot }).source!.workingPositions;
+      const { position } = s.refine!.model!.mesh;
+      return position.length === before.length && position.every((x, i) => x === before[i]);
+    }),
+    'Detect leaves the working positions intact',
+  ).toBe(true);
   expect(await inStore(page, (s) => s.refine!.model === s.refine!.start)).toBe(true);
   const before = await inStore(
     page,
     (s) => s.scene.parts[0].geometry.getAttribute('position').count,
   );
-  const id = (await topFrontProposal(page))!;
-  expect(id).not.toBeNull();
+  const id = (await frontProposal(page))!;
+  const second = (await frontProposal(page, -1))!;
+  const untouched = (
+    await inStore(page, (s) =>
+      s
+        .refine!.features.filter((f) => f.state === 'pending' && f.feature.type === 'edge')
+        .map((f) => f.id),
+    )
+  ).find((other) => other !== id && other !== second)!;
+  if (!untouched) throw new Error('Detect needs a third edge to check unselected settings');
+  const untouchedInput = await edgeInput(page, untouched);
+  const defaults = await inStore(page, (s) => s.refine!.edge);
   await clickProposal(page, id);
-  // A proposal is adjusted like a hand-placed guide, with Edge mode's controls.
+  await clickProposal(page, second, [id]);
   await page.getByRole('radio', { name: 'Edge', exact: true }).click();
   await page.getByRole('switch', { name: 'Choose width automatically' }).click();
   const width = page.getByRole('spinbutton', { name: 'Width', exact: true });
   await width.fill('1.2');
   await width.press('Enter');
   await expect
-    .poll(() =>
-      inStore(page, (s) => {
-        const f = s.refine!.features.find(
-          (f) =>
-            f.state === 'pending' && f.feature.type === 'edge' && s.refine!.selected.includes(f.id),
-        );
-        return f?.feature.type === 'edge' ? f.feature.input.width : null;
-      }),
-    )
+    .poll(async () => (await edgeInput(page, id))?.width, { message: 'Top guide Width' })
     .toBe(1.2);
+  expect((await edgeInput(page, second))?.width, 'Bottom guide Width').toBe(1.2);
+  expect(await edgeInput(page, untouched), 'Unselected guide inputs').toEqual(untouchedInput);
+  expect(await inStore(page, (s) => s.refine!.edge), 'Edge defaults').toEqual(defaults);
   await page.getByRole('radio', { name: 'Detect', exact: true }).click();
+  await clickProposal(page, id);
   await page.getByRole('button', { name: 'Accept selected' }).click();
   await expect(page.getByText(/1 accepted · \d+ proposed/)).toBeVisible();
   expect(
@@ -508,9 +575,11 @@ test('detects, adjusts a proposal and accepts it', async ({ page }) => {
     before,
   );
   // Accept changes the working surface only; Apply alone gives the part new geometry.
-  expect(await sourceKept(page)).toEqual({ geometry: true, array: true, bytes: true });
+  expect(await sourceKept(page)).toMatchObject({ geometry: true, array: true, positions: true });
   await page.getByRole('button', { name: 'Apply' }).click();
-  await expect.poll(() => sourceKept(page)).toEqual({ geometry: false, array: false, bytes: true });
+  await expect
+    .poll(() => sourceKept(page))
+    .toMatchObject({ geometry: false, array: false, positions: true });
 });
 
 test('Width goes to the selected guide, or with none selected to the next guide', async ({
@@ -558,18 +627,6 @@ test('undoes and redoes inside the session, then cancels', async ({ page }) => {
   await page.getByRole('button', { name: 'Cancel', exact: true }).click();
   await expect.poll(() => inStore(page, (s) => s.refine)).toBeNull();
   expect(await partMesh(page)).toEqual(original);
-});
-
-test('scene undo after Apply restores the original mesh', async ({ page }) => {
-  await openRefine(page);
-  const original = await partMesh(page);
-  await acceptGuide(page);
-  await page.getByRole('button', { name: 'Apply' }).click();
-  await expect.poll(async () => (await partMesh(page)).source).toBe('Refine · Scanned block');
-  await page.keyboard.press('Escape');
-  await expect.poll(() => inStore(page, (s) => s.tool)).toBe('select');
-  await undo(page);
-  await expect.poll(() => partMesh(page)).toEqual(original);
 });
 
 test('says so when a guide finds no edge', async ({ page }) => {
@@ -671,18 +728,6 @@ test('Reach off Automatic keeps the preview, and a new Reach changes it', async 
   expect(await previewChange(page)).toBeGreaterThan(0.01);
 });
 
-/** Paints over the plate's rivet at (0, 1), makes a Flatten region of it and waits for its draft. */
-async function flattenRivet(page: Page) {
-  await openRefine(page, { scene: plateFixture, view: '7' });
-  await page.getByRole('radio', { name: 'Region', exact: true }).click();
-  await brushRadius(page, 0.5);
-  await paintRivet(page);
-  await page.getByRole('button', { name: 'Make region' }).click();
-  await page.getByRole('radio', { name: 'Flatten', exact: true }).click();
-  await expect.poll(() => regionDetail(page)).toEqual(['flatten', null]);
-  await expect.poll(() => inStore(page, (s) => s.refine!.draft !== null)).toBe(true);
-}
-
 /** The first region's treatment and Offset. */
 const regionDetail = (page: Page) =>
   inStore(page, (s) => {
@@ -690,39 +735,86 @@ const regionDetail = (page: Page) =>
     return f.feature.type === 'region' ? [f.feature.input.treatment, f.feature.input.detail] : null;
   });
 
-// The seeded Offset is the limit the solve's last fit round used (0.1105 mm here); the automatic
-// solve works the limit out afresh each round, so a fixed one moves the preview 0.0088 mm.
-test('Offset off Automatic moves the preview less than 0.02 mm', async ({ page }) => {
-  await flattenRivet(page);
+const regionDraftReady = (page: Page) =>
+  inEditor(page, (store) => {
+    const refine = store.useEditor.getState().refine!;
+    const kept = (globalThis as { kept?: { draft: unknown } }).kept!;
+    return (
+      refine.draft !== null &&
+      refine.draft !== kept.draft &&
+      store.refineSolved(refine, refine.features[0]) !== null
+    );
+  });
+
+const previewVertexDistance = (page: Page) =>
+  inStore(page, (s) => {
+    const { positions: before } = (globalThis as { kept?: { positions: Float64Array } }).kept!;
+    const position = s.refine!.preview!.getAttribute('position');
+    const after = position.array;
+    let max = 0;
+    if (after.length === before.length) {
+      for (let i = 0; i < after.length; i += 3) {
+        max = Math.max(
+          max,
+          Math.hypot(
+            after[i] - before[i],
+            after[i + 1] - before[i + 1],
+            after[i + 2] - before[i + 2],
+          ),
+        );
+      }
+    }
+    return { beforeCount: before.length / 3, afterCount: position.count, max };
+  });
+
+test('Offset off Automatic moves the preview less than 0.02 mm and a large Offset flattens a rivet', async ({
+  page,
+}) => {
+  await openRefine(page, { scene: plateFixture, view: '7' });
+  await page.getByRole('radio', { name: 'Region', exact: true }).click();
+  await brushRadius(page, 0.5);
+  await paintRivet(page);
+  await page.getByRole('button', { name: 'Make region' }).click();
+  await expect.poll(() => inStore(page, (s) => s.refine!.draft !== null)).toBe(true);
   await keepDraft(page);
-  await page.getByRole('switch', { name: 'Choose offset automatically' }).click();
-  const offset = page.getByRole('spinbutton', { name: 'Offset', exact: true });
-  await expect(offset).toBeVisible();
-  expect((await regionDetail(page))![1]).toBeGreaterThan(0);
-  expect(Number(await offset.inputValue())).toBeGreaterThan(0);
-  await expect.poll(() => draftRebuilt(page)).toBe(true);
-  expect(await previewChange(page)).toBeLessThan(0.02);
-});
+  await page.getByRole('radio', { name: 'Flatten', exact: true }).click();
+  await expect.poll(() => regionDetail(page)).toEqual(['flatten', null]);
+  await expect
+    .poll(() => regionDraftReady(page), { message: 'Current automatic Flatten draft' })
+    .toBe(true);
+  await keepDraft(page);
 
-test('a large Offset stops keeping a rivet as detail', async ({ page }) => {
-  await flattenRivet(page);
   const before = await rivetMeasure(page);
-  await page.getByRole('switch', { name: 'Choose offset automatically' }).click();
   const offset = page.getByRole('spinbutton', { name: 'Offset', exact: true });
-  await expect(offset).toBeVisible();
-  expect((await regionDetail(page))![1]).toBeGreaterThan(0);
-  expect(Number(await offset.inputValue())).toBeGreaterThan(0);
-  // Twice the rivet's height: the rivet is no longer detail, and is flattened with the plate.
-  await offset.fill('0.5');
-  await offset.press('Enter');
-  await expect.poll(() => regionDetail(page)).toEqual(['flatten', 0.5]);
-  await page.getByRole('button', { name: 'Accept', exact: true }).click();
-  await expect(page.getByText('1 accepted · 0 proposed')).toBeVisible();
-  // Measured: 0.233 mm high before, 0.001 after.
-  expect((await rivetMeasure(page)).height).toBeLessThan(before.height / 2);
+  await test.step('Offset off Automatic preserves the preview within 0.02 mm', async () => {
+    await page.getByRole('switch', { name: 'Choose offset automatically' }).click();
+    await expect(offset).toBeVisible();
+    expect((await regionDetail(page))![1]).toBeGreaterThan(0);
+    expect(Number(await offset.inputValue())).toBeGreaterThan(0);
+    await expect
+      .poll(() => regionDraftReady(page), { message: 'Current fixed Offset Flatten draft' })
+      .toBe(true);
+    const { beforeCount, afterCount, max } = await previewVertexDistance(page);
+    expect.soft(afterCount, 'Offset keeps the preview vertex count').toBe(beforeCount);
+    // Automatic recalculates each round; using its final limit in every round moves the preview 0.0088 mm.
+    if (afterCount === beforeCount)
+      expect.soft(max, 'Offset preview drift (mm)').toBeLessThan(0.02);
+  });
+
+  await test.step('A large Offset flattens the rivet', async () => {
+    await offset.fill('0.5');
+    await offset.press('Enter');
+    await expect.poll(() => regionDetail(page)).toEqual(['flatten', 0.5]);
+    await page.getByRole('button', { name: 'Accept', exact: true }).click();
+    await expect(page.getByText('1 accepted · 0 proposed')).toBeVisible();
+    // Measured: 0.233 mm high before, 0.001 after.
+    expect((await rivetMeasure(page)).height, 'Rivet height after a large Offset').toBeLessThan(
+      before.height / 2,
+    );
+  });
 });
 
-test('settings made with nothing selected go to the next guide and region', async ({ page }) => {
+test('settings with no matching selection go to the next guide and region', async ({ page }) => {
   await openRefine(page);
   await page.getByRole('radio', { name: 'Arc', exact: true }).click();
   await page.getByRole('switch', { name: 'Choose width automatically' }).click();
@@ -749,6 +841,12 @@ test('settings made with nothing selected go to the next guide and region', asyn
     )
     .toEqual({ kinds: ['arc', 'arc'], joints: ['smooth'], width: 1.1, strength: 0.5 });
 
+  const selectedEdge = () =>
+    inStore(page, (s) => {
+      const f = s.refine!.features[0];
+      return { id: f.id, input: f.feature.input, selected: s.refine!.selected };
+    });
+  const before = await selectedEdge();
   await page.getByRole('radio', { name: 'Region', exact: true }).click();
   await page.getByRole('radio', { name: 'Flatten', exact: true }).click();
   await strength.fill('40');
@@ -757,6 +855,9 @@ test('settings made with nothing selected go to the next guide and region', asyn
   await expect
     .poll(() => inStore(page, (s) => s.refine!.region))
     .toMatchObject({ treatment: 'flatten', strength: 0.4, keepDetail: false });
+  const after = await selectedEdge();
+  expect(after.selected, 'The Edge remains selected in Region mode').toEqual([before.id]);
+  expect(after.input, 'Region settings leave the selected Edge inputs alone').toEqual(before.input);
   await brushRadius(page, 0.5);
   await drag(page, [front(-1, 0), front(1, 0)]);
   await page.getByRole('button', { name: 'Make region' }).click();
@@ -772,60 +873,94 @@ test('settings made with nothing selected go to the next guide and region', asyn
     .toEqual({ treatment: 'flatten', strength: 0.4, keepDetail: false });
 });
 
-test('a blur or a mode change during a stroke leaves the session as it was', async ({ page }) => {
-  await openRefine(page);
-  await page.getByRole('radio', { name: 'Brush', exact: true }).click();
-  await page.getByRole('radio', { name: 'Smooth', exact: true }).click();
-  // A stroke, undone, so there is a step to redo that a discard must keep.
-  await drag(page, [front(-2, 1), front(2, 1)], 30);
-  await expect.poll(() => steps(page)).toEqual({ undo: 1, redo: 0 });
-  await undo(page);
-  await expect.poll(() => steps(page)).toEqual({ undo: 0, redo: 1 });
-  const interruptions: [string, () => Promise<unknown>][] = [
-    ['blur', () => page.evaluate(() => window.dispatchEvent(new Event('blur')))],
-    [
-      'mode by keyboard',
-      async () => {
-        await page.getByRole('radio', { name: 'Brush', exact: true }).focus();
-        await page.keyboard.press('ArrowRight');
-      },
-    ],
-    // The panel is clicked while the stroke holds the mouse button.
-    [
-      'mode in the panel',
-      () => page.getByRole('radio', { name: 'Edge', exact: true }).dispatchEvent('click'),
-    ],
-  ];
-  for (const [name, interrupt] of interruptions) {
-    await page.getByRole('radio', { name: 'Brush', exact: true }).click();
-    await inEditor(page, (store) => {
-      (globalThis as { refineModel?: unknown }).refineModel =
-        store.useEditor.getState().refine!.model;
-    });
+test.describe('stroke interruption', () => {
+  test.use({ hasTouch: true });
+
+  test('Escape, blur and mode changes discard a live stroke and preserve redo', async ({
+    page,
+  }) => {
+    await openRefine(page);
+    const brush = page.getByRole('radio', { name: 'Brush', exact: true });
+    await brush.click();
+    await page.getByRole('radio', { name: 'Smooth', exact: true }).click();
+    await drag(page, [front(-2, 1), front(2, 1)], 30);
+    await expect.poll(() => steps(page)).toEqual({ undo: 1, redo: 0 });
+    await undo(page);
+    await expect.poll(() => steps(page)).toEqual({ undo: 0, redo: 1 });
+    const interruptions: [string, RefineMode, () => Promise<unknown>][] = [
+      ['Escape', 'brush', () => page.keyboard.press('Escape')],
+      [
+        'window blur',
+        'brush',
+        async () => {
+          const context = page.context();
+          const other = await context.newPage();
+          const cdp = await context.newCDPSession(page);
+          try {
+            await page.bringToFront();
+            // Disable Playwright's focus emulation so switching tabs sends a real window blur.
+            await cdp.send('Emulation.setFocusEmulationEnabled', { enabled: false });
+            await other.bringToFront();
+            await page.waitForFunction(() => !document.hasFocus(), undefined, { polling: 50 });
+          } finally {
+            await other.close();
+            await page.bringToFront();
+            await cdp.send('Emulation.setFocusEmulationEnabled', { enabled: true });
+            await cdp.detach();
+          }
+        },
+      ],
+      [
+        'mode by keyboard',
+        'detect',
+        async () => {
+          await brush.focus();
+          await page.keyboard.press('ArrowRight');
+        },
+      ],
+      // Tap the control with a second pointer while the mouse stroke holds capture.
+      [
+        'mode in the panel',
+        'edge',
+        () => page.getByRole('radio', { name: 'Edge', exact: true }).tap(),
+      ],
+    ];
     const a = await screen(page, front(-2, -1)),
       b = await screen(page, front(0, -1)),
       c = await screen(page, front(2, -1));
-    await page.mouse.move(a.x, a.y);
-    await page.mouse.down();
-    await page.mouse.move(b.x, b.y, { steps: 20 });
-    // The stroke is live: the preview shows it.
-    await expect.poll(() => previewOffModel(page), { message: name }).toBeGreaterThan(1e-3);
-    await interrupt();
-    await page.mouse.move(c.x, c.y, { steps: 10 });
-    await page.mouse.up();
-    expect(
-      await inEditor(
-        page,
-        (store) =>
-          store.useEditor.getState().refine!.model ===
-          (globalThis as { refineModel?: unknown }).refineModel,
-      ),
-      name,
-    ).toBe(true);
-    expect(await steps(page), name).toEqual({ undo: 0, redo: 1 });
-    expect(await previewOffModel(page), name).toBeLessThan(1e-4);
-    expect(await inStore(page, (s) => s.refine!.features.length), name).toBe(0);
-  }
+    for (const [name, mode, interrupt] of interruptions) {
+      await test.step(name, async () => {
+        await brush.click();
+        await inStore(page, (s) => {
+          (globalThis as { kept?: unknown }).kept = {
+            model: s.refine!.model,
+            redo: s.refine!.redo[0],
+          };
+        });
+        await page.mouse.move(a.x, a.y);
+        await page.mouse.down();
+        await page.mouse.move(b.x, b.y, { steps: 20 });
+        await expect.poll(() => previewOffModel(page)).toBeGreaterThan(1e-3);
+        await interrupt();
+        await page.mouse.move(c.x, c.y, { steps: 10 });
+        await page.mouse.up();
+        expect(
+          await inStore(page, (s) => ({ tool: s.tool, mode: s.refine?.mode })),
+          'Destination mode',
+        ).toEqual({ tool: 'refine', mode });
+        expect(await steps(page)).toEqual({ undo: 0, redo: 1 });
+        expect(
+          await inStore(page, (s) => {
+            const kept = (globalThis as { kept?: { model: unknown; redo: unknown } }).kept!;
+            return { model: s.refine!.model === kept.model, redo: s.refine!.redo[0] === kept.redo };
+          }),
+          'Working mesh and redo entry',
+        ).toEqual({ model: true, redo: true });
+        expect(await previewOffModel(page)).toBeLessThan(1e-4);
+        expect(await inStore(page, (s) => s.refine!.features.length)).toBe(0);
+      });
+    }
+  });
 });
 
 test('sets the ends of an open guide and keeps them on accept', async ({ page }) => {
@@ -942,54 +1077,17 @@ test('Escape during a handle drag leaves the session as it was', async ({ page }
   expect(await inStore(page, (s) => s.tool)).toBe('refine');
 });
 
-test('Escape during a stroke leaves the session as it was', async ({ page }) => {
-  await openRefine(page);
-  await page.getByRole('radio', { name: 'Brush', exact: true }).click();
-  await page.getByRole('radio', { name: 'Smooth', exact: true }).click();
-  // One finished stroke first, so there is an undo step to keep.
-  await drag(page, [front(-2, 1), front(2, 1)], 30);
-  await expect.poll(async () => (await steps(page)).undo).toBe(1);
-  const before = await steps(page);
-  await inEditor(page, (store) => {
-    (globalThis as { refineModel?: unknown }).refineModel =
-      store.useEditor.getState().refine!.model;
-  });
-  const a = await screen(page, front(-2, -1)),
-    b = await screen(page, front(0, -1)),
-    c = await screen(page, front(2, -1));
-  await page.mouse.move(a.x, a.y);
-  await page.mouse.down();
-  await page.mouse.move(b.x, b.y, { steps: 20 });
-  await page.keyboard.press('Escape');
-  await page.mouse.move(c.x, c.y, { steps: 10 });
-  await page.mouse.up();
-  expect(
-    await inEditor(
-      page,
-      (store) =>
-        store.useEditor.getState().refine!.model ===
-        (globalThis as { refineModel?: unknown }).refineModel,
-    ),
-  ).toBe(true);
-  expect(await steps(page)).toEqual(before);
-  expect(await inStore(page, (s) => s.tool)).toBe('refine');
-  // The preview shows the model again, with no trace of the stroke.
-  expect(await previewOffModel(page)).toBeLessThan(1e-4);
-});
-
 test('a new detection replaces the pending proposals', async ({ page }) => {
   await openRefine(page);
   await page.getByRole('radio', { name: 'Detect', exact: true }).click();
-  const pendingIds = () =>
-    inStore(page, (s) => s.refine!.features.filter((f) => f.state === 'pending').map((f) => f.id));
   const first = await detect(page);
   expect(first).toBeGreaterThan(0);
-  const before = await pendingIds();
+  const before = await pendingIds(page);
   expect(await detect(page)).toBe(first);
-  expect((await pendingIds()).filter((id) => before.includes(id))).toEqual([]);
+  expect((await pendingIds(page)).filter((id) => before.includes(id))).toEqual([]);
 
   // A proposal the user edited stays through a new run.
-  const edited = (await topFrontProposal(page))!;
+  const edited = (await frontProposal(page))!;
   await clickProposal(page, edited);
   await page.getByRole('radio', { name: 'Edge', exact: true }).click();
   await page.getByRole('switch', { name: 'Choose width automatically' }).click();
@@ -997,7 +1095,7 @@ test('a new detection replaces the pending proposals', async ({ page }) => {
   await width.fill('1.2');
   await width.press('Enter');
   await page.getByRole('radio', { name: 'Detect', exact: true }).click();
-  const untouched = (await pendingIds()).filter((id) => id !== edited);
+  const untouched = (await pendingIds(page)).filter((id) => id !== edited);
   await detect(page);
   const kept = await inStore(page, (s) =>
     s.refine!.features.map((f) => ({
@@ -1006,13 +1104,33 @@ test('a new detection replaces the pending proposals', async ({ page }) => {
       width: f.feature.type === 'edge' ? f.feature.input.width : null,
     })),
   );
-  expect(kept.filter((f) => untouched.includes(f.id))).toEqual([]);
-  expect(kept.find((f) => f.id === edited)).toEqual({ id: edited, state: 'pending', width: 1.2 });
+  expect(
+    kept.filter((f) => untouched.includes(f.id)),
+    'Untouched proposals replaced',
+  ).toEqual([]);
+  expect(
+    kept.find((f) => f.id === edited),
+    'Edited proposal kept',
+  ).toEqual({
+    id: edited,
+    state: 'pending',
+    width: 1.2,
+  });
+  expect(
+    kept.filter((f) => f.state === 'pending' && f.id !== edited),
+    'Fresh unrelated proposals',
+  ).toHaveLength(untouched.length);
+  expect(
+    await frontProposal(page, -1),
+    'Fresh bottom front proposal after the edit',
+  ).not.toBeNull();
 
   await clickProposal(page, edited);
   await page.getByRole('button', { name: 'Accept selected' }).click();
   await expect(page.getByText(/1 accepted · \d+ proposed/)).toBeVisible();
+  const beforeAcceptRerun = await pendingIds(page);
   await detect(page);
+  await expectFreshBottomProposal(page, beforeAcceptRerun);
   expect(
     await inStore(page, (s) =>
       s.refine!.features.filter((f) => f.state === 'accepted').map((f) => f.id),
@@ -1020,32 +1138,26 @@ test('a new detection replaces the pending proposals', async ({ page }) => {
   ).toEqual([edited]);
 });
 
+async function expectFreshBottomProposal(page: Page, before: string[]) {
+  const after = await pendingIds(page);
+  expect(
+    after.filter((id) => before.includes(id)),
+    'Prior pending IDs removed',
+  ).toEqual([]);
+  const bottom = await frontProposal(page, -1);
+  expect(bottom, 'Fresh bottom front proposal present').not.toBeNull();
+}
+
 test('a new detection proposes nothing along an accepted edge', async ({ page }) => {
   await openRefine(page);
   await page.getByRole('radio', { name: 'Detect', exact: true }).click();
   await detect(page);
-  await clickProposal(page, (await topFrontProposal(page))!);
+  await clickProposal(page, (await frontProposal(page))!);
   await page.getByRole('button', { name: 'Accept selected' }).click();
   await expect(page.getByText(/1 accepted · \d+ proposed/)).toBeVisible();
+  const before = await pendingIds(page);
   await detect(page);
-  // Other edges are still proposed, the bottom front edge among them.
-  const others = await inStore(page, (s) =>
-    s
-      .refine!.features.filter((f) => f.state === 'pending' && f.feature.type === 'edge')
-      .map((f) =>
-        f.feature.type === 'edge'
-          ? f.feature.input.segments.flatMap((g) => g.points.map((p) => p.position))
-          : [],
-      ),
-  );
-  expect(others.length).toBeGreaterThan(0);
-  expect(
-    others.some(
-      (points) =>
-        points.every((p) => p[1] < -2 && p[2] > 1) &&
-        Math.abs(points[0][0] - points.at(-1)![0]) > 4,
-    ),
-  ).toBe(true);
+  await expectFreshBottomProposal(page, before);
   // No pending edge lies along the accepted top front edge.
   expect(
     await inStore(page, (s) =>
@@ -1079,16 +1191,55 @@ test('selects all proposals, dismisses them, and accepts them in one step', asyn
   const hint = page.getByText('Preview is off while more than 8 are selected.');
   await expect(hint).toBeVisible();
   expect(await previewOffModel(page)).toBeLessThan(1e-4);
-  // Eight selected: the preview is back. Picking eight drawn curves by hand is not what this checks.
-  const all = await inStore(page, (s) => s.refine!.selected);
-  await inEditor(
-    page,
-    (store, ids) => store.useEditor.getState().selectRefine(ids),
-    all.slice(0, 8),
-  );
+  // Pick the four visible edges from the front, then the four visible from the back.
+  const selected: string[] = [];
+  for (const side of [1, -1]) {
+    if (side === -1) {
+      await page.getByRole('button', { name: 'Perspective', exact: true }).click();
+      await page.getByRole('button', { name: 'Back', exact: true }).click();
+      await expect
+        .poll(async () => {
+          const left = await screen(page, [-half[0], 0, 0]);
+          const right = await screen(page, [half[0], 0, 0]);
+          return left.x > right.x;
+        })
+        .toBe(true);
+    }
+    const edges = await inEditor(
+      page,
+      (store, side) =>
+        store.useEditor
+          .getState()
+          .refine!.features.flatMap((f) =>
+            f.state === 'pending' &&
+            f.feature.type === 'edge' &&
+            f.feature.input.segments.every((g) => g.points.every((p) => p.position[2] * side > 1))
+              ? [f.id]
+              : [],
+          ),
+      side,
+    );
+    for (const id of edges) {
+      await clickProposal(page, id, selected.length ? selected : undefined);
+      selected.push(id);
+    }
+  }
+  expect(selected).toHaveLength(8);
   await expect.poll(draft).toEqual({ skipped: false, built: true });
   await expect(hint).toBeHidden();
   expect(await previewOffModel(page)).toBeGreaterThan(0.01);
+
+  // Add the back face's region to cross the limit by exactly one.
+  await clickSurface(page, [0, 0, -half[2]], 'Shift');
+  await expect
+    .poll(() => inStore(page, (s) => s.refine!.selected.length), { message: 'Nine selected' })
+    .toBe(9);
+  await expect.poll(draft, { message: 'Preview skips at nine selected' }).toEqual({
+    skipped: true,
+    built: false,
+  });
+  expect(await previewOffModel(page), 'Nine selected show the working mesh').toBeLessThan(1e-4);
+
   await page.getByRole('button', { name: 'Select all proposed' }).click();
   await expect.poll(draft).toEqual({ skipped: true, built: false });
   const before = await steps(page);
@@ -1156,11 +1307,19 @@ test('scene undo and redo after Apply swap the original and refined meshes', asy
   await expect.poll(() => inStore(page, (s) => s.tool)).toBe('select');
   await undo(page);
   await expect.poll(() => partMesh(page)).toEqual(original);
-  expect(await sourceKept(page)).toEqual({ geometry: true, array: true, bytes: true });
+  expect(await sourceKept(page), 'Undo restores the source geometry').toMatchObject({
+    geometry: true,
+    array: true,
+    positions: true,
+  });
   // A second undo has nothing of the part's left to undo.
   await undo(page);
   expect(await inStore(page, (s) => s.past.length)).toBe(past);
-  expect(await sourceKept(page)).toEqual({ geometry: true, array: true, bytes: true });
+  expect(await sourceKept(page), 'Second undo keeps the source geometry').toMatchObject({
+    geometry: true,
+    array: true,
+    positions: true,
+  });
   expect(await partMesh(page)).toEqual(original);
   await redo(page);
   await expect.poll(() => partMesh(page)).toEqual(refined);

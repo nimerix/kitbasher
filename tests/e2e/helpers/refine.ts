@@ -35,6 +35,18 @@ export const fixture = {
   ],
 };
 
+export const indexedBlockFixture = {
+  ...fixture,
+  parts: [
+    {
+      ...fixture.parts[0],
+      geometry: serializeGeometry(
+        softBox(half, fillet, { step: 0.2, ripple: 0.04, noise: 0.008, indexed: true }),
+      ),
+    },
+  ],
+};
+
 /** A small riveted plate: half size [3, 0.5, 2], six domes 0.25 mm high on its top face. */
 export const plate = rivetedPlate({ step: 0.2, ripple: 0.04, noise: 0.008 });
 
@@ -99,6 +111,16 @@ export async function proposalSpot(page: Page, id: string): Promise<Vec3> {
     const middle = Math.floor(points.length / 6) * 3;
     return [points[middle], points[middle + 1], points[middle + 2]];
   }, id);
+}
+
+/** Clicks a proposal, or Shift-clicks to add it to the current selection. */
+export async function clickProposal(page: Page, id: string, alreadySelected?: string[]) {
+  await clickSurface(page, await proposalSpot(page, id), alreadySelected ? 'Shift' : undefined);
+  await expect
+    .poll(() => inStore(page, (s) => s.refine!.selected), {
+      message: 'Viewport proposal selection',
+    })
+    .toEqual([...(alreadySelected ?? []), id]);
 }
 
 /** Runs a function of the editor state in the page and returns what it returns. */
@@ -229,9 +251,14 @@ export async function screen(page: Page, world: Vec3) {
 }
 
 /** Clicks the surface where a world point shows. */
-export async function clickSurface(page: Page, world: Vec3) {
+export async function clickSurface(page: Page, world: Vec3, modifier?: 'Shift') {
   const spot = await screen(page, world);
-  await page.mouse.click(spot.x, spot.y);
+  if (modifier) await page.keyboard.down(modifier);
+  try {
+    await page.mouse.click(spot.x, spot.y);
+  } finally {
+    if (modifier) await page.keyboard.up(modifier);
+  }
 }
 
 /** Drags with the primary button through world points, in `steps` pointer moves per leg. */
