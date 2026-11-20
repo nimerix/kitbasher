@@ -106,12 +106,25 @@ function useSliderEdit({
     restore: null as (() => void) | null,
     dragging: false,
     cancelled: false,
+    /** Whether the drag's pointer is known to be pressed still. */
+    held: false,
+    /** Removes the drag's window listeners. */
+    detach: null as (() => void) | null,
   });
   const latest = useRef({ owned, onSet, live, begin });
   latest.current = { owned, onSet, live, begin };
   const row = useRef<HTMLElement | null>(null);
   const finish = useRef(() => {});
-  // Drops the edit, putting a live one back; the drag stays cancelled until its pointer is let go.
+  // Ends a drag's hold on the control, whether it finished or was cancelled.
+  const release = () => {
+    const current = edit.current;
+    current.detach?.();
+    current.detach = null;
+    current.dragging = false;
+    current.cancelled = false;
+    current.held = false;
+  };
+  // Drops the edit, putting a live one back; a drag stays cancelled until its pointer is let go.
   const cancel = useRef(() => {});
   cancel.current = () => {
     const current = edit.current;
@@ -127,25 +140,61 @@ function useSliderEdit({
     const next = current.pending;
     current.pending = null;
     current.restore = null;
-    current.dragging = false;
+    release();
     setDraft(null);
     if (next !== null && latest.current.owned()) latest.current.onSet(next);
   };
+  /**
+   * Follows a drag through the window: its release finishes it. A cancelled drag ends when the
+   * pointer shows no button pressed, on pointercancel, or when the window regains focus, so a
+   * release the window never saw does not leave the control locked.
+   */
+  const follow = () => {
+    const current = edit.current;
+    current.detach?.();
+    const up = (event: globalThis.PointerEvent) => {
+      current.held = false;
+      if (!current.dragging) return;
+      if (current.cancelled) release();
+      else if (event.type === 'pointerup') finish.current();
+    };
+    const moved = (event: globalThis.PointerEvent) => {
+      if (event.buttons === 0) up(event);
+    };
+    const aborted = () => {
+      if (!current.cancelled) cancel.current();
+      release();
+    };
+    const focused = (event: Event) => {
+      if (event.target === window && current.cancelled) release();
+    };
+    window.addEventListener('pointerup', up);
+    window.addEventListener('pointermove', moved);
+    window.addEventListener('pointercancel', aborted);
+    window.addEventListener('focus', focused);
+    current.detach = () => {
+      window.removeEventListener('pointerup', up);
+      window.removeEventListener('pointermove', moved);
+      window.removeEventListener('pointercancel', aborted);
+      window.removeEventListener('focus', focused);
+    };
+  };
   useEffect(() => {
     const element = row.current!;
+    const current = edit.current;
     // A range input fires a native change when it is let go, by pointer or by key, and when it
     // blurs; a drag ends at the pointer's release instead.
     const changed = (event: Event) => {
-      if (isSlider(event.target) && !edit.current.dragging) finish.current();
+      if (isSlider(event.target) && !current.dragging) finish.current();
     };
     const blurred = (event: Event) => {
-      if (isSlider(event.target) && !edit.current.dragging) finish.current();
+      if (isSlider(event.target) && !current.dragging) finish.current();
     };
     // The window losing focus mid-drag cancels it: the release may never reach the page.
     const deactivated = (event: Event) => {
       if (event.type === 'blur' && event.target !== window) return;
       if (event.type === 'visibilitychange' && document.visibilityState !== 'hidden') return;
-      if (edit.current.dragging) cancel.current();
+      if (current.dragging && !current.cancelled) cancel.current();
     };
     element.addEventListener('change', changed);
     element.addEventListener('focusout', blurred);
@@ -156,6 +205,12 @@ function useSliderEdit({
       element.removeEventListener('focusout', blurred);
       window.removeEventListener('blur', deactivated);
       document.removeEventListener('visibilitychange', deactivated);
+      // A control that goes away, or whose target changed, drops its draft and its drag.
+      current.pending = null;
+      current.restore = null;
+      current.detach?.();
+      current.detach = null;
+      current.dragging = false;
     };
   }, []);
   const change = (next: number) => {
@@ -180,27 +235,19 @@ function useSliderEdit({
     onPointerDown: (event: PointerEvent) => {
       if (!isSlider(event.target) || event.button !== 0) return;
       const current = edit.current;
-      current.cancelled = false;
+      release();
       current.dragging = true;
-      window.addEventListener(
-        'pointerup',
-        () => {
-          if (!edit.current.dragging) return;
-          if (edit.current.cancelled) {
-            edit.current.dragging = false;
-            edit.current.cancelled = false;
-          } else finish.current();
-        },
-        { once: true },
-      );
+      current.held = true;
+      follow();
       if (mixed && draft === null) change(least);
     },
     onKeyDown: (event: KeyboardEvent) => {
       if (!isSlider(event.target)) return;
       const current = edit.current;
       if (event.key !== 'Escape') {
-        // A key starts a new edit only once no cancelled drag is still held.
+        // A key ends a cancelled drag unless its pointer is known to be pressed still.
         if (!current.dragging) current.cancelled = false;
+        else if (current.cancelled && !current.held) release();
         return;
       }
       if (current.pending === null && !current.restore) return;
@@ -305,7 +352,8 @@ function SwitchRow({
   onChange: (checked: boolean) => void;
 }) {
   const mixedId = useId();
-  // The ui Switch's markup, described by the visible Mixed: a switch role has no mixed state.
+  // The ui Switch's markup. A switch has no mixed state, so a mixed one is a tri-state checkbox
+  // (aria-checked="mixed") with the same look, also described by the visible Mixed.
   const on = checked && !mixed;
   return (
     <div className="appearance-row">
@@ -314,9 +362,9 @@ function SwitchRow({
         {mixed ? <small id={mixedId}>Mixed</small> : null}
         <button
           type="button"
-          role="switch"
+          role={mixed ? 'checkbox' : 'switch'}
           aria-label={label}
-          aria-checked={on}
+          aria-checked={mixed ? 'mixed' : on}
           aria-describedby={mixed ? mixedId : undefined}
           className={`toggle ${on ? 'on' : ''}`}
           onClick={() => onChange(!on)}
@@ -523,10 +571,12 @@ function EdgeControls({ view, targets, owned }: ModeProps) {
       const saved = view.edge.strength;
       return () => editor().setRefineEdge({ strength: saved });
     }
-    const each = Object.fromEntries(
-      targets.map((f, i) => [f.id, { strength: inputs[i].strength }]),
-    );
-    return () => editor().setRefineEdge({}, each);
+    // Each target as it was, edited mark included, so a cancelled edit leaves no trace.
+    const ids = new Set(targets.map((f) => f.id));
+    const saved = editor()
+      .refine!.features.filter((f) => ids.has(f.id))
+      .map(({ id, feature, edited }) => ({ id, feature, edited }));
+    return () => editor().restoreRefineFeatures(saved);
   };
   return (
     <>

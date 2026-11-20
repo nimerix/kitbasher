@@ -362,6 +362,37 @@ describe('Refine store helpers for the panel and keys', () => {
     expect(small()).toBe(before + 1);
   });
 
+  it('restores features to their input and edited mark from before an edit', async () => {
+    setup([boxPart()], ['box']);
+    await ready();
+    editor().addRefinePoint(crest(-1.2));
+    editor().addRefinePoint(crest(1.2));
+    const id = session().selected[0];
+    // As a detected proposal the user has not touched.
+    useEditor.setState({
+      refine: {
+        ...session(),
+        features: session().features.map((f) => ({ ...f, origin: 'detected', edited: undefined })),
+      },
+    });
+    const before = session().features.find((f) => f.id === id)!;
+    editor().setRefineEdge({ strength: 0.3 });
+    expect(session().features.find((f) => f.id === id)!.edited).toBe(true);
+    // The value and the mark come back in the same write (a draft rebuild may follow).
+    const writes: { feature: unknown; edited: unknown }[] = [];
+    const stop = useEditor.subscribe(({ refine }) => {
+      const f = refine!.features.find((f) => f.id === id)!;
+      writes.push({ feature: f.feature, edited: f.edited });
+    });
+    editor().restoreRefineFeatures([{ id, feature: before.feature, edited: before.edited }]);
+    stop();
+    expect(writes[0]).toEqual({ feature: before.feature, edited: undefined });
+    const after = session().features.find((f) => f.id === id)!;
+    expect(after.feature).toBe(before.feature);
+    expect(after.edited).toBeUndefined();
+    expect('edited' in after).toBe(false);
+  });
+
   it('edits the selected features of a kind, or the defaults when none is selected', async () => {
     setup([boxPart()], ['box']);
     await ready();

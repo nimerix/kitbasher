@@ -621,6 +621,13 @@ interface EditorState {
    * Goes to the selected pending regions when there are any, each with its own entry of `each` on
    * top, and otherwise to the next region's defaults.
    */
+  /**
+   * Puts pending features back as they were before an edit, each one's proposal and edited mark,
+   * in one write: how a cancelled live edit undoes itself.
+   */
+  restoreRefineFeatures: (
+    saved: readonly { id: string; feature: RefineProposal; edited?: boolean }[],
+  ) => void;
   setRefineRegion: (
     options: Partial<RefineSession['region']>,
     each?: Record<string, Partial<RefineSession['region']>>,
@@ -3384,6 +3391,22 @@ export const useEditor = create<EditorState>((set, get) => ({
     const edited = features !== refine.features;
     const edge = { ...refine.edge, ...next, ...(edited ? {} : feature) };
     set({ refine: { ...refine, edge, features } });
+    scheduleRefineDraft();
+  },
+  restoreRefineFeatures: (saved) => {
+    const { refine } = get();
+    if (!refine) return;
+    refineDrag = null;
+    const byId = new Map(saved.map((s) => [s.id, s]));
+    const features = refine.features.map((f) => {
+      const prior = f.state === 'pending' ? byId.get(f.id) : undefined;
+      if (!prior) return f;
+      const { edited: _, ...rest } = f;
+      return prior.edited
+        ? { ...rest, feature: prior.feature, edited: true }
+        : { ...rest, feature: prior.feature };
+    });
+    set({ refine: { ...refine, features } });
     scheduleRefineDraft();
   },
   setRefineRegion: (options, each = {}) => {
