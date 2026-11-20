@@ -11,7 +11,7 @@ import {
 } from 'three';
 import { Matrix, solve } from 'ml-matrix';
 import { hasClosedEdges, weldedPositionIndex } from '../../src/core/mesh-topology';
-import { estimateNoise } from '../../src/core/refine-fit';
+import { type Shape, estimateNoise } from '../../src/core/refine-fit';
 import {
   type RefineMesh,
   addGeometryVertex,
@@ -1010,21 +1010,29 @@ export function sphereCap(radius: number) {
 }
 
 /**
- * 600 points on a cone with apex (0, 1, 0) opening down -Y at half angle atan(0.5), moved along
- * their outward normals by up to 0.002, followed by 400 strays in the box about it, each at least
- * 0.05 off the cone, with random normals.
+ * `rows` x `columns` points (600 by default) on a cone with apex (0, 1, 0) opening down -Y at half
+ * angle atan(0.5), moved along their outward normals by up to `jitter`, followed by strays up to
+ * `total` points, each at least 0.05 off the cone. The strays fill the box about the cone with
+ * random normals, or with `sheet` lie on y = -1.2 (moved by up to `jitter`) facing +Y.
  */
-export function coneWithStrays(seed = 7) {
+export function coneWithStrays(
+  seed = 7,
+  rows = 20,
+  columns = 30,
+  total = 1000,
+  jitter = 0.002,
+  sheet = false,
+) {
   const next = signedRandom(seed);
   const half = Math.atan(0.5);
   const points: number[] = [],
     normals: number[] = [];
-  for (let j = 0; j < 20; j++) {
-    const t = 0.1 + (j / 19) * 1.9;
-    for (let k = 0; k < 30; k++) {
-      const turn = (k / 30) * Math.PI * 2;
+  for (let j = 0; j < rows; j++) {
+    const t = 0.1 + (j / (rows - 1)) * 1.9;
+    for (let k = 0; k < columns; k++) {
+      const turn = (k / columns) * Math.PI * 2;
       const n = [Math.cos(turn) * Math.cos(half), Math.sin(half), Math.sin(turn) * Math.cos(half)];
-      const offset = next() * 0.002;
+      const offset = next() * jitter;
       const r = t * Math.tan(half);
       points.push(
         r * Math.cos(turn) + n[0] * offset,
@@ -1040,31 +1048,40 @@ export function coneWithStrays(seed = 7) {
     if (h * Math.cos(half) + rho * Math.sin(half) < 0) return Math.hypot(x, h, z);
     return Math.abs(rho * Math.cos(half) - h * Math.sin(half));
   };
-  while (points.length < 1000 * 3) {
-    const [x, y, z] = [next() * 1.2, next() * 1.2, next() * 1.2];
+  while (points.length < total * 3) {
+    const [x, y, z] = sheet
+      ? [next() * 1.5, -1.2 + next() * jitter, next() * 1.5]
+      : [next() * 1.2, next() * 1.2, next() * 1.2];
     if (coneDistance(x, y, z) < 0.05) continue;
     points.push(x, y, z);
-    normals.push(...randomDirection(next));
+    normals.push(...(sheet ? [0, 1, 0] : randomDirection(next)));
   }
   return [new Float32Array(points), new Float32Array(normals)] as SurfaceSample;
 }
 
 /**
- * Points of a cylinder of radius 1.5 about Z (a quarter turn from its top toward +X) and of the
- * plane y = 1.5 tangent to it there (1.5 wide toward -X), 20 rows along z in [0, 1]: `cylinder`
+ * Points of a cylinder of radius 1.5 about Z (`sweep`, a quarter turn by default, from its top
+ * toward +X) and of the plane y = 1.5 tangent to it there (1.5 wide toward -X), `rows` rows along
+ * z in [0, 1]: `cylinder`
  * and `plane` points in all, moved along their normals by up to 0.001.
  */
-export function tangentPatch(cylinder: number, plane: number, seed = 9) {
+export function tangentPatch(
+  cylinder: number,
+  plane: number,
+  seed = 9,
+  sweep = Math.PI / 2,
+  rows = 20,
+) {
   const next = signedRandom(seed);
   const radius = 1.5;
   const points: number[] = [],
     normals: number[] = [];
-  const arc = cylinder / 20,
-    flat = plane / 20;
-  for (let j = 0; j < 20; j++) {
-    const z = j / 19;
+  const arc = cylinder / rows,
+    flat = plane / rows;
+  for (let j = 0; j < rows; j++) {
+    const z = j / (rows - 1);
     for (let k = 0; k < arc; k++) {
-      const turn = ((k + 0.5) / arc) * (Math.PI / 2);
+      const turn = ((k + 0.5) / arc) * sweep;
       const n = [Math.sin(turn), Math.cos(turn), 0];
       const offset = next() * 0.001;
       points.push(n[0] * (radius + offset), n[1] * (radius + offset), z);
@@ -1132,4 +1149,83 @@ export function quadricRms(geometry: BufferGeometry) {
   const design = new Matrix(rows);
   const residual = design.mmul(solve(design, new Matrix(heights))).sub(new Matrix(heights));
   return Math.sqrt(residual.to1DArray().reduce((a, r) => a + r * r, 0) / count);
+}
+
+/** The points of a sample, with their normals, in the order of `indices`. */
+export function reordered([points, normals]: SurfaceSample, indices: ArrayLike<number>) {
+  const p = new Float32Array(indices.length * 3),
+    n = new Float32Array(indices.length * 3);
+  for (let j = 0; j < indices.length; j++)
+    for (let k = 0; k < 3; k++) {
+      p[j * 3 + k] = points[indices[j] * 3 + k];
+      n[j * 3 + k] = normals[indices[j] * 3 + k];
+    }
+  return [p, n] as SurfaceSample;
+}
+
+/**
+ * 600 points exactly on the cone of `coneWithStrays` with outward normals, followed by 400 points
+ * on a sheet whose normal is `tilt` radians from +Y toward +X at `offset` from the origin, facing
+ * along that normal, each at least 0.05 off the cone.
+ */
+export function coneBesideSheet(tilt = 0.8, offset = 1.2, seed = 7) {
+  const next = signedRandom(seed);
+  const half = Math.atan(0.5);
+  const points: number[] = [],
+    normals: number[] = [];
+  for (let j = 0; j < 20; j++) {
+    const t = 0.1 + (j / 19) * 1.9;
+    for (let k = 0; k < 30; k++) {
+      const turn = (k / 30) * Math.PI * 2;
+      const r = t * Math.tan(half);
+      points.push(r * Math.cos(turn), 1 - t, r * Math.sin(turn));
+      normals.push(
+        Math.cos(turn) * Math.cos(half),
+        Math.sin(half),
+        Math.sin(turn) * Math.cos(half),
+      );
+    }
+  }
+  const normal = [Math.sin(tilt), Math.cos(tilt), 0],
+    along = [Math.cos(tilt), -Math.sin(tilt), 0];
+  while (points.length < 1000 * 3) {
+    const [a, b] = [next() * 1.5, next() * 1.5];
+    const [x, y, z] = [normal[0] * offset + along[0] * a, normal[1] * offset + along[1] * a, b];
+    const h = 1 - y,
+      rho = Math.hypot(x, z);
+    const distance =
+      h * Math.cos(half) + rho * Math.sin(half) < 0
+        ? Math.hypot(x, h, z)
+        : Math.abs(rho * Math.cos(half) - h * Math.sin(half));
+    if (distance < 0.05) continue;
+    points.push(x, y, z);
+    normals.push(...normal);
+  }
+  return [new Float32Array(points), new Float32Array(normals)] as SurfaceSample;
+}
+
+/** The indices 0 to count - 1 in a seeded Fisher-Yates order. */
+export function shuffled(count: number, seed: number) {
+  const indices = Array.from({ length: count }, (_, i) => i);
+  let state = seed;
+  for (let i = count - 1; i > 0; i--) {
+    state = (Math.imul(state, 1664525) + 1013904223) >>> 0;
+    const j = state % (i + 1);
+    [indices[i], indices[j]] = [indices[j], indices[i]];
+  }
+  return indices;
+}
+
+/** A shape's parameters as one list, to compare two fits number by number. */
+export function shapeParameters(shape: Shape) {
+  switch (shape.kind) {
+    case 'plane':
+      return [...shape.point, ...shape.normal];
+    case 'sphere':
+      return [...shape.center, shape.radius];
+    case 'cylinder':
+      return [...shape.point, ...shape.axis, shape.radius];
+    case 'cone':
+      return [...shape.apex, ...shape.axis, shape.angle];
+  }
 }

@@ -17,6 +17,7 @@ import {
   band,
   cappedFlat,
   coneBehindApex,
+  coneBesideSheet,
   coneSide,
   coneWithStrays,
   modelOf,
@@ -26,8 +27,11 @@ import {
   onWall,
   patch,
   quadricRms,
+  reordered,
   sevenVertexFan,
+  shapeParameters,
   shapeRms,
+  shuffled,
   sphereCap,
   surfaceWhere,
   tangentPatch,
@@ -198,6 +202,40 @@ describe('fitShape support', () => {
   });
 });
 
+describe('fitShape seed search', () => {
+  it('finds a 60 % cone among 8,192 points whatever their order', () => {
+    const sample = coneWithStrays(7, 64, 77, 8192, 0.001, true);
+    const cone = 64 * 77;
+    const generated = Array.from({ length: 8192 }, (_, i) => i);
+    const strays = generated.slice(cone),
+      surface = generated.slice(0, cone);
+    const interleaved = surface.flatMap((i, j) => (j < strays.length ? [strays[j], i] : [i]));
+    const orders = {
+      generated,
+      byX: [...generated].sort((a, b) => sample[0][a * 3] - sample[0][b * 3]),
+      straysFirst: [...strays, ...surface],
+      interleaved,
+    };
+    for (const [name, order] of Object.entries(orders)) {
+      const fit = fitShape(...reordered(sample, order), 'cone', 0.004)!;
+      expect(fit.rms, name).toBeLessThan(1e-3);
+      expect(fit.support, name).toBeGreaterThan(0.55);
+      expect(fit.support, name).toBeLessThan(0.65);
+    }
+  });
+
+  it('finds an exact cone beside a sheet of 400 points in any order', () => {
+    for (const seed of [2, 3, 4]) {
+      const fit = fitShape(...reordered(coneBesideSheet(), shuffled(1000, seed)), 'cone', 0.004)!;
+      const cone = fit.shape as Extract<Shape, { kind: 'cone' }>;
+      expect(Math.hypot(cone.apex[0], cone.apex[1] - 1, cone.apex[2])).toBeLessThan(0.01);
+      expect(fit.rms).toBeLessThan(1e-4);
+      expect(fit.support).toBeGreaterThan(0.55);
+      expect(fit.support).toBeLessThan(0.65);
+    }
+  });
+});
+
 describe('fitAuto', () => {
   it('falls back to the lowest rms of every valid fit', () => {
     const sample = taperedTube(1.5, (0.5 * Math.PI) / 180, 0.02);
@@ -225,6 +263,37 @@ describe('fitAuto', () => {
     const radius = (tube.shape as Extract<Shape, { kind: 'cylinder' }>).radius;
     expect(Math.abs(radius - 1.5)).toBeLessThan(0.01);
     expect(fitAuto(...tangentPatch(400, 600), 0.004).shape.kind).toBe('plane');
+  });
+
+  it('names the cylinder when the plane tangent to it holds a minority', () => {
+    const sample = tangentPatch(600, 400, 9, 0.68, 100);
+    const fit = fitAuto(...sample, 0.004);
+    expect(fit.shape.kind).toBe('cylinder');
+    expect(fit.within).toBe(true);
+    expect(fit.support).toBeGreaterThan(fitShape(...sample, 'plane', 0.004)!.support);
+  });
+
+  it('gives the same shape for points in either order', () => {
+    const samples = [
+      topFace(rivetedPlate().geometry),
+      wall(softCylinder(1.5, 1, 0.3)),
+      patch(rippledSphere(3)),
+    ];
+    for (const sample of samples) {
+      const count = sample[0].length / 3;
+      const forward = fitAuto(...sample, 0.004);
+      const backward = fitAuto(
+        ...reordered(
+          sample,
+          Array.from({ length: count }, (_, i) => count - 1 - i),
+        ),
+        0.004,
+      );
+      expect(backward.shape.kind).toBe(forward.shape.kind);
+      expect(backward.within).toBe(forward.within);
+      const [a, b] = [shapeParameters(forward.shape), shapeParameters(backward.shape)];
+      for (let k = 0; k < a.length; k++) expect(Math.abs(a[k] - b[k])).toBeLessThan(1e-6);
+    }
   });
 
   it('keeps a riveted plate a plane within noise', () => {

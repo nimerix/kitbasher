@@ -99,11 +99,8 @@ function perpendiculars(a: ArrayLike<number>): [Vec3, Vec3] {
   return [u, [a[1] * u[2] - a[2] * u[1], a[2] * u[0] - a[0] * u[2], a[0] * u[1] - a[1] * u[0]]];
 }
 
-/** The lower median, the value a sort would put at (length - 1) >> 1, found by selection. */
-function median(values: Float64Array) {
-  if (!values.length) return 0;
-  const a = Float64Array.from(values);
-  const k = (a.length - 1) >> 1;
+/** The value a sort would put at index `k`, found by selection; reorders `a`. */
+function selectInPlace(a: Float64Array, k: number) {
   let low = 0,
     high = a.length - 1;
   while (low < high) {
@@ -124,6 +121,56 @@ function median(values: Float64Array) {
     else break;
   }
   return a[k];
+}
+
+/** The lower median, the value a sort would put at (length - 1) >> 1. */
+function median(values: Float64Array) {
+  return values.length ? selectInPlace(Float64Array.from(values), (values.length - 1) >> 1) : 0;
+}
+
+/** One murmur-style mixing step of a 32-bit hash. */
+function mix(hash: number, word: number) {
+  hash = Math.imul(hash ^ word, 0x5bd1e995);
+  return hash ^ (hash >>> 13);
+}
+
+/**
+ * Indices of at most `limit` points, a seeded random selection in a seeded random order. Both come
+ * from a hash of each point's own position and normal bits, so the input order cannot change them.
+ */
+function samplingOrder(points: Float32Array, normals: Float32Array, limit: number) {
+  const count = Math.floor(points.length / 3);
+  const position = new Uint32Array(points.buffer, points.byteOffset, count * 3);
+  const normal = new Uint32Array(normals.buffer, normals.byteOffset, normals.length);
+  const keys = new Uint32Array(count);
+  for (let i = 0; i < count; i++) {
+    let hash = 0x2545f491;
+    for (let k = 0; k < 3; k++) hash = mix(hash, position[i * 3 + k]);
+    for (let k = 0; k < 3; k++) hash = mix(hash, normal[i * 3 + k] ?? 0);
+    hash = Math.imul(hash ^ (hash >>> 16), 0x85ebca6b);
+    hash = Math.imul(hash ^ (hash >>> 13), 0xc2b2ae35);
+    keys[i] = (hash ^ (hash >>> 16)) >>> 0;
+  }
+  let indices: number[] = [];
+  if (count > limit) {
+    // The hashes are uniform, so this bound almost always holds the smallest `limit` of them.
+    const guess = ((limit * 1.1 + 64) / count) * 2 ** 32;
+    for (let i = 0; i < count; i++) if (keys[i] < guess) indices.push(i);
+    if (indices.length < limit) {
+      const threshold = selectInPlace(Float64Array.from(keys), limit - 1);
+      indices = [];
+      for (let i = 0; i < count; i++) if (keys[i] <= threshold) indices.push(i);
+    }
+  } else indices = Array.from({ length: count }, (_, i) => i);
+  indices.sort((a, b) => {
+    if (keys[a] !== keys[b]) return keys[a] - keys[b];
+    for (let k = 0; k < 3; k++) {
+      const d = points[a * 3 + k] - points[b * 3 + k] || normals[a * 3 + k] - normals[b * 3 + k];
+      if (d) return d;
+    }
+    return 0;
+  });
+  return Uint32Array.from(indices.slice(0, limit));
 }
 
 /** Points centred on their mean and scaled to unit RMS radius, so every fit is well conditioned. */
@@ -169,8 +216,14 @@ interface Model {
 }
 
 /** Tukey biweights from residuals, with a scale of 1.4826 times the median absolute residual. */
-function reweight(residual: Float64Array, noise: number, weight: Float64Array) {
-  const scale = Math.max(1.4826 * median(residual.map(Math.abs)), noise);
+function reweight(
+  residual: Float64Array,
+  noise: number,
+  weight: Float64Array,
+  absolute: Float64Array,
+) {
+  for (let i = 0; i < residual.length; i++) absolute[i] = Math.abs(residual[i]);
+  const scale = Math.max(1.4826 * selectInPlace(absolute, (absolute.length - 1) >> 1), noise);
   const cut = tukey * scale;
   for (let i = 0; i < residual.length; i++) {
     const u = residual[i] / cut;
@@ -274,25 +327,39 @@ function subset(cloud: Cloud, indices: ArrayLike<number>): Cloud {
   return { count, p, n, centre: cloud.centre, scale: cloud.scale };
 }
 
+/** Number of distinct k-subsets of n items. */
+function subsets(n: number, k: number) {
+  let total = 1;
+  for (let i = 0; i < k; i++) total = (total * (n - i)) / (i + 1);
+  return total;
+}
+
 /**
- * Iteratively reweighted fit started from whichever of the all-point start and seeded minimal
- * samples has the least median absolute residual. Enough samples are drawn to find a surface that
- * holds half of the points with the chance `confidence`, so a minority off the surface cannot
- * move it; drawing stops once a candidate keeps more than half of the points within the noise.
- * Candidates are scored on an even subsample of at most `scoringPoints` points.
+ * Iteratively reweighted fit started from whichever of the all-point start and minimal samples has
+ * the least median absolute residual. Candidates are scored on the points at `order` and samples
+ * are drawn from them: enough to find a surface that holds half of them with the chance
+ * `confidence`, or every sample when that is fewer, so a minority off the surface cannot move it.
+ * Drawing stops once a candidate keeps more than half of all points within the noise.
  */
-function robust<M extends Scorer>(cloud: Cloud, noise: number, fitter: Fitter<M>): Fitted | null {
+function robust<M extends Scorer>(
+  cloud: Cloud,
+  noise: number,
+  fitter: Fitter<M>,
+  order: Uint32Array,
+): Fitted | null {
   const { count } = cloud;
   const model = fitter.model(cloud);
-  const scored =
-    count > scoringPoints
-      ? subset(
-          cloud,
-          Array.from({ length: scoringPoints }, (_, j) => Math.floor((j * count) / scoringPoints)),
-        )
-      : cloud;
-  const scorer = scored === cloud ? model : fitter.model(scored);
-  const distance = new Float64Array(scored.count);
+  const scored = subset(cloud, order);
+  const scorer = fitter.model(scored);
+  const distance = new Float64Array(scored.count),
+    full = scored.count < count ? new Float64Array(count) : null;
+  const confirmed = (candidate: Float64Array) => {
+    if (!full) return true;
+    model.residuals(candidate, full);
+    let near = 0;
+    for (let i = 0; i < count; i++) if (Math.abs(full[i]) <= noise) near++;
+    return 2 * near > count;
+  };
   let state: Float64Array | null = null,
     least = Infinity,
     settled = false;
@@ -300,44 +367,71 @@ function robust<M extends Scorer>(cloud: Cloud, noise: number, fitter: Fitter<M>
     for (const candidate of candidates) {
       if (!candidate || !candidate.every(Number.isFinite)) continue;
       scorer.residuals(candidate, distance);
-      let near = 0;
+      let near = 0,
+        below = 0;
       for (let i = 0; i < scored.count; i++) {
         distance[i] = Math.abs(distance[i]);
         if (distance[i] <= noise) near++;
+        if (distance[i] < least) below++;
       }
-      const score = median(distance);
-      if (score < least) {
-        least = score;
+      if (2 * near > scored.count) {
+        // A majority of the sample alone can be a minority of the cloud.
+        if (!confirmed(candidate)) continue;
+        settled = true;
+      }
+      // The median is below the least so far only when more than half of the values are.
+      if (below > (scored.count - 1) >> 1) {
+        least = median(distance);
         state = candidate;
       }
-      if (2 * near > scored.count) settled = true;
     }
   };
   consider(fitter.starts(cloud, new Float64Array(count).fill(1)));
-  const { size } = fitter;
-  const draws = Math.ceil(Math.log(1 - confidence) / Math.log(1 - 0.5 ** size));
+  const { size } = fitter,
+    n = scored.count,
+    half = Math.ceil(n / 2);
   const ones = new Float64Array(size).fill(1),
     picked = new Uint32Array(size);
-  let seed = 0x2545f491;
-  const random = () => (seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0) / 4294967296;
-  for (let draw = 0; !settled && count > size && draw < draws; draw++) {
-    for (let filled = 0; filled < size;) {
-      const i = Math.floor(random() * count);
-      if (!picked.subarray(0, filled).includes(i)) picked[filled++] = i;
+  const sample = () => consider(fitter.starts(subset(scored, picked), ones));
+  if (half >= size) {
+    let p = 1;
+    for (let i = 0; i < size; i++) p *= (half - i) / (n - i);
+    const draws = p < 1 ? Math.ceil(Math.log(1 - confidence) / Math.log(1 - p)) : 1;
+    if (subsets(n, size) <= draws) {
+      for (let k = 0; k < size; k++) picked[k] = k;
+      for (;;) {
+        sample();
+        if (settled) break;
+        let k = size - 1;
+        while (k >= 0 && picked[k] === n - size + k) k--;
+        if (k < 0) break;
+        picked[k]++;
+        for (let j = k + 1; j < size; j++) picked[j] = picked[j - 1] + 1;
+      }
+    } else {
+      let seed = 0x2545f491;
+      const random = () => (seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0) / 4294967296;
+      for (let draw = 0; !settled && draw < draws; draw++) {
+        for (let filled = 0; filled < size;) {
+          const i = Math.floor(random() * n);
+          if (!picked.subarray(0, filled).includes(i)) picked[filled++] = i;
+        }
+        sample();
+      }
     }
-    consider(fitter.starts(subset(cloud, picked), ones));
   }
   const weight = new Float64Array(count),
-    residual = new Float64Array(count);
+    residual = new Float64Array(count),
+    absolute = new Float64Array(count);
   for (let round = 0; state && round < rounds; round++) {
     model.residuals(state, residual);
-    reweight(residual, noise, weight);
+    reweight(residual, noise, weight, absolute);
     state = fitter.refit(cloud, model, weight, state);
   }
   const final: Float64Array | null = state;
   if (!final || !final.every(Number.isFinite)) return null;
   model.residuals(final, residual);
-  reweight(residual, noise, weight);
+  reweight(residual, noise, weight, absolute);
   let inliers = 0,
     facing = 0;
   for (let i = 0; i < count; i++) {
@@ -651,6 +745,17 @@ export function fitShape(
   kind: ShapeKind,
   noise: number,
 ): ShapeFit | null {
+  return fitKind(points, normals, kind, noise, samplingOrder(points, normals, scoringPoints));
+}
+
+/** `fitShape` scoring and sampling the points at `order`. */
+function fitKind(
+  points: Float32Array,
+  normals: Float32Array,
+  kind: ShapeKind,
+  noise: number,
+  order: Uint32Array,
+): ShapeFit | null {
   if (points.length / 3 < minimumPoints[kind]) return null;
   const cloud = cloudOf(points, normals);
   if (!cloud) return null;
@@ -662,7 +767,7 @@ export function fitShape(
     cylinder: cylinderFitter,
     cone: coneFitter,
   }[kind];
-  const fitted = robust(cloud, scaled, fitter);
+  const fitted = robust(cloud, scaled, fitter, order);
   if (!fitted) return null;
   const shape = shapeOf(kind, cloud, fitted.state, fitted.inward);
   if (!shape) return null;
@@ -756,12 +861,14 @@ function normalsResolve(cloud: Cloud, kind: ShapeKind, fitted: Fitted) {
  * under half its rms). With none within, the lowest rms of all.
  */
 export function fitAuto(points: Float32Array, normals: Float32Array, noise: number): ShapeFit {
-  const plane = fitShape(points, normals, 'plane', noise);
+  const order = samplingOrder(points, normals, scoringPoints);
+  const fit = (kind: ShapeKind) => fitKind(points, normals, kind, noise, order);
+  const plane = fit('plane');
   // No fit keeps more than every point, so a plane keeping over 0.9 of them always wins.
   if (plane?.within && plane.support > 0.9) return plane;
-  const cylinder = fitShape(points, normals, 'cylinder', noise);
-  const cone = fitShape(points, normals, 'cone', noise);
-  const sphere = fitShape(points, normals, 'sphere', noise);
+  const cylinder = fit('cylinder');
+  const cone = fit('cone');
+  const sphere = fit('sphere');
   const all = [plane, cylinder, cone, sphere];
   const best = (fits: (ShapeFit | null)[]) =>
     fits.reduce<ShapeFit | null>((a, b) => (b && (!a || b.rms < a.rms) ? b : a), null);
