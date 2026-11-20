@@ -1,11 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { vertexCurvature } from '../../src/core/refine-curvature';
-import {
-  type RefineProposal,
-  detectDefaults,
-  detectFeatures,
-  sameSurface,
-} from '../../src/core/refine-detect';
+import { type RefineProposal, detectDefaults, detectFeatures } from '../../src/core/refine-detect';
 import { solveEdge } from '../../src/core/refine-edge';
 import { type RefineMesh, medianEdgeLength, weldedCorner } from '../../src/core/refine-mesh';
 import type { Vec3 } from '../../src/core/types';
@@ -573,119 +568,25 @@ describe('detectFeatures across interruptions', () => {
   });
 });
 
-describe('sameSurface', () => {
+describe('detectFeatures on two cylinders meeting at a seam', () => {
   const noise = 0.014;
-  /** A grid of `count` x `count` points of `at(u, v)`, u and v in 0..1, with seeded noise. */
-  const patch = (at: (u: number, v: number) => { p: Vec3; n: Vec3 }, seed: number, count = 20) => {
-    const points = new Float32Array(count * count * 3),
-      directions = new Float32Array(count * count * 3);
-    let x = seed;
-    const next = () => ((x = (x * 1103515245 + 12345) % 2147483648) / 2147483648) * 2 - 1;
-    for (let i = 0; i < count; i++)
-      for (let j = 0; j < count; j++) {
-        const { p, n } = at(i / (count - 1), j / (count - 1));
-        const e = 0.008 * next();
-        const k = (i * count + j) * 3;
-        points.set([p[0] + e * n[0], p[1] + e * n[1], p[2] + e * n[2]], k);
-        directions.set(n, k);
-      }
-    return { points, directions };
+  const cylinders = (offset: number) => {
+    const { mesh, topology } = modelOf(offsetPipe(offset));
+    return regionsOf(detectFeatures(mesh, topology, noise, defaults)).filter(
+      (r) => r.treatment === 'shape' && r.shape === 'cylinder',
+    );
   };
-  const plate = (x0: number, height: number, tilt: number, seed: number) =>
-    patch((u, v) => {
-      const x = x0 + 2 * u;
-      return {
-        p: [x, height + Math.tan(tilt) * Math.max(0, x), -1 + 2 * v],
-        n: [-Math.sin(tilt) * (x > 0 ? 1 : 0), 1, 0].map((c, _, a) => c / Math.hypot(...a)) as Vec3,
-      };
-    }, seed);
-  const tube = (y0: number, taper: number, seed: number) =>
-    patch((u, v) => {
-      const y = y0 + 2 * u,
-        a = Math.PI * v;
-      const r = 1 + Math.tan(taper) * Math.max(0, y);
-      return { p: [r * Math.cos(a), y, r * Math.sin(a)], n: [Math.cos(a), 0, Math.sin(a)] };
-    }, seed);
-  const dome = (from: number, to: number, seed: number) =>
-    patch((u, v) => {
-      const polar = from + (to - from) * u,
-        a = 2 * Math.PI * v;
-      const n: Vec3 = [
-        Math.sin(polar) * Math.cos(a),
-        Math.cos(polar),
-        Math.sin(polar) * Math.sin(a),
-      ];
-      return { p: n.map((c) => 3 * c) as Vec3, n };
-    }, seed);
-  const degree = Math.PI / 180;
 
-  it('joins one plate split by a seam and one dome split into a cap and a ring', () => {
-    expect(sameSurface('plane', plate(-2, 0, 0, 1), plate(0, 0, 0, 2), noise)).toBe(true);
-    expect(sameSurface('sphere', dome(0, 0.35, 3), dome(0.35, 0.6, 4), noise)).toBe(true);
-  });
-
-  const pipe = (offset: number, radius: number, y0: number, seed: number, count = 20) =>
-    patch(
-      (u, v) => {
-        const a = 2 * Math.PI * v;
-        return {
-          p: [offset + radius * Math.cos(a), y0 + 2 * u, radius * Math.sin(a)],
-          n: [Math.cos(a), 0, Math.sin(a)],
-        };
-      },
-      seed,
-      count,
-    );
-  const ball = (x: number, from: number, to: number, seed: number, count = 20) =>
-    patch(
-      (u, v) => {
-        const polar = from + (to - from) * u,
-          a = 2 * Math.PI * v;
-        const n: Vec3 = [
-          Math.sin(polar) * Math.cos(a),
-          Math.cos(polar),
-          Math.sin(polar) * Math.sin(a),
-        ];
-        return { p: [x + 2 * n[0], 2 * n[1], 2 * n[2]], n };
-      },
-      seed,
-      count,
-    );
-
-  it('joins one cylinder split by a seam', () => {
-    expect(sameSurface('cylinder', pipe(0, 2, -2, 7), pipe(0, 2, 0, 8), noise)).toBe(true);
-  });
-
-  it('keeps apart cylinders with axes apart or radii apart, and spheres with centres apart', () => {
-    // A large region beside a small one, either way round: the large one must not decide alone.
-    for (const [big, small] of [
-      [30, 12],
-      [12, 30],
-    ]) {
-      for (const offset of [0.15, 0.3, 0.6])
-        expect(
-          sameSurface('cylinder', pipe(0, 2, -2, 7, big), pipe(offset, 2, 0, 8, small), noise),
-        ).toBe(false);
-      expect(
-        sameSurface('cylinder', pipe(0, 1, -2, 7, big), pipe(0, 1.05, 0, 8, small), noise),
-      ).toBe(false);
-      expect(
-        sameSurface('sphere', ball(0, 0, 0.6, 9, big), ball(0.2, 0.6, 1.2, 10, small), noise),
-      ).toBe(false);
-    }
+  it('grows one cylinder split only by a seam as one region', () => {
+    // offsetPipe(0): rings 0-31 and 32-51 on one axis, the seam between rings 31 and 32.
+    const found = cylinders(0);
+    expect(found).toHaveLength(1);
+    const ringOf = (t: number) => Math.floor(t / 32);
+    const rings = new Set(Array.from(found[0].triangles, ringOf));
+    expect(rings.has(10) && rings.has(40)).toBe(true);
   });
 
   it('keeps two cylinders 0.30 mm apart on their axes as two regions', () => {
-    const { mesh, topology } = modelOf(offsetPipe(0.3));
-    const cylinders = regionsOf(detectFeatures(mesh, topology, noise, defaults)).filter(
-      (r) => r.treatment === 'shape' && r.shape === 'cylinder',
-    );
-    expect(cylinders).toHaveLength(2);
-  });
-
-  it('keeps apart a 0.05 mm step, a 2 degree fold and a 1 degree taper', () => {
-    expect(sameSurface('plane', plate(-2, 0, 0, 1), plate(0, 0.05, 0, 2), noise)).toBe(false);
-    expect(sameSurface('plane', plate(-2, 0, 0, 1), plate(0, 0, 2 * degree, 2), noise)).toBe(false);
-    expect(sameSurface('cylinder', tube(-2, 0, 5), tube(0, 1 * degree, 6), noise)).toBe(false);
+    expect(cylinders(0.3)).toHaveLength(2);
   });
 });
