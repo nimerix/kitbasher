@@ -1,3 +1,4 @@
+import { BufferAttribute, BufferGeometry } from 'three';
 import type { GuidePoint } from '../../src/core/refine-band';
 import { drawnCurve } from '../../src/core/refine-curve';
 import type { RefineProposal } from '../../src/core/refine-detect';
@@ -168,4 +169,80 @@ export function dentedDome(x: number, z: number) {
 export function pocketedPlate(x: number, z: number) {
   const t = Math.min(1, Math.max(0, (0.95 - Math.hypot(x, z)) / 0.1));
   return -0.3 * t * t * (3 - 2 * t);
+}
+
+/** Radius and height of the crests of `collar`'s two outer rims. */
+export const collarCrest = {
+  radius: 1.5 - 0.1 + 0.1 / Math.SQRT2,
+  heights: [0.1 - 0.1 / Math.SQRT2, 0.4 + 0.1 / Math.SQRT2],
+};
+
+/**
+ * A tube of radius 1 about y with a collar of radius 1.5 from y = 0 to 0.5, all four profile
+ * corners rounded by 0.1, open at y = -1.2 and 1.7. Within `slot` radians of +x the collar is cut
+ * away by a slot with steep walls.
+ */
+export function collar(slot = 0) {
+  const fillet = 0.1,
+    step = 0.05;
+  const corners: [number, number][] = [
+    [1, -1.2],
+    [1, 0],
+    [1.5, 0],
+    [1.5, 0.5],
+    [1, 0.5],
+    [1, 1.7],
+  ];
+  // The profile in (r, y) as a polyline sampled `step` apart, each inner corner a circular arc.
+  const profile: [number, number][] = [];
+  const emit = (p: [number, number]) => {
+    const last = profile[profile.length - 1];
+    if (!last) return profile.push(p);
+    const length = Math.hypot(p[0] - last[0], p[1] - last[1]);
+    const count = Math.ceil(length / step);
+    for (let k = 1; k <= count; k++)
+      profile.push([
+        last[0] + ((p[0] - last[0]) * k) / count,
+        last[1] + ((p[1] - last[1]) * k) / count,
+      ]);
+  };
+  emit(corners[0]);
+  for (let i = 1; i < corners.length - 1; i++) {
+    const [a, b, c] = [corners[i - 1], corners[i], corners[i + 1]];
+    const d1 = [Math.sign(b[0] - a[0]), Math.sign(b[1] - a[1])],
+      d2 = [Math.sign(c[0] - b[0]), Math.sign(c[1] - b[1])];
+    const from: [number, number] = [b[0] - d1[0] * fillet, b[1] - d1[1] * fillet];
+    const centre = [from[0] + d2[0] * fillet, from[1] + d2[1] * fillet];
+    emit(from);
+    const start = Math.atan2(from[1] - centre[1], from[0] - centre[0]);
+    const turn = Math.sign(d1[0] * d2[1] - d1[1] * d2[0]) * (Math.PI / 2);
+    const count = Math.ceil((fillet * Math.PI) / 2 / (step / 2));
+    for (let k = 1; k <= count; k++) {
+      const angle = start + (turn * k) / count;
+      profile.push([centre[0] + fillet * Math.cos(angle), centre[1] + fillet * Math.sin(angle)]);
+    }
+  }
+  emit(corners[corners.length - 1]);
+  const around = Math.round((2 * Math.PI * 1.5) / step);
+  // Within `slot` of +x the collar is cut away down to 5 % of its height, with walls 0.06 rad wide.
+  const kept = (angle: number) => {
+    const t = Math.min(1, Math.max(0, (Math.abs(angle) - slot) / 0.06));
+    return Math.max(0.05, slot > 0 ? t * t * (3 - 2 * t) : 1);
+  };
+  const at = (i: number, j: number) => {
+    const angle = (2 * Math.PI * j) / around;
+    const [r, y] = profile[i];
+    const radius = 1 + (r - 1) * kept(Math.atan2(Math.sin(angle), Math.cos(angle)));
+    return [radius * Math.cos(angle), y, radius * Math.sin(angle)];
+  };
+  const triangles: number[] = [];
+  for (let i = 0; i + 1 < profile.length; i++)
+    for (let j = 0; j < around; j++) {
+      const [a, b, c, d] = [at(i, j), at(i, j + 1), at(i + 1, j + 1), at(i + 1, j)];
+      // Outward faces: the profile runs up the outside of the tube.
+      triangles.push(...a, ...c, ...b, ...a, ...d, ...c);
+    }
+  const geometry = new BufferGeometry();
+  geometry.setAttribute('position', new BufferAttribute(Float32Array.from(triangles), 3));
+  return geometry;
 }

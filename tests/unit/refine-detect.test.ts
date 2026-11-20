@@ -8,6 +8,8 @@ import { modelOf } from '../helpers/refine';
 import {
   type EdgeProposal,
   boxCrestVertices,
+  collar,
+  collarCrest,
   dentedDome,
   drawnPoints,
   guidePoints,
@@ -381,5 +383,114 @@ describe('detectFeatures between faces', () => {
       ([0, 1, 2] as const).some((k) => corner(mesh, t, k)[1] < -0.15),
     );
     expect(floor).toEqual([]);
+  });
+});
+
+describe('detectFeatures on rims', () => {
+  const offCrest = (p: Vec3, height: number) =>
+    Math.hypot(Math.hypot(p[0], p[2]) - collarCrest.radius, p[1] - height);
+  const circleOf = (input: EdgeProposal['input']) => {
+    const [a, b, c] = guidePoints(input).map((g) => g.position);
+    const u = [b[0] - a[0], b[1] - a[1], b[2] - a[2]],
+      v = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
+    const n = [u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]];
+    const nn = n[0] ** 2 + n[1] ** 2 + n[2] ** 2;
+    const uu = u[0] ** 2 + u[1] ** 2 + u[2] ** 2,
+      vv = v[0] ** 2 + v[1] ** 2 + v[2] ** 2;
+    const o = [0, 1, 2].map(
+      (k) =>
+        (uu * (v[(k + 1) % 3] * n[(k + 2) % 3] - v[(k + 2) % 3] * n[(k + 1) % 3]) +
+          vv * (n[(k + 1) % 3] * u[(k + 2) % 3] - n[(k + 2) % 3] * u[(k + 1) % 3])) /
+        (2 * nn),
+    );
+    return {
+      centre: [0, 1, 2].map((k) => a[k] + o[k]) as Vec3,
+      radius: Math.hypot(o[0], o[1], o[2]),
+    };
+  };
+
+  it('proposes two rims 0.5 mm apart on a collar as two true closed arcs', () => {
+    const { mesh, topology, noise } = modelOf(collar());
+    const edges = edgesOf(detectFeatures(mesh, topology, noise, defaults));
+    for (const height of collarCrest.heights) {
+      const rims = edges.filter((e) =>
+        guidePoints(e.input).every((p) => offCrest(p.position, height) < 0.1),
+      );
+      expect(rims).toHaveLength(1);
+      expect(rims[0].input.closed).toBe(true);
+      expect(rims[0].input.segments[0].kind).toBe('arc');
+      for (const p of drawnPoints(rims[0].input))
+        expect(offCrest(p, height)).toBeLessThanOrEqual(0.02);
+    }
+  });
+
+  it('proposes a rim cut by a slot as one open arc on the rim circle', () => {
+    const { mesh, topology, noise } = modelOf(collar(0.3));
+    const height = collarCrest.heights[1];
+    const rims = edgesOf(detectFeatures(mesh, topology, noise, defaults)).filter((e) =>
+      guidePoints(e.input).every((p) => offCrest(p.position, height) < 0.1),
+    );
+    expect(rims).toHaveLength(1);
+    expect(rims[0].input.closed).toBe(false);
+    expect(rims[0].input.segments[0].kind).toBe('arc');
+    const { centre, radius } = circleOf(rims[0].input);
+    expect(Math.abs(radius - collarCrest.radius)).toBeLessThanOrEqual(0.02);
+    expect(distance(centre, [0, height, 0])).toBeLessThanOrEqual(0.02);
+  });
+});
+
+describe('detectFeatures within paint and past false bands', () => {
+  it('keeps a guide carried to a corner on the paint', () => {
+    // The L crest of the corner test with its elbow left unpainted, 0.1 mm back on both arms.
+    const ramp = (d: number) => {
+      if (d <= -0.05) return 0.65;
+      if (d < 0.05) return 0.65 - (d + 0.05) ** 2 / 0.2;
+      if (d <= 0.6) return 0.65 - d;
+      if (d < 0.7) return (0.7 - d) ** 2 / 0.2;
+      return 0;
+    };
+    const { mesh, topology } = modelOf(
+      heightField(
+        3,
+        (x, z) => {
+          const delta = Math.abs(x - z);
+          return ramp(Math.max(x, z) + (delta < 0.1 ? (0.1 - delta) ** 2 / 0.4 : 0));
+        },
+        clean,
+      ),
+    );
+    for (const gap of [0.05, 0.1, 0.2]) {
+      const triangles = trianglesWhere(mesh, (x, _, z) => x <= -gap || z <= -gap);
+      const upper = edgesOf(
+        detectFeatures(mesh, topology, 0.014, { ...defaults, triangles }),
+      ).filter((e) => guidePoints(e.input).every((p) => p.position[1] > 0.55));
+      expect(upper).toHaveLength(2);
+      for (const e of upper)
+        for (const p of drawnPoints(e.input))
+          expect(Math.min(p[0] + gap, p[2] + gap)).toBeLessThanOrEqual(0.015);
+    }
+  });
+
+  it('grows a region across a band that is not proposed as an edge', () => {
+    const { mesh, topology, noise } = modelOf(heightField(1.5, dentedDome));
+    const found = detectFeatures(mesh, topology, noise, defaults);
+    expect(edgesOf(found)).toHaveLength(0);
+    // The dome beyond the dent's rim, on both sides of it: one region.
+    const outside = (x: number, z: number) => Math.hypot(x - 0.3, z - 0.2) > 0.95;
+    const near = trianglesWhere(mesh, (x, _, z) => outside(x, z) && x > 0.3 && Math.abs(x) < 1.3),
+      far = trianglesWhere(mesh, (x, _, z) => outside(x, z) && x < -0.6 && Math.abs(x) < 1.3);
+    const owner = new Map<number, number>();
+    regionsOf(found).forEach((r, i) => r.triangles.forEach((t) => owner.set(t, i)));
+    const largest = (list: Uint32Array) => {
+      const count = new Map<number, number>();
+      for (const t of list)
+        if (owner.has(t)) count.set(owner.get(t)!, (count.get(owner.get(t)!) ?? 0) + 1);
+      return [...count.entries()].sort((a, b) => b[1] - a[1])[0];
+    };
+    const [a, inNear] = largest(near),
+      [b, inFar] = largest(far);
+    expect(a).toBe(b);
+    expect(inNear / near.length).toBeGreaterThan(0.9);
+    expect(inFar / far.length).toBeGreaterThan(0.9);
   });
 });
