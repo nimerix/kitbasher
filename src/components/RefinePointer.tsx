@@ -677,6 +677,7 @@ export function RefinePointerController({ pressed }: { pressed: () => boolean })
         for (const point of rest) state.moveRefineStroke(point);
       }
       if (d.kind === 'stroke') return state.endRefineStroke();
+      state.endRefineDrag();
       // A click on the open path's first handle closes it.
       if (!d.moved && d.handle.first) state.addRefinePoint(d.handle.point, true);
     };

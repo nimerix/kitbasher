@@ -666,6 +666,8 @@ interface EditorState {
   cancelRefineStroke: () => void;
   /** Puts the session back as it was when the handle drag under way began, its steps included. */
   cancelRefineDrag: () => void;
+  /** The handle drag under way was released: its draft is built on the next frame. */
+  endRefineDrag: () => void;
   detectRefine: () => Promise<void>;
   cancelRefineDetect: () => void;
   setRefineBrushRadius: (radius: number) => void;
@@ -3535,7 +3537,7 @@ export const useEditor = create<EditorState>((set, get) => ({
       commitRefine({ features });
       refineDrag = { key, step: get().refine?.undo.at(-1), session: refine.id, before, built };
     }
-    scheduleRefineDraft();
+    restRefineDraft();
   },
   removeRefinePoint: (id, segment, index) => {
     const refine = readyRefine();
@@ -3733,11 +3735,17 @@ export const useEditor = create<EditorState>((set, get) => ({
   cancelRefineDrag: () => {
     const drag = refineDrag;
     refineDrag = null;
+    clearRefineRest();
     const refine = readyRefine();
     // Only while nothing else has happened since the drag began.
     if (!drag || refine?.id !== drag.session || drag.step !== refine.undo.at(-1)) return;
     builtDraft = drag.built;
     set({ refine: showRefine({ ...refine, ...drag.before }) });
+  },
+  endRefineDrag: () => {
+    if (!draftRest) return;
+    clearRefineRest();
+    scheduleRefineDraft();
   },
   detectRefine: async () => {
     const refine = readyRefine();
@@ -5644,6 +5652,7 @@ function releaseRefineState() {
   refineDetect = null;
   builtDraft = null;
   cancelRefineDraft();
+  clearRefineRest();
 }
 
 /** What the store keeps for Refine outside the session object; nothing once a session has ended. */
@@ -5654,6 +5663,7 @@ export const heldRefineState = () =>
     refineDrag && 'drag',
     refineDetect && 'detection',
     draftFrame && 'frame',
+    draftRest && 'rest',
   ].filter(Boolean);
 
 /** One brush dab on the stroke's surface, written into the preview. */
@@ -6153,6 +6163,30 @@ function scheduleRefineDraft() {
 function cancelRefineDraft() {
   if (draftFrame && typeof cancelAnimationFrame === 'function') cancelAnimationFrame(draftFrame);
   draftFrame = 0;
+}
+
+/** How long a dragged handle rests, in ms, before its draft is rebuilt. */
+export const refineDragRest = 120;
+let draftRest: ReturnType<typeof setTimeout> | null = null;
+
+/**
+ * During a handle drag in a browser, rebuilds the draft once the pointer has rested for
+ * `refineDragRest` or the drag ends, not every frame: one rebuild can take longer than a frame.
+ */
+function restRefineDraft() {
+  if (typeof window === 'undefined' || typeof requestAnimationFrame !== 'function')
+    return scheduleRefineDraft();
+  cancelRefineDraft();
+  clearRefineRest();
+  draftRest = setTimeout(() => {
+    draftRest = null;
+    scheduleRefineDraft();
+  }, refineDragRest);
+}
+
+function clearRefineRest() {
+  if (draftRest) clearTimeout(draftRest);
+  draftRest = null;
 }
 
 function rebuildRefineDraft() {

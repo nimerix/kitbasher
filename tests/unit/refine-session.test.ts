@@ -40,6 +40,7 @@ import {
   paintingRefine,
   refineBrushRadius,
   refineDraftLimit,
+  refineDragRest,
   refineEdited,
   refineHoldsWork,
   refineUndoBytes,
@@ -1391,6 +1392,50 @@ describe('refine session integrity', { timeout: 20_000 }, () => {
     expect(heldRefineState()).not.toContain('frame');
     editor().endRefineStroke();
     expect(differingAttributes(session().preview!, fresh())).toEqual([]);
+  });
+
+  it('rebuilds a dragged handle draft after a rest or on release, while its guide follows each move', async () => {
+    setup([boxPart()], ['box']);
+    await ready();
+    const id = crestGuide(-1.4, 1.2);
+    const draft = session().draft;
+    expect(draft).not.toBeNull();
+    let frame: FrameRequestCallback | undefined;
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    vi.stubGlobal('window', {});
+    vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => {
+      frame = callback;
+      return 1;
+    });
+    vi.stubGlobal('cancelAnimationFrame', () => (frame = undefined));
+    try {
+      const end = () => edgeInput(id).segments[0].points[1].position;
+      editor().moveRefinePoint(id, 0, 1, crest(1.3), true);
+      editor().moveRefinePoint(id, 0, 1, crest(1.25));
+      expect(end()).toEqual(crest(1.25).position);
+      expect(frame).toBeUndefined();
+      expect(session().draft).toBe(draft);
+      expect(heldRefineState()).toContain('rest');
+      vi.advanceTimersByTime(refineDragRest - 1);
+      expect(frame).toBeUndefined();
+      vi.advanceTimersByTime(1);
+      frame!(0);
+      frame = undefined;
+      const rested = session().draft;
+      expect(rested).not.toBe(draft);
+      expect(rested).not.toBeNull();
+      editor().moveRefinePoint(id, 0, 1, crest(1.2));
+      expect(end()).toEqual(crest(1.2).position);
+      expect(session().draft).toBe(rested);
+      editor().endRefineDrag();
+      expect(heldRefineState()).not.toContain('rest');
+      frame!(0);
+      expect(session().draft).not.toBe(rested);
+      expect(differingAttributes(session().preview!, freshShown())).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+      vi.unstubAllGlobals();
+    }
   });
 
   it('discards a stroke on a mode change: nothing is committed and the preview shows the model', async () => {
