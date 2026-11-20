@@ -60,60 +60,86 @@ const plainColor = (attribute: Attribute | undefined) =>
   !attribute || !('isInterleavedBufferAttribute' in attribute);
 
 /** Per picking tree: the leaf node of each triangle and the parent of each node, by node id. */
-const treeLeaves = new WeakMap<object, { leafOf: Uint32Array; parent: Int32Array }>();
+const treeLeaves = new WeakMap<object, { leafOf: Uint32Array; parent: Int32Array } | null>();
 
 /** Bytes and 32-bit words of one node of a three-mesh-bvh node buffer. */
 const nodeBytes = 32,
   nodeWords = 8;
 
+/**
+ * The leaf of each triangle and the parent of each node, read from the tree's serialized node
+ * buffers; null, touching nothing, when they are not laid out as this reads them.
+ */
 function leavesOf(tree: MeshBVH) {
-  const cached = treeLeaves.get(tree);
-  if (cached) return cached;
-  const { roots, indirectBuffer } = MeshBVH.serialize(tree, { cloneBuffers: false });
-  const leafOf = new Uint32Array(indirectBuffer!.length);
-  const parent = new Int32Array(roots.reduce((sum, root) => sum + root.byteLength / nodeBytes, 0));
-  let first = 0;
-  for (const root of roots) {
-    const words = new Uint32Array(root),
-      halves = new Uint16Array(root);
-    const id = (n32: number) => first + n32 / nodeWords;
-    parent[first] = -1;
-    const stack = [0];
-    while (stack.length) {
-      const n32 = stack.pop()!;
-      if (halves[n32 * 2 + 15] === 0xffff) {
-        const offset = words[n32 + 6],
-          count = halves[n32 * 2 + 14];
-        for (let i = offset; i < offset + count; i++)
-          leafOf[tree.resolveTriangleIndex(i)] = id(n32);
-        continue;
-      }
-      const left = n32 + nodeWords,
-        right = n32 + words[n32 + 6] * nodeWords;
-      parent[id(left)] = parent[id(right)] = id(n32);
-      stack.push(left, right);
-    }
-    first += root.byteLength / nodeBytes;
+  if (treeLeaves.has(tree)) return treeLeaves.get(tree)!;
+  let leaves: { leafOf: Uint32Array; parent: Int32Array } | null;
+  try {
+    leaves = readLeaves(tree);
+  } catch {
+    leaves = null;
   }
-  const leaves = { leafOf, parent };
   treeLeaves.set(tree, leaves);
   return leaves;
 }
 
+function readLeaves(tree: MeshBVH) {
+  const { roots, indirectBuffer } = MeshBVH.serialize(tree, { cloneBuffers: false });
+  if (!indirectBuffer || !roots.length) return null;
+  if (roots.some((root) => !root.byteLength || root.byteLength % nodeBytes)) return null;
+  const triangles = indirectBuffer.length;
+  const leafOf = new Uint32Array(triangles).fill(unused);
+  const parent = new Int32Array(roots.reduce((sum, root) => sum + root.byteLength / nodeBytes, 0));
+  let first = 0,
+    seen = 0;
+  for (const root of roots) {
+    const words = new Uint32Array(root),
+      halves = new Uint16Array(root);
+    const nodes = root.byteLength / nodeBytes;
+    const id = (n32: number) => first + n32 / nodeWords;
+    parent[first] = -1;
+    const stack = [0];
+    let visited = 0;
+    while (stack.length) {
+      const n32 = stack.pop()!;
+      if (++visited > nodes) return null;
+      if (halves[n32 * 2 + 15] === 0xffff) {
+        const offset = words[n32 + 6],
+          count = halves[n32 * 2 + 14];
+        if (offset + count > triangles) return null;
+        for (let i = offset; i < offset + count; i++) {
+          const t = tree.resolveTriangleIndex(i);
+          if (!(t >= 0 && t < triangles) || leafOf[t] !== unused) return null;
+          leafOf[t] = id(n32);
+          seen++;
+        }
+        continue;
+      }
+      const left = n32 + nodeWords,
+        right = n32 + words[n32 + 6] * nodeWords;
+      if (right <= left || right >= nodes * nodeWords) return null;
+      parent[id(left)] = parent[id(right)] = id(n32);
+      stack.push(left, right);
+    }
+    first += nodes;
+  }
+  return seen === triangles ? { leafOf, parent } : null;
+}
+
 /**
- * Refits the nodes over `triangles` and their ancestors only. A tree that is not indirect, or not
- * over `triangleCount` triangles, is refitted whole.
+ * Refits the nodes over `triangles` and their ancestors only. A tree that is not indirect, not over
+ * `triangleCount` triangles, or not laid out as expected is refitted whole.
  */
 function refitTriangles(tree: MeshBVH, triangles: Iterable<number>, triangleCount: number) {
   if (!tree.indirect) {
     tree.refit();
     return;
   }
-  const { leafOf, parent } = leavesOf(tree);
-  if (leafOf.length !== triangleCount) {
+  const leaves = leavesOf(tree);
+  if (leaves?.leafOf.length !== triangleCount) {
     tree.refit();
     return;
   }
+  const { leafOf, parent } = leaves;
   const nodes = new Set<number>();
   for (const t of triangles)
     for (let n = leafOf[t]; n >= 0 && !nodes.has(n); n = parent[n]) nodes.add(n);
@@ -256,6 +282,9 @@ function writeChanges(
   )
     return false;
   if (!moved.length && !creased.length) return true;
+  // The tree's layout is read before anything is written, so a refit can never fail halfway.
+  const tree = preview.boundsTree as MeshBVH | undefined;
+  if (tree?.indirect) leavesOf(tree);
 
   const owner = new Int32Array(weldedCount).fill(-1);
   const index = preview.index?.array as Uint32Array | undefined;
@@ -412,7 +441,6 @@ function writeChanges(
     preview.computeBoundingBox();
     preview.computeBoundingSphere();
   }
-  const tree = preview.boundsTree as MeshBVH | undefined;
   if (tree && moved.length)
     refitTriangles(
       tree,

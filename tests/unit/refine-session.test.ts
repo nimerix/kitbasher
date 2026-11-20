@@ -13,7 +13,8 @@ import {
   Vector3,
 } from 'three';
 import { MeshBVH } from 'three-mesh-bvh';
-import { pickRaycast } from '../../src/core/bvh';
+import { pickRaycast, prepareEditedForPicking, type BvhRequest } from '../../src/core/bvh';
+import { runRefineRequest, type RefineRequest } from '../../src/core/refine-model';
 import { requestTaskCancellation, useActivity } from '../../src/core/activity';
 import { editorCommands, undoTarget } from '../../src/core/commands';
 import { partMatrix, triangleCount } from '../../src/core/geometry';
@@ -1047,6 +1048,104 @@ describe('refine lifecycle edges', () => {
     const hits: Intersection[] = [];
     pickRaycast.call(new Mesh(preview), ray, hits);
     expect(hits.length).toBeGreaterThan(0);
+  });
+
+  it('indexes a dense preview whose first stroke lands while its index is building', async () => {
+    let reply: (() => void) | undefined;
+    class HeldWorker {
+      onmessage?: (event: { data: unknown }) => void;
+      onerror = null;
+      onmessageerror = null;
+      terminate() {}
+      postMessage(message: BvhRequest | RefineRequest, transfer: Transferable[] = []) {
+        const payload = structuredClone(message, { transfer });
+        if ('type' in payload) {
+          const signal = new AbortController().signal;
+          const result = runRefineRequest(payload, () => {}, signal);
+          queueMicrotask(() => this.onmessage?.({ data: { result } }));
+          return;
+        }
+        reply = () => {
+          const geometry = new BufferGeometry();
+          geometry.setAttribute('position', new BufferAttribute(payload.positions, 3));
+          if (payload.index) geometry.setIndex(new BufferAttribute(payload.index, 1));
+          const bvh = MeshBVH.serialize(new MeshBVH(geometry, payload.options));
+          this.onmessage?.({ data: { bvh } });
+        };
+      }
+    }
+    vi.stubGlobal('Worker', HeldWorker);
+    try {
+      const geometry = new PlaneGeometry(11.25, 11.25, 225, 225);
+      const position = geometry.getAttribute('position');
+      for (let v = 0; v < position.count; v++)
+        position.setZ(v, 0.03 * Math.cos(position.getX(v) * 15) * Math.cos(position.getY(v) * 6));
+      geometry.computeVertexNormals();
+      setup([boxPart({ geometry })], ['box']);
+      await ready();
+      await vi.waitFor(() => expect(reply).toBeDefined());
+      editor().setRefineMode('brush');
+      editor().setRefineBrush({ kind: 'flatten', strength: 1 });
+      editor().setRefineBrushRadius(0.3);
+      const preview = session().preview!;
+      const version = (preview.getAttribute('position') as BufferAttribute).version;
+      editor().beginRefineStroke({ triangle: 2 * (112 * 225 + 112), position: [0, 0, 0.03] });
+      expect(session().preview).toBe(preview);
+      expect((preview.getAttribute('position') as BufferAttribute).version).toBeGreaterThan(
+        version,
+      );
+      reply!();
+      await vi.waitFor(() => expect(preview.boundsTree).toBeDefined());
+      const ray = new Raycaster(new Vector3(0.002, 0.012, 1), new Vector3(0, 0, -1));
+      const expected: Intersection[] = [],
+        actual: Intersection[] = [];
+      new Mesh(preview).raycast(ray, expected);
+      pickRaycast.call(new Mesh(preview), ray, actual);
+      expect(expected).toHaveLength(1);
+      expect(actual.map((hit) => [hit.faceIndex, hit.distance])).toEqual(
+        expected.map((hit) => [hit.faceIndex, hit.distance]),
+      );
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('builds the index of an edited geometry again when its triangles changed while it built', async () => {
+    const replies: (() => void)[] = [];
+    class HeldWorker {
+      onmessage?: (event: { data: unknown }) => void;
+      onerror = null;
+      onmessageerror = null;
+      terminate() {}
+      postMessage(message: BvhRequest, transfer: Transferable[] = []) {
+        const payload = structuredClone(message, { transfer });
+        replies.push(() => {
+          const geometry = new BufferGeometry();
+          geometry.setAttribute('position', new BufferAttribute(payload.positions, 3));
+          if (payload.index) geometry.setIndex(new BufferAttribute(payload.index, 1));
+          const bvh = MeshBVH.serialize(new MeshBVH(geometry, payload.options));
+          this.onmessage?.({ data: { bvh } });
+        });
+      }
+    }
+    vi.stubGlobal('Worker', HeldWorker);
+    try {
+      const geometry = new PlaneGeometry(10, 10, 260, 260);
+      prepareEditedForPicking(geometry);
+      await vi.waitFor(() => expect(replies).toHaveLength(1));
+      const index = geometry.index!.array.slice();
+      // The same triangles each turned, a new layout for the tree.
+      for (let t = 0; t < index.length; t += 3)
+        [index[t], index[t + 1], index[t + 2]] = [index[t + 1], index[t + 2], index[t]];
+      geometry.setIndex(new BufferAttribute(index, 1));
+      replies[0]();
+      await vi.waitFor(() => expect(replies).toHaveLength(2));
+      expect(geometry.boundsTree).toBeUndefined();
+      replies[1]();
+      await vi.waitFor(() => expect(geometry.boundsTree).toBeDefined());
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 
   it('matches a fresh preview for interleaved colour and custom position accessors', async () => {

@@ -5330,7 +5330,11 @@ function givePickingTree(
   if (previous?.boundsTree && previewLayouts.get(previous) === corners)
     refitWarpTree(previous, preview);
   else if (source.boundsTree && corners === sourceCorners) refitWarpTree(source, preview);
-  else preparePicking(preview, () => useEditor.getState().refine?.preview === preview);
+  // Brush dabs move the preview while its index builds; the index follows them when it arrives.
+  else
+    void import('./bvh').then(({ prepareEditedForPicking }) => {
+      if (useEditor.getState().refine?.preview === preview) prepareEditedForPicking(preview);
+    });
 }
 
 // A source whose index arrives after its session's preview was written lends the preview its tree.
@@ -5371,11 +5375,9 @@ function showRefine(refine: RefineSession): RefineSession {
   return { ...refine, preview: next };
 }
 
-/** Indexes a geometry for picking once the index code loads, unless `wanted` no longer holds. */
-const preparePicking = (geometry: BufferGeometry, wanted = () => true) =>
-  void import('./bvh').then(({ prepareForPicking }) => {
-    if (wanted()) prepareForPicking(geometry);
-  });
+/** Indexes a geometry for picking once the index code loads. */
+const preparePicking = (geometry: BufferGeometry) =>
+  void import('./bvh').then(({ prepareForPicking }) => prepareForPicking(geometry));
 
 /** The buffers behind a model's arrays. */
 const modelBuffers = ({ mesh, topology }: RefineModel) =>
