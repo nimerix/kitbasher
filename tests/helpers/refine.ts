@@ -611,25 +611,42 @@ export function surfaceWhere(
   return [new Float32Array(points), new Float32Array(normals)] as SurfaceSample;
 }
 
-/** Vertices of the upper face, above mid-height and at least `inset` inside the box in x and z. */
-export function topFace(geometry: BufferGeometry, inset = 0.35) {
+/** Accepts points of the upper face: above mid-height and at least `inset` inside the box in x and z. */
+export function onTopFace(geometry: BufferGeometry, inset = 0.35) {
   geometry.computeBoundingBox();
   const { min, max } = geometry.boundingBox!;
   const middle = (min.y + max.y) / 2;
-  return surfaceWhere(
-    geometry,
-    (x, y, z) =>
-      y > middle &&
-      x > min.x + inset &&
-      x < max.x - inset &&
-      z > min.z + inset &&
-      z < max.z - inset,
-  );
+  return (x: number, y: number, z: number) =>
+    y > middle && x > min.x + inset && x < max.x - inset && z > min.z + inset && z < max.z - inset;
 }
 
-/** Vertices with |y| below `half`: the straight wall of a capped shape about Y. */
+/** Vertices of the upper face, see `onTopFace`. */
+export function topFace(geometry: BufferGeometry, inset = 0.35) {
+  return surfaceWhere(geometry, onTopFace(geometry, inset));
+}
+
+/** Accepts points with |y| below `half`: the straight wall of a capped shape about Y. */
+export const onWall =
+  (half = 0.6) =>
+  (_: number, y: number) =>
+    Math.abs(y) < half;
+
+/** Vertices of the straight wall, see `onWall`. */
 export function wall(geometry: BufferGeometry, half = 0.6) {
-  return surfaceWhere(geometry, (_, y) => Math.abs(y) < half);
+  return surfaceWhere(geometry, onWall(half));
+}
+
+/** `estimateNoise` over the welded vertices that `keep` accepts. */
+export function noiseWhere(
+  geometry: BufferGeometry,
+  keep: (x: number, y: number, z: number) => boolean,
+) {
+  const { mesh, topology } = modelOf(geometry);
+  const vertices: number[] = [];
+  for (let v = 0; v < mesh.weldedCount; v++)
+    if (keep(mesh.position[v * 3], mesh.position[v * 3 + 1], mesh.position[v * 3 + 2]))
+      vertices.push(v);
+  return estimateNoise(mesh, topology, Uint32Array.from(vertices));
 }
 
 /** Vertices within `radius` of the vertex nearest the middle of the topmost 0.1 mm band. */

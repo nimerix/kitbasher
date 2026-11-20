@@ -7,7 +7,18 @@ import {
   projectToShape,
   shapeDistance,
 } from '../../src/core/refine-fit';
-import { angleDeg, coneSide, modelOf, patch, surfaceWhere, topFace, wall } from '../helpers/refine';
+import {
+  angleDeg,
+  coneSide,
+  modelOf,
+  noiseWhere,
+  onTopFace,
+  onWall,
+  patch,
+  surfaceWhere,
+  topFace,
+  wall,
+} from '../helpers/refine';
 import {
   rippledSphere,
   rivetedPlate,
@@ -124,5 +135,47 @@ describe('estimateNoise', () => {
     const { mesh, topology } = modelOf(softBox([2, 1.5, 1], 0.3));
     expect(estimateNoise(mesh, topology)).toBeGreaterThan(0.001);
     expect(estimateNoise(mesh, topology)).toBeLessThan(0.02);
+  });
+
+  it('includes the ripple and stays below it without one', () => {
+    const noise = modelOf(softBox([2, 1.5, 1], 0.3)).noise;
+    expect(noise).toBeGreaterThan(0.004);
+    expect(noise).toBeLessThan(0.02);
+    const smooth = modelOf(softBox([2, 1.5, 1], 0.3, { ripple: 0, noise: 0.004 })).noise;
+    expect(smooth).toBeLessThan(0.006);
+  });
+
+  it('lets fitAuto accept rippled shapes and still reject the elbow', () => {
+    const box = softBox([2, 1.5, 1], 0.3),
+      cylinder = softCylinder(1.5, 1, 0.3),
+      sphere = rippledSphere(3),
+      elbow = softElbow(4, 1);
+    const plane = fitAuto(...topFace(box), modelOf(box).noise);
+    expect(plane.within).toBe(true);
+    expect(plane.shape.kind).toBe('plane');
+    const round = fitAuto(...wall(cylinder), modelOf(cylinder).noise);
+    expect(round.within).toBe(true);
+    expect(round.shape.kind).toBe('cylinder');
+    const ball = fitAuto(...patch(sphere), modelOf(sphere).noise);
+    expect(ball.within).toBe(true);
+    expect(ball.shape.kind).toBe('sphere');
+    expect(fitAuto(...patch(elbow), modelOf(elbow).noise).within).toBe(false);
+  });
+
+  it('absorbs curvature', () => {
+    const box = softBox([2, 1.5, 1], 0.3),
+      cylinder = softCylinder(1.5, 1, 0.3);
+    const flat = noiseWhere(box, onTopFace(box));
+    for (const curved of [modelOf(rippledSphere(3)).noise, noiseWhere(cylinder, onWall())]) {
+      expect(curved).toBeGreaterThan(flat / 2);
+      expect(curved).toBeLessThan(flat * 2);
+    }
+  });
+
+  it('runs in under a second on a 60,000 triangle sphere', () => {
+    const { mesh, topology } = modelOf(rippledSphere(3));
+    const start = performance.now();
+    estimateNoise(mesh, topology);
+    expect(performance.now() - start).toBeLessThan(1000);
   });
 });

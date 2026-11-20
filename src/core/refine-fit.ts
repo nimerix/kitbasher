@@ -1,5 +1,5 @@
 import { Matrix, SingularValueDecomposition, solve } from 'ml-matrix';
-import type { RefineMesh, RefineTopology } from './refine-mesh';
+import { type RefineMesh, type RefineTopology, vertexNormal } from './refine-mesh';
 import type { Vec3 } from './types';
 
 export type ShapeKind = 'plane' | 'cylinder' | 'cone' | 'sphere';
@@ -687,41 +687,156 @@ export function projectToShape(
   }
 }
 
-/** Median distance of each vertex from the plane fitted to its ring. */
+/** Solves the 6x6 system `a x = b` in place by Gaussian elimination; false if singular. */
+function solve6(a: Float64Array, b: Float64Array) {
+  for (let c = 0; c < 6; c++) {
+    let pivot = c;
+    for (let r = c + 1; r < 6; r++)
+      if (Math.abs(a[r * 6 + c]) > Math.abs(a[pivot * 6 + c])) pivot = r;
+    if (Math.abs(a[pivot * 6 + c]) < 1e-12) return false;
+    if (pivot !== c) {
+      for (let k = 0; k < 6; k++) {
+        const t = a[c * 6 + k];
+        a[c * 6 + k] = a[pivot * 6 + k];
+        a[pivot * 6 + k] = t;
+      }
+      const t = b[c];
+      b[c] = b[pivot];
+      b[pivot] = t;
+    }
+    for (let r = c + 1; r < 6; r++) {
+      const f = a[r * 6 + c] / a[c * 6 + c];
+      for (let k = c; k < 6; k++) a[r * 6 + k] -= f * a[c * 6 + k];
+      b[r] -= f * b[c];
+    }
+  }
+  for (let r = 5; r >= 0; r--) {
+    let sum = b[r];
+    for (let k = r + 1; k < 6; k++) sum -= a[r * 6 + k] * b[k];
+    b[r] = sum / a[r * 6 + r];
+  }
+  return true;
+}
+
+const maximumSamples = 2000;
+
+/**
+ * Surface roughness at the scale of `rings` rings: the median over sampled vertices of the RMS
+ * residual of a quadric height field fitted to each vertex's neighbourhood, so curvature is
+ * absorbed and ripple and noise remain.
+ */
 export function estimateNoise(
   mesh: RefineMesh,
   topology: RefineTopology,
   vertices?: Uint32Array,
+  rings = 6,
 ): number {
-  const count = vertices ? vertices.length : mesh.weldedCount;
-  const distances = new Float64Array(count);
-  const covariance = new Float64Array(9);
-  const { position } = mesh;
+  const eligible = vertices ? vertices.length : mesh.weldedCount;
+  const samples = Math.min(eligible, maximumSamples);
+  const stride = eligible / Math.max(samples, 1);
+  const { position, weldedCount } = mesh;
+  const { neighbourStart, neighbours } = topology;
+  const residuals = new Float64Array(samples);
+  const stamp = new Uint32Array(weldedCount);
+  let gathered = new Uint32Array(256);
+  const normal = new Float32Array(3);
+  const normalMatrix = new Float64Array(36);
+  const rhs = new Float64Array(6);
+  const row = new Float64Array(6);
   let used = 0;
-  for (let i = 0; i < count; i++) {
-    const v = vertices ? vertices[i] : i;
-    const start = topology.neighbourStart[v],
-      end = topology.neighbourStart[v + 1];
-    if (end - start < 3) continue;
-    const mean = [0, 0, 0];
-    for (let j = start; j < end; j++)
-      for (let k = 0; k < 3; k++) mean[k] += position[topology.neighbours[j] * 3 + k];
-    for (let k = 0; k < 3; k++) mean[k] /= end - start;
-    covariance.fill(0);
-    for (let j = start; j < end; j++) {
-      const w = topology.neighbours[j] * 3;
-      for (let r = 0; r < 3; r++)
-        for (let c = 0; c < 3; c++)
-          covariance[r * 3 + c] += (position[w + r] - mean[r]) * (position[w + c] - mean[c]);
+  for (let s = 0; s < samples; s++) {
+    const i = Math.floor(s * stride);
+    const seed = vertices ? vertices[i] : i;
+    const mark = s + 1;
+    stamp[seed] = mark;
+    gathered[0] = seed;
+    let count = 1,
+      ringStart = 0;
+    for (let ring = 0; ring < rings; ring++) {
+      const ringEnd = count;
+      for (let g = ringStart; g < ringEnd; g++) {
+        const v = gathered[g];
+        for (let j = neighbourStart[v]; j < neighbourStart[v + 1]; j++) {
+          const w = neighbours[j];
+          if (stamp[w] === mark) continue;
+          stamp[w] = mark;
+          if (count === gathered.length) {
+            const grown = new Uint32Array(count * 2);
+            grown.set(gathered);
+            gathered = grown;
+          }
+          gathered[count++] = w;
+        }
+      }
+      ringStart = ringEnd;
     }
-    const { values, vectors } = eigen3(covariance);
-    if (values[1] <= 1e-10 * values[2]) continue;
-    const n = vectors[0];
-    distances[used++] = Math.abs(
-      (position[v * 3] - mean[0]) * n[0] +
-        (position[v * 3 + 1] - mean[1]) * n[1] +
-        (position[v * 3 + 2] - mean[2]) * n[2],
-    );
+    if (count < 10) continue;
+    let nx = 0,
+      ny = 0,
+      nz = 0,
+      cx = 0,
+      cy = 0,
+      cz = 0;
+    for (let g = 0; g < count; g++) {
+      const v = gathered[g];
+      vertexNormal(mesh, topology, v, normal);
+      nx += normal[0];
+      ny += normal[1];
+      nz += normal[2];
+      cx += position[v * 3];
+      cy += position[v * 3 + 1];
+      cz += position[v * 3 + 2];
+    }
+    const length = Math.hypot(nx, ny, nz);
+    if (length < 1e-9) continue;
+    const n: Vec3 = [nx / length, ny / length, nz / length];
+    const [u, w] = perpendiculars(n);
+    cx /= count;
+    cy /= count;
+    cz /= count;
+    let spread = 0;
+    for (let g = 0; g < count; g++) {
+      const v = gathered[g] * 3;
+      spread += (position[v] - cx) ** 2 + (position[v + 1] - cy) ** 2 + (position[v + 2] - cz) ** 2;
+    }
+    // Local coordinates are scaled to unit RMS radius so the normal equations stay conditioned.
+    const scale = Math.sqrt(spread / count) || 1;
+    normalMatrix.fill(0);
+    rhs.fill(0);
+    for (let g = 0; g < count; g++) {
+      const v = gathered[g] * 3;
+      const dx = position[v] - cx,
+        dy = position[v + 1] - cy,
+        dz = position[v + 2] - cz;
+      const x = (dx * u[0] + dy * u[1] + dz * u[2]) / scale;
+      const y = (dx * w[0] + dy * w[1] + dz * w[2]) / scale;
+      const z = (dx * n[0] + dy * n[1] + dz * n[2]) / scale;
+      row[0] = 1;
+      row[1] = x;
+      row[2] = y;
+      row[3] = x * x;
+      row[4] = x * y;
+      row[5] = y * y;
+      for (let r = 0; r < 6; r++) {
+        rhs[r] += row[r] * z;
+        for (let c = 0; c < 6; c++) normalMatrix[r * 6 + c] += row[r] * row[c];
+      }
+    }
+    if (!solve6(normalMatrix, rhs)) continue;
+    let squared = 0;
+    for (let g = 0; g < count; g++) {
+      const v = gathered[g] * 3;
+      const dx = position[v] - cx,
+        dy = position[v + 1] - cy,
+        dz = position[v + 2] - cz;
+      const x = (dx * u[0] + dy * u[1] + dz * u[2]) / scale;
+      const y = (dx * w[0] + dy * w[1] + dz * w[2]) / scale;
+      const z = (dx * n[0] + dy * n[1] + dz * n[2]) / scale;
+      const fit =
+        rhs[0] + rhs[1] * x + rhs[2] * y + rhs[3] * x * x + rhs[4] * x * y + rhs[5] * y * y;
+      squared += (z - fit) ** 2;
+    }
+    residuals[used++] = Math.sqrt(squared / count) * scale;
   }
-  return median(distances.subarray(0, used));
+  return median(residuals.subarray(0, used));
 }
