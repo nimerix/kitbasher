@@ -1,7 +1,8 @@
 import type { GuidePoint } from './refine-band';
 import type { EdgeInput } from './refine-edge';
-import { type RefineMesh, type RefineTopology, moveVertex } from './refine-mesh';
-import { nextMark, verticesUnderBrush } from './refine-paint';
+import { fitShape } from './refine-fit';
+import { type RefineMesh, type RefineTopology, moveVertex, vertexNormal } from './refine-mesh';
+import { nextMark, slotsFor, verticesUnderBrush, walkUnderBrush } from './refine-paint';
 import { smoothScale, smoothTargets } from './refine-smooth';
 import type { Vec3 } from './types';
 
@@ -11,6 +12,8 @@ export interface Dab {
   center: Vec3;
   radius: number;
   strength: number;
+  /** The model's noise in mm, the floor of the flatten plane's robust scale; 0 when absent. */
+  noise?: number;
 }
 
 /** A moved triangle may keep no less than this fraction of its area. */
@@ -19,17 +22,6 @@ const collapse = 1e-3;
 const halvings = 6;
 /** Most points a crease stroke's guide may have. */
 const maximumGuidePoints = 32;
-
-/** Per topology: welded vertex -> index in the current dab's working set, -1 when outside it. */
-const slotsOf = new WeakMap<RefineTopology, Int32Array>();
-function slotsFor(mesh: RefineMesh, topology: RefineTopology) {
-  let slots = slotsOf.get(topology);
-  if (!slots || slots.length < mesh.weldedCount) {
-    slots = new Int32Array(mesh.weldedCount).fill(-1);
-    slotsOf.set(topology, slots);
-  }
-  return slots;
-}
 
 /**
  * Projects the vertices under the brush onto local quadric fits of the surface (`smoothTargets`),
@@ -44,7 +36,7 @@ export function smoothDab(mesh: RefineMesh, topology: RefineTopology, dab: Dab):
   const brush = verticesUnderBrush(mesh, topology, triangle, center, radius);
   if (!brush.vertices.length) return new Uint32Array(0);
   const scale = Math.max(radius, smoothScale(meanEdge(mesh, topology, brush.vertices)));
-  const read = verticesUnderBrush(mesh, topology, triangle, center, radius + scale).vertices;
+  const read = walkUnderBrush(mesh, topology, triangle, center, radius + scale).vertices;
   const patch = patchOf(mesh, topology, read);
   const { slots } = patch;
   const free = new Uint8Array(read.length);
@@ -78,8 +70,10 @@ export function smoothDab(mesh: RefineMesh, topology: RefineTopology, dab: Dab):
 }
 
 /**
- * Fits a least squares plane to the vertices under the brush and moves each toward it along the
- * plane's normal by `strength * falloff`. Returns the welded vertices that moved.
+ * Fits a plane to the vertices under the brush and moves each toward it along the plane's normal by
+ * `strength * falloff`. The plane is a robust fit, so raised detail under the brush, such as rivets,
+ * does not tilt it; when that fit fails, the least squares plane.
+ * Returns the welded vertices that moved.
  */
 export function flattenDab(mesh: RefineMesh, topology: RefineTopology, dab: Dab): Uint32Array {
   const { triangle, center, radius, strength } = dab;
@@ -87,7 +81,8 @@ export function flattenDab(mesh: RefineMesh, topology: RefineTopology, dab: Dab)
   const { vertices, falloff } = verticesUnderBrush(mesh, topology, triangle, center, radius);
   if (vertices.length < 3) return new Uint32Array(0);
   const { position } = mesh;
-  const plane = planeThrough(position, vertices);
+  const plane =
+    robustPlane(mesh, topology, vertices, dab.noise ?? 0) ?? planeThrough(position, vertices);
   if (!plane) return new Uint32Array(0);
   const [px, py, pz, nx, ny, nz] = plane;
   const moves = new Float64Array(vertices.length * 3);
@@ -115,20 +110,22 @@ export function creaseInput(
   strength: number,
 ): EdgeInput | null {
   if (stroke.length < 2 || !(radius > 0)) return null;
-  const count = stroke.length;
-  const along = new Float64Array(count);
-  for (let i = 1; i < count; i++) {
+  const whole = new Float64Array(stroke.length);
+  for (let i = 1; i < stroke.length; i++) {
     const a = stroke[i - 1].position,
       b = stroke[i].position;
-    along[i] = along[i - 1] + Math.hypot(b[0] - a[0], b[1] - a[1], b[2] - a[2]);
+    whole[i] = whole[i - 1] + Math.hypot(b[0] - a[0], b[1] - a[1], b[2] - a[2]);
   }
+  const count = firstPass(stroke, whole, radius) + 1;
+  const pass = stroke.slice(0, count);
+  const along = whole.subarray(0, count);
   const length = along[count - 1];
   if (!(length >= radius)) return null;
   // Resampled every radius, each sample a local straight-line fit to the stroke within a radius.
   const samples = Math.ceil(length / radius);
   const smooth: Vec3[] = [];
   for (let j = 0; j <= samples; j++)
-    smooth.push(lineFitAt(stroke, along, (j * length) / samples, radius));
+    smooth.push(lineFitAt(pass, along, (j * length) / samples, radius));
   const stations = [0];
   for (let j = 1; j <= samples; j++) {
     const a = smooth[j - 1],
@@ -136,7 +133,7 @@ export function creaseInput(
     stations.push(stations[j - 1] + Math.hypot(b[0] - a[0], b[1] - a[1], b[2] - a[2]));
   }
   const total = stations[samples];
-  const points = Math.min(maximumGuidePoints, Math.ceil(total / (4 * radius)) + 3);
+  const points = Math.min(maximumGuidePoints, Math.ceil(length / (4 * radius)) + 3);
   const guide: GuidePoint[] = [];
   let j = 0,
     nearest = 0;
@@ -155,7 +152,7 @@ export function creaseInput(
       Math.abs(along[nearest + 1] - raw) <= Math.abs(along[nearest] - raw)
     )
       nearest++;
-    guide.push({ triangle: stroke[nearest].triangle, position });
+    guide.push({ triangle: pass[nearest].triangle, position });
   }
   return {
     segments: [{ kind: 'spline', points: guide }],
@@ -164,6 +161,61 @@ export function creaseInput(
     width: radius,
     strength,
   };
+}
+
+/**
+ * Index of the last point of the stroke's first pass over the surface. A point within `radius` of
+ * the stroke laid at least 2 radius of length before it, travelling against that stroke's direction
+ * there, is going back over it; the pass ends at the turnaround between them, the point farthest from
+ * that nearest earlier point. A stroke that closes or crosses itself without reversing is kept whole.
+ */
+function firstPass(stroke: GuidePoint[], along: Float64Array, radius: number): number {
+  const count = stroke.length;
+  const gap = (i: number, j: number) => {
+    const a = stroke[i].position,
+      b = stroke[j].position;
+    return Math.hypot(b[0] - a[0], b[1] - a[1], b[2] - a[2]);
+  };
+  // The stroke's direction at point i: its chord over the radius of stroke centred there.
+  const heading = (i: number) => {
+    let from = i,
+      to = i;
+    while (from > 0 && along[from - 1] >= along[i] - radius / 2) from--;
+    while (to < count - 1 && along[to + 1] <= along[i] + radius / 2) to++;
+    const a = stroke[from].position,
+      b = stroke[to].position;
+    return [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+  };
+  for (let k = 1; k < count; k++) {
+    let nearest = -1,
+      closest = radius;
+    for (let j = 0; j < k && along[j] <= along[k] - 2 * radius;) {
+      const d = gap(j, k);
+      if (d < closest) {
+        closest = d;
+        nearest = j;
+      }
+      // A point less than d - closest of stroke further on is still no closer than `closest`.
+      const skip = along[j] + d - closest;
+      j++;
+      while (j < k && along[j] < skip) j++;
+    }
+    if (nearest < 0) continue;
+    const [ax, ay, az] = heading(nearest),
+      [bx, by, bz] = heading(k);
+    if (ax * bx + ay * by + az * bz >= 0) continue;
+    let turn = nearest,
+      farthest = 0;
+    for (let i = nearest + 1; i < k; i++) {
+      const d = gap(nearest, i);
+      if (d > farthest) {
+        farthest = d;
+        turn = i;
+      }
+    }
+    return turn;
+  }
+  return count - 1;
 }
 
 /** The stroke's position at station `s`, from a least squares line through its points within `reach`. */
@@ -299,6 +351,26 @@ function patchOf(mesh: RefineMesh, topology: RefineTopology, read: Uint32Array) 
       for (const v of globals) slots[v] = -1;
     },
   };
+}
+
+/** `fitShape`'s robust plane through the vertices: a point on it and its unit normal. */
+function robustPlane(
+  mesh: RefineMesh,
+  topology: RefineTopology,
+  vertices: Uint32Array,
+  noise: number,
+) {
+  const points = new Float32Array(vertices.length * 3);
+  const normals = new Float32Array(points.length);
+  const normal = new Float32Array(3);
+  vertices.forEach((v, i) => {
+    for (let a = 0; a < 3; a++) points[i * 3 + a] = mesh.position[v * 3 + a];
+    vertexNormal(mesh, topology, v, normal);
+    normals.set(normal, i * 3);
+  });
+  // Equal weights: by falloff a rivet under the brush centre outweighs the plate and wins the fit.
+  const fit = fitShape(points, normals, 'plane', noise);
+  return fit?.shape.kind === 'plane' ? [...fit.shape.point, ...fit.shape.normal] : null;
 }
 
 /** Principal plane of the vertices' positions: a point on it and its unit normal. */

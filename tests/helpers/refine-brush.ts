@@ -134,3 +134,25 @@ export function jitteredCrest(
   }
   return stroke;
 }
+
+/** Mean and RMS about the mean of y over the welded vertices `where` accepts. */
+export function levelAndSpread(mesh: RefineMesh, where: (p: Vec3) => boolean) {
+  const heights: number[] = [];
+  for (let v = 0; v < mesh.weldedCount; v++) {
+    const p = at(mesh, v);
+    if (where(p)) heights.push(p[1]);
+  }
+  const level = heights.reduce((a, b) => a + b, 0) / heights.length;
+  const spread = Math.sqrt(heights.reduce((a, y) => a + (y - level) ** 2, 0) / heights.length);
+  return { level, spread, count: heights.length };
+}
+
+/** Welded vertices `where` accepts (judged at `before`) whose position bits differ in `after`. */
+export function movedWhere(before: RefineMesh, after: RefineMesh, where: (p: Vec3) => boolean) {
+  let moved = 0;
+  for (let v = 0; v < before.weldedCount; v++) {
+    const p = at(before, v);
+    if (where(p) && [0, 1, 2].some((a) => !Object.is(p[a], after.position[v * 3 + a]))) moved++;
+  }
+  return moved;
+}
