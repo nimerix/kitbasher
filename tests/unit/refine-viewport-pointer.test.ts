@@ -1,15 +1,23 @@
 import { describe, expect, it } from 'vitest';
 import {
   bindingBroken,
+  changedModelTriangles,
   chooseCandidate,
   draftMoved,
   gestureBinding,
+  handleClickHolds,
+  LatestNear,
   longestRun,
   pressGesture,
+  rayCrossesBounds,
+  sameAsModel,
   surfaceAllowance,
   surfaceReady,
+  trianglesHit,
+  type HandleClick,
 } from '../../src/components/RefinePointer';
-import { BufferAttribute, BufferGeometry } from 'three';
+import { BoxGeometry, BufferAttribute, BufferGeometry, Mesh, Ray, Vector3 } from 'three';
+import type { RefineMesh } from '../../src/core/refine-mesh';
 import { workerIndexTriangles } from '../../src/core/spatial-index';
 import type { RefineSession } from '../../src/core/store';
 import type { GuidePoint } from '../../src/core/refine-band';
@@ -181,5 +189,109 @@ describe('the surface a selected guide draft moved', () => {
   it('marks nothing without a draft', () => {
     expect(draftMoved(session(null), 1)).toBe(false);
     expect(draftMoved(session(model), 1)).toBe(false);
+  });
+});
+
+describe('the model surface a selected handle is tested against', () => {
+  const mesh = (position: number[], corners: number[], weldedCount: number) =>
+    ({
+      position: Float64Array.from(position),
+      weldedCount,
+      weldOf: Uint32Array.from({ length: weldedCount }, (_, i) => i),
+      corners: Uint32Array.from(corners),
+      triangleCount: corners.length / 3,
+    }) as unknown as RefineMesh;
+  // Two triangles making the unit square at z = 0; the draft lifts vertex 3 to z = 0.5.
+  const square = [0, 0, 0, 1, 0, 0, 0, 1, 0, 1, 1, 0];
+  const model = mesh(square, [0, 1, 2, 1, 3, 2], 4);
+  const draft = mesh([...square.slice(0, 9), 1, 1, 0.5], [0, 1, 2, 1, 3, 2], 4);
+  const session = { draft, model: { mesh: model } } as unknown as Pick<
+    RefineSession,
+    'draft' | 'model'
+  >;
+
+  it('lists the model triangles the draft does not show unchanged', () => {
+    expect(sameAsModel(session, 0)).toBe(true);
+    expect(sameAsModel(session, 1)).toBe(false);
+    expect(Array.from(changedModelTriangles(session))).toEqual([1]);
+    expect(changedModelTriangles({ draft: null, model: { mesh: model } } as never)).toHaveLength(0);
+  });
+
+  it('crosses a ray with those triangles at the model positions, from either side', () => {
+    const down = new Ray(new Vector3(0.8, 0.8, 2), new Vector3(0, 0, -1));
+    const hit = trianglesHit(model, [1], down)!;
+    expect(hit.distance).toBeCloseTo(2);
+    expect(Math.abs(hit.normal.z)).toBeCloseTo(1);
+    // The draft's lifted corner would be met sooner; the model is met where it lies.
+    expect(trianglesHit(draft, [1], down)!.distance).toBeLessThan(2);
+    const up = new Ray(new Vector3(0.8, 0.8, -1), new Vector3(0, 0, 1));
+    expect(trianglesHit(model, [1], up)!.distance).toBeCloseTo(1);
+    expect(trianglesHit(model, [1], down, 2.5)).toBeNull();
+    expect(trianglesHit(model, [0], down)).toBeNull();
+  });
+});
+
+describe('a handle press kept as a click while the surface has no index', () => {
+  const point: GuidePoint = { triangle: 0, position: [0, 0, 0] };
+  const other: GuidePoint = { triangle: 1, position: [1, 0, 0] };
+  const guide = { type: 'edge', input: { segments: [{ points: [point, other] }] } };
+  const refine = (changes: Record<string, unknown> = {}) =>
+    ({
+      id: 's1',
+      mode: 'edge',
+      selected: ['g1'],
+      features: [{ id: 'g1', state: 'pending', feature: guide }],
+      ...changes,
+    }) as unknown as RefineSession;
+  const press: HandleClick = {
+    session: 's1',
+    mode: 'edge',
+    handle: { feature: 'g1', segment: 0, index: 0, point, first: true },
+    feature: guide,
+  };
+
+  it('holds for the same handle of the same selected guide', () => {
+    expect(handleClickHolds(press, refine())).toBe(true);
+  });
+
+  it('lapses when the session, mode, selection or that guide changes', () => {
+    expect(handleClickHolds(press, refine({ id: 's2' }))).toBe(false);
+    expect(handleClickHolds(press, refine({ mode: 'region' }))).toBe(false);
+    expect(handleClickHolds(press, refine({ selected: ['g2'] }))).toBe(false);
+    const edited = { ...guide, input: { segments: [{ points: [point, other] }] } };
+    expect(
+      handleClickHolds(
+        press,
+        refine({ features: [{ id: 'g1', state: 'pending', feature: edited }] }),
+      ),
+    ).toBe(false);
+    expect(handleClickHolds(press, null)).toBe(false);
+  });
+});
+
+describe('the latest of a frame’s samples near an unindexed part', () => {
+  it('keeps only the latest, and only while it was near', () => {
+    const latest = new LatestNear<number>();
+    latest.record(1, true);
+    latest.record(2, true);
+    expect(latest.take()).toBe(2);
+    expect(latest.take()).toBeNull();
+    latest.record(3, true);
+    latest.record(4, false);
+    expect(latest.take()).toBeNull();
+  });
+});
+
+describe('whether a ray passes close to a part', () => {
+  it('tests the part’s own bounding box, in its own space', () => {
+    const part = new Mesh(new BoxGeometry(0.5, 16, 0.5));
+    part.position.set(0, 0, 3);
+    part.updateMatrixWorld();
+    const at = (x: number) => new Ray(new Vector3(x, 0, 20), new Vector3(0, 0, -1));
+    expect(rayCrossesBounds(at(0), part)).toBe(true);
+    expect(rayCrossesBounds(at(1), part)).toBe(false);
+    part.scale.set(5, 1, 1);
+    part.updateMatrixWorld();
+    expect(rayCrossesBounds(at(1), part)).toBe(true);
   });
 });
