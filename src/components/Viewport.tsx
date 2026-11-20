@@ -73,10 +73,12 @@ import { ManagedTransformControls } from './ManagedTransformControls';
 import { WarpOverlay, shownWarpPreview } from './WarpOverlay';
 import { beginWarpStroke, endingWarpStroke, WarpStrokeController } from './WarpStroke';
 import {
+  beginRefinePaint,
   beginRefinePointer,
   endingRefinePointer,
   pressingRefineProposal,
   refineSurfaceAt,
+  occludingRaycast,
   previewRaycast,
   RefinePointerController,
 } from './RefinePointer';
@@ -226,9 +228,9 @@ const PartMesh = memo(function PartMesh({
   }, [part.geometry, shown]);
   const raycast = useMemo(() => {
     const pick = nearby ? nearbyRaycast(nearby.shows) : pickRaycast;
-    const source = sourceRaycast(part.geometry, pick);
     // The store keeps the Refine preview's own picking tree current through every change.
     if (refinePreview) return previewRaycast(pick, nearby?.shows);
+    const source = sourceRaycast(part.geometry, occludingRaycast(pick));
     if (!warpPreview) return source;
     let indexedVersion = -1;
     return function (this: Mesh, ...args: Parameters<Mesh['raycast']>) {
@@ -375,11 +377,7 @@ const PartMesh = memo(function PartMesh({
             } else if (paintingRefine(state) && state.refine?.partId === part.id) {
               // A press on a proposal in Detect selects it on release instead.
               if (pressingRefineProposal()) return;
-              // As a brush stroke, only where the part is the first thing under the pointer.
-              const { clientX, clientY } = event.nativeEvent;
-              if (!refineSurfaceAt(part.id, clientX, clientY)) return;
-              event.stopPropagation();
-              state.paintRefineRegion(toSurface(event), event.faceIndex, event.altKey, true);
+              if (beginRefinePaint(event, part.id)) event.stopPropagation();
             } else if (beginWarpStroke(event, part.id) || beginRefinePointer(event, part.id))
               event.stopPropagation();
           }}
@@ -412,10 +410,8 @@ const PartMesh = memo(function PartMesh({
             setBrushHit(point);
             if (!state.painting || !(event.buttons & 1)) return;
             if (contact) state.paintSurface(point, event.faceIndex, event.altKey);
-            else if (refineBrush) {
-              if (paintingRefine(state) && !pressingRefineProposal())
-                state.paintRefineRegion(point, event.faceIndex, event.altKey);
-            } else state.paintWarpRegion(point, event.faceIndex, event.altKey);
+            // Refine paint is sampled by its own gesture.
+            else if (!refineBrush) state.paintWarpRegion(point, event.faceIndex, event.altKey);
           }}
           onPointerOver={(e) => {
             e.stopPropagation();
