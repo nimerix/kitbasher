@@ -3802,10 +3802,26 @@ export const useEditor = create<EditorState>((set, get) => ({
     const found: RefineFeature[] = proposals
       .filter((feature) => !repeatsKept(feature, kept, model.mesh))
       .map((feature) => ({ id: uid(), state: 'pending', origin: 'detected', feature }));
+    // A selected proposal the run replaces passes its place in the selection to its counterpart.
     const ids = new Set(kept.map((f) => f.id));
-    const selected = current!.selected.filter((id) => ids.has(id));
+    const byId = new Map(current!.features.map((f) => [f.id, f]));
+    const taken = new Set<string>();
+    const selected = current!.selected.flatMap((id) => {
+      if (ids.has(id)) return [id];
+      const old = byId.get(id);
+      const next =
+        old &&
+        found.find((f) => !taken.has(f.id) && sameDetection(old.feature, f.feature, model.mesh));
+      if (!next) return [];
+      taken.add(next.id);
+      return [next.id];
+    });
     set({ refine: { ...current!, detect, features: [...kept, ...found], selected } });
-    if (selected.length !== current!.selected.length) scheduleRefineDraft();
+    if (
+      selected.some((id, i) => id !== current!.selected[i]) ||
+      selected.length !== current!.selected.length
+    )
+      scheduleRefineDraft();
   },
   cancelRefineDetect: () => refineDetect?.abort(),
   setRefineBrushRadius: (radius) =>
@@ -5232,6 +5248,18 @@ const noFolds: Uint32Array = new Uint32Array(0);
 /** Whether the session holds work that ending it would lose. */
 export const refineEdited = (refine: RefineSession) => refine.model !== refine.start;
 
+/**
+ * Whether ending the session loses work the user made, so it says so: anything accepted, a pending
+ * guide or crease drawn by hand, a detected proposal the user edited, or painted triangles. Untouched
+ * detected proposals are not the user's work.
+ */
+export const refineHoldsWork = (
+  refine: Pick<RefineSession, 'model' | 'start' | 'features' | 'triangles'>,
+) =>
+  refine.model !== refine.start ||
+  refine.triangles.length > 0 ||
+  refine.features.some((f) => f.state === 'pending' && (f.origin === 'hand' || !!f.edited));
+
 /** The geometry drawn in place of the part while a session on it has one. */
 export const shownRefinePreview = (refine: RefineSession | null, partId: string) =>
   refine?.partId === partId ? refine.preview : null;
@@ -5945,29 +5973,70 @@ const repeatedEdgeShare = 0.8,
  * length, or a region mostly inside another by area.
  */
 function repeatsKept(proposal: RefineProposal, kept: RefineFeature[], mesh: RefineMesh) {
-  if (proposal.type === 'region') {
-    const { triangles } = proposal.input;
-    let total = 0;
-    for (const t of triangles) total += triangleArea(mesh, t);
-    return kept.some((f) => {
-      if (f.feature.type !== 'region') return false;
-      const covered = new Set(f.feature.input.triangles);
-      let inside = 0;
-      for (const t of triangles) if (covered.has(t)) inside += triangleArea(mesh, t);
-      return inside > total * repeatedRegionShare;
-    });
-  }
+  if (proposal.type === 'region')
+    return kept.some(
+      (f) =>
+        f.feature.type === 'region' &&
+        insideShare(proposal.input.triangles, f.feature.input.triangles, mesh) >
+          repeatedRegionShare,
+    );
   const samples = drawnSamples(proposal.input);
+  // A solve of the new proposal is never made here; one is only compared when already at hand.
+  const solved = refineSolves.get(proposal.input.segments)?.solve as EdgeSolve | null | undefined;
   return kept.some((f) => {
-    const curve = f.curve ?? drawnCurve(f);
-    if (!curve) return false;
-    let near = 0;
-    for (const p of samples) if (distanceToCurve(curve, p) <= repeatedEdge) near++;
-    return near >= samples.length * repeatedEdgeShare;
+    const drawn = drawnCurve(f);
+    if (drawn && mostlyNear(samples, drawn)) return true;
+    // An accepted edge is on the surface now, so a guide drawn there lies on its solved curve.
+    if (f.state === 'accepted' && f.curve && mostlyNear(samples, f.curve)) return true;
+    return !!(f.curve && solved?.curve && mostlyNear(curveSamples(solved.curve), f.curve));
   });
 }
 
-/** The line a pending edge's guide draws, for a feature with no solved curve; null for a region. */
+/**
+ * Whether a new detection repeats one it replaces: an edge whose guide runs along the other's
+ * guide, or a region more than half inside the other by area, each way.
+ */
+function sameDetection(old: RefineProposal, next: RefineProposal, mesh: RefineMesh) {
+  if (old.type === 'region' || next.type === 'region')
+    return (
+      old.type === 'region' &&
+      next.type === 'region' &&
+      insideShare(next.input.triangles, old.input.triangles, mesh) > repeatedRegionShare &&
+      insideShare(old.input.triangles, next.input.triangles, mesh) > repeatedRegionShare
+    );
+  if (!solvable(old.input) || !solvable(next.input)) return false;
+  const drawn = { points: Float64Array.from(drawnSamples(old.input).flat()), closed: false };
+  return mostlyNear(drawnSamples(next.input), drawn);
+}
+
+/** Whether at least repeatedEdgeShare of `samples` lie within repeatedEdge of `curve`. */
+function mostlyNear(samples: Vec3[], curve: Pick<EdgeCurve, 'points' | 'closed'>) {
+  let near = 0;
+  for (const p of samples) if (distanceToCurve(curve, p) <= repeatedEdge) near++;
+  return near >= samples.length * repeatedEdgeShare;
+}
+
+/** The points of a curve, as samples. */
+const curveSamples = ({ points }: Pick<EdgeCurve, 'points'>) =>
+  Array.from(
+    { length: points.length / 3 },
+    (_, i) => [...points.subarray(i * 3, i * 3 + 3)] as Vec3,
+  );
+
+/** The share of the area of `triangles` that lies in `other`. */
+function insideShare(triangles: Uint32Array, other: Uint32Array, mesh: RefineMesh) {
+  const covered = new Set(other);
+  let total = 0,
+    inside = 0;
+  for (const t of triangles) {
+    const area = triangleArea(mesh, t);
+    total += area;
+    if (covered.has(t)) inside += area;
+  }
+  return total > 0 ? inside / total : 0;
+}
+
+/** The line an edge feature's guide points draw; null for a region or an unfinished guide. */
 function drawnCurve({ feature }: RefineFeature): Pick<EdgeCurve, 'points' | 'closed'> | null {
   if (feature.type !== 'edge' || !solvable(feature.input)) return null;
   return { points: Float64Array.from(drawnSamples(feature.input).flat()), closed: false };
@@ -6394,11 +6463,11 @@ useEditor.subscribe((state, previous) => {
     (!same(part.position, before.position) ||
       !same(part.quaternion, before.quaternion) ||
       !same(part.scale, before.scale));
-  const edited = refineEdited(refine);
+  const work = refineHoldsWork(refine);
   if (!part || part.geometry !== refine.source || state.sceneEpoch !== refine.epoch || moved)
-    state.cancelRefine(edited ? 'The part changed, so the refinement was cancelled.' : undefined);
+    state.cancelRefine(work ? 'The part changed, so the refinement was cancelled.' : undefined);
   else if (state.tool !== 'refine')
-    state.cancelRefine(edited ? 'Refinement discarded. Use Apply to keep it.' : undefined);
+    state.cancelRefine(work ? 'Refinement discarded. Use Apply to keep it.' : undefined);
 });
 
 export function measureDistance() {

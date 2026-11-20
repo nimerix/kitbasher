@@ -41,6 +41,7 @@ import {
   refineBrushRadius,
   refineDraftLimit,
   refineEdited,
+  refineHoldsWork,
   refineUndoBytes,
   refineUndoLimit,
   shownRefinePreview,
@@ -1498,7 +1499,8 @@ describe('refine session integrity', { timeout: 20_000 }, () => {
     expect(second.map((f) => f.feature)).toEqual(first.map((f) => f.feature));
     expect(second.some((f) => first.includes(f))).toBe(false);
     expect(session().features[0].id).toBe(hand);
-    expect(session().selected).toEqual([hand]);
+    // The selected proposal's replacement takes its place in the selection.
+    expect(session().selected).toEqual([hand, second[0].id]);
     expect(session().undo.length).toBe(undo);
 
     const target = second.find((f) => f.feature.type === 'edge')!;
@@ -1914,6 +1916,153 @@ describe('refine session integrity', { timeout: 20_000 }, () => {
     expect(said.slice(next)).toEqual([
       'Some triangles along this edge could not be cut cleanly. Check the marked area.',
     ]);
+  });
+
+  /** The detected proposal on the coarse box's top front edge. */
+  const topFrontProposal = () =>
+    session().features.find(
+      (f) =>
+        f.origin === 'detected' &&
+        f.feature.type === 'edge' &&
+        f.feature.input.segments
+          .flatMap((s) => s.points)
+          .every((p) => p.position[1] > 2 && p.position[2] > 1),
+    )!;
+  const sameSegments = (a: RefineProposal, b: RefineProposal) =>
+    a.type === 'edge' &&
+    b.type === 'edge' &&
+    JSON.stringify(a.input.segments) === JSON.stringify(b.input.segments);
+
+  it('proposes an edited edge once, though its solved edge lies off its guide', async () => {
+    setup([coarseBox()], ['box']);
+    await ready();
+    editor().setRefineMode('detect');
+    await editor().detectRefine();
+    const count = session().features.length;
+    const target = topFrontProposal();
+    editor().selectRefine([target.id]);
+    editor().setRefineEdge({ strength: 0.74 });
+    const edited = session().features.find((f) => f.id === target.id)!;
+    expect(edited.edited).toBe(true);
+    // The case at issue: the rebuilt sharp edge is farther from the guide than the 0.15 mm test.
+    if (edited.feature.type !== 'edge') throw new Error('not an edge');
+    const guide = edited.feature.input.segments.flatMap((s) => s.points);
+    expect(
+      Math.max(...guide.map((p) => nearestOnCurve(edited.curve!, p.position))),
+    ).toBeGreaterThan(0.15);
+    await editor().detectRefine();
+    expect(session().selected).toEqual([target.id]);
+    expect(session().features.find((f) => f.id === target.id)).toEqual(edited);
+    const along = session().features.filter((f) => sameSegments(f.feature, target.feature));
+    expect(along.map((f) => f.id)).toEqual([target.id]);
+    expect(session().features).toHaveLength(count);
+  });
+
+  it('passes the place of a replaced proposal in the selection to its counterpart', async () => {
+    setup([coarseBox()], ['box']);
+    await ready();
+    editor().setRefineMode('detect');
+    await editor().detectRefine();
+    const target = topFrontProposal();
+    editor().selectRefine([target.id]);
+    await editor().detectRefine();
+    const replacement = session().features.find(
+      (f) => JSON.stringify(f.feature) === JSON.stringify(target.feature),
+    )!;
+    expect(replacement.id).not.toBe(target.id);
+    expect(session().selected).toEqual([replacement.id]);
+    expect(session().draft).not.toBeNull();
+  });
+
+  it('passes the selection of a region on to a counterpart only, and drops one without', async () => {
+    setup([boxPart()], ['box']);
+    await ready();
+    const region = (triangles: number[]): RefineProposal => ({
+      type: 'region',
+      input: { ...session().region, triangles: Uint32Array.from(triangles) },
+    });
+    const line: RefineProposal = {
+      type: 'edge',
+      input: {
+        segments: [{ kind: 'line', points: [crest(-1), crest(1)] }],
+        joints: [],
+        closed: false,
+        width: null,
+        strength: 1,
+      },
+    };
+    const publish = async (proposals: RefineProposal[]) => {
+      const held = holdDetect();
+      const detection = editor().detectRefine();
+      held.finish(proposals);
+      await detection;
+    };
+    await publish([region([0, 1, 2, 3]), line]);
+    const [area, edge] = session().features.map((f) => f.id);
+    editor().selectRefine([area, edge]);
+    // The same area, a little larger; no edge this time.
+    await publish([region([0, 1, 2, 3, 4])]);
+    const [next] = session().features;
+    expect(next.id).not.toBe(area);
+    expect(session().selected).toEqual([next.id]);
+    // A region mostly outside the old one is not its counterpart.
+    await publish([region([2, 3, 4, 5, 6, 7, 8, 9])]);
+    expect(session().selected).toEqual([]);
+  });
+
+  it('tells the user when leaving discards work they made, and only then', async () => {
+    const notice = 'Refinement discarded. Use Apply to keep it.';
+    const cases: [string, () => Promise<void> | void, boolean][] = [
+      ['nothing', () => {}, false],
+      ['untouched detections', () => editor().detectRefine(), false],
+      ['a hand-drawn guide', () => void crestGuide(), true],
+      [
+        'an edited detection',
+        async () => {
+          await editor().detectRefine();
+          editor().selectRefine([session().features.find((f) => f.feature.type === 'edge')!.id]);
+          editor().setRefineEdge({ strength: 0.5 });
+        },
+        true,
+      ],
+      [
+        'painted triangles',
+        () => {
+          editor().setRefineMode('region');
+          editor().setRefineBrushRadius(0.3);
+          paint([[0, 1.5, 0]]);
+        },
+        true,
+      ],
+      [
+        'an accepted edge',
+        () => {
+          editor().setRefineEdge({ strength: 0.3 });
+          editor().acceptRefine([crestGuide()]);
+        },
+        true,
+      ],
+    ];
+    for (const [name, make, work] of cases) {
+      setup([boxPart()], ['box']);
+      await ready();
+      await make();
+      expect(refineHoldsWork(session()), name).toBe(work);
+      useEditor.setState({ toast: null });
+      editor().setTool('select');
+      expect(editor().refine, name).toBeNull();
+      expect(toast(), name).toBe(work ? notice : undefined);
+    }
+    // A pending crease guide, then the part changing under the session.
+    setup([coarseBox()], ['box']);
+    await ready();
+    creaseStroke();
+    expect(session().features[0]).toMatchObject({ origin: 'hand', state: 'pending' });
+    expect(refineHoldsWork(session())).toBe(true);
+    useEditor.setState({ toast: null });
+    editor().transform('box', { position: [1, 0, 0] });
+    expect(editor().refine).toBeNull();
+    expect(toast()).toBe('The part changed, so the refinement was cancelled.');
   });
 
   it('keeps a closed path closed when its shared first and last point is removed', async () => {
