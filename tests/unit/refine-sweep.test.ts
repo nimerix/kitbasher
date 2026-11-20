@@ -12,7 +12,9 @@ import {
 import {
   type CrossSection,
   type TubePath,
+  dented,
   elbowPath,
+  gentlePath,
   elbowSurface,
   flatSided,
   halfTurned,
@@ -30,8 +32,10 @@ import {
   tapered,
   torusDistance,
   torusOffset,
+  tubeError,
   tubeTriangles,
   tubeTrianglesWhere,
+  wandering,
 } from '../helpers/refine-sweep';
 import { softBox, softElbow } from '../helpers/soft-edges';
 
@@ -75,6 +79,46 @@ function fitTube(
     farthest = Math.max(farthest, Math.hypot(projected[0] - x, projected[1] - y, projected[2] - z));
   }
   return { ...fit, farthest };
+}
+
+/**
+ * Solves the painted triangles of a swept tube at `noise`; null when refused, else the farthest any
+ * full-weight vertex clear of detail in the middle 80% ends from the unit tube around `path`.
+ */
+function tubeErrorAfter(
+  path: TubePath,
+  length: number,
+  radius: CrossSection,
+  ripple: number,
+  noise: number,
+  keepDetail: boolean,
+  paint: (angle: number) => boolean = () => true,
+) {
+  const { model, triangles, rings, steps } = sweptTubeModel(path, length, radius, ripple);
+  const { mesh } = model;
+  const source = new Map(Array.from(mesh.weldOf.slice(0, rings * (steps + 1)), (w, k) => [w, k]));
+  const painted = triangles.filter((t) =>
+    [0, 1, 2].every((c) => {
+      const k = source.get(mesh.weldOf[mesh.corners[t * 3 + c]]);
+      return k !== undefined && paint(Math.PI / 2 + ((k % rings) / rings - 0.5) * 2 * Math.PI);
+    }),
+  );
+  const solve = solveRegion(mesh, model.topology, sweepInput(painted, { keepDetail }), noise);
+  if (!solve) return null;
+  const out = cloneRefineMesh(mesh, false);
+  applyRegion(out, solve);
+  let worst = 0;
+  solve.vertices.forEach((v, i) => {
+    const k = source.get(v);
+    if (k === undefined || solve.weight[i] !== 1 || solve.detail[i]) return;
+    const t = Math.floor(k / rings) / steps;
+    if (t < 0.1 || t > 0.9) return;
+    worst = Math.max(
+      worst,
+      tubeError(path, out.position.subarray(v * 3, v * 3 + 3), t, 1 / length),
+    );
+  });
+  return worst;
 }
 
 /** Solves a swept tube's painted stretch at `noise`; null when refused, else its largest move. */
@@ -316,6 +360,45 @@ describe('solveRegion with a sweep', () => {
     expect(tube?.solve.fitted).toBe('sweep');
     expect(tube!.largest).toBeLessThan(0.012);
   }, 20000);
+
+  it('fits a one-turn helix at half and twice the noise, with and without ripple', () => {
+    for (const [noise, ripple] of [
+      [0.006, 0.006],
+      [0.024, 0],
+      [0.024, 0.024],
+    ])
+      for (const keepDetail of [false, true]) {
+        const error = tubeErrorAfter(helixPath, 20.5, round, ripple, noise, keepDetail);
+        expect(error, `noise ${noise}, ripple ${ripple}`).not.toBeNull();
+        expect(error!).toBeLessThan(3 * noise);
+      }
+  }, 60000);
+
+  it('follows a gentle bend under stations that wander with the noise', () => {
+    // Accepted limit of the loose path, by controller ruling: 0.020 mm, under 2 * the noise.
+    for (const [height, width] of [
+      [0.095, 4],
+      [0.08, 6],
+    ])
+      for (const keepDetail of [false, true]) {
+        const path = gentlePath(12, height, width);
+        const error = tubeErrorAfter(path, 12, wandering(0.012, 12), 0.012, 0.012, keepDetail);
+        expect(error).not.toBeNull();
+        expect(error!).toBeLessThan(0.02);
+      }
+  }, 60000);
+
+  it('fits a dented tube painted narrowly at three widths', () => {
+    // The dent fills more of each station's view the narrower the paint; the tube still holds.
+    const dent = dented(0.07, 2, 12);
+    for (const half of [45, 55, 65])
+      for (const keepDetail of [false, true]) {
+        const paint = (angle: number) => Math.cos(angle) >= Math.cos((half * Math.PI) / 180);
+        const error = tubeErrorAfter(straightPath(12), 12, dent, 0.012, 0.012, keepDetail, paint);
+        expect(error, `${half} degrees, detail ${keepDetail}`).not.toBeNull();
+        expect(error!).toBeLessThan(0.012);
+      }
+  }, 60000);
 
   it('keeps a gentle bend smooth past one out-of-round station', () => {
     // A dip 0.03 mm deep over about 1 mm on one side, midway along: the far side stays put.

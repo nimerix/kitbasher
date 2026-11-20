@@ -71,7 +71,10 @@ const roundNoise = 3;
 const pathMargin = 2;
 /** The tolerances, in noise widths, a centre line is tried at, loosest first. */
 const pathTolerances = [2, 1, 0.5];
-/** A stretch of centres bends away only when its mean offset exceeds this many noise widths. */
+/**
+ * A stretch of centres sits off a line when its mean offset exceeds its scatter and this many
+ * noise widths.
+ */
 const bendNoise = 0.25;
 /** A spline runs on along the circle through its end and points this many stations apart in. */
 const endReach = 4;
@@ -82,8 +85,8 @@ type V3 = [number, number, number];
  * A constant cross-section swept along a centre line, fitted robustly so detail standing off the
  * tube does not move it. Null when the points hold no tube: fewer than three slabs take a
  * cylinder, the points cover under 45 degrees of its circumference, the centre line folds back
- * on itself, a stretch of the path does not hold (see `heldAlong`), the cross-section drifts along
- * it, or under half the weight lies within 3 * noise.
+ * on itself, or along every candidate centre line a stretch of the path does not hold (see
+ * `heldAlong`), the cross-section drifts along it, or under half the weight lies within 3 * noise.
  * With `weights`, each point counts by its weight and points of zero weight are left out.
  * `spacing` is the points' edge length, estimated from their nearest neighbours when null. A
  * `start` sweep, fitted before to nearly the same points, keeps its centre line and only the
@@ -106,46 +109,63 @@ export function fitSweep(
   const edge = spacing ?? spacingOf(cloud);
   if (!(edge > 0)) return null;
   const thick = slabEdges * edge;
-  const line = start
-    ? {
-        local: localOf(cloud, { curve: start.path, kind: start.pathKind }, thick),
-        kind: start.pathKind,
-      }
-    : centreLine(cloud, floor, edge, thick);
-  if (!line) return null;
-  const { local, kind } = line;
-  const built = profileOf(cloud, local, floor);
-  if (!built) return null;
-  const sweep: Sweep = {
-    path: local.path.path,
-    pathKind: kind,
-    profile: built.profile,
-    round: built.round,
-  };
-  if (!heldAlong(cloud, local, sweep, thick, floor)) return null;
-  const { rms, support } = rmsOf(cloud, sweep, floor);
-  return support >= minimumSupport ? { sweep, rms } : null;
+  const lines = start
+    ? [
+        {
+          local: localOf(cloud, { curve: start.path, kind: start.pathKind }, thick),
+          kind: start.pathKind,
+        },
+      ]
+    : centreLines(cloud, floor, edge, thick);
+  // The smoothest line its stations support, else the next; refused only when none holds.
+  for (const line of lines) {
+    const built = profileOf(cloud, line.local, floor);
+    if (!built) continue;
+    const sweep: Sweep = {
+      path: line.local.path.path,
+      pathKind: line.kind,
+      profile: built.profile,
+      round: built.round,
+    };
+    if (!heldAlong(cloud, line.local, sweep, thick, floor, !start)) continue;
+    const { rms, support } = rmsOf(cloud, sweep, floor);
+    if (support >= minimumSupport) return { sweep, rms };
+  }
+  return null;
 }
 
 /**
- * The centre line, as smooth as its stations allow: fitted at each of `pathTolerances` in turn,
- * loosest first, and kept at the first whose settled stations no stretch of which sits off it
- * together (see `bendsAway`). One out-of-round station pulling its own centre is scatter the line
- * smooths over; a bend the line cuts is not, and is followed at a tighter tolerance. A tolerance at
- * which no line fits is passed over. Null when no tolerance gives a line its stations support.
+ * The candidate centre lines, best first. An arc that settles at the loosest tolerance and whose
+ * stations no stretch of which sits off it (see `bendRatio`) is the only one. Otherwise splines
+ * settled at each of `pathTolerances`, loosest first: each is offered as soon as its stations
+ * support it, and those they do not follow, least cut first. A line is only ever preferred to
+ * another by this; whether the tube holds along it is judged on its result. Fitted lazily, so a
+ * smooth line that holds costs one fit.
  */
-function centreLine(cloud: Cloud, noise: number, edge: number, thick: number) {
+function* centreLines(cloud: Cloud, noise: number, edge: number, thick: number) {
   const centres = slabCentres(cloud, noise, thick);
-  if (!centres) return null;
-  let arcs = true;
-  for (const tolerance of pathTolerances) {
-    const line = settled(cloud, centres, noise, edge, thick, tolerance, arcs);
-    if (!line) continue;
-    if (!bendsAway(line.curve, line.centres, 2 * line.radius, noise)) return line.best;
-    // An arc that cuts the stations' bend is not taken again at a tighter tolerance.
-    if (line.best.kind === 'arc') arcs = false;
+  if (!centres) return;
+  const ratio = (line: NonNullable<ReturnType<typeof settled>>) =>
+    bendRatio(line.curve, line.centres, 2 * line.radius, noise);
+  const loose = settled(cloud, centres, noise, edge, thick, pathTolerances[0], true);
+  if (loose?.best.kind === 'arc' && ratio(loose) <= 1) {
+    yield loose.best;
+    return;
   }
-  return null;
+  // An arc that cuts its stations' bend is not offered again; one that never settled may be.
+  const arcs = loose?.best.kind !== 'arc';
+  const cut: { best: Refined; ratio: number }[] = [];
+  for (const [k, tolerance] of pathTolerances.entries()) {
+    const line =
+      k === 0 && loose?.best.kind === 'spline'
+        ? loose
+        : settled(cloud, centres, noise, edge, thick, tolerance, arcs);
+    if (!line) continue;
+    const r = ratio(line);
+    if (r <= 1) yield line.best;
+    else cut.push({ best: line.best, ratio: r });
+  }
+  yield* cut.sort((x, y) => x.ratio - y.ratio).map((c) => c.best);
 }
 
 /**
@@ -652,12 +672,13 @@ function pathThrough(
 }
 
 /**
- * Whether some stretch of centres `width` long, with at least three in it, sits off the curve
- * together: the mean of their offsets from it is longer than their scatter, taken from the
- * differences between neighbouring stations' offsets (a cut bend changes little from one station
- * to the next, an out-of-round station jumps), and than `bendNoise` times the noise.
+ * How far the worst stretch of centres `width` long, with at least three in it, sits off the curve
+ * together, as a share of what it may: the mean of their offsets from it, against the larger of
+ * their scatter and `bendNoise` times the noise. The scatter is taken from the differences between
+ * neighbouring stations' offsets: a cut bend changes little from one station to the next, an
+ * out-of-round station jumps. Over 1, the curve cuts a bend its stations follow.
  */
-function bendsAway(curve: EdgeCurve, centres: Float64Array, width: number, noise: number) {
+function bendRatio(curve: EdgeCurve, centres: Float64Array, width: number, noise: number) {
   const count = centres.length / 3;
   const near = new Float64Array(3);
   const along = new Float64Array(count),
@@ -667,6 +688,7 @@ function bendsAway(curve: EdgeCurve, centres: Float64Array, width: number, noise
     for (let k = 0; k < 3; k++) offset[i * 3 + k] = centres[i * 3 + k] - near[k];
   }
   const order = Array.from(along.keys()).sort((x, y) => along[x] - along[y]);
+  let worst = 0;
   for (let a = 0; a < count; a++) {
     const members: number[] = [];
     for (let b = a; b < count && along[order[b]] - along[order[a]] <= width; b++)
@@ -680,9 +702,10 @@ function bendsAway(curve: EdgeCurve, centres: Float64Array, width: number, noise
       for (let k = 0; k < 3; k++)
         jumps += (offset[members[q] * 3 + k] - offset[members[q - 1] * 3 + k]) ** 2;
     const scatter = Math.sqrt(jumps / (2 * (members.length - 1)));
-    if (Math.hypot(mean[0], mean[1], mean[2]) > Math.max(scatter, bendNoise * noise)) return true;
+    const size = Math.hypot(mean[0], mean[1], mean[2]);
+    worst = Math.max(worst, size / Math.max(scatter, bendNoise * noise));
   }
-  return false;
+  return worst;
 }
 
 /** RMS distance of the centres from the curve. */
@@ -1064,18 +1087,26 @@ function misfitOf(cloud: Cloud, local: Local, profile: Float32Array, noise: numb
 }
 
 /**
- * Whether the sweep holds all along its path. Every station `thick` long with points, from the
- * first to the last, has at least a quarter of its weight within 3 * noise of the sweep, and those
- * points lie at a median 1.2 * noise from it: on a misplaced stretch they spread over that band
- * instead, at a median of about 1.5 * noise or more. Detail may stand off the rest of a station.
- * A run of stations that fail, with stations on both sides that hold, is bridged when it is no
- * longer than twice the tube's width and no more of it than the tube's width has points: detail
- * covering the tube, as a clamp, or left out of a weighted fit, leaves a station empty. And no
- * stretch of held stations a tube's width long sits off the sweep, on average over its stations'
- * median offsets, by more than the scatter of the points: a cross-section that swells, narrows or
- * drifts along the path is not constant.
+ * Whether the sweep holds all along its path. A station `thick` long holds when at least a quarter
+ * of its weight lies within 3 * noise of the sweep (the tube is there) and those points lie at a
+ * median 1.2 * noise from it; on a misplaced stretch, or beside a dent's flanks, they spread over
+ * that band instead. The first and last stations with points must hold. Between them, a run of
+ * stations that do not is bridged when it is no longer than twice the tube's width and no more of
+ * it than the tube's width has the tube missing: detail covering the tube, as a clamp, or left
+ * out of a weighted fit, leaves a station empty, and a dent leaves its flanks spread. With `shape`,
+ * no stretch of held stations a tube's width long sits off the sweep, on average over its
+ * stations' median offsets, by more than the scatter of the points: a cross-section that swells,
+ * narrows or drifts along the path is not constant. Weighted refits leave that to the first fit,
+ * as the detail they leave out biases what remains.
  */
-function heldAlong(cloud: Cloud, local: Local, sweep: Sweep, thick: number, noise: number) {
+function heldAlong(
+  cloud: Cloud,
+  local: Local,
+  sweep: Sweep,
+  thick: number,
+  noise: number,
+  shape: boolean,
+) {
   const { count, judged: w } = cloud;
   const { station, a, b } = local;
   const { slots, slotOf } = slotsOf(station, thick);
@@ -1125,9 +1156,11 @@ function heldAlong(cloud: Cloud, local: Local, sweep: Sweep, thick: number, nois
     const nearWeight = Float64Array.from(near, (m) => k[m]);
     let share = 0;
     for (const x of nearWeight) share += x / total;
+    // Some of the tube is here, and its points lie close: or they spread over the band, as on a
+    // misplaced stretch or beside detail.
+    const present = near.length >= stationPoints && share >= stationShareNear;
     const held =
-      near.length >= stationPoints &&
-      share >= stationShareNear &&
+      present &&
       weightedMedian(
         Float64Array.from(near, (m) => Math.abs(d[m])),
         nearWeight,
@@ -1135,7 +1168,7 @@ function heldAlong(cloud: Cloud, local: Local, sweep: Sweep, thick: number, nois
         nearNoise * scale;
     if (!held) {
       // Points standing off a station's whole view: detail covering it, or a misplaced stretch.
-      if (d.length >= stationPoints) off++;
+      if (!present && d.length >= stationPoints) off++;
       if (++gap > 2 * bridge || off > bridge || s === first || s === last) return false;
       continue;
     }
@@ -1152,6 +1185,7 @@ function heldAlong(cloud: Cloud, local: Local, sweep: Sweep, thick: number, nois
     }
   }
   if (at.length < 3) return false;
+  if (!shape) return true;
   // The scatter of the points about their own station's offset, so a swell does not widen it.
   const spread = Math.max(
     noise,

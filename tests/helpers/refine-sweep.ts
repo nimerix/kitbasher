@@ -277,3 +277,52 @@ export function sweptTubeModel(path: TubePath, length: number, radius: CrossSect
   geometry.computeVertexNormals();
   return { model: modelOf(geometry), triangles: Uint32Array.from(painted), rings, steps };
 }
+
+/** 1 at `middle` of a path `length` long, easing to 0 at `width` / 2 either side. */
+const envelope = (t: number, middle: number, width: number, length: number) => {
+  const h = ((t - middle) * length) / (width / 2);
+  return Math.abs(h) < 1 ? (1 - h * h) ** 2 : 0;
+};
+
+/** A straight line `length` long along z with a smooth sideways bend `height` high over `width`. */
+export const gentlePath =
+  (length: number, height: number, width: number): TubePath =>
+  (t) => {
+    const f = ((t - 0.5) * length) / (width / 2);
+    const slope = Math.abs(f) < 1 ? (-4 * height * f * (1 - f * f)) / (width / 2) : 0;
+    const norm = Math.hypot(1, slope);
+    return [
+      [height * envelope(t, 0.5, width, length), 0, length * t],
+      [1 / norm, 0, -slope / norm],
+      [0, 1, 0],
+    ];
+  };
+
+/** A circle whose centre wanders sideways by 0.8 * `noise`, 1.25 mm a wave, along `length`. */
+export const wandering =
+  (noise: number, length: number): CrossSection =>
+  (angle, t) =>
+    1 + 0.8 * noise * Math.cos(angle) * Math.sin((2 * Math.PI * length * t) / 1.25);
+
+/** A circle dented `depth` deep on the side toward u, over `width` midway along `length`. */
+export const dented =
+  (depth: number, width: number, length: number): CrossSection =>
+  (angle, t) =>
+    1 - depth * envelope(t, 0.5, width, length) * Math.max(0, Math.cos(angle)) ** 2;
+
+/** Distance of `p` from the unit tube around `path`, near its point at `t` (within `span`). */
+export function tubeError(path: TubePath, p: ArrayLike<number>, t: number, span: number) {
+  const squared = (u: number) => {
+    const [c] = path(u);
+    return (c[0] - p[0]) ** 2 + (c[1] - p[1]) ** 2 + (c[2] - p[2]) ** 2;
+  };
+  let low = Math.max(0, t - span),
+    high = Math.min(1, t + span);
+  for (let k = 0; k < 28; k++) {
+    const a = low + (high - low) / 3,
+      b = high - (high - low) / 3;
+    if (squared(a) < squared(b)) high = b;
+    else low = a;
+  }
+  return Math.abs(Math.sqrt(squared((low + high) / 2)) - 1);
+}
