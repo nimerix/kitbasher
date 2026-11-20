@@ -1,4 +1,4 @@
-import { BufferAttribute, BufferGeometry, ShapeUtils, Vector2 } from 'three';
+import { BufferAttribute, BufferGeometry } from 'three';
 import type { Vec3 } from '../../src/core/types';
 
 export interface SoftOptions {
@@ -266,42 +266,153 @@ export function softBox(half: Vec3, fillet: number, options?: SoftOptions) {
   return filletedBox(half, fillet, options).geometry();
 }
 
-/** Closes a polygon's outline with triangles, counter-clockwise, using every outline point. */
-function capTriangles(outline: Vec2[]) {
-  const n = outline.length;
-  const faces = ShapeUtils.triangulateShape(
-    outline.map(([x, y]) => new Vector2(x, y)),
-    [],
-  );
-  const used = new Uint8Array(n);
-  for (const face of faces) for (const i of face) used[i] = 1;
-  const area = (a: number, b: number, c: number) => {
-    const [p, q, r] = [outline[a], outline[b], outline[c]];
-    return (q[0] - p[0]) * (r[1] - p[1]) - (q[1] - p[1]) * (r[0] - p[0]);
-  };
-  const result: number[] = [];
-  for (const [a, b, c] of faces) {
-    const corners = area(a, b, c) > 0 ? [a, b, c] : [a, c, b];
-    // Earcut drops points that lie on a straight run of the outline, so fan them back in.
-    const skipped = corners.map((from, k) => {
-      const to = corners[(k + 1) % 3],
-        run: number[] = [];
-      let i = (from + 1) % n;
-      for (; i !== to && !used[i]; i = (i + 1) % n) run.push(i);
-      return i === to ? run : [];
-    });
-    const edge = skipped.findIndex((run) => run.length > 0);
-    if (edge < 0) {
-      result.push(...corners);
-      continue;
+/** Twice the signed area of triangle a, b, c, positive when counter-clockwise. */
+const orient = (a: Vec2, b: Vec2, c: Vec2) =>
+  (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]);
+
+/** Whether d lies inside the circumcircle of the counter-clockwise triangle a, b, c. */
+function inCircle(a: Vec2, b: Vec2, c: Vec2, d: Vec2) {
+  const [ax, ay, bx, by, cx, cy] = [
+    a[0] - d[0],
+    a[1] - d[1],
+    b[0] - d[0],
+    b[1] - d[1],
+    c[0] - d[0],
+    c[1] - d[1],
+  ];
+  const [la, lb, lc] = [ax * ax + ay * ay, bx * bx + by * by, cx * cx + cy * cy];
+  return ax * (by * lc - lb * cy) - ay * (bx * lc - lb * cx) + la * (bx * cy - by * cx) > 0;
+}
+
+/** Counter-clockwise Delaunay triangles of `points`, by Bowyer-Watson insertion with a walk. */
+function delaunay(points: Vec2[]) {
+  const xs = points.map((p) => p[0]),
+    ys = points.map((p) => p[1]);
+  const [x0, x1, y0, y1] = [Math.min(...xs), Math.max(...xs), Math.min(...ys), Math.max(...ys)];
+  const [cx, cy, size] = [(x0 + x1) / 2, (y0 + y1) / 2, 100 * Math.max(x1 - x0, y1 - y0)];
+  const n = points.length;
+  const all: Vec2[] = [...points, [cx - size, cy - size], [cx + size, cy - size], [cx, cy + size]];
+  // Triangle t has corners vertex[3t..3t+2] and, across edge k (corner k to k+1), neighbour[3t+k].
+  const vertex = [n, n + 1, n + 2],
+    neighbour = [-1, -1, -1],
+    alive = [true];
+  let last = 0;
+  for (let p = 0; p < n; p++) {
+    const point = all[p];
+    let t = last;
+    for (let moved = true; moved;) {
+      moved = false;
+      for (let k = 0; k < 3; k++) {
+        const [a, b] = [vertex[3 * t + k], vertex[3 * t + ((k + 1) % 3)]];
+        if (orient(all[a], all[b], point) < 0) {
+          t = neighbour[3 * t + k];
+          moved = true;
+          break;
+        }
+      }
     }
-    if (skipped.filter((run) => run.length > 0).length > 1)
-      throw new Error('A cap triangle spans more than one straight run.');
-    const chain = [corners[edge], ...skipped[edge], corners[(edge + 1) % 3]];
-    const apex = corners[(edge + 2) % 3];
-    for (let m = 0; m + 1 < chain.length; m++) result.push(chain[m], chain[m + 1], apex);
+    const cavity = new Set([t]),
+      stack = [t],
+      boundary: [number, number, number][] = [];
+    while (stack.length) {
+      const c = stack.pop()!;
+      for (let k = 0; k < 3; k++) {
+        const across = neighbour[3 * c + k];
+        if (cavity.has(across)) continue;
+        const corners = vertex.slice(3 * across, 3 * across + 3).map((v) => all[v]);
+        if (across >= 0 && inCircle(corners[0], corners[1], corners[2], point)) {
+          cavity.add(across);
+          stack.push(across);
+        } else boundary.push([vertex[3 * c + k], vertex[3 * c + ((k + 1) % 3)], across]);
+      }
+    }
+    for (const c of cavity) alive[c] = false;
+    const startingAt = new Map<number, number>();
+    for (const [a, b, outside] of boundary) {
+      const created = alive.length;
+      vertex.push(a, b, p);
+      neighbour.push(outside, -1, -1);
+      alive.push(true);
+      startingAt.set(a, created);
+      if (outside >= 0)
+        for (let k = 0; k < 3; k++)
+          if (vertex[3 * outside + k] === b && vertex[3 * outside + ((k + 1) % 3)] === a)
+            neighbour[3 * outside + k] = created;
+      last = created;
+    }
+    for (const created of startingAt.values()) {
+      const following = startingAt.get(vertex[3 * created + 1])!;
+      neighbour[3 * created + 1] = following;
+      neighbour[3 * following + 2] = created;
+    }
   }
-  return result;
+  const triangles: number[][] = [];
+  for (let t = 0; t < alive.length; t++) {
+    const corners = vertex.slice(3 * t, 3 * t + 3);
+    if (alive[t] && corners.every((v) => v < n)) triangles.push(corners);
+  }
+  return triangles;
+}
+
+function insidePolygon(polygon: Vec2[], p: Vec2) {
+  let inside = false;
+  for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
+    const [a, b] = [polygon[i], polygon[j]];
+    if (
+      a[1] > p[1] !== b[1] > p[1] &&
+      p[0] < a[0] + ((p[1] - a[1]) * (b[0] - a[0])) / (b[1] - a[1])
+    )
+      inside = !inside;
+  }
+  return inside;
+}
+
+function segmentDistance(p: Vec2, a: Vec2, b: Vec2) {
+  const [dx, dy] = [b[0] - a[0], b[1] - a[1]];
+  const t = Math.min(
+    1,
+    Math.max(0, ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / (dx * dx + dy * dy)),
+  );
+  return Math.hypot(p[0] - a[0] - t * dx, p[1] - a[1] - t * dy);
+}
+
+/**
+ * Fills a flat cap at height `z` inside a closed counter-clockwise rim of existing vertices, with
+ * jittered interior vertices about `step` apart. Faces +z when `up`, else -z.
+ */
+function cap(surface: Surface, rim: number[], z: number, up: boolean, step: number) {
+  const outline = rim.map((v): Vec2 => [surface.positions[v * 3], surface.positions[v * 3 + 1]]);
+  const edge = (i: number): [Vec2, Vec2] => [outline[i], outline[(i + 1) % outline.length]];
+  const longest = Math.max(
+    ...outline.map((p, i) => Math.hypot(...p.map((v, a) => edge(i)[1][a] - v))),
+  );
+  // Keeping interior points out of every rim edge's diametral circle makes each rim edge Delaunay.
+  const clearance = 0.6 * longest;
+  const xs = outline.map((p) => p[0]),
+    ys = outline.map((p) => p[1]);
+  const [x0, x1, y0, y1] = [Math.min(...xs), Math.max(...xs), Math.min(...ys), Math.max(...ys)];
+  const row = (step * Math.sqrt(3)) / 2;
+  const interior: Vec2[] = [];
+  for (let j = 0, y = y0; y <= y1; j++, y = y0 + j * row)
+    for (let x = x0 + (j % 2) * step * 0.5; x <= x1; x += step) {
+      const p: Vec2 = [x + surface.wobble() * step, y + surface.wobble() * row];
+      if (!insidePolygon(outline, p)) continue;
+      if (outline.every((_, i) => segmentDistance(p, ...edge(i)) > clearance)) interior.push(p);
+    }
+  const normal: Vec3 = [0, 0, up ? 1 : -1];
+  const ids = [...rim, ...interior.map((p) => surface.add([p[0], p[1], z], normal))];
+  const points = [...outline, ...interior];
+  const faces = delaunay(points).filter((t) => {
+    const [a, b, c] = t.map((v) => points[v]);
+    return insidePolygon(outline, [(a[0] + b[0] + c[0]) / 3, (a[1] + b[1] + c[1]) / 3]);
+  });
+  const area = faces.reduce((sum, [a, b, c]) => sum + orient(points[a], points[b], points[c]), 0);
+  const rimArea = outline.reduce((sum, p, i) => sum + orient([0, 0], p, edge(i)[1]), 0);
+  if (Math.abs(area - rimArea) > 1e-9 * Math.abs(rimArea))
+    throw new Error('A cap triangulation does not follow its rim.');
+  for (const [a, b, c] of faces)
+    if (up) surface.triangle(ids[a], ids[b], ids[c]);
+    else surface.triangle(ids[a], ids[c], ids[b]);
 }
 
 /** L profile in XY, extruded z -2..2: polygon (-2,-1.5) (2,-1.5) (2,0) (0,0) (0,1.5) (-2,1.5), every profile corner filleted. The interior edge is the z axis. */
@@ -339,13 +450,8 @@ export function softStep(fillet: number, options?: SoftOptions) {
       const i1 = (i + 1) % columns;
       surface.quad(grid[l][i], grid[l][i1], grid[l + 1][i1], grid[l + 1][i]);
     }
-  const outline = Array.from({ length: columns }, (_, i) => path.at(i * spacing).point);
-  const cap = capTriangles(outline);
-  for (let t = 0; t < cap.length; t += 3) {
-    const [a, b, c] = cap.slice(t, t + 3);
-    surface.triangle(grid[layers][a], grid[layers][b], grid[layers][c]);
-    surface.triangle(grid[0][a], grid[0][c], grid[0][b]);
-  }
+  cap(surface, grid[layers], 2, true, step);
+  cap(surface, grid[0], -2, false, step);
   return surface.geometry();
 }
 
