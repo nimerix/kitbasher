@@ -9,9 +9,11 @@ import {
   SphereGeometry,
   Vector3,
 } from 'three';
-import { Matrix, solve } from 'ml-matrix';
+import { Matrix, SingularValueDecomposition, solve } from 'ml-matrix';
 import { hasClosedEdges, weldedPositionIndex } from '../../src/core/mesh-topology';
 import { BandZone, type EdgeBand, type GuidePoint } from '../../src/core/refine-band';
+import { closestOnCurve } from '../../src/core/refine-curve';
+import type { EdgeSolve } from '../../src/core/refine-edge';
 import { type Shape, estimateNoise, noiseRings } from '../../src/core/refine-fit';
 import {
   type RefineMesh,
@@ -1345,5 +1347,94 @@ export function polylineGap(a: ArrayLike<number>, b: ArrayLike<number>) {
     }
     worst = Math.max(worst, best);
   }
+  return worst;
+}
+
+/** Largest distance of the `chain` vertices from the straight line that fits them best. */
+export function straightness(mesh: RefineMesh, chain: number[]) {
+  const points = chain.map((v) => [0, 1, 2].map((a) => mesh.position[v * 3 + a]));
+  const mean = [0, 1, 2].map((a) => points.reduce((sum, p) => sum + p[a], 0) / points.length);
+  const scatter = new Matrix(3, 3);
+  for (const p of points)
+    for (let r = 0; r < 3; r++)
+      for (let c = 0; c < 3; c++)
+        scatter.set(r, c, scatter.get(r, c) + (p[r] - mean[r]) * (p[c] - mean[c]));
+  const d = new SingularValueDecomposition(scatter).rightSingularVectors.getColumn(0);
+  let worst = 0;
+  for (const p of points) {
+    const w = p.map((x, a) => x - mean[a]);
+    const along = w[0] * d[0] + w[1] * d[1] + w[2] * d[2];
+    worst = Math.max(worst, Math.hypot(...w.map((x, a) => x - along * d[a])));
+  }
+  return worst;
+}
+
+/**
+ * Median angle, degrees, between the normals of the two triangles on each cut edge (pairs of welded
+ * ids in `edges`) whose ends are both in `keep`.
+ */
+export function dihedralAcross(mesh: RefineMesh, edges: Uint32Array, keep: number[]) {
+  const kept = new Set(keep);
+  const wanted = new Map<number, number>();
+  const total = mesh.weldedCount;
+  for (let i = 0; i < edges.length; i += 2)
+    if (kept.has(edges[i]) && kept.has(edges[i + 1]))
+      wanted.set(Math.min(edges[i], edges[i + 1]) * total + Math.max(edges[i], edges[i + 1]), i);
+  const faces = new Map<number, number[]>();
+  for (let t = 0; t < mesh.triangleCount; t++)
+    for (const k of [0, 1, 2] as const) {
+      const a = weldedCorner(mesh, t, k),
+        b = weldedCorner(mesh, t, ((k + 1) % 3) as 0 | 1 | 2);
+      const key = Math.min(a, b) * total + Math.max(a, b);
+      if (wanted.has(key)) faces.set(key, [...(faces.get(key) ?? []), t]);
+    }
+  const n0 = new Float32Array(3),
+    n1 = new Float32Array(3);
+  const angles: number[] = [];
+  for (const pair of faces.values()) {
+    if (pair.length !== 2) continue;
+    triangleNormal(mesh, pair[0], n0);
+    triangleNormal(mesh, pair[1], n1);
+    angles.push(angleDeg(n0, n1));
+  }
+  angles.sort((a, b) => a - b);
+  return angles.length ? angles[angles.length >> 1] : NaN;
+}
+
+/**
+ * Triangles with corners on both sides of the solved edge: the difference of the corners' distances
+ * from the two flanks changes sign beyond 1e-5 mm. Only triangles whose corners all lie within
+ * `near` of the solved edge and clear of its ends by `fade` are read.
+ */
+export function straddlingCurve(mesh: RefineMesh, solve: EdgeSolve, near = 0.3, fade = 0.6) {
+  const [left, right] = solve.flanks[0];
+  const { curve } = solve;
+  const total = curve.lengths[curve.lengths.length - 1];
+  const at = new Float64Array(3);
+  const side = (v: number) => {
+    const [x, y, z] = [0, 1, 2].map((a) => mesh.position[v * 3 + a]);
+    const station = closestOnCurve(curve, x, y, z, at);
+    if (Math.hypot(x - at[0], y - at[1], z - at[2]) > near) return NaN;
+    if (station < fade || station > total - fade) return NaN;
+    const f = left.distance(x, y, z) - right.distance(x, y, z);
+    return Math.abs(f) <= 1e-5 ? 0 : Math.sign(f);
+  };
+  let count = 0;
+  for (let t = 0; t < mesh.triangleCount; t++) {
+    const s = ([0, 1, 2] as const).map((k) => side(weldedCorner(mesh, t, k)));
+    if (s.some(Number.isNaN)) continue;
+    if (s.includes(1) && s.includes(-1)) count++;
+  }
+  return count;
+}
+
+/** Largest move of any welded vertex of `before` in `after`. */
+export function maxMove(before: RefineMesh, after: RefineMesh) {
+  let worst = 0;
+  for (let v = 0; v < before.weldedCount; v++)
+    worst = Math.max(
+      worst,
+      Math.hypot(...[0, 1, 2].map((a) => after.position[v * 3 + a] - before.position[v * 3 + a])),
+    );
   return worst;
 }
