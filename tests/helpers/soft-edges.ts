@@ -779,3 +779,87 @@ export function extrudedProfile(
       surface.quad(index[i][j], index[i][j + 1], index[i + 1][j + 1], index[i + 1][j]);
   return surface.geometry();
 }
+
+/** A piece of a profile in (x, y): `length` mm turning by `turn` radians (0 is straight, + is left). */
+export interface TurnedPiece {
+  length: number;
+  turn: number;
+}
+
+/** The point and left normal at distance `s` along pieces of constant curvature from the origin, heading +x. */
+export function turnedPoint(pieces: TurnedPiece[], s: number): Sample {
+  let point: Vec2 = [0, 0],
+    heading = 0;
+  for (const [k, piece] of pieces.entries()) {
+    const ds = k === pieces.length - 1 ? s : Math.min(s, piece.length);
+    const turn = (piece.turn * ds) / piece.length;
+    if (Math.abs(piece.turn) < 1e-12)
+      point = [point[0] + Math.cos(heading) * ds, point[1] + Math.sin(heading) * ds];
+    else {
+      const radius = piece.length / piece.turn;
+      point = [
+        point[0] + radius * (Math.sin(heading + turn) - Math.sin(heading)),
+        point[1] - radius * (Math.cos(heading + turn) - Math.cos(heading)),
+      ];
+    }
+    heading += turn;
+    s -= ds;
+    if (s <= 0) break;
+  }
+  return { point, normal: [-Math.sin(heading), Math.cos(heading)] };
+}
+
+/**
+ * An open sheet extruded along z from -extent / 2 to extent / 2 over a profile of pieces of constant
+ * curvature (`turnedPoint`). The sheet faces the left of travel.
+ */
+export function turnedProfile(pieces: TurnedPiece[], extent: number, options?: SoftOptions) {
+  const surface = new Surface(options);
+  const step = surface.options.step;
+  const total = pieces.reduce((sum, piece) => sum + piece.length, 0);
+  const columns = Math.round(total / step) + 1,
+    rows = Math.round(extent / step) + 1;
+  const index: number[][] = [];
+  for (let i = 0; i < columns; i++) {
+    const { point, normal } = turnedPoint(pieces, (i * total) / (columns - 1));
+    index.push(
+      Array.from({ length: rows }, (_, j) =>
+        surface.add(
+          [point[0], point[1], -extent / 2 + (j * extent) / (rows - 1)],
+          [normal[0], normal[1], 0],
+        ),
+      ),
+    );
+  }
+  for (let i = 0; i + 1 < columns; i++)
+    for (let j = 0; j + 1 < rows; j++)
+      surface.quad(index[i][j], index[i][j + 1], index[i + 1][j + 1], index[i + 1][j]);
+  return surface.geometry();
+}
+
+/** An open sheet y = height(x, z) over |x|, |z| <= half, facing +y. */
+export function heightField(
+  half: number,
+  height: (x: number, z: number) => number,
+  options?: SoftOptions,
+) {
+  const surface = new Surface(options);
+  const count = Math.round((2 * half) / surface.options.step);
+  const index: number[][] = [];
+  const h = 1e-5;
+  for (let i = 0; i <= count; i++) {
+    index.push([]);
+    for (let j = 0; j <= count; j++) {
+      const inner = i > 0 && i < count && j > 0 && j < count;
+      const x = -half + ((i + (inner ? surface.wobble() : 0)) * 2 * half) / count,
+        z = -half + ((j + (inner ? surface.wobble() : 0)) * 2 * half) / count;
+      const gx = (height(x + h, z) - height(x - h, z)) / (2 * h),
+        gz = (height(x, z + h) - height(x, z - h)) / (2 * h);
+      index[i].push(surface.add([x, height(x, z), z], normalize([-gx, 1, -gz])));
+    }
+  }
+  for (let i = 0; i < count; i++)
+    for (let j = 0; j < count; j++)
+      surface.quad(index[i][j], index[i][j + 1], index[i + 1][j + 1], index[i + 1][j]);
+  return surface.geometry();
+}

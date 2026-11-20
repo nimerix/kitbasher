@@ -20,10 +20,14 @@ import {
   bulgedBox,
   extrudedProfile,
   foldedStrip,
+  heightField,
+  rippledSphere,
   softBox,
   softCylinder,
   softStep,
   taperedBox,
+  turnedPoint,
+  turnedProfile,
 } from '../helpers/soft-edges';
 
 /** How far a 0.3 mm fillet's crest sits in from each face. */
@@ -654,4 +658,71 @@ describe('an edge where two flank surfaces meet', () => {
     const read = buildBand(m.mesh, m.topology, 'line', points, 0.6, m.noise)!;
     expect(Math.abs(band.soft - read.soft)).toBeLessThanOrEqual(0.03);
   });
+});
+
+describe('telling an edge from a smooth surface', () => {
+  const refused = (
+    { mesh, topology, noise }: ReturnType<typeof modelOf>,
+    kind: 'line' | 'arc',
+    guide: GuidePoint[],
+  ) => {
+    expect(estimateWidth(mesh, topology, kind, guide, noise)).toBe(0);
+    expect(buildBand(mesh, topology, kind, guide, 0.6, noise)).toBeNull();
+  };
+
+  it.each([0.7, 2])('refuses a guide along a smooth cylinder of radius %s mm', (radius) => {
+    const model = modelOf(softCylinder(radius, 1.5, 0.1));
+    refused(model, 'line', [
+      pointOn(model.mesh, [radius, -1, 0]),
+      pointOn(model.mesh, [radius, 1, 0]),
+    ]);
+  });
+
+  it('refuses a guide over a sphere cap of radius 0.5 mm', () => {
+    const model = modelOf(rippledSphere(0.5));
+    const at = (degrees: number) => {
+      const a = (degrees * Math.PI) / 180;
+      return pointOn(model.mesh, [0.5 * Math.sin(a), 0.5 * Math.cos(a), 0]);
+    };
+    refused(model, 'arc', [at(-50), at(0), at(50)]);
+  });
+
+  it('refuses a guide on a gently curved quadric patch', () => {
+    // Radii of curvature 2 and 3.3 mm.
+    const model = modelOf(heightField(1.5, (x, z) => -0.25 * x * x - 0.15 * z * z));
+    refused(
+      model,
+      'line',
+      [-1, 1].map((z) => pointOn(model.mesh, [0, -0.15 * z * z, z])),
+    );
+  });
+
+  it.each([
+    { degrees: 30, fillet: 0.4, flank: 0 },
+    { degrees: 45, fillet: 0.25, flank: 0 },
+    { degrees: 90, fillet: 0.15, flank: 0 },
+    { degrees: 45, fillet: 0.25, flank: 2 },
+  ])(
+    'finds a $degrees-degree softened edge with fillet $fillet mm and flank radius $flank mm',
+    ({ degrees, fillet, flank }) => {
+      const turn = (degrees * Math.PI) / 180,
+        bend = flank ? 1.5 / flank : 0;
+      const pieces = [
+        { length: 1.5, turn: -bend },
+        { length: fillet * turn, turn: -turn },
+        { length: 1.5, turn: -bend },
+      ];
+      const { mesh, topology, noise } = modelOf(turnedProfile(pieces, 3));
+      const [x, y] = turnedPoint(pieces, 1.5 + (fillet * turn) / 2).point;
+      const guide = [-1.2, 1.2].map((z) => pointOn(mesh, [x, y, z]));
+      const width = estimateWidth(mesh, topology, 'line', guide, noise);
+      expect(width).toBeGreaterThan(0);
+      for (const w of [width, 0.6]) {
+        const band = buildBand(mesh, topology, 'line', guide, w, noise)!;
+        expect(band).not.toBeNull();
+        expect(zoneCount(band, BandZone.Left)).toBeGreaterThan(50);
+        expect(zoneCount(band, BandZone.Right)).toBeGreaterThan(50);
+      }
+    },
+  );
 });

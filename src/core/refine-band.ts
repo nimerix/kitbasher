@@ -60,7 +60,18 @@ export interface EdgeBand {
 
 /** Fewest degrees between the two flanks' normals at the solved edge for the band to show an edge. */
 export const minBandAngle = 10;
+/**
+ * Least `flankFlatness` of an edge: on the two reference scans smooth surfaces score up to 1.98 and
+ * every edge of 50 degrees and over at least 2.46.
+ */
+export const minFlankFlatness = 2.2;
 
+/** Degrees added to the flanks' own turn, so that noise on two flat flanks cannot score unbounded. */
+const flatNoise = 4;
+/** Fewest vertices in each half of a flank for its own turn to be measured. */
+const flatHalf = 3;
+/** A flank's own turn is read from this many edge lengths past the solved edge outward. */
+const flatFrom = 1.5;
 /**
  * Fewest edge lengths a flank must run outward from where it starts, in half of the slices; also
  * the most a flank that ends at a second transition gives up to it.
@@ -966,6 +977,40 @@ function runs(entries: number[], weights: number[], offset: Float64Array, fits: 
   };
 }
 
+/**
+ * How much more the surface turns at the solved edge than within its flanks: the edge's angle in
+ * degrees over the sum of each flank's own turn plus `flatNoise` degrees. A flank's own turn is the
+ * difference between the median normal turn, in the cross-section, of its outer and inner halves
+ * (split at the median offset of its vertices from `from` outward, among those `reads` admits).
+ * An edge between flat flanks scores high; a smooth surface, whose flanks turn as the band does,
+ * scores near 1. 0 when a flank has too few vertices to measure. The guide's direction does not
+ * change it: reversing it swaps the flanks and negates the turn.
+ */
+function flankFlatness(
+  offset: Float64Array,
+  turn: Float64Array,
+  zone: Uint8Array,
+  reads: (i: number) => boolean,
+  from: number,
+  angle: number,
+) {
+  let own = flatNoise;
+  for (const side of [BandZone.Left, BandZone.Right]) {
+    const sign = side === BandZone.Left ? 1 : -1;
+    const members: number[] = [];
+    for (let i = 0; i < offset.length; i++)
+      if (zone[i] === side && sign * offset[i] >= from && reads(i)) members.push(i);
+    if (members.length < 2 * flatHalf) return 0;
+    const split = median(members.map((i) => sign * offset[i]));
+    const inner: number[] = [],
+      outer: number[] = [];
+    for (const i of members) (sign * offset[i] < split ? inner : outer).push(turn[i]);
+    if (inner.length < flatHalf || outer.length < flatHalf) return 0;
+    own += (Math.abs(median(outer) - median(inner)) * 180) / Math.PI;
+  }
+  return angle / own;
+}
+
 const dot3 = (p: ArrayLike<number>, q: ArrayLike<number>) =>
   p[0] * q[0] + p[1] * q[1] + p[2] * q[2];
 
@@ -1117,24 +1162,6 @@ function classifyOriented(
     }),
   );
   pairs.sort((p, q) => p[0] + p[1] - q[0] - q[1] || Math.abs(p[0] - p[1]) - Math.abs(q[0] - q[1]));
-  let first: FlankFit[] | null = null;
-  for (const [i, j] of pairs) {
-    const pair = [candidates[0][i], candidates[1][j]].map((run) =>
-      flankFit(
-        [...run.seed].sort((x, y) => x - y),
-        position,
-        band,
-        frame,
-        noise,
-      ),
-    );
-    if (pair[0] && pair[1]) {
-      first = pair as FlankFit[];
-      break;
-    }
-  }
-  if (!first) return null;
-  let fits = first;
 
   // The edge per slice: the point of the slice's cross-section where both flank surfaces meet, and
   // its offset along the surface from the guide, read at the band vertex nearest it.
@@ -1332,8 +1359,39 @@ function classifyOriented(
     return { o, sides, zone };
   };
 
-  let solved = solve(fits);
-  if (!solved) return null;
+  const half = slices / 2;
+  // True when the solved edge lies within reach of the guide in half of the solved slices.
+  const reaches = (at: Solved) =>
+    at.solvedSlices.filter((k) => Math.abs(at.offset[k]) <= reach).length >= half;
+  // Median angle between the flank surfaces' normals along the solved edge, degrees.
+  const apart = (at: Solved) => (median(at.solvedSlices.map((k) => at.angle[k])) * 180) / Math.PI;
+  // The nearest pair whose surfaces both fit and meet within reach of the guide, apart there.
+  let paired: FlankFit[] | null = null,
+    met: Solved | null = null;
+  // Each candidate is fitted once, when a pair first needs it.
+  const fitted = candidates.map((side) => side.map((): FlankFit | null | undefined => undefined));
+  const fitOf = (s: number, i: number) =>
+    fitted[s][i] === undefined
+      ? (fitted[s][i] = flankFit(
+          [...candidates[s][i].seed].sort((x, y) => x - y),
+          position,
+          band,
+          frame,
+          noise,
+        ))
+      : fitted[s][i];
+  for (const [i, j] of pairs) {
+    const pair = [fitOf(0, i), fitOf(1, j)];
+    if (!pair[0] || !pair[1]) continue;
+    met = solve(pair as FlankFit[]);
+    if (met && reaches(met) && apart(met) >= minBandAngle) {
+      paired = pair as FlankFit[];
+      break;
+    }
+  }
+  if (!paired || !met) return null;
+  let fits = paired,
+    solved = met;
   let classified = split(fits, solved);
   // Reseed each flank from 2 to 8 edge lengths past the solved edge and solve again, until the edge
   // stays. A seed starts past the soft zone by an edge and by its own width, so that a wide fillet's
@@ -1413,14 +1471,19 @@ function classifyOriented(
   }
 
   // Evidence of an edge that does not depend on the width: the solved edge within reach of the
-  // guide and the flank surfaces apart there.
-  const half = slices / 2;
-  let near = 0;
-  for (const k of solved.solvedSlices) if (Math.abs(solved.offset[k]) <= reach) near++;
-  if (near < half) return null;
-  const angles = solved.solvedSlices.map((k) => solved.angle[k]);
-  const angle = (median(angles) * 180) / Math.PI;
+  // guide, the flank surfaces apart there, and flanks that turn far less than the edge does.
+  if (!reaches(solved)) return null;
+  const angle = apart(solved);
   if (angle < minBandAngle) return null;
+  const flatness = flankFlatness(
+    o,
+    frame.turn,
+    zone,
+    (i) => band.g[i] <= analysis,
+    flatFrom * edge,
+    angle,
+  );
+  if (flatness < minFlankFlatness) return null;
 
   const larger: number[] = [];
   for (let k = 0; k < slices; k++)
