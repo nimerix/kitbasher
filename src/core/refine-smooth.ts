@@ -1,20 +1,24 @@
 import type { RefineMesh, RefineTopology } from './refine-mesh';
 
-/** Smooth's reach in mm from the local edge length: ripples shorter than it are removed. */
-export const smoothScale = (edge: number) => Math.max(0.6, 10 * edge);
+/** Smooth's reach in mm from the local edge length: the farthest along the surface a fit reads. */
+export const smoothScale = (edge: number) => Math.max(0.9, 15 * edge);
 
-/** An anchor's fit stands for the vertices within this fraction of the scale of it. */
-const anchorSpacing = 0.2;
+/** Anchors are spaced this fraction of the scale apart along the surface. */
+const anchorSpacing = 0.15;
+/** A vertex takes the fits of the anchors within twice the spacing of it along the surface. */
+const blendReach = 2 * anchorSpacing;
 
 /**
- * Moving least squares. The surface within `scale` of a vertex is fitted, in the frame of its mean
- * normal, by a least-squares quadric height field, and the vertex moves onto it along that
- * normal. Fits are made at anchor vertices spaced a fifth of `scale` apart; each vertex takes the
- * kernel-weighted mean of its projections onto the anchors' quadrics within twice that spacing.
- * Each round runs on the previous round's result. Neighbourhoods read only `vertices`, the painted
- * surface, and do not walk through a vertex marked in `barrier` (per welded vertex). Returns the
- * final positions of `vertices`, three values each; vertices that are not free keep theirs. `position`
- * replaces the mesh's positions as the starting surface when given.
+ * Moving least squares. The surface around a vertex is fitted, in the frame of its mean normal, by a
+ * least-squares quadric height field, and the vertex moves onto it along that normal. Fits are made
+ * at anchor vertices spaced `anchorSpacing * scale` apart; each vertex takes the kernel-weighted
+ * mean of its projections onto the quadrics of the anchors within `blendReach * scale` of it, each
+ * fitted to the surface within the rest of `scale` of its anchor, so no vertex reads a sample more
+ * than `scale` from it. Distances are measured along the surface, over mesh edges. Each round runs
+ * on the previous round's result. Neighbourhoods read only `vertices`, the painted surface, and do
+ * not walk through a vertex marked in `barrier` (per welded vertex). Returns the final positions of
+ * `vertices`, three values each; vertices that are not free keep theirs. `position` replaces the
+ * mesh's positions as the starting surface when given.
  */
 export function smoothTargets(
   mesh: RefineMesh,
@@ -35,15 +39,13 @@ export function smoothTargets(
   const sum = new Float64Array(count * 3);
   const total = new Float64Array(count);
   const covered = new Uint8Array(count);
-  const reach = anchorSpacing * scale;
   for (let round = 0; round < rounds; round++) {
     fitter.reset(current);
     sum.fill(0);
     total.fill(0);
     covered.fill(0);
     for (let i = 0; i < count; i++)
-      if (free[i] && !covered[i])
-        fitter.anchor(vertices[i], scale, reach, free, covered, sum, total);
+      if (free[i] && !covered[i]) fitter.anchor(vertices[i], scale, free, covered, sum, total);
     for (let i = 0; i < count; i++) {
       const v = vertices[i] * 3;
       for (let a = 0; a < 3; a++)
@@ -61,13 +63,18 @@ export function smoothTargets(
 /** Local quadric fits and the projections onto them, reusing every buffer between anchors. */
 class LocalFit {
   private position: Float64Array;
-  private readonly normal: Float64Array;
-  private readonly normalDone: Uint8Array;
   private readonly stamp: Uint32Array;
+  private readonly distance: Float64Array;
+  private readonly normal: Float64Array;
+  private readonly longest: Float64Array;
+  private readonly normalDone: Uint8Array;
   private mark = 0;
   private gathered = new Uint32Array(1024);
-  /** Per gathered vertex: its offset from the centre. */
+  /** Per gathered vertex: its offset from the centre, and its distance from it along the surface. */
   private offset = new Float64Array(3072);
+  private along = new Float64Array(1024);
+  private queue = new Uint32Array(1024);
+  private readonly queued: Uint32Array;
   private readonly matrix = new Float64Array(36);
   private readonly rhs = new Float64Array(6);
   /** The last fit: its normal and tangent axes, and its quadric's coefficients in scale units. */
@@ -82,9 +89,12 @@ class LocalFit {
     private readonly indexOf: Int32Array,
   ) {
     this.position = mesh.position;
-    this.normal = new Float64Array(mesh.weldedCount * 3);
-    this.normalDone = new Uint8Array(mesh.weldedCount);
     this.stamp = new Uint32Array(mesh.weldedCount);
+    this.distance = new Float64Array(mesh.weldedCount);
+    this.queued = new Uint32Array(mesh.weldedCount);
+    this.normal = new Float64Array(mesh.weldedCount * 3);
+    this.longest = new Float64Array(mesh.weldedCount);
+    this.normalDone = new Uint8Array(mesh.weldedCount);
   }
 
   reset(position: Float64Array) {
@@ -93,45 +103,44 @@ class LocalFit {
   }
 
   /**
-   * Fits the surface within `scale` of anchor `v`, then adds each free vertex within `2 * reach`
-   * of it its projection onto the fit, weighted, and marks those within `reach` covered.
+   * Fits the surface within `(1 - blendReach) * scale` of anchor `v`, then adds each free vertex
+   * within `blendReach * scale` of it its projection onto the fit, weighted, and marks those within
+   * `anchorSpacing * scale` covered.
    */
   anchor(
     v: number,
     scale: number,
-    reach: number,
     free: Uint8Array,
     covered: Uint8Array,
     sum: Float64Array,
     total: Float64Array,
   ) {
-    const count = this.gather(v, scale);
-    const fitted = this.fit(count, scale);
-    const { position, frame, coefficients } = this;
+    const radius = (1 - blendReach) * scale;
+    const count = this.gather(v, radius);
+    const fitted = this.fit(count, radius, scale);
+    const { position, frame, coefficients, gathered, offset, along, indexOf } = this;
     const px = position[v * 3],
       py = position[v * 3 + 1],
       pz = position[v * 3 + 2];
     const [nx, ny, nz, ux, uy, uz, wx, wy, wz] = frame;
     const [c0, c1, c2, c3, c4, c5] = coefficients;
     const inverse = 1 / scale;
-    const near = reach * reach,
-      far = 4 * near;
-    const blended = this.gather(v, 2 * reach);
-    const { gathered, offset, indexOf } = this;
-    for (let g = 0; g < blended; g++) {
+    const near = anchorSpacing * scale,
+      far = blendReach * scale;
+    for (let g = 0; g < count; g++) {
+      const d = along[g];
       const i = indexOf[gathered[g]];
-      if (!free[i]) continue;
+      if (d >= far || !free[i]) continue;
+      if (d < near) covered[i] = 1;
+      if (!fitted) continue;
       const dx = offset[g * 3],
         dy = offset[g * 3 + 1],
         dz = offset[g * 3 + 2];
-      const d = dx * dx + dy * dy + dz * dz;
-      if (d < near) covered[i] = 1;
-      if (!fitted) continue;
       const x = (dx * ux + dy * uy + dz * uz) * inverse,
         y = (dx * wx + dy * wy + dz * wz) * inverse,
         h = (dx * nx + dy * ny + dz * nz) * inverse;
       const lift = (c0 + c1 * x + c2 * y + c3 * x * x + c4 * x * y + c5 * y * y - h) * scale;
-      const t = 1 - d / far;
+      const t = 1 - (d * d) / (far * far);
       const weight = t * t;
       sum[i * 3] += weight * (px + dx + lift * nx);
       sum[i * 3 + 1] += weight * (py + dy + lift * ny);
@@ -141,56 +150,94 @@ class LocalFit {
   }
 
   /**
-   * Walks out from `v` over the surface to the vertices within `radius` of it, not through a
-   * barrier vertex, into `gathered`, with their offsets from it in `offset`. Returns how many.
+   * Walks out from `v` over the surface's edges to the vertices whose shortest path from it is
+   * under `radius`, not through a barrier vertex, into `gathered`, with their offsets from it in
+   * `offset` and their path lengths in `along`. Returns how many.
    */
   private gather(v: number, radius: number) {
-    const { position, barrier, stamp, indexOf } = this;
+    const { position, barrier, stamp, distance, indexOf } = this;
     const { neighbourStart, neighbours } = this.topology;
+    const mark = ++this.mark;
+    stamp[v] = mark;
+    distance[v] = 0;
+    let { gathered, queue, queued } = this;
+    gathered[0] = v;
+    let count = 1;
+    // Label-correcting search with a first-in first-out ring: on a mesh it settles in a few passes.
+    let head = 0,
+      size = 1;
+    queue[0] = v;
+    queued[v] = mark;
+    while (size) {
+      const w = queue[head];
+      head = (head + 1) % queue.length;
+      size--;
+      queued[w] = 0;
+      if (w !== v && barrier[w]) continue;
+      const d = distance[w];
+      const wx = position[w * 3],
+        wy = position[w * 3 + 1],
+        wz = position[w * 3 + 2];
+      for (let j = neighbourStart[w]; j < neighbourStart[w + 1]; j++) {
+        const k = neighbours[j];
+        if (indexOf[k] < 0) continue;
+        const ex = position[k * 3] - wx,
+          ey = position[k * 3 + 1] - wy,
+          ez = position[k * 3 + 2] - wz;
+        const next = d + Math.sqrt(ex * ex + ey * ey + ez * ez);
+        if (next >= radius) continue;
+        if (stamp[k] === mark) {
+          if (next >= distance[k]) continue;
+        } else {
+          stamp[k] = mark;
+          if (count === gathered.length) this.gathered = gathered = grow(gathered, count * 2);
+          gathered[count++] = k;
+        }
+        distance[k] = next;
+        if (queued[k] === mark) continue;
+        if (size === queue.length) {
+          const grown = new Uint32Array(queue.length * 2);
+          for (let n = 0; n < size; n++) grown[n] = queue[(head + n) % queue.length];
+          this.queue = queue = grown;
+          head = 0;
+        }
+        queue[(head + size) % queue.length] = k;
+        size++;
+        queued[k] = mark;
+      }
+    }
+    if (this.offset.length < count * 3) {
+      this.offset = new Float64Array(gathered.length * 3);
+      this.along = new Float64Array(gathered.length);
+    }
+    const { offset, along } = this;
     const px = position[v * 3],
       py = position[v * 3 + 1],
       pz = position[v * 3 + 2];
-    const reach = radius * radius;
-    const mark = ++this.mark;
-    stamp[v] = mark;
-    let { gathered, offset } = this;
-    gathered[0] = v;
-    offset[0] = offset[1] = offset[2] = 0;
-    let count = 1;
     for (let g = 0; g < count; g++) {
       const w = gathered[g];
-      if (g > 0 && barrier[w]) continue;
-      for (let j = neighbourStart[w]; j < neighbourStart[w + 1]; j++) {
-        const k = neighbours[j];
-        if (stamp[k] === mark || indexOf[k] < 0) continue;
-        stamp[k] = mark;
-        const dx = position[k * 3] - px,
-          dy = position[k * 3 + 1] - py,
-          dz = position[k * 3 + 2] - pz;
-        if (dx * dx + dy * dy + dz * dz >= reach) continue;
-        if (count === gathered.length) {
-          this.gathered = gathered = grow(gathered, count * 2);
-          this.offset = offset = grow(offset, count * 6);
-        }
-        gathered[count] = k;
-        offset[count * 3] = dx;
-        offset[count * 3 + 1] = dy;
-        offset[count * 3 + 2] = dz;
-        count++;
-      }
+      offset[g * 3] = position[w * 3] - px;
+      offset[g * 3 + 1] = position[w * 3 + 1] - py;
+      offset[g * 3 + 2] = position[w * 3 + 2] - pz;
+      along[g] = distance[w];
     }
     return count;
   }
 
-  /** Fits the quadric to the `count` gathered vertices into `frame` and `coefficients`. */
-  private fit(count: number, scale: number): boolean {
-    const { gathered, offset, normal } = this;
+  /**
+   * Fits the quadric to the `count` gathered vertices into `frame` and `coefficients`. The frame's
+   * normal is the mean of the normals of the gathered vertices whose every neighbour lies within
+   * `radius`, so it reads nothing beyond it.
+   */
+  private fit(count: number, radius: number, scale: number): boolean {
+    const { gathered, offset, along, normal, longest } = this;
     let nx = 0,
       ny = 0,
       nz = 0;
     for (let g = 0; g < count; g++) {
       const w = gathered[g];
       if (!this.normalDone[w]) this.computeNormal(w);
+      if (along[g] + longest[w] >= radius || (g > 0 && this.barrier[w])) continue;
       nx += normal[w * 3];
       ny += normal[w * 3 + 1];
       nz += normal[w * 3 + 2];
@@ -282,10 +329,10 @@ class LocalFit {
     return solve6(this.matrix, this.rhs, this.coefficients);
   }
 
-  /** Area-weighted vertex normal of `w` at the current positions, cached. */
+  /** Area-weighted normal of `w` and its longest edge at the current positions, cached. */
   private computeNormal(w: number) {
-    const { normal, position, mesh } = this;
-    const { triangleStart, trianglesOf } = this.topology;
+    const { normal, position, mesh, longest } = this;
+    const { triangleStart, trianglesOf, neighbourStart, neighbours } = this.topology;
     const { corners, weldOf } = mesh;
     let x = 0,
       y = 0,
@@ -309,6 +356,15 @@ class LocalFit {
     normal[w * 3] = x / length;
     normal[w * 3 + 1] = y / length;
     normal[w * 3 + 2] = z / length;
+    let edge = 0;
+    for (let j = neighbourStart[w]; j < neighbourStart[w + 1]; j++) {
+      const k = neighbours[j] * 3;
+      const ex = position[k] - position[w * 3],
+        ey = position[k + 1] - position[w * 3 + 1],
+        ez = position[k + 2] - position[w * 3 + 2];
+      edge = Math.max(edge, ex * ex + ey * ey + ez * ez);
+    }
+    longest[w] = Math.sqrt(edge);
     this.normalDone[w] = 1;
   }
 }

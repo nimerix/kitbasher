@@ -238,3 +238,76 @@ export function spread(mesh: RefineMesh, vertices: number[], measure: (p: number
     rms: Math.sqrt(values.reduce((a, x) => a + (x - mean) ** 2, 0) / values.length),
   };
 }
+
+export const allTriangles = (mesh: RefineMesh) =>
+  Uint32Array.from({ length: mesh.triangleCount }, (_, t) => t);
+export const allVertices = (mesh: RefineMesh) =>
+  Uint32Array.from({ length: mesh.weldedCount }, (_, v) => v);
+
+/** How far each coordinate of `v` moved from `before` to `after`. */
+export const displacementOf = (before: RefineMesh, after: RefineMesh, v: number) =>
+  [0, 1, 2].map((a) => after.position[v * 3 + a] - before.position[v * 3 + a]);
+
+/** Triangles of `after` left with under a thousandth of their area in `before`. */
+export function collapsedTriangles(before: RefineMesh, after: RefineMesh) {
+  const area = (mesh: RefineMesh, t: number) => {
+    const [a, b, c] = ([0, 1, 2] as const).map((k) => at(mesh, weldedCorner(mesh, t, k)));
+    const u = [0, 1, 2].map((k) => b[k] - a[k]),
+      w = [0, 1, 2].map((k) => c[k] - a[k]);
+    return Math.hypot(
+      u[1] * w[2] - u[2] * w[1],
+      u[2] * w[0] - u[0] * w[2],
+      u[0] * w[1] - u[1] * w[0],
+    );
+  };
+  let collapsed = 0;
+  for (let t = 0; t < before.triangleCount; t++)
+    if (area(after, t) < 1e-3 * area(before, t)) collapsed++;
+  return collapsed;
+}
+
+/**
+ * The largest difference between the moves of two neighbouring vertices, both at full weight and
+ * neither kept detail, of those whose original x and y `where` accepts.
+ */
+export function largestJump(
+  model: Model,
+  solve: RegionSolve,
+  after: RefineMesh,
+  where: (x: number, y: number) => boolean,
+) {
+  const { mesh, topology } = model;
+  const index = new Map(Array.from(solve.vertices, (v, i) => [v, i]));
+  const counted = (v: number) => {
+    const i = index.get(v);
+    if (i === undefined || solve.weight[i] !== 1 || solve.detail[i] === 1) return false;
+    return where(mesh.position[v * 3], mesh.position[v * 3 + 1]);
+  };
+  let largest = 0;
+  for (const v of solve.vertices) {
+    if (!counted(v)) continue;
+    const d = displacementOf(mesh, after, v);
+    for (let j = topology.neighbourStart[v]; j < topology.neighbourStart[v + 1]; j++) {
+      const w = topology.neighbours[j];
+      if (!counted(w)) continue;
+      const e = displacementOf(mesh, after, w);
+      largest = Math.max(largest, Math.hypot(d[0] - e[0], d[1] - e[1], d[2] - e[2]));
+    }
+  }
+  return largest;
+}
+
+/** Highest point of the surface straight above or below (x, y) along z. */
+export function surfaceHeight(mesh: RefineMesh, x: number, y: number) {
+  let best = -Infinity;
+  for (let t = 0; t < mesh.triangleCount; t++) {
+    const [a, b, c] = ([0, 1, 2] as const).map((k) => at(mesh, weldedCorner(mesh, t, k)));
+    const det = (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]);
+    if (Math.abs(det) < 1e-12) continue;
+    const u = ((x - a[0]) * (c[1] - a[1]) - (y - a[1]) * (c[0] - a[0])) / det;
+    const w = ((b[0] - a[0]) * (y - a[1]) - (b[1] - a[1]) * (x - a[0])) / det;
+    if (u < -1e-9 || w < -1e-9 || u + w > 1 + 1e-9) continue;
+    best = Math.max(best, a[2] + u * (b[2] - a[2]) + w * (c[2] - a[2]));
+  }
+  return best;
+}

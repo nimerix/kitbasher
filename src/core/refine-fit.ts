@@ -1180,3 +1180,23 @@ export function estimateNoise(
   }
   return median(residuals.subarray(0, used));
 }
+
+/** Unit normal of `shape` where the point projects, on the side `shapeDistance` counts positive. */
+export function shapeNormal(
+  shape: Shape,
+  x: number,
+  y: number,
+  z: number,
+  out: Float64Array,
+): void {
+  const h = 1e-5;
+  for (let k = 0; k < 3; k++) {
+    const q = [x, y, z];
+    q[k] += h;
+    const forward = shapeDistance(shape, q[0], q[1], q[2]);
+    q[k] -= 2 * h;
+    out[k] = forward - shapeDistance(shape, q[0], q[1], q[2]);
+  }
+  const length = Math.hypot(out[0], out[1], out[2]);
+  if (length > 0) for (let k = 0; k < 3; k++) out[k] /= length;
+}

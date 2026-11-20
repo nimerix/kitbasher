@@ -6,6 +6,7 @@ import {
   fitShape,
   projectToShape,
   shapeDistance,
+  shapeNormal,
 } from './refine-fit';
 import {
   type RefineMesh,
@@ -30,20 +31,26 @@ export interface RegionInput {
   detail: number | null;
   /** mm over which the change fades in from the border. Null uses 4 * the local edge length. */
   blend: number | null;
-  /** Smooth's reach in mm: ripples shorter than it go. Null or absent uses max(0.6, 10 edges). */
+  /**
+   * Smooth's reach in mm along the surface: no vertex reads beyond it. Null or absent uses
+   * max(0.9, 15 edges).
+   */
   scale?: number | null;
 }
 export interface RegionSolve {
   vertices: Uint32Array;
   /**
-   * Per region vertex: target position, 0-1 weight, and 1 where it is kept detail (2 where its
-   * move eases into kept detail or a restored edge).
+   * Per region vertex: target position, 0-1 weight, and 1 where it is kept as it stands (detail, or
+   * a face turned away from the fitted surface), 2 where its move eases into kept detail or a
+   * restored edge.
    */
   target: Float32Array;
   weight: Float32Array;
   detail: Uint8Array;
-  /** What the surface was fitted as; null for Smooth. */
+  /** What the first patch's surface was fitted as; null for Smooth. */
   fitted: ShapeKind | 'sweep' | null;
+  /** Per edge-connected patch, in order of its smallest triangle: what it was fitted as. */
+  fits: (ShapeKind | 'sweep' | null)[];
 }
 
 /** Detail stands this many times the region's roughness off its surface. */
@@ -55,6 +62,8 @@ const madScale = 1.4826;
 /** Edge lengths over which the base eases into kept detail, and into a restored edge. */
 const islandEase = 3;
 const creaseEase = 2;
+/** Smooth moves every vertex its own way, so it eases into detail more gradually. */
+const smoothIslandEase = 6;
 /**
  * An island lower than `warpPeak` times the detail threshold and wider than `warpWidth` mm in every
  * direction is a gentle warp of the surface, not detail.
@@ -63,6 +72,14 @@ const warpPeak = 2;
 const warpWidth = 1.5;
 /** Rounds of local fits that Smooth runs. */
 const smoothRounds = 2;
+/** A vertex whose normal is within this cosine of facing away from the fitted surface stays put. */
+const facing = 0.2;
+/** A moved triangle may keep no less than this fraction of its area. */
+const collapse = 1e-3;
+/** Rounds of holding the corners of failed triangles before the solve is refused. */
+const checkRounds = 5;
+/** Refits of Flatten and Shape to the vertices that settle on the surface. */
+const fitRounds = 3;
 
 interface Region {
   vertices: Uint32Array;
@@ -72,7 +89,7 @@ interface Region {
   border: Uint8Array;
 }
 
-/** Null when the region is too small to fit or is all detail. */
+/** Null when no patch of the region can be fitted or each is all detail. */
 export function solveRegion(
   mesh: RefineMesh,
   topology: RefineTopology,
@@ -80,30 +97,32 @@ export function solveRegion(
   noise: number,
 ): RegionSolve | null {
   if (input.treatment === 'shape' && input.shape === 'sweep') return null;
-  const region = regionOf(mesh, topology, input.triangles);
-  const { vertices, border } = region;
+  const { vertices, indexOf } = regionOf(mesh, topology, input.triangles);
   const count = vertices.length;
-  if (!border.includes(0)) return null;
-  const edge = medianEdge(mesh, input.triangles);
-  const blend = input.blend ?? 4 * edge;
-  const weight = blendWeights(mesh, topology, region, blend, input.strength);
-  const normals = new Float32Array(count * 3);
-  const normal = new Float32Array(3);
-  for (let i = 0; i < count; i++) {
-    vertexNormal(mesh, topology, vertices[i], normal);
-    normals.set(normal, i * 3);
-  }
-  const solved =
-    input.treatment === 'smooth'
-      ? smoothRegion(mesh, topology, region, input, noise, normals, edge)
-      : fitRegion(mesh, topology, region, input, noise, normals);
-  if (!solved) return null;
-  const { target, detail } = solved;
-  ease(mesh, topology, region, solved, edge, weight);
+  const { position } = mesh;
+  const target = new Float32Array(count * 3);
   for (let i = 0; i < count; i++)
-    if (!border[i] && detail[i] !== 1)
-      return { vertices, target, weight, detail, fitted: solved.fitted };
-  return null;
+    target.set(position.subarray(vertices[i] * 3, vertices[i] * 3 + 3), i * 3);
+  const weight = new Float32Array(count);
+  const detail = new Uint8Array(count);
+  const fits: (ShapeKind | null)[] = [];
+  let solved = false;
+  // Each patch has its own fit, detail and blend; a vertex two patches share is on both borders.
+  for (const triangles of patchesOf(mesh, topology, input.triangles)) {
+    const patch = solvePatch(mesh, topology, triangles, input, noise);
+    fits.push(patch?.fitted ?? null);
+    if (!patch) continue;
+    solved = true;
+    patch.vertices.forEach((v, i) => {
+      const n = indexOf[v];
+      if (patch.detail[i]) detail[n] = patch.detail[i];
+      if (!(patch.weight[i] > 0)) return;
+      weight[n] = patch.weight[i];
+      target.set(patch.target.subarray(i * 3, i * 3 + 3), n * 3);
+    });
+  }
+  if (!solved) return null;
+  return { vertices, target, weight, detail, fitted: fits[0], fits };
 }
 
 export function applyRegion(mesh: RefineMesh, solve: RegionSolve): Uint32Array {
@@ -125,78 +144,152 @@ export function applyRegion(mesh: RefineMesh, solve: RegionSolve): Uint32Array {
   return Uint32Array.from(written);
 }
 
-interface Solved {
-  target: Float32Array;
+/** Per patch vertex: its move at full weight, whether it is detail, and whether it stays put. */
+interface Base {
+  move: Float64Array;
   detail: Uint8Array;
+  held: Uint8Array;
   fitted: ShapeKind | null;
-  /** Per vertex: its island, or -1; and each island's move. */
-  island: Int32Array;
-  moves: Float64Array;
 }
 
-/** Flatten and Shape: base vertices project onto the fitted surface, detail rides on it. */
-function fitRegion(
+interface PatchSolve {
+  vertices: Uint32Array;
+  target: Float32Array;
+  weight: Float32Array;
+  detail: Uint8Array;
+  fitted: ShapeKind | null;
+}
+
+function solvePatch(
+  mesh: RefineMesh,
+  topology: RefineTopology,
+  triangles: Uint32Array,
+  input: RegionInput,
+  noise: number,
+): PatchSolve | null {
+  const region = regionOf(mesh, topology, triangles);
+  const { vertices, border } = region;
+  const count = vertices.length;
+  if (!border.includes(0)) return null;
+  const edge = medianEdge(mesh, triangles);
+  const blend = blendWeights(mesh, topology, region, input.blend ?? 4 * edge);
+  const normals = new Float32Array(count * 3);
+  const normal = new Float32Array(3);
+  for (let i = 0; i < count; i++) {
+    vertexNormal(mesh, topology, vertices[i], normal);
+    normals.set(normal, i * 3);
+  }
+  const base =
+    input.treatment === 'smooth'
+      ? smoothBase(mesh, topology, region, input, noise, normals, edge)
+      : fitBase(mesh, topology, region, input, noise, normals, edge, blend);
+  if (!base) return null;
+  for (let i = 0; i < count; i++)
+    if (!border[i] && !base.detail[i] && !base.held[i])
+      return settle(mesh, topology, region, base, blend, input.strength, edge);
+  return null;
+}
+
+/**
+ * Flatten and Shape: base vertices project onto the fitted surface. The surface is fitted again to
+ * the vertices that end at full weight, clear of detail and of eased rings, so a second run over
+ * the result, where those vertices already lie on it, finds the same surface. A vertex facing away
+ * from the surface (a wall, or the far side of a thin part) stays put.
+ */
+function fitBase(
   mesh: RefineMesh,
   topology: RefineTopology,
   region: Region,
   input: RegionInput,
   noise: number,
   normals: Float32Array,
-): Solved | null {
-  const { vertices } = region;
+  edge: number,
+  blend: Float32Array,
+): Base | null {
+  const { vertices, border } = region;
   const count = vertices.length;
-  const { position } = mesh;
+  const { position, crease } = mesh;
   const points = new Float32Array(count * 3);
   for (let i = 0; i < count; i++)
     points.set(position.subarray(vertices[i] * 3, vertices[i] * 3 + 3), i * 3);
-  const fit = fitOf(points, normals, input, noise);
-  if (!fit) return null;
-  const offsets = (shape: Shape) =>
-    Float64Array.from({ length: count }, (_, i) =>
+  const first = fitOf(points, normals, input, noise);
+  if (!first) return null;
+  const kind = first.shape.kind;
+  const classify = (shape: Shape) => {
+    const offset = Float64Array.from({ length: count }, (_, i) =>
       shapeDistance(shape, points[i * 3], points[i * 3 + 1], points[i * 3 + 2]),
     );
-  let shape = fit.shape;
-  let detail: Uint8Array = new Uint8Array(count);
-  const judge = (offset: Float64Array) =>
-    detailOf(topology, region, offset, noise, input.detail, points, normals);
-  if (input.keepDetail) {
-    detail = judge(offsets(shape));
-    // Refitted without the detail, whose foot would otherwise lift the surface under it.
-    const clear = detail.includes(1) ? refit(points, normals, detail, fit, noise) : null;
-    if (clear) {
-      shape = clear;
-      detail = judge(offsets(shape));
-    }
+    const detail = input.keepDetail
+      ? detailOf(topology, region, offset, noise, input.detail, points, normals)
+      : new Uint8Array(count);
+    return { detail, held: facingAway(shape, points, normals, detail) };
+  };
+  let shape = first.shape;
+  let { detail, held } = classify(shape);
+  let settled: Uint8Array | null = null;
+  for (let round = 0; round < fitRounds; round++) {
+    const kept = new Uint8Array(count);
+    const near = surfaceDistance(
+      mesh,
+      topology,
+      region,
+      Int32Array.from(detail, (d, i) => (d || held[i] ? 0 : -1)),
+      islandEase * edge,
+    ).distance;
+    const nearCrease = surfaceDistance(
+      mesh,
+      topology,
+      region,
+      Int32Array.from(vertices, (v) => (crease[v] ? 0 : -1)),
+      creaseEase * edge,
+    ).distance;
+    let total = 0;
+    for (let i = 0; i < count; i++)
+      if (blend[i] === 1 && !border[i] && near[i] === Infinity && nearCrease[i] === Infinity) {
+        kept[i] = 1;
+        total++;
+      }
+    if (total < 12 || (settled && kept.every((k, i) => k === settled![i]))) break;
+    const pick = (values: Float32Array) => {
+      const out = new Float32Array(total * 3);
+      let n = 0;
+      for (let i = 0; i < count; i++)
+        if (kept[i]) out.set(values.subarray(i * 3, i * 3 + 3), 3 * n++);
+      return out;
+    };
+    const next = fitShape(pick(points), pick(normals), kind, noise);
+    if (!next) break;
+    shape = next.shape;
+    settled = kept;
+    ({ detail, held } = classify(shape));
   }
-  const target = new Float32Array(count * 3);
+  const move = new Float64Array(count * 3);
+  const projected = new Float32Array(3);
   for (let i = 0; i < count; i++) {
     const v = vertices[i] * 3;
-    projectToShape(shape, position[v], position[v + 1], position[v + 2], target, i * 3);
+    projectToShape(shape, position[v], position[v + 1], position[v + 2], projected);
+    for (let axis = 0; axis < 3; axis++) move[i * 3 + axis] = projected[axis] - position[v + axis];
   }
-  return {
-    target,
-    detail,
-    fitted: shape.kind,
-    ...carryIslands(mesh, topology, region, detail, target),
-  };
+  return { move, detail, held, fitted: kind };
 }
 
-/** The fitted kind again, from the vertices that are not detail. */
-function refit(
-  points: Float32Array,
-  normals: Float32Array,
-  detail: Uint8Array,
-  fit: ShapeFit,
-  noise: number,
-): Shape | null {
-  const kept: number[] = [];
-  detail.forEach((d, i) => d || kept.push(i));
-  const pick = (values: Float32Array) => {
-    const out = new Float32Array(kept.length * 3);
-    kept.forEach((i, n) => out.set(values.subarray(i * 3, i * 3 + 3), n * 3));
-    return out;
-  };
-  return fitShape(pick(points), pick(normals), fit.shape.kind, noise)?.shape ?? null;
+/**
+ * Base vertices whose normal is within `facing` of turning away from the surface's own normal where
+ * they project, with the surface's side taken from the vertices' normals as a whole.
+ */
+function facingAway(shape: Shape, points: Float32Array, normals: Float32Array, detail: Uint8Array) {
+  const count = detail.length;
+  const along = new Float64Array(count);
+  const normal = new Float64Array(3);
+  let side = 0;
+  for (let i = 0; i < count; i++) {
+    shapeNormal(shape, points[i * 3], points[i * 3 + 1], points[i * 3 + 2], normal);
+    along[i] =
+      normal[0] * normals[i * 3] + normal[1] * normals[i * 3 + 1] + normal[2] * normals[i * 3 + 2];
+    side += along[i];
+  }
+  const sign = side < 0 ? -1 : 1;
+  return Uint8Array.from(along, (a, i) => (!detail[i] && sign * a < facing ? 1 : 0));
 }
 
 function fitOf(
@@ -219,7 +312,7 @@ function fitOf(
  * shorter than `scale` go and the surface's own curvature stays. Detail is what stands off the
  * same projection at twice the scale; the smoothing runs with it pressed onto that base.
  */
-function smoothRegion(
+function smoothBase(
   mesh: RefineMesh,
   topology: RefineTopology,
   region: Region,
@@ -227,7 +320,7 @@ function smoothRegion(
   noise: number,
   normals: Float32Array,
   edge: number,
-): Solved {
+): Base {
   const { vertices, border } = region;
   const count = vertices.length;
   const { position, crease } = mesh;
@@ -255,10 +348,12 @@ function smoothRegion(
     }
   }
   const target = smoothTargets(mesh, topology, vertices, free, scale, smoothRounds, crease, start);
+  const move = new Float64Array(count * 3);
   for (let i = 0; i < count; i++)
-    if (!free[i])
-      for (let axis = 0; axis < 3; axis++) target[i * 3 + axis] = position[vertices[i] * 3 + axis];
-  return { target, detail, fitted: null, ...carryIslands(mesh, topology, region, detail, target) };
+    if (free[i])
+      for (let axis = 0; axis < 3; axis++)
+        move[i * 3 + axis] = target[i * 3 + axis] - position[vertices[i] * 3 + axis];
+  return { move, detail, held: new Uint8Array(count), fitted: null };
 }
 
 /**
@@ -396,24 +491,196 @@ function islandsOf(topology: RefineTopology, region: Region, detail: Uint8Array)
 }
 
 /**
- * Gives every island of detail the mean target move of the base vertices within `ringDepth` rings
- * of it. The nearest ring alone sits where the island's growth stopped, off the surface on the
- * island's side, and would sink it.
+ * Final moves. Each vertex's weight is its blend times the strength, 0 on the border, on a restored
+ * edge and where it stays put. An island of detail moves rigidly by the mean move of the base
+ * within `ringDepth` rings of it, at the least weight of any of its vertices. The base near islands
+ * and held vertices eases continuously from its own move to theirs, and into restored edges. Then
+ * every triangle that moves is checked; the corners of one that would collapse or turn over are
+ * held and the moves found again, and after `checkRounds` such rounds the patch is refused.
  */
-function carryIslands(
+function settle(
   mesh: RefineMesh,
   topology: RefineTopology,
   region: Region,
-  detail: Uint8Array,
-  target: Float32Array,
-) {
-  const { vertices, indexOf } = region;
-  const { position } = mesh;
-  const { neighbourStart, neighbours } = topology;
+  base: Base,
+  blend: Float32Array,
+  strength: number,
+  edge: number,
+): PatchSolve | null {
+  const { vertices, border } = region;
+  const count = vertices.length;
+  const { position, crease } = mesh;
+  const { move, detail } = base;
+  const held = base.held.slice();
   const { island, islands } = islandsOf(topology, region, detail);
-  const moves = new Float64Array(islands * 3);
   const members: number[][] = Array.from({ length: islands }, () => []);
   island.forEach((n, i) => n >= 0 && members[n].push(i));
+  const carry = carried(topology, region, members, detail, held, move);
+  const islandHeld = new Uint8Array(islands);
+  const toCrease = surfaceDistance(
+    mesh,
+    topology,
+    region,
+    Int32Array.from(vertices, (v) => (crease[v] ? 0 : -1)),
+    creaseEase * edge,
+  ).distance;
+  const reach = (base.fitted ? islandEase : smoothIslandEase) * edge;
+  const own = Float32Array.from(blend, (b, i) =>
+    border[i] || crease[vertices[i]] ? 0 : b * strength,
+  );
+  for (let round = 0; ; round++) {
+    const weight = Float32Array.from(own, (w, i) => (held[i] ? 0 : w));
+    const islandWeight = new Float64Array(islands);
+    members.forEach((list, n) => {
+      let least = islandHeld[n] ? 0 : Infinity;
+      for (const i of list) least = Math.min(least, weight[i]);
+      islandWeight[n] = least;
+      for (const i of list) weight[i] = least;
+    });
+    // Per base vertex: the product of its own shares, and the sums of the anchors' shares and moves.
+    const keep = new Float64Array(count).fill(1);
+    const share = new Float64Array(count);
+    const shared = new Float64Array(count * 3);
+    const anchor = (sources: Int32Array, x: number, y: number, z: number) => {
+      const { distance } = surfaceDistance(mesh, topology, region, sources, reach);
+      for (let i = 0; i < count; i++) {
+        const d = distance[i];
+        if (d === Infinity || d === 0) continue;
+        const s = smoothstep(d / reach);
+        keep[i] *= s;
+        share[i] += 1 - s;
+        shared[i * 3] += (1 - s) * x;
+        shared[i * 3 + 1] += (1 - s) * y;
+        shared[i * 3 + 2] += (1 - s) * z;
+      }
+    };
+    members.forEach((list, n) => {
+      const sources = new Int32Array(count).fill(-1);
+      for (const i of list) sources[i] = 0;
+      const w = islandWeight[n];
+      anchor(sources, w * carry[n * 3], w * carry[n * 3 + 1], w * carry[n * 3 + 2]);
+    });
+    if (held.includes(1))
+      anchor(
+        Int32Array.from(held, (h, i) => (h && island[i] < 0 ? 0 : -1)),
+        0,
+        0,
+        0,
+      );
+    const displacement = new Float64Array(count * 3);
+    const eased = new Uint8Array(count);
+    for (let i = 0; i < count; i++) {
+      const n = island[i];
+      if (n >= 0) {
+        for (let axis = 0; axis < 3; axis++)
+          displacement[i * 3 + axis] = islandWeight[n] * carry[n * 3 + axis];
+        continue;
+      }
+      const w = weight[i];
+      if (!(w > 0)) continue;
+      const sc = smoothstep(toCrease[i] / (creaseEase * edge));
+      const k = keep[i];
+      const total = k + share[i];
+      for (let axis = 0; axis < 3; axis++)
+        displacement[i * 3 + axis] =
+          (sc * (k * w * move[i * 3 + axis] + shared[i * 3 + axis])) / total;
+      if (share[i] > 0 || sc < 1) eased[i] = 1;
+    }
+    const failed = collapsed(mesh, topology, region, displacement);
+    if (!failed.length) {
+      const target = new Float32Array(count * 3);
+      const flags = new Uint8Array(count);
+      for (let i = 0; i < count; i++) {
+        const v = vertices[i] * 3;
+        const w = weight[i];
+        for (let axis = 0; axis < 3; axis++)
+          target[i * 3 + axis] =
+            w > 0 ? position[v + axis] + displacement[i * 3 + axis] / w : position[v + axis];
+        flags[i] = island[i] >= 0 || held[i] ? 1 : eased[i] ? 2 : 0;
+      }
+      return { vertices, target, weight, detail: flags, fitted: base.fitted };
+    }
+    if (round === checkRounds) return null;
+    for (const i of failed) {
+      if (island[i] >= 0) islandHeld[island[i]] = 1;
+      else held[i] = 1;
+    }
+  }
+}
+
+/**
+ * Region indices of the corners of triangles that the displacements would shrink below `collapse`
+ * of their area or turn by more than 90 degrees.
+ */
+function collapsed(
+  mesh: RefineMesh,
+  topology: RefineTopology,
+  region: Region,
+  displacement: Float64Array,
+): number[] {
+  const { vertices, indexOf } = region;
+  const { position, corners, weldOf } = mesh;
+  const { triangleStart, trianglesOf } = topology;
+  const failed = new Set<number>();
+  const checked = new Set<number>();
+  const was = new Float64Array(9),
+    now = new Float64Array(9);
+  for (let i = 0; i < vertices.length; i++) {
+    if (!displacement[i * 3] && !displacement[i * 3 + 1] && !displacement[i * 3 + 2]) continue;
+    const v = vertices[i];
+    for (let j = triangleStart[v]; j < triangleStart[v + 1]; j++) {
+      const t = trianglesOf[j];
+      if (checked.has(t)) continue;
+      checked.add(t);
+      for (let c = 0; c < 3; c++) {
+        const w = weldOf[corners[t * 3 + c]];
+        const k = indexOf[w];
+        for (let axis = 0; axis < 3; axis++) {
+          was[c * 3 + axis] = position[w * 3 + axis];
+          now[c * 3 + axis] = was[c * 3 + axis] + (k >= 0 ? displacement[k * 3 + axis] : 0);
+        }
+      }
+      const [ax, ay, az] = crossOf(was),
+        [bx, by, bz] = crossOf(now);
+      const before = Math.hypot(ax, ay, az),
+        after = Math.hypot(bx, by, bz);
+      if (after >= collapse * before && ax * bx + ay * by + az * bz >= 0) continue;
+      for (let c = 0; c < 3; c++) {
+        const k = indexOf[weldOf[corners[t * 3 + c]]];
+        if (k >= 0) failed.add(k);
+      }
+    }
+  }
+  return [...failed].sort((x, y) => x - y);
+}
+
+/** Cross product of a triangle's two edges from its first corner, corners packed in `p`. */
+function crossOf(p: Float64Array): [number, number, number] {
+  const ux = p[3] - p[0],
+    uy = p[4] - p[1],
+    uz = p[5] - p[2];
+  const wx = p[6] - p[0],
+    wy = p[7] - p[1],
+    wz = p[8] - p[2];
+  return [uy * wz - uz * wy, uz * wx - ux * wz, ux * wy - uy * wx];
+}
+
+/**
+ * Each island's move: the mean move of the base vertices within `ringDepth` rings of it. The nearest
+ * ring alone sits where the island's growth stopped, off the surface on the island's side, and
+ * would sink it.
+ */
+function carried(
+  topology: RefineTopology,
+  region: Region,
+  members: number[][],
+  detail: Uint8Array,
+  held: Uint8Array,
+  move: Float64Array,
+) {
+  const { vertices, indexOf } = region;
+  const { neighbourStart, neighbours } = topology;
+  const carry = new Float64Array(members.length * 3);
   const seen = new Int32Array(vertices.length).fill(-1);
   members.forEach((list, n) => {
     for (const i of list) seen[i] = n;
@@ -431,69 +698,61 @@ function carryIslands(
           if (k < 0 || detail[k] || seen[k] === n) continue;
           seen[k] = n;
           next.push(k);
-          const w = vertices[k] * 3;
-          x += target[k * 3] - position[w];
-          y += target[k * 3 + 1] - position[w + 1];
-          z += target[k * 3 + 2] - position[w + 2];
+          if (held[k]) continue;
+          x += move[k * 3];
+          y += move[k * 3 + 1];
+          z += move[k * 3 + 2];
           rung++;
         }
       }
       front = next;
     }
-    if (rung) {
-      x /= rung;
-      y /= rung;
-      z /= rung;
-    }
-    moves.set([x, y, z], n * 3);
-    for (const i of list) {
-      const v = vertices[i] * 3;
-      target[i * 3] = position[v] + x;
-      target[i * 3 + 1] = position[v + 1] + y;
-      target[i * 3 + 2] = position[v + 2] + z;
-    }
+    if (rung) carry.set([x / rung, y / rung, z / rung], n * 3);
   });
-  return { island, moves };
+  return carry;
 }
 
-/**
- * Restored-edge vertices never move, and the base eases into them over `creaseEase` edge lengths.
- * The base within `islandEase` edge lengths of kept detail eases from the island's move to its
- * own, so no step or ring of facets forms where the two meet. Eased vertices are marked 2.
- */
-function ease(
-  mesh: RefineMesh,
-  topology: RefineTopology,
-  region: Region,
-  solved: Solved,
-  edge: number,
-  weight: Float32Array,
-) {
-  const { vertices } = region;
-  const { position, crease } = mesh;
-  const { target, detail, island, moves } = solved;
-  const count = vertices.length;
-  const creases = Int32Array.from(vertices, (v) => (crease[v] ? 0 : -1));
-  const toIsland = surfaceDistance(mesh, topology, region, island, islandEase * edge);
-  const toCrease = surfaceDistance(mesh, topology, region, creases, creaseEase * edge);
-  for (let i = 0; i < count; i++) {
-    if (crease[vertices[i]]) {
-      weight[i] = 0;
-      continue;
+/** The region's triangles split into edge-connected patches, ordered by smallest triangle. */
+function patchesOf(mesh: RefineMesh, topology: RefineTopology, triangles: Uint32Array) {
+  const slot = new Int32Array(mesh.triangleCount).fill(-1);
+  const sorted = Uint32Array.from(triangles).sort();
+  let count = 0;
+  for (const t of sorted) if (slot[t] < 0) sorted[(slot[t] = count++)] = t;
+  const parent = Int32Array.from({ length: count }, (_, n) => n);
+  const root = (n: number): number => {
+    while (parent[n] !== n) n = parent[n] = parent[parent[n]];
+    return n;
+  };
+  const { triangleStart, trianglesOf } = topology;
+  const { corners, weldOf } = mesh;
+  for (let n = 0; n < count; n++) {
+    const t = sorted[n];
+    for (let k = 0; k < 3; k++) {
+      const a = weldOf[corners[t * 3 + k]],
+        b = weldOf[corners[t * 3 + ((k + 1) % 3)]];
+      for (let j = triangleStart[a]; j < triangleStart[a + 1]; j++) {
+        const u = trianglesOf[j];
+        const m = slot[u];
+        if (m < 0 || u === t) continue;
+        const shares =
+          weldOf[corners[u * 3]] === b ||
+          weldOf[corners[u * 3 + 1]] === b ||
+          weldOf[corners[u * 3 + 2]] === b;
+        if (!shares) continue;
+        const x = root(n),
+          y = root(m);
+        if (x !== y) parent[Math.max(x, y)] = Math.min(x, y);
+      }
     }
-    if (detail[i] === 1) continue;
-    const si = smoothstep(toIsland.distance[i] / (islandEase * edge));
-    const sc = smoothstep(toCrease.distance[i] / (creaseEase * edge));
-    if (si === 1 && sc === 1) continue;
-    const n = toIsland.label[i];
-    const v = vertices[i] * 3;
-    for (let axis = 0; axis < 3; axis++) {
-      const own = target[i * 3 + axis] - position[v + axis];
-      const carried = si < 1 ? moves[n * 3 + axis] : 0;
-      target[i * 3 + axis] = position[v + axis] + sc * ((1 - si) * carried + si * own);
-    }
-    detail[i] = 2;
   }
+  const groups = new Map<number, number[]>();
+  for (let n = 0; n < count; n++) {
+    const r = root(n);
+    const list = groups.get(r);
+    if (list) list.push(sorted[n]);
+    else groups.set(r, [sorted[n]]);
+  }
+  return [...groups.values()].map((list) => Uint32Array.from(list));
 }
 
 const smoothstep = (t: number) => (t >= 1 ? 1 : t <= 0 ? 0 : t * t * (3 - 2 * t));
@@ -544,22 +803,18 @@ function medianEdge(mesh: RefineMesh, triangles: Uint32Array) {
   return lengths.length ? lengths[lengths.length >> 1] : 0;
 }
 
-/**
- * Smoothstep of the distance along the surface from the border, reaching 1 at `blend`, times the
- * strength. Border vertices get 0.
- */
+/** Smoothstep of the distance along the surface from the border, reaching 1 at `blend`. */
 function blendWeights(
   mesh: RefineMesh,
   topology: RefineTopology,
   region: Region,
   blend: number,
-  strength: number,
 ): Float32Array {
   const sources = Int32Array.from(region.border, (b) => (b ? 0 : -1));
   const { distance } = surfaceDistance(mesh, topology, region, sources, Infinity);
   return Float32Array.from(distance, (d) => {
     if (d === 0) return 0;
-    return (blend > 0 ? smoothstep(d / blend) : 1) * strength;
+    return blend > 0 ? smoothstep(d / blend) : 1;
   });
 }
 
