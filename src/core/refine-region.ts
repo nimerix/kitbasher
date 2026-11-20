@@ -16,6 +16,7 @@ import {
   weldedCorner,
 } from './refine-mesh';
 import { smoothScale, smoothTargets } from './refine-smooth';
+import { type Sweep, fitSweep, projectToSweep, sweepDistance, sweepNormal } from './refine-sweep';
 
 export type Treatment = 'smooth' | 'flatten' | 'shape';
 export type RegionShape = 'auto' | 'cylinder' | 'cone' | 'sphere' | 'sweep';
@@ -107,7 +108,6 @@ export function solveRegion(
   input: RegionInput,
   noise: number,
 ): RegionSolve | null {
-  if (input.treatment === 'shape' && input.shape === 'sweep') return null;
   const { vertices, indexOf } = regionOf(mesh, topology, input.triangles);
   const count = vertices.length;
   const { position } = mesh;
@@ -116,7 +116,7 @@ export function solveRegion(
     target.set(position.subarray(vertices[i] * 3, vertices[i] * 3 + 3), i * 3);
   const weight = new Float32Array(count);
   const detail = new Uint8Array(count);
-  const fits: (ShapeKind | null)[] = [];
+  const fits: (Fitted | null)[] = [];
   let solved = false;
   // Each patch has its own fit, detail and blend; a vertex two patches share is on both borders.
   for (const triangles of patchesOf(mesh, topology, input.triangles)) {
@@ -149,12 +149,31 @@ export function applyRegion(mesh: RefineMesh, solve: RegionSolve): Uint32Array {
   return Uint32Array.from(written);
 }
 
+type Fitted = ShapeKind | 'sweep';
+/** The surface Flatten and Shape fit: one of the fitted shapes, or a sweep. */
+type Surface = Shape | { kind: 'sweep'; sweep: Sweep };
+
+const offsetOf = (surface: Surface, x: number, y: number, z: number) =>
+  surface.kind === 'sweep'
+    ? sweepDistance(surface.sweep, x, y, z)
+    : shapeDistance(surface, x, y, z);
+
+function projectTo(surface: Surface, x: number, y: number, z: number, out: Float32Array) {
+  if (surface.kind === 'sweep') projectToSweep(surface.sweep, x, y, z, out);
+  else projectToShape(surface, x, y, z, out);
+}
+
+function normalOf(surface: Surface, x: number, y: number, z: number, out: Float64Array) {
+  if (surface.kind === 'sweep') sweepNormal(surface.sweep, x, y, z, out);
+  else shapeNormal(surface, x, y, z, out);
+}
+
 /** Per patch vertex: its move at full weight, whether it is detail, and whether it stays put. */
 interface Base {
   move: Float64Array;
   detail: Uint8Array;
   held: Uint8Array;
-  fitted: ShapeKind | null;
+  fitted: Fitted | null;
 }
 
 interface PatchSolve {
@@ -162,7 +181,7 @@ interface PatchSolve {
   target: Float64Array;
   weight: Float32Array;
   detail: Uint8Array;
-  fitted: ShapeKind | null;
+  fitted: Fitted | null;
 }
 
 function solvePatch(
@@ -218,19 +237,19 @@ function fitBase(
   const points = new Float32Array(count * 3);
   for (let i = 0; i < count; i++)
     points.set(position.subarray(vertices[i] * 3, vertices[i] * 3 + 3), i * 3);
-  const first = fitOf(points, normals, input, noise);
+  const first = fitOf(points, normals, input, noise, edge);
   if (!first) return null;
-  const kind = first.shape.kind;
-  const classify = (shape: Shape) => {
+  const kind = first.kind;
+  const classify = (shape: Surface) => {
     const offset = Float64Array.from({ length: count }, (_, i) =>
-      shapeDistance(shape, points[i * 3], points[i * 3 + 1], points[i * 3 + 2]),
+      offsetOf(shape, points[i * 3], points[i * 3 + 1], points[i * 3 + 2]),
     );
     const detail = input.keepDetail
       ? detailOf(topology, region, offset, noise, input.detail, points, normals)
       : new Uint8Array(count);
     return { detail, held: facingAway(shape, points, normals, detail) };
   };
-  let shape = first.shape;
+  let shape = first;
   let { detail, held } = classify(shape);
   let used: Float64Array | null = null;
   for (let round = 0; round < fitRounds; round++) {
@@ -252,7 +271,7 @@ function fitBase(
       border[i] || near[i] < Infinity || nearCrease[i] < Infinity ? 0 : b ** fitWeightPower,
     );
     if (used && weights.every((w, i) => w === used![i])) break;
-    const next = weightedFit(points, normals, kind, noise, weights);
+    const next = weightedFit(points, normals, shape, noise, weights, edge);
     if (!next) return null;
     shape = next;
     used = weights;
@@ -262,23 +281,24 @@ function fitBase(
   const projected = new Float32Array(3);
   for (let i = 0; i < count; i++) {
     const v = vertices[i] * 3;
-    projectToShape(shape, position[v], position[v + 1], position[v + 2], projected);
+    projectTo(shape, position[v], position[v + 1], position[v + 2], projected);
     for (let axis = 0; axis < 3; axis++) move[i * 3 + axis] = projected[axis] - position[v + axis];
   }
   return { move, detail, held, fitted: kind };
 }
 
 /**
- * The surface fitted to the points with weight, each counting by its weight; null when their total
- * weight is under 3 or they lie on one line.
+ * The surface of `previous`'s kind fitted to the points with weight, each counting by its weight;
+ * null when their total weight is under 3 or they lie on one line.
  */
 function weightedFit(
   points: Float32Array,
   normals: Float32Array,
-  kind: ShapeKind,
+  previous: Surface,
   noise: number,
   weights: Float64Array,
-): Shape | null {
+  edge: number,
+): Surface | null {
   const used: number[] = [];
   let total = 0;
   const mean = [0, 0, 0];
@@ -301,6 +321,11 @@ function weightedFit(
   const trace = c[0] + c[4] + c[8];
   const pairs = c[0] * c[4] + c[0] * c[8] + c[4] * c[8] - c[1] * c[3] - c[2] * c[6] - c[5] * c[7];
   if (!(pairs > 1e-10 * trace * trace)) return null;
+  if (previous.kind === 'sweep') {
+    // On the first fit's centre line: the weights narrow a partial tube's view of it.
+    const fit = fitSweep(points, normals, noise, weights, edge, previous.sweep);
+    return fit && { kind: 'sweep', sweep: fit.sweep };
+  }
   const pick = (values: Float32Array) =>
     Float32Array.from(
       { length: used.length * 3 },
@@ -309,7 +334,7 @@ function weightedFit(
   const fit = fitShape(
     pick(points),
     pick(normals),
-    kind,
+    previous.kind,
     noise,
     Float64Array.from(used, (i) => weights[i]),
   );
@@ -320,13 +345,18 @@ function weightedFit(
  * Base vertices whose normal is within `facing` of turning away from the surface's own normal where
  * they project, with the surface's side taken from the vertices' normals as a whole.
  */
-function facingAway(shape: Shape, points: Float32Array, normals: Float32Array, detail: Uint8Array) {
+function facingAway(
+  shape: Surface,
+  points: Float32Array,
+  normals: Float32Array,
+  detail: Uint8Array,
+) {
   const count = detail.length;
   const along = new Float64Array(count);
   const normal = new Float64Array(3);
   let side = 0;
   for (let i = 0; i < count; i++) {
-    shapeNormal(shape, points[i * 3], points[i * 3 + 1], points[i * 3 + 2], normal);
+    normalOf(shape, points[i * 3], points[i * 3 + 1], points[i * 3 + 2], normal);
     along[i] =
       normal[0] * normals[i * 3] + normal[1] * normals[i * 3 + 1] + normal[2] * normals[i * 3 + 2];
     side += along[i];
@@ -335,16 +365,23 @@ function facingAway(shape: Shape, points: Float32Array, normals: Float32Array, d
   return Uint8Array.from(along, (a, i) => (!detail[i] && sign * a < facing ? 1 : 0));
 }
 
+/** The first fit of a patch; Auto picks among the shapes only, never a sweep. */
 function fitOf(
   points: Float32Array,
   normals: Float32Array,
   input: RegionInput,
   noise: number,
-): ShapeFit | null {
-  if (input.treatment === 'flatten') return fitShape(points, normals, 'plane', noise);
-  if (input.shape !== 'auto') return fitShape(points, normals, input.shape as ShapeKind, noise);
+  edge: number,
+): Surface | null {
+  const shape = (fit: ShapeFit | null) => fit?.shape ?? null;
+  if (input.treatment === 'flatten') return shape(fitShape(points, normals, 'plane', noise));
+  if (input.shape === 'sweep') {
+    const fit = fitSweep(points, normals, noise, null, edge);
+    return fit && { kind: 'sweep', sweep: fit.sweep };
+  }
+  if (input.shape !== 'auto') return shape(fitShape(points, normals, input.shape, noise));
   try {
-    return fitAuto(points, normals, noise);
+    return fitAuto(points, normals, noise).shape;
   } catch {
     return null;
   }

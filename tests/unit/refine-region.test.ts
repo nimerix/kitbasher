@@ -308,15 +308,6 @@ describe('solveRegion and applyRegion', () => {
     ).toBeNull();
   });
 
-  it('returns null for a sweep, which is not yet fitted', () => {
-    const model = modelOf(softCylinder(1.5, 1, 0.3));
-    const input: RegionInput = {
-      ...flatten(wallRegion(model.mesh)),
-      treatment: 'shape',
-      shape: 'sweep',
-    };
-    expect(solveRegion(model.mesh, model.topology, input, model.noise)).toBeNull();
-  });
   it('never collapses or turns over a triangle, holding faces turned away from the fit', () => {
     const model = modelOf(new BoxGeometry(4, 3, 0.08, 12, 9, 1));
     const all = allTriangles(model.mesh);
