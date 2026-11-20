@@ -15,6 +15,7 @@ import type { EdgeInput, EdgeSolve } from '../core/refine-edge';
 import type { RegionInput, RegionSolve, RegionShape, Treatment } from '../core/refine-region';
 import {
   refineBrushRadius,
+  refineDraftLimit,
   refineEdited,
   refineSolved,
   useEditor,
@@ -23,6 +24,7 @@ import {
 } from '../core/store';
 import {
   autoRule,
+  draftSkippedHint,
   endLabels,
   endOption,
   extendsGuide,
@@ -391,6 +393,16 @@ function Choice<T extends string>({
       />
     </div>
   );
+}
+
+/** Says that the preview is off while more features are selected than it shows. */
+function PreviewOffHint() {
+  const skipped = useEditor((s) => !!s.refine?.draftSkipped);
+  return skipped ? (
+    <p className="anchor-help" role="status">
+      {draftSkippedHint(refineDraftLimit)}
+    </p>
+  ) : null;
 }
 
 /** Dismiss and Accept for the mode's selected pending features. */
@@ -897,6 +909,7 @@ function DetectControls({ view, targets, owned }: ModeProps) {
           >
             Select all proposed
           </button>
+          <PreviewOffHint />
           <div className="warp-gap-row">
             <button
               className="button secondary"

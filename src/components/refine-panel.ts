@@ -15,6 +15,10 @@ export const foldWarning = (n: number) =>
 
 export const skippedWarning = (n: number) => `${triangles(n)} could not be cut cleanly.`;
 
+/** Said where features are selected when too many are for the preview to show them. */
+export const draftSkippedHint = (limit: number) =>
+  `Preview is off while more than ${limit} are selected.`;
+
 /** What a region's Auto shape fitted, or null when nothing was fitted. */
 export const fittedLabel = (fitted: RegionSolve['fitted']) => (fitted ? `Fits a ${fitted}` : null);
 

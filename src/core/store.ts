@@ -6,6 +6,7 @@ import {
   notify as recordNotification,
   startTask,
   updateTask,
+  useActivity,
 } from './activity';
 import type { DriveFileBinding } from './types';
 import {
@@ -374,6 +375,8 @@ export interface RefineFeature {
   curve?: EdgeCurve;
   /** Pieces an accepted edge's cut came out in; more than 1 when it could not be cut whole. */
   pieces?: number;
+  /** Whether the user changed it since it was made or proposed; a new Detect keeps it then. */
+  edited?: boolean;
 }
 /** A session undo step. Its model shares every array that did not change with its neighbours. */
 export interface RefineStep {
@@ -654,6 +657,8 @@ interface EditorState {
   endRefineStroke: () => void;
   /** Ends the stroke under way without committing it: no step, and the preview shows the model. */
   cancelRefineStroke: () => void;
+  /** Puts the session back as it was when the handle drag under way began, its steps included. */
+  cancelRefineDrag: () => void;
   detectRefine: () => Promise<void>;
   cancelRefineDetect: () => void;
   setRefineBrushRadius: (radius: number) => void;
@@ -3456,8 +3461,10 @@ export const useEditor = create<EditorState>((set, get) => ({
         segments[segments.length - 1] = { ...last, points: [...last.points, first] };
         next = { ...input, segments, closed: true, joints: [...input.joints, edge.joint] };
       } else if (!open && edge.kind !== 'arc' && (segments.length > 1 || last.points.length > 2)) {
+        // A closing segment adds two joints: where it starts, and where it meets the first point.
         segments.push({ kind: edge.kind, points: [end, first] });
-        next = { ...input, segments, closed: true, joints: [...input.joints, edge.joint] };
+        const joints = [...input.joints, edge.joint, edge.joint];
+        next = { ...input, segments, closed: true, joints };
       } else return;
     } else if (open) {
       segments[segments.length - 1] = { ...last, points: [...last.points, point] };
@@ -3491,8 +3498,19 @@ export const useEditor = create<EditorState>((set, get) => ({
     if (!begin && refineDrag?.key === key && refineDrag.step === refine.undo.at(-1))
       set({ refine: { ...refine, features } });
     else {
+      const { selected, undo, redo, drawing, draft, draftSkipped } = refine;
+      const before = {
+        features: refine.features,
+        selected,
+        undo,
+        redo,
+        drawing,
+        draft,
+        draftSkipped,
+      };
+      const built = builtDraft;
       commitRefine({ features });
-      refineDrag = { key, step: get().refine?.undo.at(-1) };
+      refineDrag = { key, step: get().refine?.undo.at(-1), session: refine.id, before, built };
     }
     scheduleRefineDraft();
   },
@@ -3600,6 +3618,7 @@ export const useEditor = create<EditorState>((set, get) => ({
       failures = {
         session: refine.id,
         known: new Map([...failures.known].filter(([id]) => kept.has(id))),
+        banners: new Map([...failures.banners].filter(([id]) => kept.has(id))),
       };
     commitRefine({
       features,
@@ -3665,19 +3684,38 @@ export const useEditor = create<EditorState>((set, get) => ({
       get().notify(noEdgeNotice, 'info');
       return;
     }
-    // The brush is the guide's width; where the rounding is wider than the brush, the solver's own.
+    // The brush is the guide's width. Where the rounding is wider, the solver's own width would
+    // reach past the brush, so that guide waits, previewed, for the user to accept it.
     const { model } = refine;
-    const drawn: RefineProposal = { type: 'edge', input };
-    const guide = solveProposal(model, model.mesh, drawn) ? input : { ...input, width: null };
-    const feature: RefineFeature = {
+    const feature = (guide: EdgeInput): RefineFeature => ({
       id: uid(),
       state: 'pending',
       origin: 'hand',
       feature: { type: 'edge', input: guide },
-    };
-    acceptFeatures(refine, [...refine.features, feature], [feature]);
+    });
+    if (solveProposal(model, model.mesh, { type: 'edge', input })) {
+      const drawn = feature(input);
+      acceptFeatures(refine, [...refine.features, drawn], [drawn]);
+      return;
+    }
+    const wide = feature({ ...input, width: null });
+    if (!solveProposal(model, model.mesh, wide.feature)) {
+      acceptFeatures(refine, [...refine.features, wide], [wide]);
+      return;
+    }
+    commitRefine({ features: [...refine.features, wide], selected: [wide.id], drawing: false });
+    get().notify(wideCreaseNotice, 'info');
   },
   cancelRefineStroke: () => discardRefineStroke(),
+  cancelRefineDrag: () => {
+    const drag = refineDrag;
+    refineDrag = null;
+    const refine = readyRefine();
+    // Only while nothing else has happened since the drag began.
+    if (!drag || refine?.id !== drag.session || drag.step !== refine.undo.at(-1)) return;
+    builtDraft = drag.built;
+    set({ refine: showRefine({ ...refine, ...drag.before }) });
+  },
   detectRefine: async () => {
     const refine = readyRefine();
     if (!refine || refine.detect.running) return;
@@ -3732,11 +3770,14 @@ export const useEditor = create<EditorState>((set, get) => ({
       return;
     }
     completeTask(taskId);
-    // A new run replaces the detected proposals still pending, and leaves out what is accepted.
-    const kept = current!.features.filter((f) => f.origin !== 'detected' || f.state !== 'pending');
+    // A new run replaces the detected proposals still pending and untouched, and leaves out what
+    // is accepted. One the user edited is their work, and stays.
+    const kept = current!.features.filter(
+      (f) => f.origin !== 'detected' || f.state !== 'pending' || f.edited,
+    );
     const accepted = kept.filter((f) => f.state === 'accepted');
     const found: RefineFeature[] = proposals
-      .filter((feature) => !repeatsAccepted(feature, accepted))
+      .filter((feature) => !repeatsAccepted(feature, accepted, model.mesh))
       .map((feature) => ({ id: uid(), state: 'pending', origin: 'detected', feature }));
     const ids = new Set(kept.map((f) => f.id));
     const selected = current!.selected.filter((id) => ids.has(id));
@@ -5216,7 +5257,8 @@ const importRefineCode = () =>
     import('./refine-cut'),
     import('./refine-model'),
     import('./refine-job'),
-  ]).then(([edge, region, brush, paint, cut, model, job]) => ({
+    import('./refine-curve'),
+  ]).then(([edge, region, brush, paint, cut, model, job, curve]) => ({
     edge,
     region,
     brush,
@@ -5224,6 +5266,7 @@ const importRefineCode = () =>
     cut,
     model,
     job,
+    curve,
   }));
 /** The Refine modules, loaded with the first session so the app does not load them until used. */
 let refineCode: Awaited<ReturnType<typeof importRefineCode>> | null = null;
@@ -5455,7 +5498,17 @@ export function commitRefine(next: Partial<RefineSession>) {
 let refineDetect: AbortController | null = null;
 
 /** The point last dragged and the step its drag recorded, so a drag is one step. */
-let refineDrag: { key: string; step: RefineStep | undefined } | null = null;
+let refineDrag: {
+  key: string;
+  step: RefineStep | undefined;
+  session: string;
+  /** The session as the drag found it, and the draft record then, which a cancel puts back. */
+  before: Pick<
+    RefineSession,
+    'features' | 'selected' | 'undo' | 'redo' | 'drawing' | 'draft' | 'draftSkipped'
+  >;
+  built: typeof builtDraft;
+} | null = null;
 
 interface RefineStroke {
   session: string;
@@ -5629,9 +5682,9 @@ function solveProposal<P extends RefineProposal>(
 }
 
 /**
- * Folds one solve pass into the failures already reported, by feature id: a feature that solved
- * is dropped; one failing for a reason not on record is news. News also drops the features not
- * failing in this pass, so a feature that fails after another one did is reported again.
+ * Folds one solve pass into the failures already reported, one record per feature id: a feature
+ * that solved is dropped; one failing for a reason not on its record is news. A feature not in the
+ * pass keeps its record whatever the others do.
  */
 export function reportFailures(
   known: ReadonlyMap<string, string>,
@@ -5641,27 +5694,61 @@ export function reportFailures(
   const news: string[] = [];
   for (const { id, notice } of pass)
     if (notice === null) next.delete(id);
-    else if (known.get(id) !== notice) news.push(notice);
-  if (news.length)
-    for (const id of next.keys()) if (!pass.some((p) => p.id === id && p.notice)) next.delete(id);
-  for (const { id, notice } of pass) if (notice !== null) next.set(id, notice);
+    else {
+      if (known.get(id) !== notice) news.push(notice);
+      next.set(id, notice);
+    }
   return { known: next, news };
 }
 
-/** The failures last reported in a session, shared by the preview and Accept. */
-let failures: { session: string; known: ReadonlyMap<string, string> } = {
-  session: '',
-  known: new Map(),
-};
+/**
+ * The failures reported in a session: each feature's reason, and the banner that said it, so Accept
+ * can tell whether that banner is still on screen.
+ */
+let failures: {
+  session: string;
+  known: ReadonlyMap<string, string>;
+  banners: ReadonlyMap<string, string>;
+} = { session: '', known: new Map(), banners: new Map() };
 
-/** Records a solve pass of the session and returns the notices it should raise. */
-function solvePass(session: string, pass: { id: string; notice: string | null }[]) {
-  const { known, news } = reportFailures(
-    failures.session === session ? failures.known : new Map(),
-    pass,
+/** Whether the notification banner `id` is on screen: not dismissed, and among those shown. */
+const bannerShown = (id: string | undefined) =>
+  !!id &&
+  useActivity
+    .getState()
+    .notifications.filter((n) => !n.dismissed)
+    .slice(0, 3)
+    .some((n) => n.id === id);
+
+/** Raises `notice` and records its banner for the failing features of `pass` it speaks for. */
+function raiseFailure(
+  notice: string,
+  pass: readonly { id: string; notice: string | null }[],
+  banners: Map<string, string>,
+) {
+  useEditor.getState().notify(notice, 'info');
+  const banner = useActivity.getState().notifications.find((n) => n.message === notice)?.id;
+  if (banner) for (const p of pass) if (p.notice === notice) banners.set(p.id, banner);
+}
+
+/**
+ * Records a solve pass of the session and raises its notices. The preview says each new failure
+ * once. Accept (`press`) says at most one thing: a new failure, or a known one whose banner is no
+ * longer on screen.
+ */
+function solvePass(session: string, pass: { id: string; notice: string | null }[], press = false) {
+  const same = failures.session === session;
+  const before = same ? failures.known : new Map<string, string>();
+  const { known } = reportFailures(before, pass);
+  const banners = new Map(same ? failures.banners : []);
+  for (const id of banners.keys()) if (!known.has(id)) banners.delete(id);
+  failures = { session, known, banners };
+  const due = pass.filter(
+    ({ id, notice }) =>
+      notice !== null && (before.get(id) !== notice || (press && !bannerShown(banners.get(id)))),
   );
-  failures = { session, known };
-  return news;
+  const notices = [...new Set(due.map((p) => p.notice!))];
+  for (const notice of press ? notices.slice(0, 1) : notices) raiseFailure(notice, pass, banners);
 }
 
 /**
@@ -5730,11 +5817,8 @@ function acceptFeatures(
     }
     accepted = true;
   }
-  const { notify, toast } = useEditor.getState();
-  // A press that changed nothing says why, once, unless that notice is already showing.
-  const notices = new Set(solvePass(refine.id, pass));
-  for (const { notice } of pass) if (notice && toast?.message !== notice) notices.add(notice);
-  for (const notice of notices) notify(notice, 'info');
+  const { notify } = useEditor.getState();
+  solvePass(refine.id, pass, true);
   if (!accepted) return;
   commitRefine({
     model,
@@ -5808,24 +5892,85 @@ function solvedForm(input: EdgeInput): EdgeInput {
   };
 }
 
-/** How near an accepted edge's curve a detected edge's guide points lie for it to repeat it, mm. */
+/** How near an accepted edge's curve a detected edge runs to repeat it, mm. */
 const repeatedEdge = 0.15;
+/** Spacing of the samples along a detected edge, mm, and the fewest samples taken. */
+const repeatStep = 0.2,
+  repeatSamples = 5;
+/** The share of a detected edge's samples, or of a region's area, that makes it a repeat. */
+const repeatedEdgeShare = 0.8,
+  repeatedRegionShare = 0.5;
 
-/** Whether a detected proposal repeats an accepted feature: along its edge, or mostly inside it. */
-function repeatsAccepted(proposal: RefineProposal, accepted: RefineFeature[]) {
+/**
+ * Whether a detected proposal repeats an accepted feature: an edge that runs along an accepted
+ * edge's solved curve over most of its length, or a region mostly inside an accepted one by area.
+ */
+function repeatsAccepted(proposal: RefineProposal, accepted: RefineFeature[], mesh: RefineMesh) {
   if (proposal.type === 'region') {
     const { triangles } = proposal.input;
+    let total = 0;
+    for (const t of triangles) total += triangleArea(mesh, t);
     return accepted.some((f) => {
       if (f.feature.type !== 'region') return false;
       const covered = new Set(f.feature.input.triangles);
       let inside = 0;
-      for (const t of triangles) if (covered.has(t)) inside++;
-      return inside > triangles.length / 2;
+      for (const t of triangles) if (covered.has(t)) inside += triangleArea(mesh, t);
+      return inside > total * repeatedRegionShare;
     });
   }
-  const points = proposal.input.segments.flatMap((s) => s.points);
-  return accepted.some(
-    ({ curve }) => curve && points.every((p) => distanceToCurve(curve, p.position) <= repeatedEdge),
+  const samples = drawnSamples(proposal.input);
+  return accepted.some(({ curve }) => {
+    if (!curve) return false;
+    let near = 0;
+    for (const p of samples) if (distanceToCurve(curve, p) <= repeatedEdge) near++;
+    return near >= samples.length * repeatedEdgeShare;
+  });
+}
+
+/** Points along the curves a guide's segments draw, every repeatStep and at least repeatSamples. */
+function drawnSamples(input: EdgeInput): Vec3[] {
+  const polylines = input.segments.map(
+    ({ kind, points }) =>
+      refineCode!.curve.fitCurve(
+        kind,
+        points.flatMap((p) => p.position),
+        points.length,
+        repeatStep / 4,
+      ).points,
+  );
+  const spans: [Vec3, Vec3, number][] = [];
+  let length = 0;
+  for (const line of polylines)
+    for (let i = 3; i < line.length; i += 3) {
+      const a: Vec3 = [line[i - 3], line[i - 2], line[i - 1]],
+        b: Vec3 = [line[i], line[i + 1], line[i + 2]];
+      const span = Math.hypot(b[0] - a[0], b[1] - a[1], b[2] - a[2]);
+      spans.push([a, b, span]);
+      length += span;
+    }
+  if (!spans.length) return input.segments.flatMap((s) => s.points.map((p) => p.position));
+  const count = Math.max(repeatSamples, Math.ceil(length / repeatStep) + 1);
+  const samples: Vec3[] = [];
+  let k = 0,
+    start = 0;
+  for (let i = 0; i < count; i++) {
+    const s = (i * length) / (count - 1);
+    while (k < spans.length - 1 && start + spans[k][2] < s) start += spans[k++][2];
+    const [a, b, span] = spans[k];
+    const t = span > 0 ? Math.min(1, Math.max(0, (s - start) / span)) : 0;
+    samples.push([0, 1, 2].map((j) => a[j] + t * (b[j] - a[j])) as Vec3);
+  }
+  return samples;
+}
+
+/** Area of triangle `t` of `mesh`. */
+function triangleArea(mesh: RefineMesh, t: number) {
+  const { position, weldOf, corners } = mesh;
+  const [a, b, c] = [0, 1, 2].map((k) => weldOf[corners[t * 3 + k]] * 3);
+  const u = [0, 1, 2].map((k) => position[b + k] - position[a + k]),
+    w = [0, 1, 2].map((k) => position[c + k] - position[a + k]);
+  return (
+    Math.hypot(u[1] * w[2] - u[2] * w[1], u[2] * w[0] - u[0] * w[2], u[0] * w[1] - u[1] * w[0]) / 2
   );
 }
 
@@ -5946,8 +6091,7 @@ function rebuildRefineDraft() {
   useEditor.setState({
     refine: showDraft({ ...refine, features: curved, draftSkipped: false }, mesh, changed),
   });
-  const { notify } = useEditor.getState();
-  for (const notice of solvePass(refine.id, pass)) notify(notice, 'info');
+  solvePass(refine.id, pass);
 }
 
 /**
@@ -5998,6 +6142,7 @@ const unsteppedRefine = { draft: null, folds: noFolds, skipped: noFolds };
 const noEdgeNotice =
   'No edge found under this guide. Move it onto the rounded edge or change Width.';
 const smallRegionNotice = 'This area is too small to fit a surface. Paint more of it.';
+const wideCreaseNotice = 'The edge is wider than the brush. Check the preview, then accept it.';
 const cutNotice = 'Some triangles along this edge could not be cut cleanly. Check the marked area.';
 
 /** The session, when it is ready for work. */
@@ -6066,8 +6211,18 @@ function drawnGuide(refine: RefineSession) {
     : null;
 }
 
+/** Whether a setting change left a proposal's input as it was, value for value. */
+const sameInput = (a: RefineProposal, b: RefineProposal) => {
+  const [x, y] = [
+    a.input as unknown as Record<string, unknown>,
+    b.input as unknown as Record<string, unknown>,
+  ];
+  const keys = new Set([...Object.keys(x), ...Object.keys(y)]);
+  return [...keys].every((key) => x[key] === y[key]);
+};
+
 const withProposal = (refine: RefineSession, id: string, feature: RefineProposal) =>
-  refine.features.map((f) => (f.id === id ? { ...f, feature } : f));
+  refine.features.map((f) => (f.id === id ? { ...f, feature, edited: true } : f));
 
 /**
  * The features with each selected pending one's proposal replaced by `change`'s, unless null; the
@@ -6083,7 +6238,7 @@ function updateSelected(
     const feature = f.state === 'pending' && selected.has(f.id) ? change(f.feature, f.id) : null;
     if (!feature) return f;
     changed = true;
-    return { ...f, feature };
+    return sameInput(feature, f.feature) ? { ...f, feature } : { ...f, feature, edited: true };
   });
   return changed ? features : refine.features;
 }
@@ -6103,19 +6258,29 @@ function withoutPoint(input: EdgeInput, segment: number, index: number): EdgeInp
     index = segments[segment].points.length - 1;
   }
   const n = segments.length;
-  const points = segments[segment].points;
-  const lastPoint = index === points.length - 1;
   const loops = () =>
     samePoint(segments[0].points[0], segments[segments.length - 1].points.at(-1)!);
-  if (closed && ((segment === 0 && index === 0) || (segment === n - 1 && lastPoint))) {
-    closed = false;
-    joints.pop();
-    if (n === 1 && !loops()) points.splice(index, 1);
-    else {
-      segments[0].points.shift();
-      segments[segments.length - 1].points.pop();
-    }
-  } else if (lastPoint && segment < n - 1) {
+  const closing =
+    closed &&
+    ((segment === 0 && index === 0) ||
+      (segment === n - 1 && index === segments[n - 1].points.length - 1));
+  if (closing && n > 1) {
+    // Started one segment on, the closing point is shared like any other and is removed as one.
+    segments.push(segments.shift()!);
+    joints.push(joints.shift()!);
+    segment = n - 2;
+    index = segments[segment].points.length - 1;
+  }
+  const points = segments[segment].points;
+  const lastPoint = index === points.length - 1;
+  if (closing && n === 1) {
+    if (loops()) {
+      // A spline back on its first point starts again from its second.
+      points.shift();
+      points.pop();
+      if (points.length) points.push(points[0]);
+    } else points.splice(index, 1);
+  } else if (lastPoint && segment < segments.length - 1) {
     points.pop();
     if (points.length) segments[segment + 1].points[0] = points[points.length - 1];
     else segments[segment + 1].points.shift();
@@ -6138,12 +6303,14 @@ function withoutPoint(input: EdgeInput, segment: number, index: number): EdgeInp
 }
 
 /**
- * Whether closed segments are a form solveEdge closes: one arc of 3 points, one spline back on
- * its first point, or several segments back on the first point, through at least 3 points.
+ * Whether closed segments are a form solveEdge closes: each segment complete, and one arc of 3
+ * points, one spline back on its first point, or several segments back on the first point,
+ * through at least 3 points.
  */
 function closesAs(segments: EdgeSegment[]) {
   const [first] = segments;
   const end = segments[segments.length - 1].points.at(-1)!;
+  if (!segments.every((s) => s.points.length >= pointsNeeded[s.kind])) return false;
   const distinct: GuidePoint[] = [];
   for (const { points } of segments)
     for (const p of points) if (!distinct.some((q) => samePoint(p, q))) distinct.push(p);

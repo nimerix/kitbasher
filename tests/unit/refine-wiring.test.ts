@@ -1,8 +1,10 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { dismissNotification, useActivity } from '../../src/core/activity';
 import { keyActions } from '../../src/core/keybindings';
 import { keyTools } from '../../src/hooks/useWorkbench';
 import {
   autoRule,
+  draftSkippedHint,
   endOption,
   extendsGuide,
   featureCounts,
@@ -19,6 +21,7 @@ import {
 import type { EdgeSolve } from '../../src/core/refine-edge';
 import {
   drawingRefineGuide,
+  refineDraftLimit,
   refineSolved,
   reportFailures,
   useEditor,
@@ -168,14 +171,14 @@ describe('Refine failure notices', () => {
     ]);
   });
 
-  it('reports a feature again after a different feature failed in between', () => {
+  it('keeps each feature record when a different feature fails in between', () => {
     expect(
       run([
         [{ id: 'a', notice: noEdge }],
         [{ id: 'b', notice: noEdge }],
         [{ id: 'a', notice: noEdge }],
       ]),
-    ).toEqual([[noEdge], [noEdge], [noEdge]]);
+    ).toEqual([[noEdge], [noEdge], []]);
   });
 
   it('keeps a failure not in the pass when nothing new failed', () => {
@@ -186,6 +189,14 @@ describe('Refine failure notices', () => {
         [{ id: 'a', notice: small }],
       ]),
     ).toEqual([[small], [], []]);
+  });
+});
+
+describe('Refine preview limit hint', () => {
+  it('says the preview is off above the draft limit', () => {
+    expect(draftSkippedHint(refineDraftLimit)).toBe(
+      'Preview is off while more than 8 are selected.',
+    );
   });
 });
 
@@ -256,7 +267,7 @@ describe('Refine store helpers for the panel and keys', () => {
     expect(drawingRefineGuide(session())).toBeNull();
   });
 
-  it('says once that a feature does not solve, until another fails', async () => {
+  it('says once that a feature does not solve, whatever other features do', async () => {
     setup([boxPart()], ['box']);
     await ready();
     const notify = vi.fn();
@@ -276,9 +287,9 @@ describe('Refine store helpers for the panel and keys', () => {
     flatGuide(-0.4);
     expect(noEdge()).toBe(2);
     editor().selectRefine([first]);
-    expect(noEdge()).toBe(3);
+    expect(noEdge()).toBe(2);
     editor().setRefineEdge({ strength: 0.3 });
-    expect(noEdge()).toBe(3);
+    expect(noEdge()).toBe(2);
   });
 
   it('raises no notice again for regions that keep failing, from an edit or Accept', async () => {
@@ -301,8 +312,10 @@ describe('Refine store helpers for the panel and keys', () => {
     editor().acceptRefine();
     expect(small()).toBe(before);
     expect(session().features.every((f) => f.state === 'pending')).toBe(true);
-    // With the notice no longer showing, a press that changed nothing says why, once.
-    useEditor.setState({ toast: null });
+    // With its banner dismissed, a press that changed nothing says why, once.
+    for (const { id } of useActivity.getState().notifications) dismissNotification(id);
+    editor().acceptRefine();
+    expect(small()).toBe(before + 1);
     editor().acceptRefine();
     expect(small()).toBe(before + 1);
   });

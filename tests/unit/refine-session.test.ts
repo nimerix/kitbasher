@@ -15,7 +15,7 @@ import {
 import { MeshBVH } from 'three-mesh-bvh';
 import { pickRaycast, prepareEditedForPicking, type BvhRequest } from '../../src/core/bvh';
 import { runRefineRequest, type RefineRequest } from '../../src/core/refine-model';
-import { requestTaskCancellation, useActivity } from '../../src/core/activity';
+import { dismissNotification, requestTaskCancellation, useActivity } from '../../src/core/activity';
 import { editorCommands, undoTarget } from '../../src/core/commands';
 import { partMatrix, triangleCount } from '../../src/core/geometry';
 import { detectDefaults } from '../../src/core/refine-detect';
@@ -25,7 +25,7 @@ import {
   weldedCorner,
   writeRefinedGeometry,
 } from '../../src/core/refine-mesh';
-import type { EdgeCurve } from '../../src/core/refine-curve';
+import { fitCurve, type EdgeCurve } from '../../src/core/refine-curve';
 import type { RefineProposal } from '../../src/core/refine-detect';
 import type { RegionInput } from '../../src/core/refine-region';
 import * as cutCode from '../../src/core/refine-cut';
@@ -606,8 +606,15 @@ describe('refine guides', () => {
       'No edge found under this guide. Move it onto the rounded edge or change Width.',
     );
     const model = session().model;
+    // While its banner shows, Accept does not repeat it; once dismissed, Accept says it again.
+    const banners = () => useActivity.getState().notifications.length;
+    const shown = banners();
+    editor().acceptRefine();
+    expect(banners()).toBe(shown);
+    for (const { id } of useActivity.getState().notifications) dismissNotification(id);
     useEditor.setState({ toast: null });
     editor().acceptRefine();
+    expect(banners()).toBe(shown + 1);
     expect(session().model).toBe(model);
     expect(session().features[0].state).toBe('pending');
     expect(toast()).toBe(
@@ -1595,10 +1602,237 @@ describe('refine session integrity', { timeout: 20_000 }, () => {
   it('falls back to the automatic width when a crease stroke is narrower than the rounding', async () => {
     setup([coarseBox()], ['box']);
     await ready();
+    const model = session().model,
+      undo = session().undo.length;
     creaseStroke();
+    // Wider than the brush: previewed, selected and waiting, never accepted on release.
     expect(session().features).toHaveLength(1);
-    expect(session().features[0].state).toBe('accepted');
+    expect(session().features[0]).toMatchObject({ state: 'pending', origin: 'hand' });
     expect(edgeInput(session().features[0].id).width).toBeNull();
+    expect(session().selected).toEqual([session().features[0].id]);
+    expect(session().model).toBe(model);
+    expect(session().undo.length).toBe(undo + 1);
+    expect(session().draft).not.toBeNull();
+    expect(toast()).toBe('The edge is wider than the brush. Check the preview, then accept it.');
+  });
+
+  it('accepts a crease guide wider than the brush once the user accepts it', async () => {
+    setup([coarseBox()], ['box']);
+    await ready();
+    creaseStroke();
+    const id = session().features[0].id;
+    const undo = session().undo.length;
+    editor().acceptRefine();
+    expect(session().features[0]).toMatchObject({ id, state: 'accepted' });
+    expect(session().model!.mesh.crease.includes(1)).toBe(true);
+    expect(session().undo.length).toBe(undo + 1);
+    editor().undoRefine();
+    editor().undoRefine();
+    expect(session().features).toEqual([]);
+  });
+
+  it('keeps detected proposals the user edited, and their selection, across Detect', async () => {
+    setup([boxPart()], ['box']);
+    await ready();
+    const line: RefineProposal = {
+      type: 'edge',
+      input: {
+        segments: [{ kind: 'line', points: [crest(-1), crest(1)] }],
+        joints: [],
+        closed: false,
+        width: null,
+        strength: 1,
+      },
+    };
+    const area: RefineProposal = {
+      type: 'region',
+      input: { ...session().region, triangles: Uint32Array.of(0, 1, 2, 3) },
+    };
+    const publish = async (proposals: RefineProposal[]) => {
+      const held = holdDetect();
+      const detection = editor().detectRefine();
+      held.finish(proposals);
+      await detection;
+    };
+    await publish([line, area, line]);
+    const [a, b, c] = session().features.map((f) => f.id);
+    editor().selectRefine([a, b, c]);
+    editor().setRefineEdge({}, { [a]: { width: 0.6 } });
+    editor().moveRefinePoint(a, 0, 0, crest(-1.2), true);
+    editor().setRefineRegion({ strength: 0.3 });
+    const edited = [a, b].map((id) => session().features.find((f) => f.id === id)!);
+    expect(edited.map((f) => f.edited)).toEqual([true, true]);
+    expect(session().features.find((f) => f.id === c)!.edited).toBeUndefined();
+    await publish([line, area]);
+    expect(
+      session()
+        .features.slice(0, 2)
+        .map((f) => f.feature),
+    ).toEqual(edited.map((f) => f.feature));
+    expect(
+      session()
+        .features.slice(0, 2)
+        .map((f) => f.id),
+    ).toEqual([a, b]);
+    expect(session().features.some((f) => f.id === c)).toBe(false);
+    expect(
+      session()
+        .features.slice(2)
+        .map((f) => f.feature),
+    ).toEqual([line, area]);
+    expect(session().selected).toEqual([a, b]);
+  });
+
+  it('repeats an accepted edge only along it, and a region only by most of its area', async () => {
+    setup([boxPart()], ['box']);
+    await ready();
+    const edge = (kind: 'line' | 'arc', points: [number, number, number][]): RefineProposal => ({
+      type: 'edge',
+      input: {
+        segments: [{ kind, points: points.map((position) => ({ position, triangle: 0 })) }],
+        joints: [],
+        closed: false,
+        width: null,
+        strength: 1,
+      },
+    });
+    const arcPoints: [number, number, number][] = [
+      [-1, 0, 0],
+      [0, 1, 0],
+      [1, 0, 0],
+    ];
+    const chord = edge('line', [arcPoints[0], arcPoints[2]]);
+    const along = edge('line', [
+      [-0.8, 0.6, 0],
+      [-0.6, 0.8, 0],
+    ]);
+    const { mesh } = session().model!;
+    const areas = Array.from({ length: mesh.triangleCount }, (_, t) => trianglesArea(mesh, [t]));
+    // A small accepted region inside a large proposal: most of its triangles, little of its area.
+    const order = areas.map((_, t) => t).sort((x, y) => areas[x] - areas[y]);
+    const small = order.slice(0, 18),
+      large = order.slice(-8);
+    const region = (triangles: number[]): RefineProposal => ({
+      type: 'region',
+      input: { ...session().region, triangles: Uint32Array.from(triangles).sort() },
+    });
+    const surrounding = region([...small, ...large]);
+    const mostly = region([...small, ...order.slice(18, 20)]);
+    useEditor.setState({
+      refine: {
+        ...session(),
+        features: [
+          {
+            id: 'arc',
+            state: 'accepted',
+            origin: 'hand',
+            feature: edge('arc', arcPoints),
+            curve: fitCurve('arc', arcPoints.flat(), 3, 0.025),
+          },
+          { id: 'small', state: 'accepted', origin: 'hand', feature: region(small) },
+        ],
+      },
+    });
+    expect(trianglesArea(mesh, small)).toBeLessThan(trianglesArea(mesh, large) / 2);
+    const held = holdDetect();
+    const detection = editor().detectRefine();
+    held.finish([chord, along, surrounding, mostly]);
+    await detection;
+    expect(
+      session()
+        .features.filter((f) => f.state === 'pending')
+        .map((f) => f.feature),
+    ).toEqual([chord, surrounding]);
+  });
+
+  it('keeps a closed path closed when its shared first and last point is removed', async () => {
+    setup([boxPart()], ['box']);
+    await ready();
+    const [p, q, r, s] = [top(-1, -0.5), top(1, -0.5), top(1, 0.5), top(-1, 0.5)];
+    editor().setRefineEdge({ joint: 'smooth' });
+    for (const point of [p, q, r, s]) editor().addRefinePoint(point);
+    editor().setRefineEdge({ joint: 'sharp' });
+    editor().addRefinePoint(p, true);
+    const id = session().selected[0];
+    expect(edgeInput(id).joints).toEqual(['smooth', 'smooth', 'sharp', 'sharp']);
+    for (const [segment, index] of [
+      [0, 0],
+      [3, 1],
+    ]) {
+      editor().removeRefinePoint(id, segment, index);
+      expect(edgeInput(id).closed).toBe(true);
+      expect(edgeInput(id).segments.map((x) => x.points)).toEqual([
+        [q, r],
+        [r, s],
+        [s, q],
+      ]);
+      // The joints at the corners that stay, r and s, then the closing one at q.
+      expect(edgeInput(id).joints).toEqual(['smooth', 'sharp', 'smooth']);
+      editor().undoRefine();
+    }
+  });
+
+  it('puts the session back as the cancelled drag found it, steps and draft included', async () => {
+    setup([boxPart()], ['box']);
+    await ready();
+    const id = crestGuide(-1.4, 1.2);
+    editor().moveRefinePoint(id, 0, 1, crest(1.3), true);
+    editor().undoRefine();
+    const before = session();
+    expect(before.redo).toHaveLength(1);
+    editor().moveRefinePoint(id, 0, 1, crest(1.4), true);
+    editor().moveRefinePoint(id, 0, 1, crest(1.5));
+    expect(session().redo).toHaveLength(0);
+    editor().cancelRefineDrag();
+    for (const key of ['features', 'selected', 'undo', 'redo', 'drawing', 'draft'] as const)
+      expect(session()[key]).toBe(before[key]);
+    expect(differingAttributes(session().preview!, freshShown())).toEqual([]);
+    expect(heldRefineState()).not.toContain('drag');
+    // Nothing to put back: no drag, or one that something else has followed.
+    const unchanged = session();
+    editor().cancelRefineDrag();
+    expect(session()).toBe(unchanged);
+    editor().moveRefinePoint(id, 0, 1, crest(1.4), true);
+    editor().selectRefine([id]);
+    const moved = session();
+    editor().cancelRefineDrag();
+    expect(session()).toBe(moved);
+  });
+
+  it('keeps each failure record, and says at most one thing per Accept press', async () => {
+    setup([boxPart()], ['box']);
+    await ready();
+    const said: string[] = [];
+    const notify = editor().notify;
+    useEditor.setState({
+      notify: (message, kind) => {
+        said.push(message);
+        notify(message, kind);
+      },
+    });
+    editor().addRefinePoint(top(-1));
+    editor().addRefinePoint(top(1));
+    const edge = session().selected[0];
+    editor().setRefineMode('region');
+    useEditor.setState({ refine: { ...session(), triangles: [0] } });
+    editor().makeRefineRegion();
+    const region = session().selected[0];
+    expect(said.map((m) => m.slice(0, 12))).toEqual(['No edge foun', 'This area is']);
+    // The region's failure leaves the edge's record alone: reselecting the edge says nothing.
+    editor().setRefineMode('edge');
+    editor().selectRefine([edge]);
+    expect(said).toHaveLength(2);
+    // With both banners gone, each press on both failures says one thing it is not showing.
+    for (const { id } of useActivity.getState().notifications) dismissNotification(id);
+    editor().setRefineMode('detect');
+    editor().selectRefine([edge, region]);
+    expect(said).toHaveLength(2);
+    editor().acceptRefine();
+    expect(said.slice(2)).toEqual([said[0]]);
+    editor().acceptRefine();
+    expect(said.slice(3)).toEqual([said[1]]);
+    editor().acceptRefine();
+    expect(said).toHaveLength(4);
   });
 
   it('opens a closed loop left with too few corners, keeping its segments in order', async () => {

@@ -269,9 +269,8 @@ export function RefinePointerController({ pressed }: { pressed: () => boolean })
       if (!d) return;
       const state = useEditor.getState();
       if (d.kind === 'handle') {
-        const { handle } = d;
-        if (d.moved)
-          state.moveRefinePoint(handle.feature, handle.segment, handle.index, handle.point);
+        // A drag that moved the point puts the session back as it found it, history included.
+        if (d.began) state.cancelRefineDrag();
         return;
       }
       state.cancelRefineStroke();
