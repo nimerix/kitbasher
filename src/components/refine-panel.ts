@@ -82,15 +82,17 @@ export function withEnd(
 
 /**
  * What the mode's Dismiss, Accept, Delete and Enter act on: the selected pending features of the
- * mode's kind, any kind in Detect, and none in Brush.
+ * mode's kind, any kind in Detect, and edges in Brush (where a crease stroke wider than the brush
+ * leaves its guide waiting to be accepted).
  */
 export function refineTargets(refine: Pick<RefineSession, 'mode' | 'features' | 'selected'>) {
   const { mode } = refine;
-  if (mode === 'brush' || !refine.selected.length) return [];
+  if (!refine.selected.length) return [];
+  const kind = mode === 'brush' ? 'edge' : mode;
   const selected = new Set(refine.selected);
   return refine.features.filter(
     (f) =>
-      f.state === 'pending' && selected.has(f.id) && (mode === 'detect' || f.feature.type === mode),
+      f.state === 'pending' && selected.has(f.id) && (kind === 'detect' || f.feature.type === kind),
   );
 }
 

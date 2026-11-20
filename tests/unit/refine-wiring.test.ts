@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { dismissNotification, useActivity } from '../../src/core/activity';
 import { keyActions } from '../../src/core/keybindings';
-import { keyTools } from '../../src/hooks/useWorkbench';
+import { keyTools, refineKey } from '../../src/hooks/useWorkbench';
 import {
   autoRule,
   draftSkippedHint,
@@ -221,7 +221,9 @@ describe('Refine panel targets', () => {
     expect(ids('edge', selected)).toEqual(['e1']);
     expect(ids('region', selected)).toEqual(['r1']);
     expect(ids('detect', selected)).toEqual(['e1', 'r1']);
-    expect(ids('brush', selected)).toEqual([]);
+    // Brush acts on a selected pending edge: a crease guide waiting to be accepted.
+    expect(ids('brush', selected)).toEqual(['e1']);
+    expect(ids('brush', ['r1', 'e2'])).toEqual([]);
     expect(ids('detect', ['e2'])).toEqual([]);
     expect(ids('region', [])).toEqual([]);
   });
@@ -268,6 +270,43 @@ describe('Refine store helpers for the panel and keys', () => {
     expect(drawingRefineGuide(session())).toBe(session().selected[0]);
     editor().finishRefineGuide();
     expect(drawingRefineGuide(session())).toBeNull();
+  });
+
+  it('routes Escape, Delete and Enter to a pending guide in Brush mode as in Edge mode', async () => {
+    setup([boxPart()], ['box']);
+    await ready();
+    const pendingGuide = () => {
+      editor().setRefineMode('edge');
+      editor().selectRefine([]);
+      editor().addRefinePoint(crest(-1.2));
+      editor().addRefinePoint(crest(1.2));
+      editor().setRefineMode('brush');
+      return session().selected[0];
+    };
+    const state = (id: string) => session().features.find((f) => f.id === id)?.state;
+    // Escape lets go of it and keeps it; with nothing selected it is not Refine's to handle.
+    const first = pendingGuide();
+    expect(refineKey(editor(), 'cancel')).toBe(true);
+    expect(session().selected).toEqual([]);
+    expect(state(first)).toBe('pending');
+    expect(refineKey(editor(), 'cancel')).toBe(false);
+    expect(editor().refine).not.toBeNull();
+    // Delete dismisses it.
+    editor().selectRefine([first]);
+    refineKey(editor(), 'delete');
+    expect(state(first)).toBeUndefined();
+    // Enter accepts it, in Brush mode.
+    const second = pendingGuide();
+    refineKey(editor(), 'apply');
+    expect(state(second)).toBe('accepted');
+    expect(session().mode).toBe('brush');
+    // In Edge mode Escape still dismisses the guide being drawn.
+    editor().setRefineMode('edge');
+    editor().selectRefine([]);
+    editor().addRefinePoint(crest(-1));
+    const drawn = session().selected[0];
+    expect(refineKey(editor(), 'cancel')).toBe(true);
+    expect(state(drawn)).toBeUndefined();
   });
 
   it('says once that a feature does not solve, whatever other features do', async () => {

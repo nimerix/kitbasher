@@ -31,6 +31,35 @@ export const keyTools = {
   measure: 'measure',
 } as const;
 
+/**
+ * What Escape, Delete and Enter do in the Refine tool. Escape dismisses the guide being drawn in
+ * Edge mode and lets go of (deselects, never dismisses) a crease guide waiting in Brush mode;
+ * otherwise it returns false and the tool is left. Delete dismisses and Enter accepts the mode's
+ * targets; Enter first finishes a spline being drawn. Without a ready session they do nothing,
+ * and Delete never reaches the scene's parts.
+ */
+export function refineKey(
+  state: ReturnType<typeof useEditor.getState>,
+  action: 'cancel' | 'delete' | 'apply',
+) {
+  const refine = state.refine?.stage === 'ready' ? state.refine : null;
+  if (action === 'cancel') {
+    const guide = refine?.mode === 'edge' && drawingRefineGuide(refine);
+    if (guide) state.dismissRefine([guide]);
+    else if (refine?.mode === 'brush' && refineTargets(refine).length) state.selectRefine([]);
+    else return false;
+    return true;
+  }
+  if (!refine) return true;
+  if (action === 'apply' && refine.drawing) {
+    state.finishRefineGuide();
+    return true;
+  }
+  const ids = refineTargets(refine).map((f) => f.id);
+  if (ids.length) (action === 'apply' ? state.acceptRefine : state.dismissRefine)(ids);
+  return true;
+}
+
 export function useLiveSession() {
   useEffect(() => (liveSession ? joinLiveSession() : undefined), []);
 }
@@ -247,14 +276,8 @@ export function useKeyboard(openScene: () => void, searchParts: () => void) {
             state.setNavigationMode(null);
             return;
           }
-          // Only Edge mode draws guides; elsewhere Escape leaves the tool as it does for Warp.
-          const refine = state.tool === 'refine' ? state.refine : null;
-          const guide =
-            refine?.stage === 'ready' && refine.mode === 'edge' && drawingRefineGuide(refine);
-          if (guide) {
-            state.dismissRefine([guide]);
-            return;
-          }
+          // Otherwise Escape leaves the tool, as it does for Warp.
+          if (state.tool === 'refine' && refineKey(state, 'cancel')) return;
           const wasSelecting = state.tool === 'select';
           state.setTool('select');
           state.resetPicks();
@@ -265,23 +288,14 @@ export function useKeyboard(openScene: () => void, searchParts: () => void) {
           event.preventDefault();
           if (state.tool === 'warp' && state.warp) {
             if (state.warp.stage === 'warp') state.removeWarpPoints();
-          } else if (state.tool === 'refine') {
-            // Without a ready session Delete does nothing: it never reaches the scene's parts.
-            const targets = state.refine?.stage === 'ready' ? refineTargets(state.refine) : [];
-            if (targets.length) state.dismissRefine(targets.map((f) => f.id));
-          } else executeEditorCommand('delete');
+          } else if (state.tool === 'refine') refineKey(state, 'delete');
+          else executeEditorCommand('delete');
           return;
         case 'apply':
           if (nativeActivation) return;
           if (state.tool === 'refine') {
             event.preventDefault();
-            const refine = state.refine;
-            if (refine?.stage !== 'ready') return;
-            if (refine.drawing) state.finishRefineGuide();
-            else {
-              const ids = refineTargets(refine).map((f) => f.id);
-              if (ids.length) state.acceptRefine(ids);
-            }
+            refineKey(state, 'apply');
             return;
           }
           if (!['align', 'joint'].includes(state.tool)) return;

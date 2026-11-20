@@ -1487,13 +1487,14 @@ describe('refine session integrity', { timeout: 20_000 }, () => {
     await ready();
     const hand = crestGuide();
     await editor().detectRefine();
+    // 18 on the bare box; the edge the hand-drawn guide lies on is not proposed again.
     const first = session().features.filter((f) => f.origin === 'detected');
-    expect(first).toHaveLength(18);
+    expect(first).toHaveLength(17);
     editor().selectRefine([hand, first[0].id]);
     const undo = session().undo.length;
     await editor().detectRefine();
     const second = session().features.filter((f) => f.origin === 'detected');
-    expect(second).toHaveLength(18);
+    expect(second).toHaveLength(17);
     expect(second.map((f) => f.feature)).toEqual(first.map((f) => f.feature));
     expect(second.some((f) => first.includes(f))).toBe(false);
     expect(session().features[0].id).toBe(hand);
@@ -1675,11 +1676,8 @@ describe('refine session integrity', { timeout: 20_000 }, () => {
         .map((f) => f.id),
     ).toEqual([a, b]);
     expect(session().features.some((f) => f.id === c)).toBe(false);
-    expect(
-      session()
-        .features.slice(2)
-        .map((f) => f.feature),
-    ).toEqual([line, area]);
+    // The run's line and area repeat the edited ones, so nothing new is added.
+    expect(session().features).toHaveLength(2);
     expect(session().selected).toEqual([a, b]);
   });
 
@@ -1743,6 +1741,179 @@ describe('refine session integrity', { timeout: 20_000 }, () => {
         .features.filter((f) => f.state === 'pending')
         .map((f) => f.feature),
     ).toEqual([chord, surrounding]);
+  });
+
+  it('proposes nothing again along a detected edge the user edited', async () => {
+    setup([boxPart()], ['box']);
+    await ready();
+    await editor().detectRefine();
+    const first = session().features;
+    const target = first.find((f) => f.feature.type === 'edge')!;
+    editor().selectRefine([target.id]);
+    editor().setRefineEdge({}, { [target.id]: { width: 0.4 } });
+    editor().selectRefine([]);
+    const edited = session().features.find((f) => f.id === target.id)!;
+    expect(edited.edited).toBe(true);
+    await editor().detectRefine();
+    const pending = session().features.filter((f) => f.origin === 'detected');
+    expect(pending.filter((f) => f.id === target.id)).toEqual([edited]);
+    // The run's own copy of that edge is left out; every other proposal is back.
+    expect(pending).toHaveLength(first.length);
+    expect(pending.filter((f) => sameProposal(f.feature, target.feature))).toEqual([]);
+  });
+
+  it('proposes nothing again along or inside edited proposals', async () => {
+    setup([boxPart()], ['box']);
+    await ready();
+    const line: RefineProposal = {
+      type: 'edge',
+      input: {
+        segments: [{ kind: 'line', points: [crest(-1), crest(1)] }],
+        joints: [],
+        closed: false,
+        width: null,
+        strength: 1,
+      },
+    };
+    const area: RefineProposal = {
+      type: 'region',
+      input: { ...session().region, triangles: Uint32Array.of(0, 1, 2, 3) },
+    };
+    const publish = async (proposals: RefineProposal[]) => {
+      const held = holdDetect();
+      const detection = editor().detectRefine();
+      held.finish(proposals);
+      await detection;
+    };
+    await publish([line, area]);
+    const [edge, region] = session().features.map((f) => f.id);
+    editor().selectRefine([edge, region]);
+    editor().setRefineEdge({}, { [edge]: { width: 0.6 } });
+    editor().setRefineRegion({ strength: 0.4 });
+    editor().selectRefine([]);
+    const kept = session().features;
+    await publish([line, area]);
+    expect(session().features).toEqual(kept);
+  });
+
+  it('proposes nothing along a hand-drawn guide, and keeps its selection', async () => {
+    setup([boxPart()], ['box']);
+    await ready();
+    await editor().detectRefine();
+    const all = session().features.map((f) => f.feature);
+    editor().dismissRefine(session().features.map((f) => f.id));
+    const hand = crestGuide();
+    const guide = session().features.find((f) => f.id === hand)!;
+    expect(guide.curve).toBeDefined();
+    await editor().detectRefine();
+    expect(session().selected).toEqual([hand]);
+    const found = session().features.filter((f) => f.origin === 'detected');
+    expect(found).toHaveLength(all.length - 1);
+    // The one left out is the edge the guide lies on: its middle is on the guide's curve.
+    const missing = all.filter((p) => !found.some((f) => sameProposal(f.feature, p)));
+    expect(missing).toHaveLength(1);
+    const [left] = missing;
+    if (left.type !== 'edge') throw new Error('not an edge');
+    const points = left.input.segments.flatMap((s) => s.points.map((p) => p.position));
+    const middle = [0, 1, 2].map((k) => (points[0][k] + points.at(-1)![k]) / 2);
+    expect(nearestOnCurve(guide.curve!, middle as [number, number, number])).toBeLessThan(0.15);
+  });
+
+  it('keeps a pending crease guide selected through Detect, and a new stroke lets go of it', async () => {
+    setup([coarseBox()], ['box']);
+    await ready();
+    creaseStroke();
+    const crease = session().features[0];
+    expect(session().selected).toEqual([crease.id]);
+    editor().setRefineMode('detect');
+    await editor().detectRefine();
+    expect(session().selected).toEqual([crease.id]);
+    expect(session().features[0]).toBe(crease);
+    editor().setRefineMode('brush');
+    expect(session().draft).not.toBeNull();
+    // A new stroke owns the preview: the guide stays pending, deselected, without a draft.
+    editor().setRefineBrush({ kind: 'smooth' });
+    editor().beginRefineStroke(coarseCrest(0));
+    editor().endRefineStroke();
+    expect(session().features[0]).toMatchObject({ id: crease.id, state: 'pending' });
+    expect(session().selected).toEqual([]);
+    expect(session().draft).toBeNull();
+  });
+
+  it('says one thing per Accept press when a batch both fails a guide and leaves a rough cut', async () => {
+    setup(
+      [boxPart({ geometry: softBox([2, 1.5, 1], 0.3, { seed: 3, step: 0.2, noise: 0.012 }) })],
+      ['box'],
+    );
+    await ready();
+    const said: string[] = [];
+    const notify = editor().notify;
+    useEditor.setState({
+      notify: (message, kind) => {
+        said.push(message);
+        notify(message, kind);
+      },
+    });
+    // A guide on the flat top, which finds no edge.
+    editor().addRefinePoint(top(-1.2));
+    editor().addRefinePoint(top(1.2));
+    // A closed loop of lines round the top's four crests, sharp at its corners: cut, but not cleanly.
+    const inset = 0.3 * (1 - Math.SQRT1_2);
+    const [x, y, z] = [2 - inset, 1.5 - inset, 1 - inset];
+    const corners = [
+      [x, y, z],
+      [x, y, -z],
+      [-x, y, -z],
+      [-x, y, z],
+    ].map((p) => surfacePoint(p as [number, number, number]));
+    const refine = session();
+    useEditor.setState({
+      refine: {
+        ...refine,
+        selected: [],
+        features: [
+          ...refine.features,
+          {
+            id: 'loop',
+            state: 'pending',
+            origin: 'hand',
+            feature: {
+              type: 'edge',
+              input: {
+                segments: corners.map((point, i) => ({
+                  kind: 'line' as const,
+                  points: [point, corners[(i + 1) % 4]],
+                })),
+                joints: ['sharp', 'sharp', 'sharp', 'sharp'],
+                closed: true,
+                width: null,
+                strength: 1,
+              },
+            },
+          },
+        ],
+      },
+    });
+    editor().setRefineMode('detect');
+    editor().selectRefine(session().features.map((f) => f.id));
+    expect(said.filter((m) => m.startsWith('No edge found'))).toHaveLength(1);
+    for (const { id } of useActivity.getState().notifications) dismissNotification(id);
+    const before = said.length;
+    editor().acceptRefine();
+    expect(session().features.map((f) => f.state)).toEqual(['pending', 'accepted']);
+    // The cut left marks, which the footer and the surface show; the press says only the failure.
+    expect(session().skipped.length + session().folds.length).toBeGreaterThan(0);
+    expect(said.slice(before)).toEqual([said[0]]);
+
+    // Without a failure in the press, the cut warning is the one thing said.
+    editor().undoRefine();
+    editor().selectRefine(['loop']);
+    const next = said.length;
+    editor().acceptRefine();
+    expect(session().skipped.length + session().folds.length).toBeGreaterThan(0);
+    expect(said.slice(next)).toEqual([
+      'Some triangles along this edge could not be cut cleanly. Check the marked area.',
+    ]);
   });
 
   it('keeps a closed path closed when its shared first and last point is removed', async () => {
@@ -1995,3 +2166,7 @@ function enclosed(mesh: RefineMesh, topology: RefineTopology, set: ArrayLike<num
     }
   return [...found];
 }
+
+/** Whether two proposals have the same input, value for value. */
+const sameProposal = (a: RefineProposal, b: RefineProposal) =>
+  JSON.stringify(a) === JSON.stringify(b);

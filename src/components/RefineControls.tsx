@@ -841,7 +841,7 @@ function RegionControls({ view, targets, owned }: ModeProps) {
   );
 }
 
-function BrushControls({ view, owned }: ModeProps) {
+function BrushControls({ view, targets, owned }: ModeProps) {
   return (
     <>
       <Choice
@@ -866,6 +866,7 @@ function BrushControls({ view, owned }: ModeProps) {
         owned={owned}
         onSet={(strength) => editor().setRefineBrush({ strength })}
       />
+      {targets.length ? <FeatureActions targets={targets} /> : null}
     </>
   );
 }

@@ -3775,9 +3775,9 @@ export const useEditor = create<EditorState>((set, get) => ({
     const kept = current!.features.filter(
       (f) => f.origin !== 'detected' || f.state !== 'pending' || f.edited,
     );
-    const accepted = kept.filter((f) => f.state === 'accepted');
+    // Nothing new along, or mostly inside, what the run keeps: accepted, edited or hand-made.
     const found: RefineFeature[] = proposals
-      .filter((feature) => !repeatsAccepted(feature, accepted, model.mesh))
+      .filter((feature) => !repeatsKept(feature, kept, model.mesh))
       .map((feature) => ({ id: uid(), state: 'pending', origin: 'detected', feature }));
     const ids = new Set(kept.map((f) => f.id));
     const selected = current!.selected.filter((id) => ids.has(id));
@@ -5830,7 +5830,10 @@ function acceptFeatures(
     accepted = true;
   }
   const { notify } = useEditor.getState();
+  // One press says at most one thing: a failure to solve, by its own rules, or else the cut warning.
+  // Skipped and folded triangles stay in the footer and on the surface either way.
   solvePass(refine.id, pass, true);
+  const failed = pass.some((p) => p.notice !== null);
   if (!accepted) return;
   commitRefine({
     model,
@@ -5842,7 +5845,7 @@ function acceptFeatures(
     skipped,
     drawing: false,
   });
-  if (skipped.length || folds.length) notify(cutNotice, 'info');
+  if (!failed && (skipped.length || folds.length)) notify(cutNotice, 'info');
 }
 
 /**
@@ -5914,15 +5917,16 @@ const repeatedEdgeShare = 0.8,
   repeatedRegionShare = 0.5;
 
 /**
- * Whether a detected proposal repeats an accepted feature: an edge that runs along an accepted
- * edge's solved curve over most of its length, or a region mostly inside an accepted one by area.
+ * Whether a detected proposal repeats a feature the session keeps: an edge that runs along the
+ * other's solved curve (or, for a pending one not solved yet, its drawn guide) over most of its
+ * length, or a region mostly inside another by area.
  */
-function repeatsAccepted(proposal: RefineProposal, accepted: RefineFeature[], mesh: RefineMesh) {
+function repeatsKept(proposal: RefineProposal, kept: RefineFeature[], mesh: RefineMesh) {
   if (proposal.type === 'region') {
     const { triangles } = proposal.input;
     let total = 0;
     for (const t of triangles) total += triangleArea(mesh, t);
-    return accepted.some((f) => {
+    return kept.some((f) => {
       if (f.feature.type !== 'region') return false;
       const covered = new Set(f.feature.input.triangles);
       let inside = 0;
@@ -5931,12 +5935,19 @@ function repeatsAccepted(proposal: RefineProposal, accepted: RefineFeature[], me
     });
   }
   const samples = drawnSamples(proposal.input);
-  return accepted.some(({ curve }) => {
+  return kept.some((f) => {
+    const curve = f.curve ?? drawnCurve(f);
     if (!curve) return false;
     let near = 0;
     for (const p of samples) if (distanceToCurve(curve, p) <= repeatedEdge) near++;
     return near >= samples.length * repeatedEdgeShare;
   });
+}
+
+/** The line a pending edge's guide draws, for a feature with no solved curve; null for a region. */
+function drawnCurve({ feature }: RefineFeature): Pick<EdgeCurve, 'points' | 'closed'> | null {
+  if (feature.type !== 'edge' || !solvable(feature.input)) return null;
+  return { points: Float64Array.from(drawnSamples(feature.input).flat()), closed: false };
 }
 
 /** Points along the curves a guide's segments draw, every repeatStep and at least repeatSamples. */
@@ -5987,7 +5998,7 @@ function triangleArea(mesh: RefineMesh, t: number) {
 }
 
 /** Distance from `p` to the polyline of `curve`, its closing span included when closed. */
-function distanceToCurve({ points, closed }: EdgeCurve, p: Vec3) {
+function distanceToCurve({ points, closed }: Pick<EdgeCurve, 'points' | 'closed'>, p: Vec3) {
   const count = points.length / 3;
   let nearest = Infinity;
   for (let i = 0; i < (closed ? count : count - 1); i++) {
