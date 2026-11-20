@@ -1125,10 +1125,6 @@ interface Joint {
   sharp: boolean;
   station: number;
   point: number[];
-  /** Unit directions of the curve arriving at and leaving the joint, and the mitre between them. */
-  before: number[];
-  after: number[];
-  mitre: number[];
   /** The segments it joins. */
   from: number;
   to: number;
@@ -1188,14 +1184,6 @@ function frameOf(mesh: RefineMesh, topology: RefineTopology, solve: EdgeSolve): 
     pathPoint(curve, station, at);
     const point = [at[0], at[1], at[2]];
     const [from, to] = [k, (k + 1) % n];
-    // Directions read a soft half-width either side, past any short bridge the join put in.
-    const reach = Math.max(bands[from].soft, bands[to].soft);
-    const p = new Float64Array(3),
-      q = new Float64Array(3);
-    pathPoint(curve, station - reach, p);
-    pathPoint(curve, station + reach, q);
-    const before = unit([0, 1, 2].map((a) => point[a] - p[a]));
-    const after = unit([0, 1, 2].map((a) => q[a] - point[a]));
     const apart = [0, 1].map((side) => {
       const [f, g] = [solve.flanks[from][side], solve.flanks[to][side]];
       if (joint !== 'sharp' || f === g) return false;
@@ -1206,9 +1194,6 @@ function frameOf(mesh: RefineMesh, topology: RefineTopology, solve: EdgeSolve): 
       sharp: joint === 'sharp',
       station,
       point,
-      before,
-      after,
-      mitre: unit([0, 1, 2].map((a) => before[a] + after[a])),
       from,
       to,
       soft: Math.max(bands[from].soft, bands[to].soft),
@@ -1419,7 +1404,7 @@ function frameWeights(
   topology: RefineTopology,
   solve: EdgeSolve,
   frame: Frame,
-  surfaces: (i: number) => Surfaces,
+  surfaces: SurfaceAt,
 ) {
   const { curve, bands } = solve;
   const { position } = mesh;
@@ -1481,7 +1466,7 @@ function frameWeights(
     if (!curve.closed && (station < low + solve.width / 2 || station > high - solve.width / 2))
       continue;
     // Out at the band's side the correction has faded, so the full move is the flank's distance.
-    const surface = surfaces(frame.owner[i]);
+    const surface = surfaces(p[0], p[1], p[2]);
     const flank = solve.flanks[frame.owner[i]][sideOf(frame.zone[i], surface, p)];
     const full = flank.distance(p[0], p[1], p[2]);
     if (full <= seamMove) continue;
@@ -1491,25 +1476,10 @@ function frameWeights(
   }
   blend = Math.min(blend, Math.max(solve.width / 2, blendEdges[0] * edge));
   const taper = taperOf(Math.abs(stations[1] - stations[0]), edge, tapering);
-  // Around a joint the vertices move in full out to half the band's width, so the faces meeting
-  // there stay whole where no band holds them, then fade out by the band's width.
-  const cornered = frame.joints;
-  const cornerWeight = (v: number) => {
-    let weight = 0;
-    for (const { point } of cornered) {
-      const r = Math.hypot(
-        position[v * 3] - point[0],
-        position[v * 3 + 1] - point[1],
-        position[v * 3 + 2] - point[2],
-      );
-      weight = Math.max(weight, 1 - smooth((2 * r) / solve.width - 1));
-    }
-    return weight;
-  };
   return Float64Array.from(reach, (d, i) => {
     const v = vertices[i];
     if (!indexOf.has(v)) return 0;
-    let weight = Math.max(smooth(d / blend), cornered.length ? cornerWeight(v) : 0);
+    let weight = smooth(d / blend);
     if (curve.closed || !tapering || !(taper > 0)) return weight;
     const station = onCurve(curve, position[v * 3], position[v * 3 + 1], position[v * 3 + 2], at);
     stations.forEach((end, k) => {
@@ -1669,16 +1639,61 @@ function correctedSurfaces(
 type Surfaces = ReturnType<typeof correctedSurfaces>;
 
 /** The side a vertex moves to first: its own flank's, or in the soft zone the corrected surface nearer it. */
-function sideOf(zone: number, surface: Surfaces, p: number[]) {
+function sideOf(zone: number, surface: Surface, p: number[]) {
   if (zone === BandZone.Left) return 0;
   if (zone === BandZone.Right) return 1;
   return +(surface.distance(1, p[0], p[1], p[2]) < surface.distance(0, p[0], p[1], p[2]));
 }
 
-/** Each segment's corrected surfaces, made when first asked for. */
-function surfacesOf(mesh: RefineMesh, topology: RefineTopology, solve: EdgeSolve, frame: Frame) {
+/** One pair of corrected surfaces, as a point reads them. */
+interface Surface {
+  target(s: number, x: number, y: number, z: number, out: number[]): void;
+  normal(s: number, x: number, y: number, z: number, out: number[]): void;
+  distance(s: number, x: number, y: number, z: number): number;
+}
+type SurfaceAt = (x: number, y: number, z: number) => Surface;
+
+/** Two segments' corrected surfaces mixed, `share` of the second. */
+function mixed(first: Surface, second: Surface, share: number): Surface {
+  const [p, q] = [
+    [0, 0, 0],
+    [0, 0, 0],
+  ];
+  const mix = (out: number[]) => {
+    for (let a = 0; a < 3; a++) out[a] = p[a] * (1 - share) + q[a] * share;
+  };
+  return {
+    target(s, x, y, z, out) {
+      first.target(s, x, y, z, p);
+      second.target(s, x, y, z, q);
+      mix(out);
+    },
+    normal(s, x, y, z, out) {
+      first.normal(s, x, y, z, p);
+      second.normal(s, x, y, z, q);
+      mix(out);
+      const n = unit(out);
+      for (let a = 0; a < 3; a++) out[a] = n[a];
+    },
+    distance: (s, x, y, z) =>
+      first.distance(s, x, y, z) * (1 - share) + second.distance(s, x, y, z) * share,
+  };
+}
+
+/**
+ * The corrected surfaces at a point: those of the segment whose stretch of the curve is nearest, or
+ * within half the band's width of a smooth joint along the curve a blend of the two segments' that
+ * passes from one to the other, so nothing steps where one segment hands over to the next. Each
+ * segment's are made when first asked for.
+ */
+function surfacesOf(
+  mesh: RefineMesh,
+  topology: RefineTopology,
+  solve: EdgeSolve,
+  frame: Frame,
+): SurfaceAt {
   const made: (Surfaces | undefined)[] = solve.bands.map(() => undefined);
-  return (i: number) =>
+  const of = (i: number) =>
     (made[i] ??= correctedSurfaces(
       mesh,
       solve.bands[i],
@@ -1687,46 +1702,34 @@ function surfacesOf(mesh: RefineMesh, topology: RefineTopology, solve: EdgeSolve
       solve.width,
       bandEdgeLength(mesh, topology, solve.bands[i]),
     ));
+  const smoothJoints = frame.joints.filter((joint) => !joint.sharp);
+  const reach = solve.width / 2;
+  const total = pathLength(solve.curve);
+  const at = new Float64Array(3);
+  return (x, y, z) => {
+    if (smoothJoints.length) {
+      const station = closestOnCurve(solve.curve, x, y, z, at);
+      for (const joint of smoothJoints) {
+        let along = station - joint.station;
+        if (solve.curve.closed) along -= total * Math.round(along / total);
+        if (Math.abs(along) < reach)
+          return mixed(of(joint.from), of(joint.to), smooth((along + reach) / (2 * reach)));
+      }
+    }
+    return of(frame.ownerAt(x, y, z));
+  };
 }
 
 /**
  * Exported for the tests: each side's corrected surface, as `applyEdge` moves the band onto it, read
- * from the segment whose stretch of the curve is nearest the point.
+ * as `surfacesOf` reads it at the point.
  */
 export function correctedFlanks(mesh: RefineMesh, topology: RefineTopology, solve: EdgeSolve) {
   const frame = frameOf(mesh, topology, solve);
   const surfaces = surfacesOf(mesh, topology, solve, frame);
   return [0, 1].map(
-    (s) => (x: number, y: number, z: number) =>
-      surfaces(frame.ownerAt(x, y, z)).distance(s, x, y, z),
+    (s) => (x: number, y: number, z: number) => surfaces(x, y, z).distance(s, x, y, z),
   );
-}
-
-/**
- * The point on the solved edge a point of the cut goes to: the nearest, except near a sharp joint,
- * where the station is drawn toward the joint as the point nears the mitre between the two
- * segments, so the cut's point on the mitre lands on the corner itself.
- */
-function placerOf(solve: EdgeSolve, frame: Frame) {
-  const { curve } = solve;
-  const total = pathLength(curve);
-  const reach = jointReach * solve.width;
-  return (x: number, y: number, z: number, out: Float64Array) => {
-    const s = onCurve(curve, x, y, z, out);
-    for (const corner of frame.corners) {
-      let along = s - corner.station;
-      if (curve.closed) along -= total * Math.round(along / total);
-      if (Math.abs(along) > reach) continue;
-      const sign = along > 0 ? 1 : -1;
-      const r = [x - corner.point[0], y - corner.point[1], z - corner.point[2]];
-      const toward = sign > 0 ? corner.after : corner.before;
-      const mitre = Math.max(0, (sign * dot(corner.mitre, r)) / dot(corner.mitre, toward));
-      const pull = 1 - smooth(mitre / corner.soft);
-      const from = Math.abs(along);
-      pathPoint(curve, corner.station + sign * (from - pull * (from - mitre)), out);
-      return;
-    }
-  };
 }
 
 /**
@@ -1763,13 +1766,13 @@ function cornerFade(solve: EdgeSolve, frame: Frame, owner: number, side: number,
 function facingAt(
   solve: EdgeSolve,
   frame: Frame,
-  surfaces: (i: number) => Surfaces,
+  surfaces: SurfaceAt,
   x: number,
   y: number,
   z: number,
   out: Float64Array,
 ) {
-  const surface = surfaces(frame.ownerAt(x, y, z));
+  const surface = surfaces(x, y, z);
   const side = +(surface.distance(1, x, y, z) < surface.distance(0, x, y, z));
   facingOn(solve, frame, surfaces, x, y, z, side, out);
 }
@@ -1783,7 +1786,7 @@ function facingAt(
 function facingOn(
   solve: EdgeSolve,
   frame: Frame,
-  surfaces: (i: number) => Surfaces,
+  surfaces: SurfaceAt,
   x: number,
   y: number,
   z: number,
@@ -1793,7 +1796,7 @@ function facingOn(
   const owner = frame.ownerAt(x, y, z);
   const p = [x, y, z];
   let normal = [0, 0, 0];
-  surfaces(owner).normal(side, x, y, z, normal);
+  surfaces(x, y, z).normal(side, x, y, z, normal);
   for (const corner of frame.corners) {
     if (!corner.apart[side] || (corner.from !== owner && corner.to !== owner)) continue;
     const [px, py, pz] = corner.point;
@@ -1838,8 +1841,8 @@ export function applyEdge(
   const weights = frameWeights(mesh, topology, solve, frame, surfaces);
 
   // A path of several segments reads its cut where the vertices started, signed by the side they go
-  // to, and faces each child by its own side: neighbouring segments' corrected surfaces differ, so
-  // where they end the field changes sign across a joint.
+  // to, and faces each child by its own side: where its vertices end, a corner keeps the rounding
+  // between two faces off the corrected surfaces, and the field leaves straddlers there.
   const path = solve.bands.length > 1;
   const move = new Float64Array(count * 3);
   const moved = new Uint8Array(count);
@@ -1853,7 +1856,7 @@ export function applyEdge(
     const weight = strength * weights[i];
     if (!(weight > 0)) continue;
     const owner = frame.owner[i];
-    const surface = surfaces(owner);
+    const surface = surfaces(p[0], p[1], p[2]);
     if (frame.pinned[i]) {
       // On the zero set already, so the cut takes it as it is.
       moved[i] = 2;
@@ -1947,7 +1950,7 @@ export function applyEdge(
   // A vertex outside the cut lies on the side of the corrected surface it is nearer, as it stands.
   const beside = (v: number) => {
     const [x, y, z] = [position[v * 3], position[v * 3 + 1], position[v * 3 + 2]];
-    const surface = surfaces(frame.ownerAt(x, y, z));
+    const surface = surfaces(x, y, z);
     return Math.sign(surface.distance(0, x, y, z) - surface.distance(1, x, y, z));
   };
   // The fold check reads the triangles the edit can have turned: around a vertex that moved more
@@ -2019,7 +2022,6 @@ export function applyEdge(
   };
 
   const on = new Float64Array(3);
-  const pathPlace = placerOf(solve, frame);
   const kept: number[] = [];
   for (const [v, i] of indexOf) if (frame.pinned[i]) kept.push(v);
   const keptAt = new Set(
@@ -2048,7 +2050,7 @@ export function applyEdge(
       out[2] = z;
       return true;
     }
-    pathPlace(x, y, z, on);
+    onCurve(solve.curve, x, y, z, on);
     const weight = strength * weightAt(x, y, z);
     for (let k = 0; k < 3; k++) {
       from[k] = source(a, k) * (1 - t) + source(b, k) * t;
