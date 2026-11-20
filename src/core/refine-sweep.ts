@@ -21,8 +21,23 @@ const fitPoints = 20000;
 const slabEdges = 8;
 /** Points one slab's cylinder fit reads at most, evenly spread over the slab. */
 const slabPoints = 800;
-/** Rounds of refitting each station's circle about the centre line and the line through them. */
+/**
+ * Rounds of refitting each station's circle about the centre line and the line through them: at
+ * least the first, and on while the stations reach further or fit better, up to the second.
+ */
 const polishRounds = 4;
+const mostRounds = 12;
+/** Rounds of cutting slabs along a centre line that stops short of the points. */
+const regrowRounds = 4;
+/** A round fits better when it lowers the misfit by more than this fraction. */
+const improvement = 0.01;
+/**
+ * Stations fitted to the free profile are kept when they bring the misfit under this share, and
+ * tried only when the points cover this many profile bins (three quarters of the circumference):
+ * on a narrower view the free profile matches the points from almost any centre.
+ */
+const freeGain = 0.5;
+const freeCoverage = 48;
 const tukey = 4.685;
 const madScale = 1.4826;
 /** A station with under this fraction of the median station's weight is left out. */
@@ -39,15 +54,29 @@ const slabCoarsest = 64;
 const slabAlignment = 0.5;
 /** Neighbouring centre-line segments may turn by no more than 90 degrees. */
 const foldCosine = 0;
-/** At least this fraction of the stations keep a radius within tolerance of their median. */
-const agreeing = 2 / 3;
-/** Stations may differ in radius by this many noise widths, or this fraction of the radius. */
-const radiusNoise = 6;
-const radiusFraction = 0.05;
+/**
+ * At least `stationShareNear` of each station's weight lies within `stationNoise` noise widths of
+ * the sweep, and those points at a median of no more than `nearNoise` noise widths.
+ */
+const stationNoise = 3;
+const stationShareNear = 0.25;
+const nearNoise = 1.2;
+/** A station with fewer points than this has none to judge, as at a grazed end. */
+const stationPoints = 3;
+/**
+ * The cross-section may drift from one end of the path to the other by no more than this many
+ * noise widths, or this many standard errors of the drift when the stations scatter more.
+ */
+const driftNoise = 2;
+const driftErrors = 3;
 /** A profile is round when no bin with data lies this many noise widths off their mean. */
 const roundNoise = 3;
 /** The path runs on past the farthest point by this many stations at each end. */
 const pathMargin = 2;
+/** A spline through the stations' centres strays from them by this many noise widths in rms. */
+const splineNoise = 0.5;
+/** A spline runs on along the circle through its end and points this many stations apart in. */
+const endReach = 4;
 
 type V3 = [number, number, number];
 
@@ -55,12 +84,14 @@ type V3 = [number, number, number];
  * A constant cross-section swept along a centre line, fitted robustly so detail standing off the
  * tube does not move it. Null when the points hold no tube: fewer than three slabs take a
  * cylinder, the points cover under 45 degrees of its circumference, the centre line folds back
- * on itself, the stations disagree in radius, or under half the weight lies within 3 * noise.
+ * on itself, a stretch of the path does not hold (see `heldAlong`), the cross-section drifts along
+ * it, or under half the weight lies within 3 * noise.
  * With `weights`, each point counts by its weight and points of zero weight are left out.
  * `spacing` is the points' edge length, estimated from their nearest neighbours when null. A
  * `start` sweep, fitted before to nearly the same points, keeps its centre line and only the
  * cross-section is fitted again: weights that narrow a partial tube's view would let the centre
- * line slide toward or away from the visible side.
+ * line slide toward or away from the visible side. Without `weights`, `judged` sets how much each
+ * point counts when the sweep is checked along its path.
  */
 export function fitSweep(
   points: Float32Array,
@@ -69,35 +100,135 @@ export function fitSweep(
   weights: Float64Array | null = null,
   spacing: number | null = null,
   start: Sweep | null = null,
+  judged: Float64Array | null = null,
 ): { sweep: Sweep; rms: number } | null {
-  const cloud = sampled(cloudOf(points, normals, weights));
+  const cloud = sampled(cloudOf(points, normals, weights, judged));
   if (cloud.count < 12) return null;
   const floor = Math.max(noise, 1e-9);
   const edge = spacing ?? spacingOf(cloud);
   if (!(edge > 0)) return null;
   const thick = slabEdges * edge;
-  let path: PathFit;
-  if (start) path = { curve: start.path, kind: start.pathKind };
-  else {
-    const centres = slabCentres(cloud, floor, thick);
-    if (!centres) return null;
-    path = pathThrough(centres, floor, edge, null);
-  }
-  let local = localOf(cloud, path, thick);
-  for (let round = 0; round < (start ? 0 : polishRounds); round++) {
-    const stations = polish(cloud, local, thick, floor);
-    if (stations.length < 3) return null;
-    const flat = Float64Array.from(stations.flatMap((s) => s.centre));
-    if (folds(flat)) return null;
-    path = pathThrough(flat, floor, edge, median(stations.map((s) => s.radius)));
-    local = localOf(cloud, path, thick);
-  }
-  if (!radiiAgree(cloud, local, thick, floor)) return null;
+  const line = start
+    ? {
+        local: localOf(cloud, { curve: start.path, kind: start.pathKind }, thick),
+        kind: start.pathKind,
+      }
+    : centreLine(cloud, floor, edge, thick);
+  if (!line) return null;
+  const { local, kind } = line;
   const built = profileOf(cloud, local, floor);
   if (!built) return null;
-  const sweep: Sweep = { path: local.path.path, pathKind: path.kind, ...built };
+  const sweep: Sweep = {
+    path: local.path.path,
+    pathKind: kind,
+    profile: built.profile,
+    round: built.round,
+  };
+  if (!heldAlong(cloud, local, sweep, thick, floor)) return null;
   const { rms, support } = rmsOf(cloud, sweep, floor);
   return support >= minimumSupport ? { sweep, rms } : null;
+}
+
+/**
+ * The centre line: through the slabs' cylinder axes, cut again along itself while it stops well
+ * short of the points, then through stations fitted to the cross-section, refitted until it fits
+ * no better. Null when fewer than three stations fit or the line folds back on itself.
+ */
+function centreLine(cloud: Cloud, noise: number, edge: number, thick: number) {
+  const centres = slabCentres(cloud, noise, thick);
+  if (!centres) return null;
+  let path = pathThrough(centres, noise, edge, null);
+  let local = localOf(cloud, path, thick);
+  // A chain that stops well short of the points, as across a helix, is found again along itself.
+  for (let round = 0; round < regrowRounds && local.beyond > endReach * thick; round++) {
+    const along = centresAlong(cloud, local, noise, thick);
+    if (!along) break;
+    const next = pathThrough(along, noise, edge, null);
+    const nextLocal = localOf(cloud, next, thick);
+    if (!(nextLocal.beyond < local.beyond)) break;
+    path = next;
+    local = nextLocal;
+  }
+  const circles = refined(cloud, local, noise, edge, thick, false);
+  if (!circles || circles.best.round || circles.best.seen < freeCoverage)
+    return circles?.best ?? null;
+  // Circles sharing one radius slide toward one flank of an oval over the rounds, so the free
+  // profile starts from the line their first round left.
+  const free = refined(cloud, circles.first, noise, edge, thick, true);
+  // Stations fitted to the free profile shift with whatever detail the profile takes up, so they
+  // are kept only when they fit clearly better than circles: as on an oval, by half.
+  return free && free.best.misfit < freeGain * circles.best.misfit ? free.best : circles.best;
+}
+
+interface Refined {
+  local: Local;
+  kind: PathFit['kind'];
+  misfit: number;
+  round: boolean;
+  /** Profile bins with data. */
+  seen: number;
+}
+
+/**
+ * Rounds of fitting each station (to its circle about the path, all sharing one radius, or with
+ * `free` to the profile the last round left) and the line through them. Each round's line is kept
+ * only when it fits better than every one before it; the rounds end when two in a row fit no
+ * better, since a line may pass through a worse one on its way. Null when the first round has
+ * fewer than three stations or folds back on itself.
+ */
+function refined(
+  cloud: Cloud,
+  local: Local,
+  noise: number,
+  edge: number,
+  thick: number,
+  free: boolean,
+): { best: Refined; first: Local } | null {
+  let best: Refined | null = null,
+    first = local;
+  let profile = free ? profileOf(cloud, local, noise) : null;
+  let idle = 0;
+  for (let round = 0; round < mostRounds; round++) {
+    const stations = profile
+      ? polishProfile(cloud, local, profile.profile, thick, noise)
+      : polish(cloud, local, thick, noise);
+    const flat = Float64Array.from(stations.flatMap((s) => s.centre));
+    if (stations.length < 3 || folds(flat)) break;
+    const path = pathThrough(flat, noise, edge, median(stations.map((s) => s.radius)));
+    local = localOf(cloud, path, thick);
+    if (round === 0) first = local;
+    const built = profileOf(cloud, local, noise);
+    if (!built) break;
+    if (free) profile = built;
+    const misfit = misfitOf(cloud, local, built.profile, noise);
+    idle = !best || misfit < best.misfit * (1 - improvement) ? 0 : idle + 1;
+    if (!best || misfit < best.misfit)
+      best = { local, kind: path.kind, misfit, round: built.round, seen: built.seen };
+    if (round >= polishRounds - 1 && idle >= 2) break;
+  }
+  return best && { best, first };
+}
+
+/**
+ * One lookup of (x, y, z) against the sweep: writes its projection as `projectToSweep` does and
+ * its normal as `sweepNormal` does, and returns its distance as `sweepDistance` does.
+ */
+export function sweepAt(
+  sweep: Sweep,
+  x: number,
+  y: number,
+  z: number,
+  projected: Float32Array | Float64Array,
+  normal: Float64Array,
+): number {
+  const at = locate(sweep, x, y, z);
+  const r = radiusAt(sweep, at.angle);
+  const c = Math.cos(at.angle),
+    s = Math.sin(at.angle);
+  for (let k = 0; k < 3; k++)
+    projected[k] = at.centre[k] + at.along * at.t[k] + Math.abs(r) * (c * at.u[k] + s * at.v[k]);
+  normalAt(sweep, at, r, normal);
+  return Math.sign(r || 1) * (at.radius - Math.abs(r));
 }
 
 /** Writes the point of the sweep's surface nearest (x, y, z) along its cross-section. */
@@ -132,7 +263,10 @@ export function sweepNormal(
   out: Float64Array,
 ): void {
   const at = locate(sweep, x, y, z);
-  const r = radiusAt(sweep, at.angle);
+  normalAt(sweep, at, radiusAt(sweep, at.angle), out);
+}
+
+function normalAt(sweep: Sweep, at: typeof located, r: number, out: Float64Array) {
   const step = (2 * Math.PI) / bins;
   const slope =
     (Math.abs(radiusAt(sweep, at.angle + step / 2)) -
@@ -154,13 +288,24 @@ interface Cloud {
   n: Float32Array;
   w: Float64Array;
   total: number;
+  /** How much each point counts when the sweep is checked along its path. */
+  judged: Float64Array;
 }
 
-/** The points with weight, and their weights scaled to a largest of 1. */
-function cloudOf(points: Float32Array, normals: Float32Array, weights: Float64Array | null): Cloud {
+/**
+ * The points with weight, and their weights scaled to a largest of 1; each is judged by `judged`
+ * when given and there are no weights, else by its weight.
+ */
+function cloudOf(
+  points: Float32Array,
+  normals: Float32Array,
+  weights: Float64Array | null,
+  judged: Float64Array | null,
+): Cloud {
   const count = points.length / 3;
   if (!weights) {
-    return { count, p: points, n: normals, w: new Float64Array(count).fill(1), total: count };
+    const w = new Float64Array(count).fill(1);
+    return { count, p: points, n: normals, w, total: count, judged: judged ?? w };
   }
   const used: number[] = [];
   let largest = 0;
@@ -179,7 +324,7 @@ function cloudOf(points: Float32Array, normals: Float32Array, weights: Float64Ar
     w[k] = weights[i] / largest;
     total += w[k];
   });
-  return { count: used.length, p, n, w, total };
+  return { count: used.length, p, n, w, total, judged: w };
 }
 
 /** The cloud thinned to `fitPoints` evenly spread points when it has more. */
@@ -193,6 +338,7 @@ function sampled(cloud: Cloud): Cloud {
     n: pickOf(cloud.n, picked),
     w,
     total: w.reduce((sum, x) => sum + x, 0),
+    judged: pickWeights(cloud.judged, picked),
   };
 }
 
@@ -267,9 +413,34 @@ function slabCentres(cloud: Cloud, noise: number, thick: number) {
   return fit && fit.shape.kind === 'cylinder' ? across(fit.shape.axis) : null;
 }
 
+/**
+ * Centres of slabs one station thick cut across `local`'s path, run on past its ends, each the
+ * axis point of its cylinder nearest its centroid, in order along the path; null as for
+ * `slabCentres`.
+ */
+function centresAlong(cloud: Cloud, local: Local, noise: number, thick: number) {
+  const { slots, slotOf } = slotsOf(local.station, thick);
+  const members: number[][] = Array.from({ length: slots }, () => []);
+  local.station.forEach((s, i) => members[slotOf(s)].push(i));
+  const centres: V3[] = [];
+  const at = new Float64Array(3),
+    frame = new Float64Array(9);
+  for (const list of members) {
+    const picked = spread(list.length, slabPoints).map((k) => list[k]);
+    if (picked.length < 6) continue;
+    let along = 0;
+    for (const i of picked) along += local.station[i] / picked.length;
+    frameAt(local.path, along, at, frame);
+    const centre = slabCentre(cloud, picked, noise, frame.subarray(0, 3));
+    if (centre) centres.push(centre);
+  }
+  if (centres.length < 3) return null;
+  return unfolded(Float64Array.from(centres.flat()));
+}
+
 /** Centres of the slabs across `axis`; see `slabCentres`. */
 function centresAcross(cloud: Cloud, noise: number, thick: number, mean: number[], axis: V3) {
-  const { count, p, n, w } = cloud;
+  const { count, p } = cloud;
   const along = Float64Array.from(
     { length: count },
     (_, i) =>
@@ -292,23 +463,33 @@ function centresAcross(cloud: Cloud, noise: number, thick: number, mean: number[
   for (const list of members) {
     const picked = spread(list.length, slabPoints).map((k) => list[k]);
     if (picked.length < 6) continue;
-    const fit = coarseCylinder(pickOf(p, picked), pickOf(n, picked), noise, pickWeights(w, picked));
-    if (!fit || fit.shape.kind !== 'cylinder') continue;
-    const { point, axis: direction } = fit.shape;
-    // A slab cut along the tube rather than across it places its centre poorly.
-    if (Math.abs(dot3(direction, axis)) < slabAlignment) continue;
-    const centroid = [0, 0, 0];
-    let total = 0;
-    for (const i of picked) {
-      total += w[i];
-      for (let k = 0; k < 3; k++) centroid[k] += w[i] * p[i * 3 + k];
-    }
-    const offset = [0, 1, 2].map((k) => centroid[k] / total - point[k]);
-    const h = offset[0] * direction[0] + offset[1] * direction[1] + offset[2] * direction[2];
-    centres.push([0, 1, 2].map((k) => point[k] + h * direction[k]) as V3);
+    const centre = slabCentre(cloud, picked, noise, axis);
+    if (centre) centres.push(centre);
   }
   if (centres.length < 3) return null;
   return unfolded(chain(centres, axis));
+}
+
+/**
+ * The axis point nearest the centroid of the cylinder fitted to the `picked` points of a slab cut
+ * across `axis`; null when no cylinder fits or its axis is over 60 degrees from `axis`.
+ */
+function slabCentre(cloud: Cloud, picked: number[], noise: number, axis: ArrayLike<number>) {
+  const { p, n, w } = cloud;
+  const fit = coarseCylinder(pickOf(p, picked), pickOf(n, picked), noise, pickWeights(w, picked));
+  if (!fit || fit.shape.kind !== 'cylinder') return null;
+  const { point, axis: direction } = fit.shape;
+  // A slab cut along the tube rather than across it places its centre poorly.
+  if (Math.abs(dot3(direction, axis)) < slabAlignment) return null;
+  const centroid = [0, 0, 0];
+  let total = 0;
+  for (const i of picked) {
+    total += w[i];
+    for (let k = 0; k < 3; k++) centroid[k] += w[i] * p[i * 3 + k];
+  }
+  const offset = [0, 1, 2].map((k) => centroid[k] / total - point[k]);
+  const h = offset[0] * direction[0] + offset[1] * direction[1] + offset[2] * direction[2];
+  return [0, 1, 2].map((k) => point[k] + h * direction[k]) as V3;
 }
 
 /**
@@ -409,7 +590,8 @@ interface PathFit {
 
 /**
  * An arc through the centres when it stays within 2 * noise of them in rms, else the spline with
- * the fewest controls, from four up to one per half radius of length, that does.
+ * the fewest controls, from four up to one per half radius of length, that stays within half the
+ * noise: each centre is the mean of a station's many points, so far steadier than one point.
  */
 function pathThrough(
   centres: Float64Array,
@@ -431,7 +613,7 @@ function pathThrough(
   let curve = arc;
   for (let controls = Math.min(4, most); controls <= most; controls++) {
     curve = fitCurve('spline', centres, controls, step);
-    if (centreRms(curve, centres) <= 2 * noise) break;
+    if (centreRms(curve, centres) <= splineNoise * noise) break;
   }
   return { curve, kind: 'spline' };
 }
@@ -457,6 +639,8 @@ interface Local {
   station: Float64Array;
   a: Float64Array;
   b: Float64Array;
+  /** How far the farthest point lies past either end of the path before it was run on. */
+  beyond: number;
 }
 
 /**
@@ -487,6 +671,7 @@ function localOf(cloud: Cloud, fit: PathFit, thick: number): Local {
         fit,
         before > 0 ? before + pathMargin * thick : 0,
         after > 0 ? after + pathMargin * thick : 0,
+        endReach * thick,
       ),
     };
   const station = new Float64Array(count),
@@ -498,15 +683,16 @@ function localOf(cloud: Cloud, fit: PathFit, thick: number): Local {
     a[i] = at.radius * Math.cos(at.angle);
     b[i] = at.radius * Math.sin(at.angle);
   }
-  return { path: probe, station, a, b };
+  return { path: probe, station, a, b, beyond: Math.max(before, after) };
 }
 
 /**
  * The path run on by `before` and `after` past its ends, around its own circle when it is an arc
- * and around the circle through its end and the points a quarter and half its length in when it is
- * a spline, straight on when that circle would turn the run by over 45 degrees.
+ * and around the circle through its end and the points `reach` and twice that in (at most a
+ * quarter and half its length) when it is a spline, straight on when that circle would turn the
+ * run by over 90 degrees.
  */
-function extended(fit: PathFit, before: number, after: number): EdgeCurve {
+function extended(fit: PathFit, before: number, after: number, reach: number): EdgeCurve {
   const p = fit.curve.points,
     count = p.length / 3;
   const point = (i: number): V3 => [p[i * 3], p[i * 3 + 1], p[i * 3 + 2]];
@@ -515,14 +701,14 @@ function extended(fit: PathFit, before: number, after: number): EdgeCurve {
     fit.kind === 'arc' && count >= 3
       ? circleThrough(point(0), point(count >> 1), point(count - 1))
       : null;
-  const span = count >> 2;
+  const span = Math.min(count >> 2, Math.max(1, Math.round(reach / step)));
   const circleAt = (end: number, inward: number, distance: number) => {
     const circle =
       whole ??
       (span >= 1
         ? circleThrough(point(end), point(end + inward * span), point(end + 2 * inward * span))
         : null);
-    return circle && distance <= (Math.PI / 4) * circle.radius ? circle : null;
+    return circle && distance <= (Math.PI / 2) * circle.radius ? circle : null;
   };
   const head: V3[] = [],
     tail: V3[] = [];
@@ -569,15 +755,7 @@ interface Station {
 function polish(cloud: Cloud, local: Local, thick: number, noise: number): Station[] {
   const { count, w } = cloud;
   const { station, a, b } = local;
-  let low = Infinity,
-    high = -Infinity;
-  for (const s of station) {
-    low = Math.min(low, s);
-    high = Math.max(high, s);
-  }
-  const slots = Math.max(1, Math.round((high - low) / thick));
-  const slotOf = (s: number) =>
-    Math.min(slots - 1, Math.floor(((s - low) / (high - low || 1)) * slots));
+  const { slots, slotOf } = slotsOf(station, thick);
   const rho = Float64Array.from({ length: count }, (_, i) => Math.hypot(a[i], b[i]));
   const radius = weightedMedian(rho, w);
   const residual = Float64Array.from(rho, (r) => r - radius);
@@ -613,19 +791,7 @@ function polish(cloud: Cloud, local: Local, thick: number, noise: number): Stati
     Y += k * residual[i];
   }
   // Solve A_b dc_b + e_b dR = y_b per slot and sum(e_b . dc_b) + W dR = Y, eliminating dc_b.
-  const usable: number[] = [];
-  const inverse = new Float64Array(slots * 3);
-  const typical = median(Array.from(total).filter((t) => t > 0));
-  for (let s = 0; s < slots; s++) {
-    // A station the points only graze, at an end of the tube, places its centre poorly.
-    if (seen[s] < 6 || total[s] < stationShare * typical) continue;
-    const [p, q, r] = [A[s * 3], A[s * 3 + 1], A[s * 3 + 2]];
-    const det = p * r - q * q;
-    // A view of under about 25 degrees leaves the centre undetermined across it.
-    if (!(det > 0.002 * (p + r) * (p + r))) continue;
-    inverse.set([r / det, -q / det, p / det], s * 3);
-    usable.push(s);
-  }
+  const { usable, inverse } = usableSlots(A, total, seen);
   const solveSlot = (s: number, ra: number, rb: number) => [
     inverse[s * 3] * ra + inverse[s * 3 + 1] * rb,
     inverse[s * 3 + 1] * ra + inverse[s * 3 + 2] * rb,
@@ -640,43 +806,297 @@ function polish(cloud: Cloud, local: Local, thick: number, noise: number): Stati
       e[s * 2 + 1] * solveSlot(s, y[s * 2], y[s * 2 + 1])[1];
   }
   const dR = schur > 1e-9 * W ? right / schur : 0;
-  const result: Station[] = [];
-  const at = new Float64Array(3),
-    frame = new Float64Array(9);
-  for (const s of usable) {
-    const [ca, cb] = solveSlot(s, y[s * 2] - e[s * 2] * dR, y[s * 2 + 1] - e[s * 2 + 1] * dR);
-    frameAt(local.path, along[s] / total[s], at, frame);
-    result.push({
-      centre: [0, 1, 2].map((k) => at[k] + ca * frame[3 + k] + cb * frame[6 + k]) as V3,
+  const result = new Map<number, Station>();
+  for (const s of usable)
+    result.set(s, {
+      centre: shifted(
+        local,
+        along[s] / total[s],
+        ...(solveSlot(s, y[s * 2] - e[s * 2] * dR, y[s * 2 + 1] - e[s * 2 + 1] * dR) as [
+          number,
+          number,
+        ]),
+      ),
       radius: radius + dR,
     });
-  }
-  return result;
+  const placed = [...result.keys()].sort((x, y) => x - y).map((s) => result.get(s)!);
+  if (!usable.length) return placed;
+  const [first, last] = [Math.min(...usable), Math.max(...usable)];
+  for (const [s, centre] of strayCentres(cloud, local, thick, noise, total, first, last))
+    result.set(s, { centre, radius: radius + dR });
+  const all = [...result.keys()].sort((x, y) => x - y).map((s) => result.get(s)!);
+  // Strays that turn the line back are dropped, not taken for a fold of the tube.
+  return folds(Float64Array.from(all.flatMap((s) => s.centre))) ? placed : all;
 }
 
 /**
- * Whether at least two thirds of the stations keep a median distance from the path within
- * max(6 * noise, 5% of the radius) of the median over stations.
+ * Slots past the polished ones (`first` to `last`) with a station's share of points of which too
+ * few lie near the shared circle for `polish` to place them, as where the path runs on away from
+ * the tube: each is placed by a cylinder fitted to its points, from which the next round polishes
+ * it, so the path reaches the tube's ends.
  */
-function radiiAgree(cloud: Cloud, local: Local, thick: number, noise: number) {
+function strayCentres(
+  cloud: Cloud,
+  local: Local,
+  thick: number,
+  noise: number,
+  near: Float64Array,
+  first: number,
+  last: number,
+) {
+  const { count, w } = cloud;
+  const { slots, slotOf } = slotsOf(local.station, thick);
+  const members: number[][] = Array.from({ length: slots }, () => []);
+  const raw = new Float64Array(slots);
+  for (let i = 0; i < count; i++) {
+    const slot = slotOf(local.station[i]);
+    members[slot].push(i);
+    raw[slot] += w[i];
+  }
+  const typical = median(Array.from(raw).filter((t) => t > 0));
+  const typicalNear = median(Array.from(near).filter((t) => t > 0));
+  const found = new Map<number, V3>();
+  const at = new Float64Array(3),
+    frame = new Float64Array(9);
+  for (let s = 0; s < slots; s++) {
+    if (s >= first && s <= last) continue;
+    if (raw[s] < stationShare * typical || near[s] >= stationShare * typicalNear) continue;
+    const picked = spread(members[s].length, slabPoints).map((k) => members[s][k]);
+    if (picked.length < 6) continue;
+    let along = 0;
+    for (const i of picked) along += local.station[i] / picked.length;
+    frameAt(local.path, along, at, frame);
+    const centre = slabCentre(cloud, picked, noise, frame.subarray(0, 3));
+    if (centre) found.set(s, centre);
+  }
+  return found;
+}
+
+/**
+ * Stations as in `polish`, each one's centre moved so its points best meet the free `profile`,
+ * by one Gauss-Newton step of their distances from the path against the profile's radius at
+ * their angle. Its radius is the profile's median.
+ */
+function polishProfile(
+  cloud: Cloud,
+  local: Local,
+  profile: Float32Array,
+  thick: number,
+  noise: number,
+): Station[] {
+  const { count, w } = cloud;
   const { station, a, b } = local;
-  const groups = new Map<number, { r: number[]; w: number[] }>();
-  let low = Infinity;
-  for (const s of station) low = Math.min(low, s);
-  station.forEach((s, i) => {
-    const key = Math.floor((s - low) / thick);
-    const group = groups.get(key) ?? { r: [], w: [] };
-    group.r.push(Math.hypot(a[i], b[i]));
-    group.w.push(cloud.w[i]);
-    groups.set(key, group);
+  const { slots, slotOf } = slotsOf(station, thick);
+  const step = (2 * Math.PI) / bins;
+  const residual = new Float64Array(count),
+    rho = new Float64Array(count),
+    angle = new Float64Array(count);
+  for (let i = 0; i < count; i++) {
+    rho[i] = Math.hypot(a[i], b[i]);
+    angle[i] = Math.atan2(b[i], a[i]);
+    residual[i] = rho[i] - Math.abs(profileAt(profile, angle[i]));
+  }
+  const scale = Math.max(noise, madScale * weightedMedian(residual.map(Math.abs), w));
+  const A = new Float64Array(slots * 3),
+    y = new Float64Array(slots * 2),
+    along = new Float64Array(slots),
+    total = new Float64Array(slots),
+    seen = new Uint32Array(slots);
+  for (let i = 0; i < count; i++) {
+    const u = residual[i] / (tukey * scale);
+    if (Math.abs(u) >= 1 || !(rho[i] > 0)) continue;
+    const k = w[i] * (1 - u * u) ** 2;
+    const slot = slotOf(station[i]);
+    const slope =
+      (Math.abs(profileAt(profile, angle[i] + step / 2)) -
+        Math.abs(profileAt(profile, angle[i] - step / 2))) /
+      step;
+    // Less the residual's change as the centre moves along the frame's normal and binormal.
+    const r2 = rho[i] * rho[i];
+    const da = a[i] / rho[i] + (slope * b[i]) / r2,
+      db = b[i] / rho[i] - (slope * a[i]) / r2;
+    A[slot * 3] += k * da * da;
+    A[slot * 3 + 1] += k * da * db;
+    A[slot * 3 + 2] += k * db * db;
+    y[slot * 2] += k * da * residual[i];
+    y[slot * 2 + 1] += k * db * residual[i];
+    along[slot] += k * station[i];
+    total[slot] += k;
+    seen[slot]++;
+  }
+  const { usable, inverse } = usableSlots(A, total, seen);
+  const radius = median(Array.from(profile, Math.abs));
+  return usable.map((s) => {
+    const [ra, rb] = [y[s * 2], y[s * 2 + 1]];
+    const ca = inverse[s * 3] * ra + inverse[s * 3 + 1] * rb,
+      cb = inverse[s * 3 + 1] * ra + inverse[s * 3 + 2] * rb;
+    return { centre: shifted(local, along[s] / total[s], ca, cb), radius };
   });
-  const radii: number[] = [];
-  for (const { r, w } of groups.values())
-    if (r.length >= 6) radii.push(weightedMedian(Float64Array.from(r), Float64Array.from(w)));
-  if (radii.length < 3) return false;
-  const middle = median(radii);
-  const tolerance = Math.max(radiusNoise * noise, radiusFraction * middle);
-  return radii.filter((r) => Math.abs(r - middle) <= tolerance).length >= agreeing * radii.length;
+}
+
+/** Slots `thick` apart over the stations' span, and each station's slot. */
+function slotsOf(station: Float64Array, thick: number) {
+  let low = Infinity,
+    high = -Infinity;
+  for (const s of station) {
+    low = Math.min(low, s);
+    high = Math.max(high, s);
+  }
+  const slots = Math.max(1, Math.round((high - low) / thick));
+  const slotOf = (s: number) =>
+    Math.min(slots - 1, Math.floor(((s - low) / (high - low || 1)) * slots));
+  return { slots, slotOf };
+}
+
+/**
+ * The slots whose centre the points determine, and the inverse of each one's 2 x 2 normal matrix
+ * (packed a, b, c of the symmetric [a b; b c]).
+ */
+function usableSlots(A: Float64Array, total: Float64Array, seen: Uint32Array) {
+  const slots = total.length;
+  const usable: number[] = [];
+  const inverse = new Float64Array(slots * 3);
+  const typical = median(Array.from(total).filter((t) => t > 0));
+  for (let s = 0; s < slots; s++) {
+    // A station the points only graze, at an end of the tube, places its centre poorly.
+    if (seen[s] < 6 || total[s] < stationShare * typical) continue;
+    const [p, q, r] = [A[s * 3], A[s * 3 + 1], A[s * 3 + 2]];
+    const det = p * r - q * q;
+    // A view of under about 25 degrees leaves the centre undetermined across it.
+    if (!(det > 0.002 * (p + r) * (p + r))) continue;
+    inverse.set([r / det, -q / det, p / det], s * 3);
+    usable.push(s);
+  }
+  return { usable, inverse };
+}
+
+/** The path point at `station` moved by (ca, cb) along its frame's normal and binormal. */
+function shifted(local: Local, station: number, ca: number, cb: number): V3 {
+  const at = new Float64Array(3),
+    frame = new Float64Array(9);
+  frameAt(local.path, station, at, frame);
+  return [0, 1, 2].map((k) => at[k] + ca * frame[3 + k] + cb * frame[6 + k]) as V3;
+}
+
+/**
+ * Weighted RMS distance from the path less the profile's radius at each point's angle, each
+ * distance capped at Tukey's cut of the noise: detail counts no more than that, and points the
+ * path does not reach count in full.
+ */
+function misfitOf(cloud: Cloud, local: Local, profile: Float32Array, noise: number) {
+  const { count, w } = cloud;
+  const { a, b } = local;
+  const residual = Float64Array.from(
+    { length: count },
+    (_, i) => Math.hypot(a[i], b[i]) - Math.abs(profileAt(profile, Math.atan2(b[i], a[i]))),
+  );
+  const cap = tukey * noise;
+  let sum = 0;
+  residual.forEach((d, i) => (sum += w[i] * Math.min(d * d, cap * cap)));
+  return Math.sqrt(sum / cloud.total);
+}
+
+/**
+ * Whether the sweep holds all along its path. Every station `thick` long with points, from the
+ * first to the last, has at least a quarter of its weight within 3 * noise of the sweep, and those
+ * points lie at a median 1.2 * noise from it: on a misplaced stretch they spread over that band
+ * instead, at a median of about 1.5 * noise or more. Detail may stand off the rest of a station.
+ * A run of stations that fail, with stations on both sides that hold, is bridged when it is no
+ * longer than twice the tube's width and no more of it than the tube's width has points: detail
+ * covering the tube, as a clamp, or left out of a weighted fit, leaves a station empty. And
+ * the held stations' median offsets drift from one end of the path to the other by no more than
+ * 2 * noise, or 3 standard errors of that drift where the stations scatter more.
+ */
+function heldAlong(cloud: Cloud, local: Local, sweep: Sweep, thick: number, noise: number) {
+  const { count, judged: w } = cloud;
+  const { station, a, b } = local;
+  const { slots, slotOf } = slotsOf(station, thick);
+  const offsets: number[][] = Array.from({ length: slots }, () => []);
+  const weights: number[][] = Array.from({ length: slots }, () => []);
+  const along = new Float64Array(slots);
+  for (let i = 0; i < count; i++) {
+    const slot = slotOf(station[i]);
+    offsets[slot].push(
+      Math.hypot(a[i], b[i]) - Math.abs(profileAt(sweep.profile, Math.atan2(b[i], a[i]))),
+    );
+    weights[slot].push(w[i]);
+    along[slot] += station[i];
+  }
+  // The scale the sweep's own points scatter by, as `rmsOf` takes it.
+  const scale = Math.max(
+    noise,
+    madScale *
+      weightedMedian(
+        Float64Array.from(offsets.flat(), Math.abs),
+        Float64Array.from(weights.flat()),
+      ),
+  );
+  let first = 0,
+    last = slots - 1;
+  // An end station with too few points to judge, or one the fit counts at under half weight on
+  // average (a blend band, which moves by as little), is left out.
+  const weak = (s: number) =>
+    offsets[s].length < stationPoints ||
+    weights[s].reduce((sum, x) => sum + x, 0) < 0.5 * offsets[s].length;
+  while (first <= last && weak(first)) first++;
+  while (last >= first && weak(last)) last--;
+  const radius = Array.from(sweep.profile).reduce((sum, r) => sum + Math.abs(r), 0) / bins;
+  const bridge = Math.floor((2 * radius) / thick);
+  const at: number[] = [],
+    offset: number[] = [];
+  let gap = 0,
+    off = 0;
+  for (let s = first; s <= last; s++) {
+    const d = offsets[s],
+      k = weights[s];
+    let total = 0;
+    for (const x of k) total += x;
+    const near = Array.from(d.keys()).filter((m) => Math.abs(d[m]) <= stationNoise * scale);
+    const nearWeight = Float64Array.from(near, (m) => k[m]);
+    let share = 0;
+    for (const x of nearWeight) share += x / total;
+    const held =
+      near.length >= stationPoints &&
+      share >= stationShareNear &&
+      weightedMedian(
+        Float64Array.from(near, (m) => Math.abs(d[m])),
+        nearWeight,
+      ) <=
+        nearNoise * scale;
+    if (!held) {
+      // Points standing off a station's whole view: detail covering it, or a misplaced stretch.
+      if (d.length >= stationPoints) off++;
+      if (++gap > 2 * bridge || off > bridge || s === first || s === last) return false;
+      continue;
+    }
+    gap = off = 0;
+    at.push(along[s] / d.length);
+    offset.push(
+      weightedMedian(
+        Float64Array.from(near, (m) => d[m]),
+        nearWeight,
+      ),
+    );
+  }
+  if (at.length < 3) return false;
+  // Least-squares line of the offsets along the path, its drift end to end and that drift's error.
+  const n = at.length;
+  const mx = at.reduce((sum, x) => sum + x, 0) / n,
+    my = offset.reduce((sum, y) => sum + y, 0) / n;
+  let sxx = 0,
+    sxy = 0;
+  for (let i = 0; i < n; i++) {
+    sxx += (at[i] - mx) ** 2;
+    sxy += (at[i] - mx) * (offset[i] - my);
+  }
+  if (!(sxx > 0)) return true;
+  const slope = sxy / sxx;
+  let ssr = 0;
+  for (let i = 0; i < n; i++) ssr += (offset[i] - my - slope * (at[i] - mx)) ** 2;
+  const span = at[n - 1] - at[0];
+  const drift = Math.abs(slope * span);
+  const error = n > 2 ? (Math.sqrt(ssr / (n - 2)) * span) / Math.sqrt(sxx) : 0;
+  return drift <= Math.max(driftNoise * noise, driftErrors * error);
 }
 
 /**
@@ -689,6 +1109,8 @@ function profileOf(cloud: Cloud, local: Local, noise: number) {
   const { a, b, station } = local;
   const radii: number[][] = Array.from({ length: bins }, () => []);
   const weights: number[][] = Array.from({ length: bins }, () => []);
+  const turns: number[][] = Array.from({ length: bins }, () => []);
+  const step = (2 * Math.PI) / bins;
   let facing = 0;
   const at = new Float64Array(3),
     frame = new Float64Array(9);
@@ -699,6 +1121,11 @@ function profileOf(cloud: Cloud, local: Local, noise: number) {
     const bin = ((Math.floor((angle / (2 * Math.PI)) * bins) % bins) + bins) % bins;
     radii[bin].push(rho);
     weights[bin].push(w[i]);
+    turns[bin].push(
+      angle -
+        (bin + 0.5) * step -
+        2 * Math.PI * Math.round(angle / (2 * Math.PI) - (bin + 0.5) / bins),
+    );
     frameAt(local.path, station[i], at, frame);
     let outward = 0;
     for (let k = 0; k < 3; k++)
@@ -712,6 +1139,25 @@ function profileOf(cloud: Cloud, local: Local, noise: number) {
     if (radii[k].length < binPoints || !(total > 0)) continue;
     profile[k] = weightedMedian(Float64Array.from(radii[k]), Float64Array.from(weights[k]));
     filled.push(k);
+  }
+  // A bin's points may sit off its centre together, as on rings that share angles: each is moved
+  // to the centre along the slope between the neighbouring bins.
+  const first = profile.slice();
+  for (const k of filled) {
+    const before = first[(k + bins - 1) % bins],
+      after = first[(k + 1) % bins];
+    const slope = !Number.isNaN(before)
+      ? !Number.isNaN(after)
+        ? (after - before) / (2 * step)
+        : (first[k] - before) / step
+      : !Number.isNaN(after)
+        ? (after - first[k]) / step
+        : 0;
+    if (!slope) continue;
+    profile[k] = weightedMedian(
+      Float64Array.from(radii[k], (r, m) => r - slope * turns[k][m]),
+      Float64Array.from(weights[k]),
+    );
   }
   if (filled.length < minimumCoverage) return null;
   const mean = filled.reduce((s, k) => s + profile[k], 0) / filled.length;
@@ -731,7 +1177,7 @@ function profileOf(cloud: Cloud, local: Local, noise: number) {
     }
   }
   if (facing < 0) for (let k = 0; k < bins; k++) profile[k] = -profile[k];
-  return { profile, round };
+  return { profile, round, seen: filled.length };
 }
 
 /**
@@ -877,8 +1323,9 @@ function locate(sweep: Sweep, x: number, y: number, z: number) {
 }
 
 /** The profile's radius at `angle`, linear between bin centres. */
-function radiusAt(sweep: Sweep, angle: number) {
-  const { profile } = sweep;
+const radiusAt = (sweep: Sweep, angle: number) => profileAt(sweep.profile, angle);
+
+function profileAt(profile: Float32Array, angle: number) {
   const position = (angle / (2 * Math.PI)) * bins - 0.5;
   const floor = Math.floor(position);
   const f = position - floor;

@@ -1,4 +1,4 @@
-import type { BufferGeometry } from 'three';
+import { BufferAttribute, BufferGeometry } from 'three';
 import { type RefineMesh, vertexNormal, weldedCorner } from '../../src/core/refine-mesh';
 import { type SurfaceSample, modelOf } from './refine';
 import { trianglesWhere } from './refine-region';
@@ -133,4 +133,140 @@ export function straightTube(
       normals.push(...n);
     }
   return [new Float32Array(points), new Float32Array(normals)];
+}
+
+type Vec = [number, number, number];
+/** A centre line at t from 0 to 1: its point and two unit directions across it. */
+export type TubePath = (t: number) => [point: Vec, u: Vec, v: Vec];
+/** A cross-section's radius at `angle` from u toward v, at t along the path. */
+export type CrossSection = (angle: number, t: number) => number;
+
+/** A quarter turn of radius `bend` about the y axis, centred on the x axis. */
+export const elbowPath =
+  (bend: number): TubePath =>
+  (t) => {
+    const phi = ((t - 0.5) * Math.PI) / 2;
+    return [
+      [bend * Math.cos(phi), 0, bend * Math.sin(phi)],
+      [Math.cos(phi), 0, Math.sin(phi)],
+      [0, 1, 0],
+    ];
+  };
+/** A straight line `length` long along z. */
+export const straightPath =
+  (length: number): TubePath =>
+  (t) => [
+    [0, 0, length * t],
+    [1, 0, 0],
+    [0, 1, 0],
+  ];
+/** Two quarter turns of radius 4 bending opposite ways, in the xy plane: about 6.3 long. */
+export const sBendPath: TubePath = (t) => {
+  const phi = ((t - 0.5) * Math.PI) / 2;
+  const turn = Math.sign(phi);
+  return [
+    [4 * Math.sin(phi), 4 * turn * (1 - Math.cos(phi)), 0],
+    [-turn * Math.sin(phi), Math.cos(phi), 0],
+    [0, 0, 1],
+  ];
+};
+/** One turn of a helix of radius 3 and pitch 8 about z: about 20.5 long. */
+export const helixPath: TubePath = (t) => {
+  const phi = (t - 0.5) * 2 * Math.PI;
+  const axial = 8 / (2 * Math.PI);
+  const norm = Math.hypot(3, axial);
+  return [
+    [3 * Math.cos(phi), 3 * Math.sin(phi), axial * phi],
+    [Math.cos(phi), Math.sin(phi), 0],
+    [(axial * Math.sin(phi)) / norm, (-axial * Math.cos(phi)) / norm, 3 / norm],
+  ];
+};
+export const round: CrossSection = () => 1;
+/** An ellipse `amount` wider along u and as much narrower along v. */
+export const oval =
+  (amount: number): CrossSection =>
+  (angle) =>
+    1 / Math.hypot(Math.cos(angle) / (1 + amount), Math.sin(angle) / (1 - amount));
+/** A circle of radius 1 whose side toward v is cut flat 0.85 from the centre. */
+export const flatSided: CrossSection = (angle) =>
+  Math.sin(angle) > 0.85 ? 0.85 / Math.sin(angle) : 1;
+/** A circle whose radius grows by `amount` from one end to the other. */
+export const tapered =
+  (amount: number): CrossSection =>
+  (_, t) =>
+    1 + amount * (t - 0.5);
+
+/**
+ * Rings of points 0.06 apart around a tube swept `length` along `path`, rings 0.06 apart, each
+ * point moved out by a ripple of up to `ripple`. `interior` marks the points from 10% to 90% along.
+ */
+export function sweptTube(path: TubePath, length: number, radius: CrossSection, ripple = 0) {
+  const steps = Math.ceil(length / 0.06),
+    rings = Math.ceil((2 * Math.PI) / 0.06);
+  const points: number[] = [],
+    normals: number[] = [],
+    interior: number[] = [],
+    axis: Vec[] = [];
+  for (let along = 0; along <= steps; along++) {
+    const t = along / steps;
+    const [c, u, v] = path(t);
+    axis.push(c);
+    for (let around = 0; around < rings; around++) {
+      const angle = Math.PI / 2 + (around / rings - 0.5) * 2 * Math.PI;
+      const r = radius(angle, t) + ripple * Math.sin(t * 46) * Math.cos(3 * angle + t * 11);
+      const slope = (radius(angle + 1e-5, t) - radius(angle - 1e-5, t)) / 2e-5;
+      for (let k = 0; k < 3; k++) {
+        const out = Math.cos(angle) * u[k] + Math.sin(angle) * v[k];
+        const turn = -Math.sin(angle) * u[k] + Math.cos(angle) * v[k];
+        points.push(c[k] + r * out);
+        normals.push((r * out - slope * turn) / Math.hypot(r, slope));
+      }
+      interior.push(t > 0.1 && t < 0.9 ? 1 : 0);
+    }
+  }
+  return {
+    points: Float32Array.from(points),
+    normals: Float32Array.from(normals),
+    interior: Uint8Array.from(interior),
+    axis,
+    rings,
+    steps,
+  };
+}
+
+/**
+ * `sweptTube` closed by a fan at each end, as a model, and the triangles of the tube from four rings
+ * in from either end: a region the user paints along it.
+ */
+export function sweptTubeModel(path: TubePath, length: number, radius: CrossSection, ripple = 0) {
+  const { points, normals, axis, rings, steps } = sweptTube(path, length, radius, ripple);
+  const vertices = [...points, ...axis[0], ...axis[steps]];
+  const at = (i: number) => vertices.slice(i * 3, i * 3 + 3);
+  const [p0, p1, pr] = [at(0), at(1), at(rings)];
+  const a = [0, 1, 2].map((k) => p1[k] - p0[k]),
+    b = [0, 1, 2].map((k) => pr[k] - p0[k]);
+  const cross = [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+  const forward = cross[0] * normals[0] + cross[1] * normals[1] + cross[2] * normals[2] > 0;
+  const indices: number[] = [],
+    painted: number[] = [];
+  const push = (x: number, y: number, z: number) =>
+    indices.push(x, forward ? y : z, forward ? z : y);
+  for (let row = 0; row < steps; row++)
+    for (let col = 0; col < rings; col++) {
+      const lower = row * rings + col,
+        next = row * rings + ((col + 1) % rings);
+      if (row >= 4 && row < steps - 4) painted.push(indices.length / 3, indices.length / 3 + 1);
+      push(lower, next, lower + rings);
+      push(next, next + rings, lower + rings);
+    }
+  for (let col = 0; col < rings; col++) {
+    const next = (col + 1) % rings;
+    push((steps + 1) * rings, next, col);
+    push((steps + 1) * rings + 1, steps * rings + col, steps * rings + next);
+  }
+  const geometry = new BufferGeometry();
+  geometry.setAttribute('position', new BufferAttribute(Float32Array.from(vertices), 3));
+  geometry.setIndex(indices);
+  geometry.computeVertexNormals();
+  return { model: modelOf(geometry), triangles: Uint32Array.from(painted) };
 }
