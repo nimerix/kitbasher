@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { BufferAttribute, type BufferGeometry, Matrix4, SphereGeometry, Vector3 } from 'three';
+import { BufferAttribute, BufferGeometry, Matrix4, SphereGeometry, Vector3 } from 'three';
+import { weldedPositionIndex } from '../../src/core/mesh-topology';
 import { cloneRefineMesh, writeRefinedGeometry } from '../../src/core/refine-mesh';
 import { cutAlongField, remapTriangles } from '../../src/core/refine-cut';
 import {
@@ -19,7 +20,7 @@ import {
   trianglesWhollyOn,
   writtenVertexOf,
 } from '../helpers/refine';
-import { type SoftOptions, softBox } from '../helpers/soft-edges';
+import { type SoftOptions, extrudedProfile, softBox } from '../helpers/soft-edges';
 
 const cases = [
   ['unindexed', {}],
@@ -122,6 +123,87 @@ it('refuses a placement that would reverse a triangle against the one it is cut 
   expect([...result.skipped]).toEqual(straddlingTriangles(cut, fn, 1e-6));
   expect(closedMesh(cut)).toBe(true);
   expect(meshMinTriangleArea(cut)).toBeGreaterThan(1e-12);
+});
+
+it('keeps a placement off a vertex joined neither to the band nor to its one-ring', () => {
+  // Two closed tetrahedra 0.35 mm apart; the lower one's apex is placed on a corner of the upper one.
+  const base = cornerTetrahedron(false).getAttribute('position');
+  const points: number[] = [];
+  for (const lift of [0, 0.41])
+    for (let i = 0; i < base.count; i++)
+      points.push(base.getX(i) * 0.06, base.getY(i) * 0.06, base.getZ(i) * 0.06 + lift);
+  const geometry = new BufferGeometry();
+  geometry.setAttribute('position', new BufferAttribute(Float32Array.from(points), 3));
+  geometry.computeVertexNormals();
+  const { mesh, topology } = modelOf(geometry);
+  const cut = cloneRefineMesh(mesh, true);
+  const z = (v: number) => mesh.position[v * 3 + 2];
+  const all = Uint32Array.from({ length: mesh.weldedCount }, (_, i) => i);
+  const ids = all.filter((v) => z(v) < 0.2);
+  const apex = ids.find((v) => z(v) > 0.05)!;
+  const target = all.find(
+    (v) => z(v) > 0.4 && mesh.position[v * 3] === 0 && mesh.position[v * 3 + 1] === 0,
+  )!;
+  const field = Float32Array.from(ids, (v) => (v === apex ? 0 : 1));
+  cutAlongField(cut, topology, ids, field, (x, y, _z, out) => out.set([x, y, z(target)]));
+  expect(cut.position[apex * 3 + 2]).toBe(z(apex));
+  const written = writeRefinedGeometry(geometry, new Matrix4(), cut);
+  expect(weldedPositionIndex(written).vertices).toBe(8);
+});
+
+// A 115 degree edge rounded with r 0.1 mm: its band moved onto the two planes, then cut on the
+// plane between them with each point placed on the corner line, as `applyEdge` does.
+const cutRoundedCorner = (facing: boolean) => {
+  const turn = (-115 * Math.PI) / 180;
+  const geometry = extrudedProfile(
+    [
+      [-1.2, 0],
+      [0, 0],
+      [1.2 * Math.cos(turn), 1.2 * Math.sin(turn)],
+    ],
+    [0.1],
+    2,
+  );
+  const { mesh, topology } = modelOf(geometry);
+  const planes = [
+    [0, 1, 0],
+    [-Math.sin(turn), Math.cos(turn), 0],
+  ];
+  const along = (n: number[], x: number, y: number) => n[0] * x + n[1] * y;
+  const fn = (x: number, y: number) =>
+    Math.abs(along(planes[0], x, y)) - Math.abs(along(planes[1], x, y));
+  const cut = cloneRefineMesh(mesh, true);
+  const band: number[] = [];
+  for (let v = 0; v < cut.weldedCount; v++) {
+    const [x, y, z] = [0, 1, 2].map((a) => cut.position[v * 3 + a]);
+    if (Math.hypot(x, y) > 0.4) continue;
+    const n = planes[fn(x, y) < 0 ? 0 : 1];
+    const d = along(n, x, y);
+    cut.position.set([x - d * n[0], y - d * n[1], z], v * 3);
+    band.push(v);
+  }
+  const ids = Uint32Array.from(band);
+  const field = Float32Array.from(ids, (v) => fn(cut.position[v * 3], cut.position[v * 3 + 1]));
+  const result = cutAlongField(
+    cut,
+    topology,
+    ids,
+    field,
+    (_x, _y, z, out) => out.set([0, 0, z]),
+    undefined,
+    facing ? (_x, _y, _z, side, out) => out.set(planes[side > 0 ? 1 : 0]) : undefined,
+  );
+  return { cut, result, straddling: straddlingTriangles(cut, fn, 1e-6) };
+};
+
+it('judges children against the surface they belong to on a 115 degree edge', () => {
+  const without = cutRoundedCorner(false);
+  expect(without.result.skipped.length).toBeGreaterThan(0);
+  const { cut, result, straddling } = cutRoundedCorner(true);
+  expect(result.skipped.length).toBe(0);
+  expect(straddling).toEqual([]);
+  expect(result.chain.length).toBeGreaterThan(0);
+  expect(meshMinTriangleArea(cut)).toBeGreaterThan(1e-9);
 });
 
 // A seeded generator, so the planes are the same on every run.

@@ -29,6 +29,9 @@ interface Split {
 const collapsedFraction = 1e-6;
 const tinyArea = 1e-12;
 
+/** Coarse cells around a plan share bits of a table this size less one. */
+const coarseMask = (1 << 20) - 1;
+
 const cellKey = (x: number, y: number, z: number) =>
   Math.imul(x, 73856093) ^ Math.imul(y, 19349663) ^ Math.imul(z, 83492791);
 
@@ -84,8 +87,10 @@ const area = (p: Float64Array, out: Float64Array) => {
  * `place` maps a point on the zero set to its final position. The mesh must be a topology clone.
  * `field[i]` is the value at `vertices[i]`; `topology` describes the mesh before the cut.
  * The whole cut is planned on final positions first; a split or snap that would collapse a triangle,
- * reverse one against the triangle it is cut from, or land on another vertex is revised or dropped,
- * and the triangles left straddling are reported in `skipped`.
+ * reverse one, or land on another vertex is revised or dropped, and the triangles left straddling are
+ * reported in `skipped`. A child is reversed when its normal opposes `facing`, the outward normal the
+ * surface should have at its centroid on its side of the zero set (the field's sign there), or,
+ * without `facing`, the normal of the triangle it is cut from.
  */
 export function cutAlongField(
   mesh: RefineMesh,
@@ -94,6 +99,7 @@ export function cutAlongField(
   field: Float32Array,
   place: (x: number, y: number, z: number, out: Float32Array) => void,
   snap = 0.25,
+  facing?: (x: number, y: number, z: number, side: 1 | -1, out: Float64Array) => void,
 ): CutResult {
   const { neighbourStart, neighbours, triangleStart, trianglesOf } = topology;
   const weldedCount = mesh.weldedCount;
@@ -242,6 +248,20 @@ export function cutAlongField(
   const parentNormal = new Float64Array(3),
     childNormal = new Float64Array(3);
   const ends = new Float64Array(6);
+  const facingNormal = new Float64Array(3);
+  // The side of the zero set a child lies on: the field's sign at its corners off the zero set, or 0
+  // when they disagree or none has a value.
+  const sideOf = (child: number[]): 1 | -1 | 0 => {
+    let side = 0;
+    for (const ref of child) {
+      if (ref >= 3 || isZero(corner(ref))) continue;
+      const s = Math.sign(valueOf(corner(ref)));
+      if (!s) continue;
+      if (side && s !== side) return 0;
+      side = s;
+    }
+    return side as 1 | -1 | 0;
+  };
   const far = (p: number, q: number) => {
     pointOf(p, ends, 0);
     pointOf(q, ends, 3);
@@ -269,10 +289,6 @@ export function cutAlongField(
   // position, where the two could merge on export: the later of two chain vertices. Chain vertices
   // sit in a spatial hash under the 27 cells around their own, so each other vertex needs one lookup.
   const coincident = mesh.clearance;
-  // The vertices a chain vertex can land on: the band's and those joined to it.
-  const nearby = new Set<number>(welded);
-  for (const v of welded)
-    for (let i = neighbourStart[v]; i < neighbourStart[v + 1]; i++) nearby.add(neighbours[i]);
   const reviseCoincident = () => {
     const ids: number[] = [];
     const at: number[] = [];
@@ -312,14 +328,34 @@ export function cutAlongField(
             else cells.set(key, [e]);
           }
     }
-    for (const v of nearby) {
-      if (isPlaced(v)) continue;
-      const e = nearest(
-        mesh.position[v * 3],
-        mesh.position[v * 3 + 1],
-        mesh.position[v * 3 + 2],
-        ids.length,
-      );
+    // Any vertex of the mesh can be landed on, joined to the band or not. One pass over positions
+    // reaches each of them; a bit per coarse cell around the plan passes on only those near it.
+    const low = [Infinity, Infinity, Infinity],
+      high = [-Infinity, -Infinity, -Infinity];
+    for (let k = 0; k < at.length; k++) {
+      low[k % 3] = Math.min(low[k % 3], at[k] - coincident);
+      high[k % 3] = Math.max(high[k % 3], at[k] + coincident);
+    }
+    const coarse = Math.max(coincident, ...[0, 1, 2].map((a) => (high[a] - low[a]) / 256));
+    const coarseOf = (x: number, y: number, z: number) =>
+      cellKey(Math.floor(x / coarse), Math.floor(y / coarse), Math.floor(z / coarse)) & coarseMask;
+    const occupied = new Uint8Array(coarseMask + 1);
+    for (let k = 0; k < at.length; k += 3)
+      for (let dx = -1; dx <= 1; dx++)
+        for (let dy = -1; dy <= 1; dy++)
+          for (let dz = -1; dz <= 1; dz++)
+            occupied[
+              coarseOf(at[k] + dx * coarse, at[k + 1] + dy * coarse, at[k + 2] + dz * coarse)
+            ] = 1;
+    const { position } = mesh;
+    for (let v = 0; v < weldedCount; v++) {
+      const x = position[v * 3],
+        y = position[v * 3 + 1],
+        z = position[v * 3 + 2];
+      if (x < low[0] || x > high[0] || y < low[1] || y > high[1] || z < low[2] || z > high[2])
+        continue;
+      if (!occupied[coarseOf(x, y, z)] || isPlaced(v)) continue;
+      const e = nearest(x, y, z, ids.length);
       if (e >= 0) clash[e] = 1;
     }
     let revised = false;
@@ -350,10 +386,23 @@ export function cutAlongField(
       for (const child of divide(cut, far)) {
         child.forEach((ref, k) => pointOf(ref, points, k * 3));
         const collapsed = area(points, childNormal) < limit;
+        const side = facing ? sideOf(child) : 0;
+        let reference = parentNormal;
+        if (side !== 0) {
+          facing!(
+            (points[0] + points[3] + points[6]) / 3,
+            (points[1] + points[4] + points[7]) / 3,
+            (points[2] + points[5] + points[8]) / 3,
+            side,
+            facingNormal,
+          );
+          if (mesh.flipped) for (let a = 0; a < 3; a++) facingNormal[a] = -facingNormal[a];
+          reference = facingNormal;
+        }
         const reversed =
-          childNormal[0] * parentNormal[0] +
-            childNormal[1] * parentNormal[1] +
-            childNormal[2] * parentNormal[2] <
+          childNormal[0] * reference[0] +
+            childNormal[1] * reference[1] +
+            childNormal[2] * reference[2] <
           0;
         if ((collapsed || reversed) && revise(child)) {
           revised = true;
