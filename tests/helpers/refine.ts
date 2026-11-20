@@ -1478,9 +1478,48 @@ export function reversedAgainst(
 }
 
 /**
- * The chain vertices with every band vertex of weight at least 0.9 (where the cut runs) within
- * `reach` of them in `after` at full weight: where the edge is sharp rather than blending into the
- * scan. `reach` should exceed an edge length plus the largest move of a point onto the edge.
+ * Children of cut triangles, other than those `skipped` left straddling, whose normal opposes the
+ * outward normal of the flank on their side: the side whose corrected surface, as `distances`
+ * measures, their centroid lies nearer.
+ */
+export function reversedAgainstFlanks(
+  after: RefineMesh,
+  solve: EdgeSolve,
+  children: Map<number, number[]>,
+  distances: ((x: number, y: number, z: number) => number)[],
+  skipped: ArrayLike<number> = [],
+) {
+  const straddling = new Set(Array.from(skipped));
+  const flanks = solve.flanks[0];
+  const h = 1e-6;
+  let reversed = 0;
+  for (const list of children.values())
+    for (const t of list) {
+      if (straddling.has(t)) continue;
+      const p = ([0, 1, 2] as const).map((k) => weldedCorner(after, t, k) * 3);
+      const at = (k: number, a: number) => after.position[p[k] + a];
+      const u = [0, 1, 2].map((a) => at(1, a) - at(0, a));
+      const v = [0, 1, 2].map((a) => at(2, a) - at(0, a));
+      const sign = after.flipped ? -1 : 1;
+      const n = [u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]];
+      const c = [0, 1, 2].map((a) => (at(0, a) + at(1, a) + at(2, a)) / 3);
+      const side = distances[1](c[0], c[1], c[2]) < distances[0](c[0], c[1], c[2]) ? 1 : 0;
+      const outward = [0, 1, 2].map((a) => {
+        const q = [...c];
+        q[a] += h;
+        const forward = flanks[side].signed(q[0], q[1], q[2]);
+        q[a] -= 2 * h;
+        return forward - flanks[side].signed(q[0], q[1], q[2]);
+      });
+      if (sign * (n[0] * outward[0] + n[1] * outward[1] + n[2] * outward[2]) < 0) reversed++;
+    }
+  return reversed;
+}
+
+/**
+ * The chain vertices with no band vertex of weight under 1 within `reach` of them in `after`: where
+ * the edge is sharp rather than blending into the scan. `reach` should exceed an edge length plus the
+ * largest move of a point onto the edge.
  */
 export function fullWeightChain(
   after: RefineMesh,
@@ -1492,7 +1531,7 @@ export function fullWeightChain(
   const [band] = solve.bands;
   return [...chain].filter((v) =>
     band.vertices.every((w, i) => {
-      if (band.zone[i] === BandZone.Beyond || weights[i] < 0.9 || weights[i] === 1) return true;
+      if (band.zone[i] === BandZone.Beyond || weights[i] === 1) return true;
       const d = Math.hypot(
         ...[0, 1, 2].map((a) => after.position[w * 3 + a] - after.position[v * 3 + a]),
       );

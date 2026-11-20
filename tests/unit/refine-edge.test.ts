@@ -22,7 +22,7 @@ import {
   modelOf,
   movedOutside,
   pointOn,
-  reversedAgainst,
+  reversedAgainstFlanks,
   seamMove,
   straddlingCurve,
   straightness,
@@ -252,16 +252,12 @@ describe('solveEdge and applyEdge on one segment', () => {
     expect(secondBlend).toBeLessThan(firstBlend);
   });
 
-  it('cuts without reversing a face against the face it is cut from', () => {
+  it('cuts without reversing a face against the flank it belongs to', () => {
     for (const { model, solve } of [boxCase(), stepCase(), rimCase()]) {
-      const moved = cloneRefineMesh(model.mesh, false);
-      applyEdge(moved, model.topology, solve, 1, false);
       const out = cloneRefineMesh(model.mesh, true);
       const { cut } = applyEdge(out, model.topology, solve, 1, true);
-      const parentOf = new Map<number, number>();
-      for (const [parent, children] of cut!.children)
-        for (const child of children) parentOf.set(child, parent);
-      expect(reversedAgainst(moved, out, parentOf)).toBe(0);
+      const surfaces = correctedFlanks(model.mesh, model.topology, solve);
+      expect(reversedAgainstFlanks(out, solve, cut!.children, surfaces, cut!.skipped)).toBe(0);
       expect(closedMesh(out)).toBe(true);
     }
   });
@@ -395,6 +391,76 @@ describe('solveEdge and applyEdge on one segment', () => {
     }
   });
 
+  it('holds an edge drawn from corner to corner and tapers one that stops mid-edge', () => {
+    const model = modelOf(softBox([2, 1.5, 1], 0.3));
+    const ends = (x0: number, x1: number) =>
+      solveEdge(
+        model.mesh,
+        model.topology,
+        inputOf('line', edgeGuide(model.mesh, x0, x1)),
+        model.noise,
+      )!.ends;
+    expect(ends(-1, 1)).toEqual(['taper', 'taper']);
+    expect(ends(-1.85, 1.85)).toEqual(['hold', 'hold']);
+    expect(ends(-0.5, 1.85)).toEqual(['taper', 'hold']);
+  });
+
+  it('cuts along the whole guide and creases only where the weight is at least 0.5', () => {
+    const model = modelOf(softBox([2, 1.5, 1], 0.3));
+    const solve = solveEdge(
+      model.mesh,
+      model.topology,
+      inputOf('line', edgeGuide(model.mesh, -1, 1)),
+      model.noise,
+    )!;
+    const out = cloneRefineMesh(model.mesh, true);
+    const { cut, skipped } = applyEdge(out, model.topology, solve, 1, true);
+    expect(skipped.length).toBe(0);
+    const weights = moveWeights(model.mesh, model.topology, solve);
+    const weightOf = new Map<number, number>();
+    solve.bands[0].vertices.forEach((v, i) => weightOf.set(v, weights[i]));
+    // The chain reaches into the tapers, where the weight is under 0.5 and nothing is creased.
+    const xs = [...cut!.chain].map((v) => out.position[v * 3]);
+    expect(Math.min(...xs)).toBeLessThan(-0.75);
+    expect(Math.max(...xs)).toBeGreaterThan(0.75);
+    const creased = [...cut!.chain].filter((v) => out.crease[v] === 1);
+    expect(creased.length).toBeGreaterThan(0);
+    expect(creased.length).toBeLessThan(cut!.chain.length);
+    for (const v of cut!.chain)
+      if (v < model.mesh.weldedCount && weightOf.get(v)! < 0.4) expect(out.crease[v]).toBe(0);
+  });
+
+  it('keeps neighbouring moves within 0.025 mm of each other where an edge tapers', () => {
+    const box = modelOf(softBox([2, 1.5, 1], 0.3));
+    const step = stepCase();
+    const cases = [
+      {
+        model: box,
+        solve: solveEdge(
+          box.mesh,
+          box.topology,
+          inputOf('line', edgeGuide(box.mesh, -1, 1)),
+          box.noise,
+        )!,
+      },
+      step,
+      rimCase(),
+    ];
+    for (const { model, solve } of cases) {
+      expect(solve.ends).toEqual(['taper', 'taper']);
+      expect(weightStep(model, solve)).toBeLessThan(0.025);
+    }
+  });
+
+  it("moves a vertex beside one that stays, along an interior step's sides, by at most 0.006 mm", () => {
+    const { model, solve } = stepCase();
+    const out = cloneRefineMesh(model.mesh, false);
+    applyEdge(out, model.topology, solve, 1, false);
+    const seam = seamMove(model.mesh, out, model.topology, (_x, _y, z) => Math.abs(z) <= 1);
+    expect(seam).toBeGreaterThan(0);
+    expect(seam).toBeLessThan(0.006);
+  });
+
   it('puts the chain on the solved edge where the weight is full', () => {
     for (const { model, solve } of [boxCase(), stepCase(), rimCase()]) {
       const out = cloneRefineMesh(model.mesh, true);
@@ -411,6 +477,27 @@ describe('solveEdge and applyEdge on one segment', () => {
     }
   });
 });
+
+/**
+ * Largest difference the weights make between two neighbours' moves at full strength: |w_u - w_v|
+ * times the larger of their full moves. The raw difference is not used: across the rounding's middle
+ * two neighbours at full weight move onto different flanks.
+ */
+function weightStep(model: ReturnType<typeof modelOf>, solve: EdgeSolve) {
+  const out = cloneRefineMesh(model.mesh, false);
+  applyEdge(out, model.topology, solve, 1, false);
+  const weights = moveWeights(model.mesh, model.topology, solve);
+  const w = new Float64Array(model.mesh.weldedCount);
+  solve.bands[0].vertices.forEach((v, i) => (w[v] = weights[i]));
+  const full = (v: number) => (w[v] > 0 ? moveOf(model.mesh, out, v) / w[v] : 0);
+  let worst = 0;
+  for (const v of solve.bands[0].vertices)
+    for (let j = model.topology.neighbourStart[v]; j < model.topology.neighbourStart[v + 1]; j++) {
+      const u = model.topology.neighbours[j];
+      worst = Math.max(worst, Math.abs(w[v] - w[u]) * Math.max(full(v), full(u)));
+    }
+  return worst;
+}
 
 /** A sharp 0.12 mm fillet sampled at 0.06 mm without ripple. */
 const sharpEdge = { step: 0.06, noise: 0.004, ripple: 0 };
