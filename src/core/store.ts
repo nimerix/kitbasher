@@ -79,6 +79,14 @@ import {
   type WarpTransformSelection,
 } from './transform-selection';
 import type { FreeTransformMode, TransformAxis, TransformPatch } from './free-transform';
+import type { RefineBrush } from './refine-brush';
+import type { EdgeCurve, GuideJoint, GuideKind } from './refine-curve';
+import type { RefineProposal } from './refine-detect';
+import type { EdgeEnd } from './refine-edge';
+import { type RefineMesh, writeRefinedGeometry } from './refine-mesh';
+import type { RefineModel } from './refine-model';
+import { patchRefinedGeometry } from './refine-preview';
+import type { RegionInput } from './refine-region';
 import type { NavigationMode } from './navigation';
 import { createSample } from './sample';
 import { useXR } from './xr-session';
@@ -348,6 +356,57 @@ interface WarpRecovery {
   session: WarpSession;
 }
 
+export type RefineMode = 'edge' | 'region' | 'brush' | 'detect';
+export interface RefineFeature {
+  id: string;
+  state: 'pending' | 'accepted';
+  origin: 'hand' | 'detected';
+  feature: RefineProposal;
+  /** The solved edge of an accepted or previewed edge feature, for drawing. */
+  curve?: EdgeCurve;
+}
+/** A session undo step. Its model shares every array that did not change with its neighbours. */
+export interface RefineStep {
+  model: RefineModel;
+  features: RefineFeature[];
+  selected: string[];
+  triangles: number[];
+}
+export interface RefineSession {
+  id: string;
+  partId: string;
+  source: BufferGeometry;
+  epoch: number;
+  stage: 'building' | 'ready';
+  /** The model the session started with. */
+  start: RefineModel | null;
+  /** The working surface: the scan with everything accepted. */
+  model: RefineModel | null;
+  /** The working surface with the selected pending features previewed, uncut. Null when nothing is selected. */
+  draft: RefineMesh | null;
+  /** Never in the scene or history. Face t is triangle t of the working surface. */
+  preview: BufferGeometry | null;
+  mode: RefineMode;
+  features: RefineFeature[];
+  selected: string[];
+  /** Painted triangles of the working surface: the region being made, or where Detect looks. */
+  triangles: number[];
+  edge: {
+    kind: GuideKind;
+    width: number | null;
+    joint: GuideJoint;
+    strength: number;
+    /** How the sharpness ends at each end of an open guide; null decides automatically. */
+    ends: [EdgeEnd | null, EdgeEnd | null];
+  };
+  region: Omit<RegionInput, 'triangles'>;
+  brush: { kind: RefineBrush; strength: number };
+  detect: { where: 'part' | 'painted'; sensitivity: number; minLength: number; running: boolean };
+  folds: Uint32Array;
+  undo: RefineStep[];
+  redo: RefineStep[];
+}
+
 interface EditorState {
   scene: SceneDocument;
   selected: string[];
@@ -391,6 +450,7 @@ interface EditorState {
   /** First warp in the queued or submitted edit, available to reopen if that batch is refused. */
   warpPending: WarpRecovery | null;
   warpInFlight: WarpRecovery | null;
+  refine: RefineSession | null;
   view: ViewSettings;
   /** Lighting for scenes that have none of their own. Kept in this browser. */
   defaultLighting: SceneLighting;
@@ -517,6 +577,14 @@ interface EditorState {
   submitWarp: () => void;
   retryWarp: () => void;
   settleWarp: (accepted: boolean, submittedOnly?: boolean) => void;
+  /** Starts a session on the one selected part, or says why it cannot. */
+  startRefine: () => boolean;
+  /** Ends the session without changing the part. It leaves the tool as it is. */
+  cancelRefine: (notice?: string) => void;
+  /** Writes the working surface to the part as one undo step, then starts again on the result. */
+  applyRefine: () => boolean;
+  undoRefine: () => void;
+  redoRefine: () => void;
   setOperation: (patch: Partial<AssemblyOperation>) => void;
   resetPicks: () => void;
   pick: (point: SurfacePoint) => void;
@@ -1811,6 +1879,7 @@ export const useEditor = create<EditorState>((set, get) => ({
   warpAdd: 'point',
   warpPending: null,
   warpInFlight: null,
+  refine: null,
   view: {
     inspection: {
       enabled: false,
@@ -1972,6 +2041,9 @@ export const useEditor = create<EditorState>((set, get) => ({
     if (tool === 'warp' && state.tool === 'warp' && state.warp)
       set({ navigationMode: null, pivotPicking: false });
     else if (tool === 'warp') state.startWarp();
+    else if (tool === 'refine' && state.tool === 'refine' && state.refine)
+      set({ navigationMode: null, pivotPicking: false });
+    else if (tool === 'refine') state.startRefine();
     else set((state) => toolChange(state, tool));
   },
   addFitAnchor: (point) => {
@@ -3107,6 +3179,99 @@ export const useEditor = create<EditorState>((set, get) => ({
       'info',
     );
   },
+  startRefine: () => {
+    const state = get();
+    if (useXR.getState().session) return false;
+    const part =
+      state.selected.length === 1
+        ? state.scene.parts.find((p) => p.id === state.selected[0])
+        : undefined;
+    if (!part || part.locked || !part.visible) {
+      state.notify('Select one visible, unlocked part to refine.', 'info');
+      return false;
+    }
+    if (triangleCount(part.geometry) > maxPaintTriangles) {
+      state.notify(
+        `${part.name} has too many triangles to refine. The limit is 10 million.`,
+        'info',
+      );
+      return false;
+    }
+    state.cancelRefine();
+    const refine = newRefineSession(part, state.sceneEpoch);
+    set((state) => ({ ...toolChange(state, 'refine'), refine }));
+    void buildRefine(refine, part);
+    return true;
+  },
+  cancelRefine: (notice) => {
+    abortRefineJobs();
+    const { refine } = get();
+    if (!refine) return;
+    disposeRefinePreview(refine.preview);
+    set({ refine: null });
+    if (notice) get().notify(notice, 'info');
+  },
+  applyRefine: () => {
+    const state = get(),
+      refine = state.refine;
+    if (!refine?.model || refine.stage !== 'ready' || !refineEdited(refine)) return false;
+    const part = state.scene.parts.find((p) => p.id === refine.partId);
+    if (!part || part.geometry !== refine.source || state.sceneEpoch !== refine.epoch) {
+      state.notify('The part changed, so the refinement could not be applied.', 'error');
+      return false;
+    }
+    if (part.locked) {
+      state.notify(`Unlock ${part.name} to apply the refinement.`, 'info');
+      return false;
+    }
+    abortRefineJobs();
+    const { mesh } = refine.model;
+    const geometry = writeRefinedGeometry(refine.source, partMatrix(part), mesh);
+    // Without a cut, triangle t is still the source's, so its tree only needs new bounds.
+    if (mesh.triangleCount === mesh.sourceTriangleCount) refitWarpTree(refine.source, geometry);
+    const refined: Part = { ...part, geometry, source: `Refine · ${part.source}` };
+    const { mode, edge, region, brush, detect } = refine;
+    const next: RefineSession = {
+      ...newRefineSession(refined, state.sceneEpoch),
+      mode,
+      edge,
+      region,
+      brush,
+      detect: { ...detect, running: false },
+    };
+    disposeRefinePreview(refine.preview);
+    set({
+      ...changed(state, {
+        ...state.scene,
+        parts: state.scene.parts.map((p) => (p.id === part.id ? refined : p)),
+      }),
+      refine: next,
+    });
+    preparePicking(geometry);
+    void buildRefine(next, refined);
+    return true;
+  },
+  undoRefine: () => {
+    const { refine } = get();
+    const step = refine?.undo.at(-1);
+    if (!refine?.model || !step) return;
+    const kept = trimRefineSteps(step.model, refine.undo.slice(0, -1), [
+      ...refine.redo,
+      refineStep(refine),
+    ]);
+    set({ refine: showRefine({ ...refine, ...step, ...kept, draft: null, folds: noFolds }) });
+  },
+  redoRefine: () => {
+    const { refine } = get();
+    const step = refine?.redo.at(-1);
+    if (!refine?.model || !step) return;
+    const kept = trimRefineSteps(
+      step.model,
+      [...refine.undo, refineStep(refine)],
+      refine.redo.slice(0, -1),
+    );
+    set({ refine: showRefine({ ...refine, ...step, ...kept, draft: null, folds: noFolds }) });
+  },
   setOperation: (patch) =>
     set((state) => {
       const op = state.operation;
@@ -4008,6 +4173,7 @@ function releaseGeometries(
   for (const geometry of [
     ...reachable,
     state.warp?.preview,
+    state.refine?.preview,
     state.warpPending?.session.preview,
     state.warpInFlight?.session.preview,
   ]) {
@@ -4507,6 +4673,231 @@ useEditor.subscribe((state, previous) => {
       warp.stage !== 'warp')
   )
     useEditor.setState({ warp: { ...warp, applying: false } });
+});
+
+export const refineUndoLimit = 50;
+/** The most memory session undo and redo may hold beyond the working surface, in bytes. */
+export const refineUndoBytes = 512 * 1024 * 1024;
+const noFolds = new Uint32Array(0);
+
+/** Whether the session holds work that ending it would lose. */
+export const refineEdited = (refine: RefineSession) => refine.model !== refine.start;
+
+/** The geometry drawn in place of the part while a session on it has one. */
+export const shownRefinePreview = (refine: RefineSession | null, partId: string) =>
+  refine?.partId === partId ? refine.preview : null;
+
+const newRefineSession = (part: Part, epoch: number): RefineSession => ({
+  id: uid(),
+  partId: part.id,
+  source: part.geometry,
+  epoch,
+  stage: 'building',
+  start: null,
+  model: null,
+  draft: null,
+  preview: null,
+  mode: 'edge',
+  features: [],
+  selected: [],
+  triangles: [],
+  edge: { kind: 'line', width: null, joint: 'sharp', strength: 1, ends: [null, null] },
+  region: {
+    treatment: 'smooth',
+    shape: 'auto',
+    strength: 1,
+    keepDetail: true,
+    detail: null,
+    blend: null,
+    scale: null,
+  },
+  brush: { kind: 'smooth', strength: 0.5 },
+  // detectDefaults, written out so the store does not load detection before a session needs it.
+  detect: { where: 'part', sensitivity: 0.5, minLength: 1.5, running: false },
+  folds: noFolds,
+  undo: [],
+  redo: [],
+});
+
+/** Every running build or detection of the session, aborted when it ends. */
+const refineJobs = new Set<AbortController>();
+
+function abortRefineJobs() {
+  const jobs = [...refineJobs];
+  refineJobs.clear();
+  for (const job of jobs) job.abort();
+}
+
+/** Frees a preview's buffers. It owns all of them. */
+function disposeRefinePreview(preview: BufferGeometry | null) {
+  if (preview) releaseGeometries([preview], useEditor.getState());
+}
+
+/** The mesh each preview holds, so a refresh writes only what differs from it. */
+const previewMeshes = new WeakMap<BufferGeometry, RefineMesh>();
+
+async function buildRefine(refine: RefineSession, part: Part) {
+  const controller = new AbortController();
+  refineJobs.add(controller);
+  const taskId = startTask({
+    title: 'Preparing to refine',
+    detail: `${triangleCount(part.geometry).toLocaleString()} triangles`,
+    progress: null,
+    notify: false,
+    cancel: () => controller.abort(),
+  });
+  controller.signal.addEventListener(
+    'abort',
+    () => cancelTask(taskId, 'Refine preparation cancelled.'),
+    { once: true },
+  );
+  const matrix = partMatrix(part);
+  let model: RefineModel;
+  try {
+    // Loaded with the first session, so the app does not load Refine until it is used.
+    const [{ buildRefineModelJob }, { refineModelInput }] = await Promise.all([
+      import('./refine-job'),
+      import('./refine-model'),
+    ]);
+    model = await buildRefineModelJob(refineModelInput(part.geometry, matrix), controller.signal);
+  } catch (error) {
+    // Ending the session has already cleared its jobs; a cancel from the activity centre has not.
+    if (!refineJobs.delete(controller) || useEditor.getState().refine?.id !== refine.id) return;
+    if (controller.signal.aborted) {
+      useEditor.getState().cancelRefine();
+      return;
+    }
+    failTask(taskId, error instanceof Error ? error.message : String(error));
+    useEditor.getState().cancelRefine(`${part.name} could not be prepared for refining.`);
+    return;
+  }
+  const current = useEditor.getState().refine;
+  if (!refineJobs.delete(controller) || current?.id !== refine.id) return;
+  const preview = writeRefinedGeometry(refine.source, matrix, model.mesh);
+  refitWarpTree(refine.source, preview);
+  previewMeshes.set(preview, model.mesh);
+  useEditor.setState({ refine: { ...current, stage: 'ready', start: model, model, preview } });
+  completeTask(taskId, `${model.mesh.weldedCount.toLocaleString()} vertices`);
+}
+
+/**
+ * Brings the preview to the draft, or to the model without one. A change of positions only is
+ * written into the preview's attributes; any other change writes a new preview in its place.
+ */
+function showRefine(refine: RefineSession): RefineSession {
+  const { preview, model, source } = refine;
+  const mesh = refine.draft ?? model?.mesh;
+  const part = useEditor.getState().scene.parts.find((p) => p.id === refine.partId);
+  const shown = preview && previewMeshes.get(preview);
+  if (!preview || !model || !mesh || !part || shown === mesh) return refine;
+  const matrix = partMatrix(part);
+  if (
+    shown &&
+    mesh.corners === model.mesh.corners &&
+    patchRefinedGeometry(preview, source, matrix, shown, mesh, model.topology)
+  ) {
+    previewMeshes.set(preview, mesh);
+    refitWarpTree(source, preview);
+    return refine;
+  }
+  const next = writeRefinedGeometry(source, matrix, mesh);
+  previewMeshes.set(next, mesh);
+  // A tree over the same number of triangles stays valid with new bounds.
+  if (preview.boundsTree && triangleCount(preview) === mesh.triangleCount)
+    refitWarpTree(preview, next);
+  else if (mesh.triangleCount === mesh.sourceTriangleCount) refitWarpTree(source, next);
+  disposeRefinePreview(preview);
+  preparePicking(next, () => useEditor.getState().refine?.preview === next);
+  return { ...refine, preview: next };
+}
+
+/** Indexes a geometry for picking once the index code loads, unless `wanted` no longer holds. */
+const preparePicking = (geometry: BufferGeometry, wanted = () => true) =>
+  void import('./bvh').then(({ prepareForPicking }) => {
+    if (wanted()) prepareForPicking(geometry);
+  });
+
+/** The buffers behind a model's arrays. */
+const modelBuffers = ({ mesh, topology }: RefineModel) =>
+  [...Object.values(mesh), ...Object.values(topology)].flatMap((value) =>
+    ArrayBuffer.isView(value) ? [value.buffer] : [],
+  );
+
+const refineStep = ({ model, features, selected, triangles }: RefineSession): RefineStep => ({
+  model: model!,
+  features,
+  selected,
+  triangles,
+});
+
+/**
+ * Drops the oldest undo steps, then the furthest redo steps, until the arrays the steps hold
+ * beyond those of `model` fit in `budget` bytes. An array shared by several is counted once.
+ */
+export function trimRefineSteps(
+  model: RefineModel,
+  undo: RefineStep[],
+  redo: RefineStep[],
+  budget = refineUndoBytes,
+) {
+  const held = () => {
+    const counted = new Set(modelBuffers(model));
+    let bytes = 0;
+    for (const step of [...undo, ...redo])
+      for (const buffer of modelBuffers(step.model))
+        if (!counted.has(buffer)) {
+          counted.add(buffer);
+          bytes += buffer.byteLength;
+        }
+    return bytes;
+  };
+  while (undo.length + redo.length && held() > budget)
+    if (undo.length) undo = undo.slice(1);
+    else redo = redo.slice(1);
+  return { undo, redo };
+}
+
+/**
+ * Records the session as it is as one undo step, clears redo, then takes `next` and brings the
+ * preview to it. Every change to the working surface goes through here.
+ */
+export function commitRefine(next: Partial<RefineSession>) {
+  const { refine } = useEditor.getState();
+  if (!refine?.model || refine.stage !== 'ready') return;
+  const updated = { ...refine, ...next };
+  const kept = trimRefineSteps(
+    updated.model!,
+    [...refine.undo, refineStep(refine)].slice(-refineUndoLimit),
+    [],
+  );
+  useEditor.setState({ refine: showRefine({ ...updated, ...kept }) });
+}
+
+// A refinement is built from one geometry of one scene at one pose. Undo, another editor,
+// opening a file or leaving the tool by any route ends the session.
+useEditor.subscribe((state, previous) => {
+  const { refine } = state;
+  if (
+    !refine ||
+    (refine === previous.refine &&
+      state.scene === previous.scene &&
+      state.sceneEpoch === previous.sceneEpoch &&
+      state.tool === previous.tool)
+  )
+    return;
+  const part = state.scene.parts.find((p) => p.id === refine.partId);
+  const before = previous.scene.parts.find((p) => p.id === refine.partId);
+  const moved =
+    part &&
+    before &&
+    (!same(part.position, before.position) ||
+      !same(part.quaternion, before.quaternion) ||
+      !same(part.scale, before.scale));
+  const edited = refineEdited(refine);
+  if (!part || part.geometry !== refine.source || state.sceneEpoch !== refine.epoch || moved)
+    state.cancelRefine(edited ? 'The part changed, so the refinement was cancelled.' : undefined);
+  else if (state.tool !== 'refine')
+    state.cancelRefine(edited ? 'Refinement discarded. Use Apply to keep it.' : undefined);
 });
 
 export function measureDistance() {

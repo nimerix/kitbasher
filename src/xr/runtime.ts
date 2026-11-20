@@ -227,9 +227,9 @@ export class XRRuntime {
     private readonly scene: Scene,
     private readonly session: XRSession,
   ) {
-    // Warp is desktop only.
+    // Warp and Refine are desktop only.
     const editor = useEditor.getState();
-    if (editor.tool === 'warp') {
+    if (editor.tool === 'warp' || editor.tool === 'refine') {
       editor.setTool('select');
       this.tool = 'select';
     }
