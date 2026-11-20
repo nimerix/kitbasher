@@ -25,6 +25,7 @@ import {
   straightPath,
   straightTube,
   sweptTube,
+  swelling,
   sweptTubeModel,
   tapered,
   torusDistance,
@@ -318,6 +319,16 @@ describe('solveRegion with a sweep', () => {
   it('refuses a 0.12 mm taper under 0.012 mm ripple', () => {
     for (const keepDetail of [false, true])
       expect(solveTube(straightPath(8), 8, tapered(0.12), 0.012, 0.012, keepDetail)).toBeNull();
+  });
+
+  it('refuses a tube that swells or narrows by 0.1 mm along its length and returns', () => {
+    // Offsets that cancel end to end: a bulge, a waist, and a radius high at both ends.
+    const ends: CrossSection = (_, t) => 1 + 0.05 * Math.cos(2 * Math.PI * t);
+    for (const radius of [swelling(0.1), swelling(-0.1), ends])
+      for (const keepDetail of [false, true])
+        expect(solveTube(straightPath(12), 12, radius, 0, 0.012, keepDetail)).toBeNull();
+    // The same length of tube, constant under 0.012 mm ripple, still fits.
+    expect(solveTube(straightPath(12), 12, round, 0.012, 0.012, false)?.solve.fitted).toBe('sweep');
   });
 
   it('snaps an elbow 10% out of round onto itself', () => {

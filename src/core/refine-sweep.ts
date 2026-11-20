@@ -63,12 +63,8 @@ const stationShareNear = 0.25;
 const nearNoise = 1.2;
 /** A station with fewer points than this has none to judge, as at a grazed end. */
 const stationPoints = 3;
-/**
- * The cross-section may drift from one end of the path to the other by no more than this many
- * noise widths, or this many standard errors of the drift when the stations scatter more.
- */
-const driftNoise = 2;
-const driftErrors = 3;
+/** A stretch of stations counts when it spans at least this share of the tube's width. */
+const stretchShare = 0.75;
 /** A profile is round when no bin with data lies this many noise widths off their mean. */
 const roundNoise = 3;
 /** The path runs on past the farthest point by this many stations at each end. */
@@ -1003,9 +999,10 @@ function misfitOf(cloud: Cloud, local: Local, profile: Float32Array, noise: numb
  * instead, at a median of about 1.5 * noise or more. Detail may stand off the rest of a station.
  * A run of stations that fail, with stations on both sides that hold, is bridged when it is no
  * longer than twice the tube's width and no more of it than the tube's width has points: detail
- * covering the tube, as a clamp, or left out of a weighted fit, leaves a station empty. And
- * the held stations' median offsets drift from one end of the path to the other by no more than
- * 2 * noise, or 3 standard errors of that drift where the stations scatter more.
+ * covering the tube, as a clamp, or left out of a weighted fit, leaves a station empty. And no
+ * stretch of held stations a tube's width long sits off the sweep, on average over its stations'
+ * median offsets, by more than the scatter of the points: a cross-section that swells, narrows or
+ * drifts along the path is not constant.
  */
 function heldAlong(cloud: Cloud, local: Local, sweep: Sweep, thick: number, noise: number) {
   const { count, judged: w } = cloud;
@@ -1043,7 +1040,9 @@ function heldAlong(cloud: Cloud, local: Local, sweep: Sweep, thick: number, nois
   const radius = Array.from(sweep.profile).reduce((sum, r) => sum + Math.abs(r), 0) / bins;
   const bridge = Math.floor((2 * radius) / thick);
   const at: number[] = [],
-    offset: number[] = [];
+    offset: number[] = [],
+    within: number[] = [],
+    withinWeight: number[] = [];
   let gap = 0,
     off = 0;
   for (let s = first; s <= last; s++) {
@@ -1071,32 +1070,32 @@ function heldAlong(cloud: Cloud, local: Local, sweep: Sweep, thick: number, nois
     }
     gap = off = 0;
     at.push(along[s] / d.length);
-    offset.push(
-      weightedMedian(
-        Float64Array.from(near, (m) => d[m]),
-        nearWeight,
-      ),
+    const middle = weightedMedian(
+      Float64Array.from(near, (m) => d[m]),
+      nearWeight,
     );
+    offset.push(middle);
+    for (const m of near) {
+      within.push(Math.abs(d[m] - middle));
+      withinWeight.push(k[m]);
+    }
   }
   if (at.length < 3) return false;
-  // Least-squares line of the offsets along the path, its drift end to end and that drift's error.
-  const n = at.length;
-  const mx = at.reduce((sum, x) => sum + x, 0) / n,
-    my = offset.reduce((sum, y) => sum + y, 0) / n;
-  let sxx = 0,
-    sxy = 0;
-  for (let i = 0; i < n; i++) {
-    sxx += (at[i] - mx) ** 2;
-    sxy += (at[i] - mx) * (offset[i] - my);
+  // The scatter of the points about their own station's offset, so a swell does not widen it.
+  const spread = Math.max(
+    noise,
+    madScale * weightedMedian(Float64Array.from(within), Float64Array.from(withinWeight)),
+  );
+  // Every stretch of held stations a tube's width long keeps a mean offset within the scatter of
+  // the stations' own points: a swell or waist that returns cancels end to end, but not here.
+  const width = 2 * radius;
+  for (let i = 0, j = 0, sum = 0; i < at.length; sum -= offset[i], i++) {
+    for (; j < at.length && at[j] - at[i] <= width; j++) sum += offset[j];
+    const stretch = at[j - 1] - at[i];
+    if (j - i >= 3 && stretch >= stretchShare * width && Math.abs(sum / (j - i)) > spread)
+      return false;
   }
-  if (!(sxx > 0)) return true;
-  const slope = sxy / sxx;
-  let ssr = 0;
-  for (let i = 0; i < n; i++) ssr += (offset[i] - my - slope * (at[i] - mx)) ** 2;
-  const span = at[n - 1] - at[0];
-  const drift = Math.abs(slope * span);
-  const error = n > 2 ? (Math.sqrt(ssr / (n - 2)) * span) / Math.sqrt(sxx) : 0;
-  return drift <= Math.max(driftNoise * noise, driftErrors * error);
+  return true;
 }
 
 /**

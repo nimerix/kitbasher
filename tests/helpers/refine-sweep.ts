@@ -196,6 +196,12 @@ export const tapered =
   (_, t) =>
     1 + amount * (t - 0.5);
 
+/** A circle whose radius swells by `amount` (shrinks when negative) midway along and returns. */
+export const swelling =
+  (amount: number): CrossSection =>
+  (_, t) =>
+    1 + amount * Math.sin(Math.PI * t) ** 2;
+
 /**
  * Rings of points 0.06 apart around a tube swept `length` along `path`, rings 0.06 apart, each
  * point moved out by a ripple of up to `ripple`. `interior` marks the points from 10% to 90% along.
