@@ -49,6 +49,7 @@ function run<T>(
   if (typeof Worker === 'undefined')
     return Promise.resolve().then(() => {
       try {
+        if (signal.aborted) throw cancelled();
         const received = structuredClone(request, { transfer });
         const result = runRefineRequest(received, report, signal);
         if (signal.aborted) throw cancelled();
@@ -80,7 +81,12 @@ function run<T>(
       worker = new Worker(new URL('./refine.worker.ts', import.meta.url), { type: 'module' });
       worker.onmessage = ({ data }) => {
         if (data.type === 'progress') {
-          if (!settled) report(data.fraction);
+          if (settled) return;
+          try {
+            report(data.fraction);
+          } catch (error) {
+            finish(error);
+          }
         } else if (data.error) finish(new Error(data.error));
         else finish(undefined, data.result);
       };

@@ -1,8 +1,18 @@
-import { BufferAttribute, type BufferGeometry, Matrix4, Quaternion, Vector3 } from 'three';
-import { describe, expect, it } from 'vitest';
+import {
+  BoxGeometry,
+  BufferAttribute,
+  type BufferGeometry,
+  InterleavedBuffer,
+  InterleavedBufferAttribute,
+  Matrix4,
+  Quaternion,
+  Vector3,
+} from 'three';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { type RefineProposal, detectDefaults, detectFeatures } from '../../src/core/refine-detect';
 import { solveEdge } from '../../src/core/refine-edge';
 import { buildRefineModelJob, detectRefineJob } from '../../src/core/refine-job';
+import * as refineMesh from '../../src/core/refine-mesh';
 import { buildRefineMesh, buildTopology } from '../../src/core/refine-mesh';
 import {
   buildRefineModel,
@@ -69,6 +79,24 @@ describe('buildRefineModel', () => {
     expectSameModel(geometry, placed);
   });
 
+  it('keeps a coordinate an accessor decodes past float32 precision', () => {
+    class Offset extends InterleavedBufferAttribute {
+      override getX(i: number) {
+        return super.getX(i) + 1e-9;
+      }
+    }
+    const geometry = new BoxGeometry();
+    const source = geometry.getAttribute('position');
+    const raw = new Float32Array(source.count * 4);
+    for (let i = 0; i < source.count; i++)
+      raw.set([0, source.getX(i), source.getY(i), source.getZ(i)], i * 4);
+    geometry.setAttribute('position', new Offset(new InterleavedBuffer(raw, 4), 3, 1));
+    const direct = modelFrom(buildRefineMesh(geometry, new Matrix4()));
+    const packed = buildRefineModel(refineModelInput(geometry, new Matrix4()));
+    expect(direct.mesh.position[0]).toBe(0.500000001);
+    expect(packed.mesh.position).toEqual(direct.mesh.position);
+  });
+
   it('copies the source arrays', () => {
     const geometry = colouredIndexedBox();
     const input = refineModelInput(geometry, placed);
@@ -91,6 +119,18 @@ describe('modelFromMesh', () => {
 });
 
 describe('buildRefineModelJob', () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it('builds nothing when cancelled before the job starts work', async () => {
+    const build = vi.spyOn(refineMesh, 'buildRefineMesh');
+    const input = refineModelInput(softBox([2, 1.5, 1], 0.3), new Matrix4());
+    const controller = new AbortController();
+    const pending = buildRefineModelJob(input, controller.signal);
+    controller.abort();
+    await expect(pending).rejects.toMatchObject({ name: 'AbortError' });
+    expect(build).not.toHaveBeenCalled();
+  });
+
   it('builds the same model in a job as directly', async () => {
     const geometry = softBox([2, 1.5, 1], 0.3);
     const direct = buildRefineModel(refineModelInput(geometry, new Matrix4()));
@@ -197,6 +237,29 @@ describe('keepSolvable', () => {
     expect(kept[0]).toBe(found[0]);
     expect(reports).toHaveLength(found.length + 1);
     expect(reports[0]).toBeCloseTo(0.7 + 0.3 / (found.length + 1), 12);
+    expect(reports.at(-1)).toBe(1);
+  });
+
+  it('ends its progress at exactly 1', () => {
+    const model = buildRefineModel(refineModelInput(new BoxGeometry(), new Matrix4()));
+    const region: RefineProposal = {
+      type: 'region',
+      input: {
+        triangles: new Uint32Array([0]),
+        treatment: 'flatten',
+        shape: 'auto',
+        strength: 1,
+        keepDetail: true,
+        detail: null,
+        blend: null,
+      },
+    };
+    const reports: number[] = [];
+    keepSolvable(
+      model,
+      Array.from({ length: 109 }, () => region),
+      (fraction) => reports.push(fraction),
+    );
     expect(reports.at(-1)).toBe(1);
   });
 

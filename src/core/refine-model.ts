@@ -37,12 +37,18 @@ const getters = ['getX', 'getY', 'getZ', 'getW'] as const;
 export function refineModelInput(geometry: BufferGeometry, matrixWorld: Matrix4): RefineModelInput {
   const position = geometry.getAttribute('position');
   const Positions = position.array instanceof Float32Array ? Float32Array : Float64Array;
-  const positions = new Positions(position.count * 3);
-  for (let v = 0; v < position.count; v++) {
-    positions[v * 3] = position.getX(v);
-    positions[v * 3 + 1] = position.getY(v);
-    positions[v * 3 + 2] = position.getZ(v);
-  }
+  let positions: Float32Array | Float64Array = new Positions(position.count * 3);
+  for (let v = 0; v < position.count; v++)
+    for (let k = 0; k < 3; k++) {
+      const value = position[getters[k]](v);
+      const i = v * 3 + k;
+      positions[i] = value;
+      // An accessor may decode float32 storage to a value that needs a double.
+      if (positions[i] !== value && value === value) {
+        positions = Float64Array.from(positions);
+        positions[i] = value;
+      }
+    }
   const source = geometry.getAttribute('color');
   const colorSize = source ? source.itemSize : 0;
   let color: Float32Array | null = null;
@@ -101,7 +107,7 @@ export function keepSolvable(
     const { mesh, topology, noise } = model;
     if (proposal.type === 'region' || solveEdge(mesh, topology, proposal.input, noise))
       kept.push(proposal);
-    report(0.7 + (0.3 * (i + 1)) / proposals.length);
+    report(i + 1 === proposals.length ? 1 : 0.7 + (0.3 * (i + 1)) / proposals.length);
   });
   if (!proposals.length) report(1);
   return kept;
