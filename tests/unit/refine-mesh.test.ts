@@ -576,3 +576,51 @@ describe.each(cases)('promoted storage, %s', (_, options) => {
     expect(bits[g * 3]).toBe(0x7f800001);
   });
 });
+
+const farMatrix = () =>
+  new Matrix4().compose(
+    new Vector3(1234.5, -987.25, 4321.125),
+    new Quaternion().setFromAxisAngle(new Vector3(1, 2, 3).normalize(), 0.7),
+    new Vector3(1, 2, -1),
+  );
+const bytesOf = (array: ArrayLike<number> & { buffer: ArrayBufferLike; byteOffset: number }) =>
+  new Uint8Array(array.buffer, array.byteOffset, (array as Float32Array).byteLength);
+
+describe.each([
+  ['Float32', Float32Array],
+  ['Float64', Float64Array],
+] as const)('64-bit world positions, %s source', (_, Store) => {
+  it.each(cases)(
+    'writes a touched vertex left in place back with its source bits, %s',
+    (__, options) => {
+      const source = softBox([2, 1.5, 1], 0.3, options);
+      const stored = source.getAttribute('position');
+      source.setAttribute('position', new BufferAttribute(Store.from(stored.array), 3));
+      const matrix = farMatrix();
+      const mesh = buildRefineMesh(source, matrix);
+      expect(mesh.position).toBeInstanceOf(Float64Array);
+      for (const v of [0, 7, 19, 42, mesh.weldedCount - 1]) {
+        const [x, y, z] = mesh.position.subarray(v * 3, v * 3 + 3);
+        moveVertex(mesh, v, x, y, z);
+      }
+      const written = writeRefinedGeometry(source, matrix, mesh).getAttribute('position');
+      expect(written.array).toBeInstanceOf(Store);
+      expect(bytesOf(written.array as Float32Array)).toEqual(
+        bytesOf(source.getAttribute('position').array as Float32Array),
+      );
+    },
+  );
+});
+
+describe('clearance', () => {
+  const box = softBox([2, 1.5, 1], 0.3);
+  it('is 1e-4 scaled by the matrix norm for a small part', () => {
+    expect(buildRefineMesh(box, new Matrix4()).clearance).toBeCloseTo(1e-4 * Math.sqrt(3), 9);
+    const scaled = buildRefineMesh(box, new Matrix4().makeScale(100, 100, 100)).clearance;
+    expect(Math.abs(scaled - 100 * 1e-4 * Math.sqrt(3))).toBeLessThan(1e-9);
+  });
+  it('is copied by a clone', () => {
+    const mesh = buildRefineMesh(box, farMatrix());
+    expect(cloneRefineMesh(mesh, false).clearance).toBe(mesh.clearance);
+  });
+});

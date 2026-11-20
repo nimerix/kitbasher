@@ -204,7 +204,7 @@ export function cutAlongField(
   const corner = (k: number) => w[k % 3];
   const cutOf = () => [0, 1, 2].filter((k) => splitOf(corner(k), corner(k + 1)) >= 0);
   const pointOf = (ref: number, target: Float64Array, offset: number) => {
-    let source: Float32Array = mesh.position,
+    let source: Float32Array | Float64Array = mesh.position,
       i = corner(ref) * 3;
     if (ref >= 3) {
       source = splitAt;

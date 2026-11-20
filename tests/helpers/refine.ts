@@ -155,7 +155,7 @@ export function changedVertices(source: BufferGeometry, written: BufferGeometry)
 }
 
 /** Size of the bounding box of the first `count` points of a position array. */
-export function extent(position: Float32Array, count = position.length / 3) {
+export function extent(position: Float32Array | Float64Array, count = position.length / 3) {
   const low = [Infinity, Infinity, Infinity],
     high = [-Infinity, -Infinity, -Infinity];
   for (let i = 0; i < count; i++)

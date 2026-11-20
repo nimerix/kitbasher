@@ -12,7 +12,7 @@ const unused = 0xffffffff;
 
 export interface RefineMesh {
   /** World position per welded vertex. Grows when triangles are cut. */
-  position: Float32Array;
+  position: Float64Array;
   weldedCount: number;
   /** Geometry vertex -> welded vertex. Grows with new geometry vertices. */
   weldOf: Uint32Array;
@@ -32,6 +32,11 @@ export interface RefineMesh {
   sourceVertexCount: number;
   sourceTriangleCount: number;
   indexed: boolean;
+  /**
+   * World-space distance below which two distinct points could weld together once written back to
+   * mesh-local coordinates and welded at 1e-5.
+   */
+  clearance: number;
 }
 
 export interface RefineTopology {
@@ -50,22 +55,23 @@ export function buildRefineMesh(geometry: BufferGeometry, matrixWorld: Matrix4):
   const vertexCount = position.count;
   const corners = index ? Uint32Array.from(index.array) : Uint32Array.from(indices, (_, i) => i);
   const weldOf = new Uint32Array(vertexCount).fill(unused);
-  const world = new Float32Array(weldedCount * 3);
+  for (let i = 0; i < indices.length; i++) weldOf[corners[i]] = indices[i];
+  const world = new Float64Array(weldedCount * 3);
   const seen = new Uint8Array(weldedCount);
   const e = matrixWorld.elements;
-  for (let i = 0; i < indices.length; i++) {
-    const vertex = corners[i];
-    const welded = indices[i];
-    weldOf[vertex] = welded;
+  let largest = 0;
+  // Each welded vertex takes the lowest geometry vertex's position, as write-back's representative.
+  for (let vertex = 0; vertex < vertexCount; vertex++) {
+    const welded = weldOf[vertex];
+    if (welded === unused) continue;
+    for (let axis = 0; axis < 3; axis++)
+      largest = Math.max(largest, Math.abs(decoded(position, vertex, axis)));
     if (seen[welded]) continue;
     seen[welded] = 1;
-    const x = position.getX(vertex),
-      y = position.getY(vertex),
-      z = position.getZ(vertex);
-    world[welded * 3] = e[0] * x + e[4] * y + e[8] * z + e[12];
-    world[welded * 3 + 1] = e[1] * x + e[5] * y + e[9] * z + e[13];
-    world[welded * 3 + 2] = e[2] * x + e[6] * y + e[10] * z + e[14];
+    worldOf(position, vertex, e, world, welded * 3);
   }
+  let frobenius = 0;
+  for (const k of [0, 1, 2, 4, 5, 6, 8, 9, 10]) frobenius += e[k] * e[k];
   const source = geometry.getAttribute('color');
   const colorSize = source ? source.itemSize : 0;
   let color: Float32Array | null = null;
@@ -89,7 +95,24 @@ export function buildRefineMesh(geometry: BufferGeometry, matrixWorld: Matrix4):
     sourceVertexCount: vertexCount,
     sourceTriangleCount: indices.length / 3,
     indexed: !!index,
+    clearance: Math.max(1e-4, 16 * largest * 2 ** -23) * Math.sqrt(frobenius),
   };
+}
+
+/** World position of a source vertex, written at `offset` of `out`. */
+function worldOf(
+  position: Attribute,
+  vertex: number,
+  e: number[],
+  out: Float64Array,
+  offset: number,
+) {
+  const x = position.getX(vertex),
+    y = position.getY(vertex),
+    z = position.getZ(vertex);
+  out[offset] = e[0] * x + e[4] * y + e[8] * z + e[12];
+  out[offset + 1] = e[1] * x + e[5] * y + e[9] * z + e[13];
+  out[offset + 2] = e[2] * x + e[6] * y + e[10] * z + e[14];
 }
 
 /** Copies position, touched and crease; copies weldOf, corners and colour only when `topology` is true. */
@@ -162,7 +185,7 @@ export function buildTopology(mesh: RefineMesh): RefineTopology {
 /** Unnormalized outward normal of a triangle at `position`: twice its area in length. */
 function faceCross(
   mesh: RefineMesh,
-  position: Float32Array,
+  position: Float64Array,
   triangle: number,
   out: Float32Array | Float64Array,
 ) {
@@ -232,7 +255,10 @@ export function moveVertex(
 }
 
 /** `array` itself when it holds `length` values, otherwise a copy with room to grow. */
-function room<T extends Float32Array | Uint32Array | Uint8Array>(array: T, length: number): T {
+function room<T extends Float32Array | Float64Array | Uint32Array | Uint8Array>(
+  array: T,
+  length: number,
+): T {
   if (array.length >= length) return array;
   const grown = new (array.constructor as new (length: number) => T)(
     Math.max(length, array.length * 2),
@@ -288,7 +314,7 @@ export function addTriangle(mesh: RefineMesh, a: number, b: number, c: number): 
 export function foldedTriangles(
   mesh: RefineMesh,
   topology: RefineTopology,
-  before: Float32Array,
+  before: Float64Array,
   vertices: Uint32Array,
 ): Uint32Array {
   const was = new Float64Array(3),
@@ -461,11 +487,25 @@ export function writeRefinedGeometry(
     else copies[g] = g < sourceVertexCount ? g : representative[v];
   }
 
+  // A touched vertex back at its source's world position writes the source's own bits.
+  const e = matrixWorld.elements;
+  const start = new Float64Array(3);
+  const restored = new Uint8Array(weldedCount);
+  for (let v = 0; v < weldedCount; v++) {
+    if (!touched[v] || representative[v] === unused) continue;
+    worldOf(sourcePosition, representative[v], e, start, 0);
+    restored[v] = +(
+      start[0] === mesh.position[v * 3] &&
+      start[1] === mesh.position[v * 3 + 1] &&
+      start[2] === mesh.position[v * 3 + 2]
+    );
+  }
+
   // Mesh-local position of every moved welded vertex, computed once so duplicates share bits.
   const inverse = matrixWorld.clone().invert().elements;
   const local = new Float64Array(weldedCount * 3);
   for (let v = 0; v < weldedCount; v++) {
-    if (!touched[v] && representative[v] !== unused) continue;
+    if ((!touched[v] && representative[v] !== unused) || restored[v]) continue;
     const x = mesh.position[v * 3],
       y = mesh.position[v * 3 + 1],
       z = mesh.position[v * 3 + 2];
@@ -540,11 +580,10 @@ export function writeRefinedGeometry(
   const outPosition = position.target;
   for (let i = 0; i < count; i++) {
     const g = from[i];
+    const v = weldOf[g];
     if (copies[g] !== unused) position.copy(copies[g], i);
-    else {
-      const v = weldOf[g] * 3;
-      outPosition.setXYZ(i, local[v], local[v + 1], local[v + 2]);
-    }
+    else if (restored[v]) position.copy(representative[v], i);
+    else outPosition.setXYZ(i, local[v * 3], local[v * 3 + 1], local[v * 3 + 2]);
   }
 
   // Normal of each corner at a moved vertex: area-weighted over its fan, from positions as written.
