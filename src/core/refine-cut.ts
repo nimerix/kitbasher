@@ -65,23 +65,27 @@ function divide(cut: number[], far: (p: number, q: number) => number): number[][
   return [[a, ab, ca], ...quad];
 }
 
-const area = (p: Float64Array) => {
+/** Area of the triangle `p` holds; `out` receives its normal scaled by twice the area. */
+const area = (p: Float64Array, out: Float64Array) => {
   const ux = p[3] - p[0],
     uy = p[4] - p[1],
     uz = p[5] - p[2];
   const vx = p[6] - p[0],
     vy = p[7] - p[1],
     vz = p[8] - p[2];
-  return Math.hypot(uy * vz - uz * vy, uz * vx - ux * vz, ux * vy - uy * vx) / 2;
+  out[0] = uy * vz - uz * vy;
+  out[1] = uz * vx - ux * vz;
+  out[2] = ux * vy - uy * vx;
+  return Math.hypot(out[0], out[1], out[2]) / 2;
 };
 
 /**
  * Puts a chain of mesh edges on the zero set of `field` among `vertices`.
  * `place` maps a point on the zero set to its final position. The mesh must be a topology clone.
  * `field[i]` is the value at `vertices[i]`; `topology` describes the mesh before the cut.
- * The whole cut is planned on final positions first; a split or snap that would collapse a triangle
- * or land on another vertex is revised or dropped, and the triangles left straddling are reported
- * in `skipped`.
+ * The whole cut is planned on final positions first; a split or snap that would collapse a triangle,
+ * reverse one against the triangle it is cut from, or land on another vertex is revised or dropped,
+ * and the triangles left straddling are reported in `skipped`.
  */
 export function cutAlongField(
   mesh: RefineMesh,
@@ -235,14 +239,16 @@ export function cutAlongField(
     for (let axis = 0; axis < 3; axis++) target[offset + axis] = source[i + axis];
   };
   const points = new Float64Array(9);
+  const parentNormal = new Float64Array(3),
+    childNormal = new Float64Array(3);
   const ends = new Float64Array(6);
   const far = (p: number, q: number) => {
     pointOf(p, ends, 0);
     pointOf(q, ends, 3);
     return Math.hypot(ends[0] - ends[3], ends[1] - ends[4], ends[2] - ends[5]);
   };
-  // Revises the plan behind a collapsed child: its splits move to the midpoint, then are dropped,
-  // then its placed vertices stay where they are. False when nothing is left to revise.
+  // Revises the plan behind a collapsed or reversed child: its splits move to the midpoint, then are
+  // dropped, then its placed vertices stay where they are. False when nothing is left to revise.
   const revise = (child: number[]) => {
     const splits = child
       .filter((ref) => ref >= 3)
@@ -340,10 +346,16 @@ export function cutAlongField(
       if (cut.length === 0 && !w.some(isPlaced)) continue;
       for (let k = 0; k < 3; k++)
         for (let axis = 0; axis < 3; axis++) points[k * 3 + axis] = mesh.position[w[k] * 3 + axis];
-      const limit = Math.max(area(points) * collapsedFraction, tinyArea);
+      const limit = Math.max(area(points, parentNormal) * collapsedFraction, tinyArea);
       for (const child of divide(cut, far)) {
         child.forEach((ref, k) => pointOf(ref, points, k * 3));
-        if (area(points) < limit && revise(child)) {
+        const collapsed = area(points, childNormal) < limit;
+        const reversed =
+          childNormal[0] * parentNormal[0] +
+            childNormal[1] * parentNormal[1] +
+            childNormal[2] * parentNormal[2] <
+          0;
+        if ((collapsed || reversed) && revise(child)) {
           revised = true;
           break;
         }

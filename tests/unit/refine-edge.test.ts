@@ -1,18 +1,29 @@
 import { Matrix4 } from 'three';
 import { describe, expect, it } from 'vitest';
-import { type EdgeInput, applyEdge, moveWeights, solveEdge } from '../../src/core/refine-edge';
+import {
+  type EdgeInput,
+  type EdgeSolve,
+  applyEdge,
+  correctedFlanks,
+  moveWeights,
+  solveEdge,
+} from '../../src/core/refine-edge';
 import { type RefineMesh, cloneRefineMesh } from '../../src/core/refine-mesh';
 import type { GuidePoint } from '../../src/core/refine-band';
-import type { GuideKind } from '../../src/core/refine-curve';
+import { type GuideKind, closestOnCurve } from '../../src/core/refine-curve';
 import {
   closedMesh,
   dihedralAcross,
+  facesOffSurfaces,
+  fullWeightChain,
   maxMove,
   meshMinTriangleArea,
   modelFrom,
   modelOf,
   movedOutside,
   pointOn,
+  reversedAgainst,
+  seamMove,
   straddlingCurve,
   straightness,
 } from '../helpers/refine';
@@ -181,7 +192,11 @@ describe('solveEdge and applyEdge on one segment', () => {
     expect(solve.sign[0]).toBe(1);
     const out = cloneRefineMesh(model.mesh, true);
     const { cut } = applyEdge(out, model.topology, solve, 1, true);
-    const chain = [...cut!.chain].filter((v) => Math.abs(out.position[v * 3]) <= 2.4 - fade);
+    // Its taper of 8 edge lengths along the stretched edge is longer than `fade`.
+    const weights = moveWeights(model.mesh, model.topology, solve);
+    const chain = fullWeightChain(out, solve, weights, cut!.chain).filter(
+      (v) => Math.abs(out.position[v * 3]) <= 2.4 - fade,
+    );
     expect(chain.length).toBeGreaterThan(20);
     for (const v of chain) expect(offEdge(out, v, 1.5, -1)).toBeLessThan(0.02);
     expect(Math.abs(dihedralAcross(out, cut!.edges, chain) - 90)).toBeLessThan(1);
@@ -236,4 +251,209 @@ describe('solveEdge and applyEdge on one segment', () => {
     expect(full).toBeLessThan(0.002);
     expect(secondBlend).toBeLessThan(firstBlend);
   });
+
+  it('cuts without reversing a face against the face it is cut from', () => {
+    for (const { model, solve } of [boxCase(), stepCase(), rimCase()]) {
+      const moved = cloneRefineMesh(model.mesh, false);
+      applyEdge(moved, model.topology, solve, 1, false);
+      const out = cloneRefineMesh(model.mesh, true);
+      const { cut } = applyEdge(out, model.topology, solve, 1, true);
+      const parentOf = new Map<number, number>();
+      for (const [parent, children] of cut!.children)
+        for (const child of children) parentOf.set(child, parent);
+      expect(reversedAgainst(moved, out, parentOf)).toBe(0);
+      expect(closedMesh(out)).toBe(true);
+    }
+  });
+
+  it('solves an edge from flank clear of the rounding', () => {
+    // A 0.12 mm fillet sampled at 0.06 mm: its shoulder lies within the flanks' tolerance.
+    const model = modelOf(softBox([2.5, 1.5, 1], 0.12, sharpEdge));
+    const solve = solveEdge(
+      model.mesh,
+      model.topology,
+      autoWidth(smallCrest(model.mesh)),
+      model.noise,
+    )!;
+    expect(solve).not.toBeNull();
+    expect(curveOff(solve, (p) => Math.hypot(p[1] - 1.5, p[2] - 1), 1)).toBeLessThan(0.02);
+    const out = cloneRefineMesh(model.mesh, true);
+    const { cut } = applyEdge(out, model.topology, solve, 1, true);
+    const weights = moveWeights(model.mesh, model.topology, solve);
+    const chain = fullWeightChain(out, solve, weights, cut!.chain);
+    expect(chain.length).toBeGreaterThan(20);
+    for (const v of chain) expect(offEdge(out, v, 1.5, 1)).toBeLessThan(0.02);
+  });
+
+  it('meets the tolerances on a mirrored part scaled unevenly across its edge', () => {
+    // The world-space box is half [2, 3, 1]: its 0.15 mm fillet is 0.3 mm tall on the front face.
+    const matrix = new Matrix4().makeScale(1, 2, -1);
+    const c = 0.15 - 0.15 / Math.SQRT2;
+    const model = modelOf(softBox([2, 1.5, 1], 0.15), matrix);
+    const points = [-1.6, 1.6].map((x) => pointOn(model.mesh, [x, 3 - 2 * c, -(1 - c)]));
+    const solve = solveEdge(model.mesh, model.topology, inputOf('line', points), model.noise)!;
+    expect(solve).not.toBeNull();
+    expect(solve.sign[0]).toBe(1);
+    const out = cloneRefineMesh(model.mesh, true);
+    const { cut } = applyEdge(out, model.topology, solve, 1, true);
+    const chain = core(out, cut!.chain);
+    expect(chain.length).toBeGreaterThan(20);
+    for (const v of chain) expect(offEdge(out, v, 3, -1)).toBeLessThan(0.02);
+    expect(closedMesh(out)).toBe(true);
+  });
+
+  it('reports how far the solved edge strays from the meet it straightens', () => {
+    const straight = modelOf(softBox([2.5, 1.5, 1], 0.12, sharpEdge));
+    const level = solveEdge(
+      straight.mesh,
+      straight.topology,
+      autoWidth(smallCrest(straight.mesh)),
+      straight.noise,
+    )!;
+    expect(level.deviation).toBeLessThan(0.005);
+    // A 0.07 mm bump on the top face: a line guide straightens it and says by how much.
+    const bulged = modelOf(bulgedBox([2.5, 1.5, 1], 0.12, 0.07, sharpEdge));
+    const bent = solveEdge(
+      bulged.mesh,
+      bulged.topology,
+      autoWidth(smallCrest(bulged.mesh)),
+      bulged.noise,
+    )!;
+    expect(bent).not.toBeNull();
+    expect(bent.deviation).toBeGreaterThan(0.03);
+    expect(bent.deviation).toBeLessThan(0.07);
+  });
+
+  it('puts the faces beside the chain on the corrected surfaces', () => {
+    const bulged = modelOf(bulgedBox([2.5, 1.5, 1], 0.12, 0.07, sharpEdge));
+    const bent = solveEdge(
+      bulged.mesh,
+      bulged.topology,
+      autoWidth(smallCrest(bulged.mesh)),
+      bulged.noise,
+    )!;
+    for (const { model, solve } of [boxCase(), { model: bulged, solve: bent }]) {
+      const out = cloneRefineMesh(model.mesh, true);
+      const { cut } = applyEdge(out, model.topology, solve, 1, true);
+      const weights = moveWeights(model.mesh, model.topology, solve);
+      const chain = fullWeightChain(out, solve, weights, cut!.chain);
+      const surfaces = correctedFlanks(model.mesh, model.topology, solve);
+      const worst = facesOffSurfaces(out, cut!.edges, chain, surfaces);
+      expect(worst).toBeGreaterThanOrEqual(0);
+      expect(worst).toBeLessThan(0.005);
+    }
+  });
+
+  it('refuses a width that leaves no sharp core', () => {
+    const model = modelOf(softBox([2.5, 1.5, 1], 0.12, sharpEdge));
+    const points = [-1.1, 1.1].map((x) => pointOn(model.mesh, [x, 1.5 - smallC, 1 - smallC]));
+    const narrow = { ...inputOf('line', points), width: 0.12 };
+    expect(solveEdge(model.mesh, model.topology, narrow, model.noise)).toBeNull();
+  });
+
+  it('keeps the middle of the edge when the width is far larger than the estimate', () => {
+    const model = modelOf(softBox([2.5, 1.5, 1], 0.12, sharpEdge));
+    const points = [-1.1, 1.1].map((x) => pointOn(model.mesh, [x, 1.5 - smallC, 1 - smallC]));
+    const run = (width: number | null) => {
+      const solve = solveEdge(
+        model.mesh,
+        model.topology,
+        { ...inputOf('line', points), width },
+        model.noise,
+      )!;
+      const out = cloneRefineMesh(model.mesh, false);
+      applyEdge(out, model.topology, solve, 1, false);
+      return { solve, out };
+    };
+    const estimate = run(null);
+    const wide = run(2.5);
+    expect(wide.solve.width).toBe(2.5);
+    const weights = moveWeights(model.mesh, model.topology, estimate.solve);
+    let worst = 0,
+      count = 0;
+    estimate.solve.bands[0].vertices.forEach((v, i) => {
+      if (weights[i] !== 1) return;
+      count++;
+      worst = Math.max(worst, moveOf(estimate.out, wide.out, v));
+    });
+    expect(count).toBeGreaterThan(50);
+    expect(worst).toBeLessThan(0.002);
+  });
+
+  it("moves a vertex beside one that stays, along the band's sides, by at most 0.005 mm", () => {
+    // Clear of the ends, where the taper along the guide sets the blend.
+    const turn = (x: number, z: number) => (Math.atan2(z, x) + 2 * Math.PI) % (2 * Math.PI);
+    for (const { model, solve, sides } of [
+      { ...boxCase(), sides: (x: number) => Math.abs(x) <= 1 },
+      { ...rimCase(), sides: (x: number, _: number, z: number) => Math.abs(turn(x, z) - 2) <= 1 },
+    ]) {
+      const out = cloneRefineMesh(model.mesh, false);
+      applyEdge(out, model.topology, solve, 1, false);
+      const seam = seamMove(model.mesh, out, model.topology, sides);
+      expect(seam).toBeGreaterThan(0);
+      expect(seam).toBeLessThan(0.005);
+    }
+  });
+
+  it('puts the chain on the solved edge where the weight is full', () => {
+    for (const { model, solve } of [boxCase(), stepCase(), rimCase()]) {
+      const out = cloneRefineMesh(model.mesh, true);
+      const { cut } = applyEdge(out, model.topology, solve, 1, true);
+      const weights = moveWeights(model.mesh, model.topology, solve);
+      const chain = fullWeightChain(out, solve, weights, cut!.chain);
+      expect(chain.length).toBeGreaterThan(20);
+      const at = new Float64Array(3);
+      for (const v of chain) {
+        const p = [0, 1, 2].map((a) => out.position[v * 3 + a]);
+        closestOnCurve(solve.curve, p[0], p[1], p[2], at);
+        expect(Math.hypot(p[0] - at[0], p[1] - at[1], p[2] - at[2])).toBeLessThan(0.001);
+      }
+    }
+  });
 });
+
+/** A sharp 0.12 mm fillet sampled at 0.06 mm without ripple. */
+const sharpEdge = { step: 0.06, noise: 0.004, ripple: 0 };
+const smallC = 0.12 * (1 - Math.SQRT1_2);
+const smallCrest = (mesh: RefineMesh) =>
+  [-1.7, 1.7].map((x) => pointOn(mesh, [x, 1.5 - smallC, 1 - smallC]));
+const autoWidth = (points: GuidePoint[]): EdgeInput => ({
+  ...inputOf('line', points),
+  width: null,
+});
+/** Largest distance from the solved curve, where |x| <= `reach`, of `off`. */
+const curveOff = (solve: EdgeSolve, off: (p: number[]) => number, reach: number) => {
+  let worst = 0;
+  const p = solve.curve.points;
+  for (let k = 0; k < p.length; k += 3)
+    if (Math.abs(p[k]) <= reach) worst = Math.max(worst, off([p[k], p[k + 1], p[k + 2]]));
+  return worst;
+};
+const boxCase = () => {
+  const { model, solve } = refineBoxEdge();
+  return { model, solve };
+};
+const stepCase = () => {
+  const model = modelOf(softStep(0.3));
+  const points = [
+    pointOn(model.mesh, [crest, crest, -1.6]),
+    pointOn(model.mesh, [crest, crest, 1.6]),
+  ];
+  return {
+    model,
+    solve: solveEdge(model.mesh, model.topology, inputOf('line', points), model.noise)!,
+  };
+};
+const rimCase = () => {
+  const model = modelOf(softCylinder(1.5, 1, 0.3));
+  const r = 1.2 + 0.3 / Math.SQRT2,
+    y = 0.7 + 0.3 / Math.SQRT2;
+  const points = [0, 1, 2].map((k) => {
+    const angle = (k * 2 * Math.PI) / 3;
+    return pointOn(model.mesh, [r * Math.cos(angle), y, r * Math.sin(angle)]);
+  });
+  return {
+    model,
+    solve: solveEdge(model.mesh, model.topology, inputOf('arc', points), model.noise)!,
+  };
+};

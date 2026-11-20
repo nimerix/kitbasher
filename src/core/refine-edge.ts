@@ -9,6 +9,7 @@ import {
   minBandAngle,
 } from './refine-band';
 import { type CutResult, cutAlongField } from './refine-cut';
+import { type Shape, fitShape, projectToShape, shapeDistance } from './refine-fit';
 import {
   type EdgeCurve,
   type GuideJoint,
@@ -23,6 +24,7 @@ import {
   foldedTriangles,
   moveVertex,
   vertexNormal,
+  weldedCorner,
 } from './refine-mesh';
 
 export interface Flank {
@@ -54,6 +56,11 @@ export interface EdgeSolve {
   /** +1 exterior, -1 interior, per segment. */
   sign: Int8Array;
   width: number;
+  /**
+   * Largest distance, mm, between `curve` and the points where the flanks meet that it was fitted
+   * to, clear of the ends' tapers.
+   */
+  deviation: number;
 }
 export interface EdgeResult {
   /** Welded vertices moved or created. */
@@ -72,11 +79,28 @@ const deepestEdge = 0.5;
  * move, over a blend of half the band's width, held between these many edge lengths.
  */
 const blendEdges = [2, 4];
+/** At an open guide's ends the weight also tapers along the edge over this many mm, or edge lengths. */
+const taperLength = 0.5;
+const taperEdges = 8;
+/** Fewest edge lengths of the edge that keep full weight; the taper shortens to leave them. */
+const coreEdges = 4;
 /** Least weight of the vertices the cut runs among; below it the surface is only moved. */
-const cutWeight = 0.5;
+const cutWeight = 0.9;
+/**
+ * The flanks are refitted from vertices past the soft zone plus these many edge lengths from the
+ * edge, then this many more each step, until the edge they meet at moves no more than `settled` mm.
+ */
+const clearEdges = 2;
+const settled = 0.01;
+/** Fewest vertices, and edge lengths of run past the threshold, a refitted flank reads. */
+const refitVertices = 12;
+const refitRun = 3;
+/** Most vertices a flank refit reads. */
+const refitPoints = 1024;
 const empty = new Uint32Array(0);
 
 const dot = (a: ArrayLike<number>, b: ArrayLike<number>) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+const curveLength = (curve: EdgeCurve) => curve.lengths[curve.lengths.length - 1];
 const smooth = (x: number) => (x <= 0 ? 0 : x >= 1 ? 1 : x * x * (3 - 2 * x));
 const median = (values: number[]) => {
   const sorted = [...values].sort((a, b) => a - b);
@@ -150,13 +174,6 @@ function bandEdgeLength(mesh: RefineMesh, topology: RefineTopology, band: EdgeBa
   return lengths.length ? median(lengths) : 0;
 }
 
-/** The band's solved edge as an offset across the guide, sampled along the guide. */
-interface EdgeOffsets {
-  stations: number[];
-  /** Offset across the guide, 3 values per station (the first used), for `interpolate`. */
-  offsets: number[];
-}
-
 /**
  * Finds which of `members` (indices into the band) lies nearest a point, through a grid of `cell` mm.
  * The search widens ring by ring until no closer member can remain. -1 when there are no members.
@@ -207,30 +224,6 @@ function nearestMember(mesh: RefineMesh, band: EdgeBand, members: number[], cell
       }
     return { nearest, distance: best };
   };
-}
-
-const allMembers = (band: EdgeBand) => Array.from({ length: band.vertices.length }, (_, i) => i);
-
-/** At each point of the band's solved edge: its station and offset, those of the nearest band vertex. */
-function edgeOffsets(mesh: RefineMesh, band: EdgeBand, edgeLength: number): EdgeOffsets {
-  const edge = band.edge;
-  const find = nearestMember(mesh, band, allMembers(band), 4 * edgeLength);
-  const samples: [number, number][] = [];
-  for (let k = 0; k < edge.length; k += 3) {
-    const { nearest } = find(edge[k], edge[k + 1], edge[k + 2]);
-    samples.push([band.station[nearest], band.cross[nearest]]);
-  }
-  samples.sort((a, b) => a[0] - b[0]);
-  return { stations: samples.map((s) => s[0]), offsets: samples.flatMap((s) => [s[1], 0, 0]) };
-}
-
-/** Signed offset of each band vertex across the guide from the solved edge, along the surface. */
-function offsetsFromEdge(band: EdgeBand, edge: EdgeOffsets) {
-  const value = [0, 0, 0];
-  return Float64Array.from(band.cross, (cross, i) => {
-    interpolate(edge.stations, edge.offsets, band.station[i], value);
-    return cross - value[0];
-  });
 }
 
 /**
@@ -325,54 +318,45 @@ function edgeSign(
   return facing < 0 ? 1 : -1;
 }
 
-/**
- * Null when the band finds no edge under the guide. This handles one open segment; paths of several
- * segments and closed loops also give null.
- */
-export function solveEdge(
-  mesh: RefineMesh,
-  topology: RefineTopology,
-  input: EdgeInput,
-  noise: number,
-): EdgeSolve | null {
-  if (input.segments.length !== 1 || input.closed) return null;
-  const [{ kind, points }] = input.segments;
-  const width = input.width ?? estimateWidth(mesh, topology, kind, points, noise);
-  if (!(width > 0)) return null;
-  const band = buildBand(mesh, topology, kind, points, width, noise);
-  if (!band) return null;
-  const edge = bandEdgeLength(mesh, topology, band);
-  const flanks: [Flank, Flank] = [flankOf(band.flanks[0]), flankOf(band.flanks[1])];
-  const meet = meetFlanks(band, flanks, width);
-  if (meet.angles.length < 2 || median(meet.angles) < minBandAngle) return null;
-  // An edge that lies farther from the surface than half the band's width, as at a fin whose faces
-  // nearly meet, cannot be reached by moving the band's vertices.
-  const find = nearestMember(mesh, band, allMembers(band), 4 * edge);
-  const depths: number[] = [];
-  for (let k = 0; k < meet.points.length; k += 3)
-    depths.push(find(meet.points[k], meet.points[k + 1], meet.points[k + 2]).distance);
-  if (median(depths) > deepestEdge * width) return null;
-  const curve = fitCurve(kind, meet.points, points.length, edge);
+/** A fitted shape as a signed surface: positive on the side its fitted points' normals face. */
+function shapeFlank(shape: Shape): Flank {
   return {
-    bands: [band],
-    flanks: [flanks],
-    curve,
-    sign: Int8Array.of(edgeSign(mesh, topology, band, flanks, meet.points, edge)),
-    width,
+    kind: shape.kind,
+    signed: (x, y, z) => shapeDistance(shape, x, y, z),
+    distance: (x, y, z) => Math.abs(shapeDistance(shape, x, y, z)),
+    project: (x, y, z, out) => projectToShape(shape, x, y, z, out),
   };
 }
 
-/** The point of `curve` nearest (x, y, z), past an end along the end's tangent. */
+/**
+ * The point of `curve` nearest (x, y, z), past an end along the end's tangent, into `out`; returns
+ * its station, continued past the ends.
+ */
 function onCurve(curve: EdgeCurve, x: number, y: number, z: number, out: Float64Array) {
   const station = closestOnCurve(curve, x, y, z, out);
-  const total = curve.lengths[curve.lengths.length - 1];
+  const total = curveLength(curve);
   if (curve.closed || (station > 0 && station < total)) return station;
   const tangent = new Float64Array(3);
   curveTangent(curve, station, tangent);
   const along = (x - out[0]) * tangent[0] + (y - out[1]) * tangent[1] + (z - out[2]) * tangent[2];
-  if ((station <= 0 && along < 0) || (station >= total && along > 0))
+  if ((station <= 0 && along < 0) || (station >= total && along > 0)) {
     for (let a = 0; a < 3; a++) out[a] += along * tangent[a];
+    return station + along;
+  }
   return station;
+}
+
+/**
+ * The stretch of the solved edge the guide covers: the stations, along `curve` continued past its
+ * ends, of the drawn guide's two ends, and the taper at each end.
+ */
+function guideSpan(curve: EdgeCurve, drawn: EdgeCurve, edge: number) {
+  const at = new Float64Array(3);
+  const p = drawn.points,
+    n = p.length - 3;
+  const ends = [onCurve(curve, p[0], p[1], p[2], at), onCurve(curve, p[n], p[n + 1], p[n + 2], at)];
+  const [from, to] = ends[0] <= ends[1] ? ends : [ends[1], ends[0]];
+  return { from, to, taper: taperOf(to - from, edge) };
 }
 
 /** Linear interpolation of `values` (3 per sample) at `station` among ascending `stations`. */
@@ -387,12 +371,207 @@ function interpolate(stations: number[], values: number[], station: number, out:
 }
 
 /**
- * Per band vertex, the share of its full move it makes at strength 1: smoothstep of its distance over
- * the surface from the nearest vertex that does not move (outside the band, or Beyond), over a blend
- * of half the band's width held between 2 and 4 edge lengths. 0 for a vertex that does not move.
+ * Length of the taper at each end of an edge `length` mm long: `taperLength` or `taperEdges` edge
+ * lengths, shortened so that `coreEdges` edge lengths keep full weight.
+ */
+function taperOf(length: number, edge: number) {
+  const taper = Math.max(taperLength, taperEdges * edge);
+  if (length >= 2 * taper + coreEdges * edge) return taper;
+  return Math.max(0, (length - coreEdges * edge) / 2);
+}
+
+/** Largest distance from `points` (xyz) to `curve`, among those clear of the guide's end tapers. */
+function largestGap(curve: EdgeCurve, drawn: EdgeCurve, points: ArrayLike<number>, edge: number) {
+  const { from, to, taper } = guideSpan(curve, drawn, edge);
+  const at = new Float64Array(3);
+  let clear = 0,
+    all = 0;
+  for (let k = 0; k < points.length; k += 3) {
+    const station = onCurve(curve, points[k], points[k + 1], points[k + 2], at);
+    const gap = Math.hypot(points[k] - at[0], points[k + 1] - at[1], points[k + 2] - at[2]);
+    all = Math.max(all, gap);
+    if (station >= from + taper && station <= to - taper) clear = Math.max(clear, gap);
+  }
+  return clear || all;
+}
+
+/**
+ * The flanks, refitted from vertices clear of the rounding's shoulder, where they meet and the curve
+ * fitted there. Vertices a little way up the rounding lie within tolerance of a flank and tilt its
+ * fit toward the rounding, pulling the edge inward: each flank is refitted from its vertices past
+ * `soft + clearEdges` edge lengths from the edge, then `clearEdges` more each step, until the edge
+ * moves no more than `settled` between steps or too few vertices remain. A profile flank is kept.
+ */
+function unbiasedFlanks(
+  mesh: RefineMesh,
+  topology: RefineTopology,
+  band: EdgeBand,
+  kind: GuideKind,
+  controls: number,
+  width: number,
+  noise: number,
+  edge: number,
+) {
+  const { position } = mesh;
+  const normal = new Float32Array(3);
+  const sides = [BandZone.Left, BandZone.Right].map((zone) => {
+    const members: number[] = [];
+    band.zone.forEach((z, i) => z === zone && members.push(band.vertices[i]));
+    const normals = new Float32Array(members.length * 3);
+    members.forEach((v, k) => {
+      vertexNormal(mesh, topology, v, normal);
+      normals.set(normal, k * 3);
+    });
+    return { members, normals };
+  });
+  const at = new Float64Array(3);
+  const refit = (threshold: number, curve: EdgeCurve): [Flank, Flank] | null => {
+    const fitted = sides.map(({ members, normals }, s) => {
+      const fit = band.fits[s];
+      if (fit === 'profile') return flankOf(band.flanks[s]);
+      const chosen: number[] = [];
+      let reach = 0;
+      members.forEach((v, k) => {
+        onCurve(curve, position[v * 3], position[v * 3 + 1], position[v * 3 + 2], at);
+        const d = Math.hypot(
+          position[v * 3] - at[0],
+          position[v * 3 + 1] - at[1],
+          position[v * 3 + 2] - at[2],
+        );
+        if (d <= threshold) return;
+        chosen.push(k);
+        reach = Math.max(reach, d);
+      });
+      if (chosen.length < refitVertices || reach - threshold < refitRun * edge) return null;
+      const count = Math.min(chosen.length, refitPoints);
+      const stride = chosen.length / count;
+      const p = new Float32Array(count * 3),
+        n = new Float32Array(count * 3);
+      for (let j = 0; j < count; j++) {
+        const k = chosen[Math.floor(j * stride)];
+        p.set(position.subarray(members[k] * 3, members[k] * 3 + 3), j * 3);
+        n.set(normals.subarray(k * 3, k * 3 + 3), j * 3);
+      }
+      const shape = fitShape(p, n, fit, noise);
+      return shape?.within ? shapeFlank(shape.shape) : null;
+    });
+    return fitted[0] && fitted[1] ? [fitted[0], fitted[1]] : null;
+  };
+  const meetWith = (flanks: [Flank, Flank]) => {
+    const meet = meetFlanks(band, flanks, width);
+    if (meet.angles.length < 2) return null;
+    return { flanks, meet, curve: fitCurve(kind, meet.points, controls, edge) };
+  };
+  // The band's own flanks seed the first step; once two steps agree, the nearer one is kept.
+  let solved = meetWith([flankOf(band.flanks[0]), flankOf(band.flanks[1])]);
+  for (let step = clearEdges; solved; step += clearEdges) {
+    const flanks = refit(band.soft + step * edge, solved.curve);
+    const next = flanks && meetWith(flanks);
+    if (!next) break;
+    if (
+      step > clearEdges &&
+      largestGap(solved.curve, band.drawn, next.meet.points, edge) <= settled
+    )
+      break;
+    solved = next;
+  }
+  return solved;
+}
+
+/**
+ * Null when the band finds no edge under the guide, or when the width leaves no usable core: fewer
+ * than `coreEdges` edge lengths of the edge at full weight, or no fully weighted vertex on a flank.
+ * This handles one open segment; paths of several segments and closed loops also give null.
+ */
+export function solveEdge(
+  mesh: RefineMesh,
+  topology: RefineTopology,
+  input: EdgeInput,
+  noise: number,
+): EdgeSolve | null {
+  if (input.segments.length !== 1 || input.closed) return null;
+  const [{ kind, points }] = input.segments;
+  const width = input.width ?? estimateWidth(mesh, topology, kind, points, noise);
+  if (!(width > 0)) return null;
+  const band = buildBand(mesh, topology, kind, points, width, noise);
+  if (!band) return null;
+  const edge = bandEdgeLength(mesh, topology, band);
+  const solved = unbiasedFlanks(mesh, topology, band, kind, points.length, width, noise, edge);
+  if (!solved) return null;
+  const { flanks, meet, curve } = solved;
+  if (median(meet.angles) < minBandAngle) return null;
+  // An edge that lies farther from the surface than half the band's width, as at a fin whose faces
+  // nearly meet, cannot be reached by moving the band's vertices.
+  const members = Array.from({ length: band.vertices.length }, (_, i) => i);
+  const find = nearestMember(mesh, band, members, 4 * edge);
+  const depths: number[] = [];
+  for (let k = 0; k < meet.points.length; k += 3)
+    depths.push(find(meet.points[k], meet.points[k + 1], meet.points[k + 2]).distance);
+  if (median(depths) > deepestEdge * width) return null;
+  const solve: EdgeSolve = {
+    bands: [band],
+    flanks: [flanks],
+    curve,
+    sign: Int8Array.of(edgeSign(mesh, topology, band, flanks, meet.points, edge)),
+    width,
+    deviation: largestGap(curve, band.drawn, meet.points, edge),
+  };
+  return usableCore(mesh, topology, solve, edge) ? solve : null;
+}
+
+/**
+ * True when at least `coreEdges` edge lengths of the edge, unbroken, have a vertex of full weight in
+ * the soft zone or as near the edge as the soft zone is wide, and each flank has a vertex of full
+ * weight.
+ */
+function usableCore(mesh: RefineMesh, topology: RefineTopology, solve: EdgeSolve, edge: number) {
+  const [band] = solve.bands;
+  const { position } = mesh;
+  const weights = moveWeights(mesh, topology, solve);
+  const near = Math.max(band.soft, 2 * edge);
+  const sides = [false, false];
+  const stations: number[] = [];
+  const at = new Float64Array(3);
+  band.vertices.forEach((v, i) => {
+    if (weights[i] < 1) return;
+    if (band.zone[i] === BandZone.Left) sides[0] = true;
+    if (band.zone[i] === BandZone.Right) sides[1] = true;
+    const station = onCurve(
+      solve.curve,
+      position[v * 3],
+      position[v * 3 + 1],
+      position[v * 3 + 2],
+      at,
+    );
+    const d = Math.hypot(
+      position[v * 3] - at[0],
+      position[v * 3 + 1] - at[1],
+      position[v * 3 + 2] - at[2],
+    );
+    if (band.zone[i] === BandZone.Soft || d <= near) stations.push(station);
+  });
+  if (!sides[0] || !sides[1] || !stations.length) return false;
+  stations.sort((a, b) => a - b);
+  let from = stations[0],
+    longest = 0;
+  for (let k = 1; k < stations.length; k++) {
+    if (stations[k] - stations[k - 1] > 2 * edge) from = stations[k];
+    longest = Math.max(longest, stations[k] - from);
+  }
+  // Each vertex stands for half an edge length of the edge either side of it.
+  return longest + edge >= coreEdges * edge;
+}
+
+/**
+ * Per band vertex, the share of its full move it makes at strength 1. Along the band's sides:
+ * smoothstep of its distance over the surface from the nearest vertex that does not move (outside
+ * the band, or Beyond), over a blend of half the band's width held between 2 and 4 edge lengths. At
+ * an open guide's ends, also smoothstep of its distance along the edge from the end over the taper.
+ * 0 for a vertex that does not move.
  */
 export function moveWeights(mesh: RefineMesh, topology: RefineTopology, solve: EdgeSolve) {
   const [band] = solve.bands;
+  const { curve } = solve;
   const { position } = mesh;
   const count = band.vertices.length;
   const indexOf = new Map<number, number>();
@@ -430,15 +609,98 @@ export function moveWeights(mesh: RefineMesh, topology: RefineTopology, solve: E
   }
   const edge = bandEdgeLength(mesh, topology, band);
   const blend = Math.max(blendEdges[0] * edge, Math.min(solve.width / 2, blendEdges[1] * edge));
-  return Float64Array.from(reach, (d, i) =>
-    indexOf.has(band.vertices[i]) ? smooth(d / blend) : 0,
-  );
+  const { from, to, taper } = guideSpan(curve, band.drawn, edge);
+  const at = new Float64Array(3);
+  return Float64Array.from(reach, (d, i) => {
+    const v = band.vertices[i];
+    if (!indexOf.has(v)) return 0;
+    if (curve.closed || !(taper > 0)) return smooth(d / blend);
+    const station = onCurve(curve, position[v * 3], position[v * 3 + 1], position[v * 3 + 2], at);
+    return smooth(d / blend) * smooth(Math.min(station - from, to - station) / taper);
+  });
 }
 
 /**
- * Moves the band onto the flanks, each vertex by `strength` times its `moveWeights` share of its full
- * move. With `cut`, also puts mesh edges on the solved edge (mesh must be a topology clone). At
- * strength 0 nothing moves and nothing is cut.
+ * Each flank's corrected surface: the flank plus the offset that carries the flanks' own meet onto
+ * the solved edge, faded by smoothstep from the meet out to that flank's own start. Both surfaces
+ * pass through the solved edge.
+ */
+function correctedSurfaces(mesh: RefineMesh, solve: EdgeSolve, edge: number) {
+  const [band] = solve.bands;
+  const flanks = solve.flanks[0];
+  const { curve, width } = solve;
+  const { position } = mesh;
+  const meet = meetFlanks(band, flanks, width).points;
+  const at = new Float64Array(3);
+  const samples = Array.from({ length: meet.length / 3 }, (_, k) => {
+    const p = [meet[k * 3], meet[k * 3 + 1], meet[k * 3 + 2]];
+    const station = onCurve(curve, p[0], p[1], p[2], at);
+    return { station, p, correction: [at[0] - p[0], at[1] - p[1], at[2] - p[2]] };
+  });
+  samples.sort((a, b) => a.station - b.station);
+  const stations = samples.map((s) => s.station);
+  const meets = samples.flatMap((s) => s.p);
+  const corrections = samples.flatMap((s) => s.correction);
+  const m = [0, 0, 0],
+    c = [0, 0, 0];
+  // Distance of a flank point from the meet at its station, leaving that station's offset in `c`.
+  const fromMeet = (x: number, y: number, z: number) => {
+    const station = onCurve(curve, x, y, z, at);
+    interpolate(stations, meets, station, m);
+    interpolate(stations, corrections, station, c);
+    return { station, r: Math.hypot(x - m[0], y - m[1], z - m[2]) };
+  };
+  // Each flank's own start: per stretch of 4 edge lengths the nearest of its vertices to the meet,
+  // the median over the stretches, at least 2 edge lengths.
+  const q = new Float32Array(3);
+  const starts = [BandZone.Left, BandZone.Right].map((zone, s) => {
+    const nearest = new Map<number, number>();
+    band.vertices.forEach((v, i) => {
+      if (band.zone[i] !== zone) return;
+      flanks[s].project(position[v * 3], position[v * 3 + 1], position[v * 3 + 2], q);
+      const { station, r } = fromMeet(q[0], q[1], q[2]);
+      const bin = Math.floor(station / (4 * edge));
+      nearest.set(bin, Math.min(nearest.get(bin) ?? Infinity, r));
+    });
+    return Math.max(2 * edge, nearest.size ? median([...nearest.values()]) : band.soft);
+  });
+  // The offset of side s at the flank point q, into `out`.
+  const offset = (s: number, out: number[]) => {
+    const f = 1 - smooth(fromMeet(q[0], q[1], q[2]).r / starts[s]);
+    for (let a = 0; a < 3; a++) out[a] = f * c[a];
+  };
+  const d = [0, 0, 0];
+  return {
+    /** The point of side s's corrected surface over (x, y, z)'s projection onto its flank. */
+    target(s: number, x: number, y: number, z: number, out: number[]) {
+      flanks[s].project(x, y, z, q);
+      offset(s, d);
+      for (let a = 0; a < 3; a++) out[a] = q[a] + d[a];
+    },
+    /** Distance from (x, y, z) to side s's corrected surface, unsigned. */
+    distance(s: number, x: number, y: number, z: number) {
+      const p = [x, y, z];
+      flanks[s].project(x, y, z, q);
+      for (let iteration = 0; iteration < 4; iteration++) {
+        offset(s, d);
+        flanks[s].project(p[0] - d[0], p[1] - d[1], p[2] - d[2], q);
+      }
+      return flanks[s].distance(p[0] - d[0], p[1] - d[1], p[2] - d[2]);
+    },
+  };
+}
+
+/** Exported for the tests: each side's corrected surface, as `applyEdge` moves the band onto it. */
+export function correctedFlanks(mesh: RefineMesh, topology: RefineTopology, solve: EdgeSolve) {
+  const surfaces = correctedSurfaces(mesh, solve, bandEdgeLength(mesh, topology, solve.bands[0]));
+  return [0, 1].map((s) => (x: number, y: number, z: number) => surfaces.distance(s, x, y, z));
+}
+
+/**
+ * Moves the band onto the flanks' corrected surfaces, each vertex by `strength` times its
+ * `moveWeights` share of its full move. With `cut`, also puts mesh edges on the solved edge where the
+ * weight is at least `cutWeight` (mesh must be a topology clone). At strength 0 nothing moves and
+ * nothing is cut.
  */
 export function applyEdge(
   mesh: RefineMesh,
@@ -450,51 +712,32 @@ export function applyEdge(
   if (!(strength > 0)) return { changed: empty, cut: null, skipped: empty, folded: empty };
   const [band] = solve.bands;
   const flanks = solve.flanks[0];
-  const { curve, width } = solve;
+  const { curve } = solve;
   const { position } = mesh;
   const edge = bandEdgeLength(mesh, topology, band);
   const count = band.vertices.length;
-  const candidate = (i: number) => band.zone[i] !== BandZone.Beyond;
   const indexOf = new Map<number, number>();
-  for (let i = 0; i < count; i++) if (candidate(i)) indexOf.set(band.vertices[i], i);
-
-  // Where the flanks meet at each station, and how far the solved edge lies from that.
-  const meet = meetFlanks(band, flanks, width).points;
-  const at = new Float64Array(3);
-  const samples = Array.from({ length: meet.length / 3 }, (_, k) => {
-    const p = [meet[k * 3], meet[k * 3 + 1], meet[k * 3 + 2]];
-    const station = onCurve(curve, p[0], p[1], p[2], at);
-    return { station, correction: [at[0] - p[0], at[1] - p[1], at[2] - p[2]] };
-  });
-  samples.sort((a, b) => a.station - b.station);
-  const corrections = samples.flatMap((s) => s.correction);
-  const curveStations = samples.map((s) => s.station);
-  const edgeAt = edgeOffsets(mesh, band, edge);
-  const offsets = offsetsFromEdge(band, edgeAt);
+  for (let i = 0; i < count; i++)
+    if (band.zone[i] !== BandZone.Beyond) indexOf.set(band.vertices[i], i);
+  const surfaces = correctedSurfaces(mesh, solve, edge);
   const weights = moveWeights(mesh, topology, solve);
 
-  const soft = Math.max(band.soft, 2 * edge);
   const move = new Float64Array(count * 3);
   const moved = new Uint8Array(count);
-  const projected = new Float32Array(3);
-  const correction = [0, 0, 0];
+  const target = [0, 0, 0];
   for (const [v, i] of indexOf) {
     const p = [position[v * 3], position[v * 3 + 1], position[v * 3 + 2]];
     const weight = strength * weights[i];
     if (!(weight > 0)) continue;
     const zone = band.zone[i];
-    const flank =
+    const side =
       zone === BandZone.Left
-        ? flanks[0]
+        ? 0
         : zone === BandZone.Right
-          ? flanks[1]
-          : flanks[+(flanks[1].distance(p[0], p[1], p[2]) < flanks[0].distance(p[0], p[1], p[2]))];
-    flank.project(p[0], p[1], p[2], projected);
-    const station = closestOnCurve(curve, projected[0], projected[1], projected[2], at);
-    interpolate(curveStations, corrections, station, correction);
-    const near = Math.max(0, 1 - Math.abs(offsets[i]) / soft);
-    for (let a = 0; a < 3; a++)
-      move[i * 3 + a] = weight * (projected[a] + near * correction[a] - p[a]);
+          ? 1
+          : +(flanks[1].distance(p[0], p[1], p[2]) < flanks[0].distance(p[0], p[1], p[2]));
+    surfaces.target(side, p[0], p[1], p[2], target);
+    for (let a = 0; a < 3; a++) move[i * 3 + a] = weight * (target[a] - p[a]);
     moved[i] = +(move[i * 3] !== 0 || move[i * 3 + 1] !== 0 || move[i * 3 + 2] !== 0);
   }
   const before = position.slice(0, mesh.weldedCount * 3);
@@ -526,17 +769,19 @@ export function applyEdge(
     Math.imul(Math.floor(z / edge), 83492791);
   vertices.forEach((v, k) => {
     const [x, y, z] = [position[v * 3], position[v * 3 + 1], position[v * 3 + 2]];
-    field[k] = flanks[0].distance(x, y, z) - flanks[1].distance(x, y, z);
+    field[k] = surfaces.distance(0, x, y, z) - surfaces.distance(1, x, y, z);
     const key = cellOf(x, y, z);
     const list = cells.get(key);
     if (list) list.push(v);
     else cells.set(key, [v]);
   });
-  // A point on the edge moves onto it as the weight of the cut vertex nearest it rises from
-  // `cutWeight` to 1, so that where the cut begins the edge starts flush with the moved surface.
+  // A point on the edge moves onto it as the least weight of the cut vertices within an edge length
+  // of it (else the nearest) rises from `cutWeight` to 1, so that where the cut begins the edge
+  // starts flush with the moved surface and is wholly on the solved edge only where it is sharp.
   const weightAt = (x: number, y: number, z: number) => {
     let best = Infinity,
-      weight = 0;
+      nearest = 1,
+      least = Infinity;
     for (let dx = -1; dx <= 1; dx++)
       for (let dy = -1; dy <= 1; dy++)
         for (let dz = -1; dz <= 1; dz++)
@@ -546,27 +791,70 @@ export function applyEdge(
               position[v * 3 + 1] - y,
               position[v * 3 + 2] - z,
             );
+            const w = weights[indexOf.get(v)!];
+            if (d <= edge) least = Math.min(least, w);
             if (d < best) {
               best = d;
-              weight = strength * smooth((weights[indexOf.get(v)!] - cutWeight) / (1 - cutWeight));
+              nearest = w;
             }
           }
-    return weight;
+    const weight = least < Infinity ? least : nearest;
+    return strength * smooth((weight - cutWeight) / (1 - cutWeight));
   };
-  const target = new Float64Array(3);
+  // Corners of the triangles around the cut, so that their children can be checked against them.
+  const parents = new Map<number, number[]>();
+  for (const v of vertices)
+    for (let j = topology.triangleStart[v]; j < topology.triangleStart[v + 1]; j++) {
+      const t = topology.trianglesOf[j];
+      if (!parents.has(t))
+        parents.set(
+          t,
+          [0, 1, 2].map((k) => weldedCorner(mesh, t, k as 0 | 1 | 2)),
+        );
+    }
+  const on = new Float64Array(3);
   const result = cutAlongField(mesh, topology, vertices, field, (x, y, z, out) => {
-    onCurve(curve, x, y, z, target);
+    onCurve(curve, x, y, z, on);
     const weight = weightAt(x, y, z);
-    out[0] = x + weight * (target[0] - x);
-    out[1] = y + weight * (target[1] - y);
-    out[2] = z + weight * (target[2] - z);
+    out[0] = x + weight * (on[0] - x);
+    out[1] = y + weight * (on[1] - y);
+    out[2] = z + weight * (on[2] - z);
   });
+  const reversed = new Set(folded);
+  for (const t of reversedChildren(mesh, before, parents, result.children)) reversed.add(t);
   const all = new Set(changed);
   for (const v of result.chain) all.add(v);
   return {
     changed: Uint32Array.from(all).sort(),
     cut: result,
     skipped: result.skipped,
-    folded,
+    folded: Uint32Array.from(reversed).sort(),
   };
+}
+
+/** Triangles, children included, whose normal opposes that of their parent's corners at `before`. */
+function reversedChildren(
+  mesh: RefineMesh,
+  before: Float64Array,
+  parents: Map<number, number[]>,
+  children: Map<number, number[]>,
+) {
+  const normal = (source: ArrayLike<number>, corners: number[]) => {
+    const [a, b, c] = corners.map((w) => w * 3);
+    const u = [0, 1, 2].map((k) => source[b + k] - source[a + k]);
+    const v = [0, 1, 2].map((k) => source[c + k] - source[a + k]);
+    return crossOf(u, v);
+  };
+  const reversed: number[] = [];
+  for (const [t, corners] of parents) {
+    const was = normal(before, corners);
+    for (const child of children.get(t) ?? [t]) {
+      const now = normal(
+        mesh.position,
+        [0, 1, 2].map((k) => weldedCorner(mesh, child, k as 0 | 1 | 2)),
+      );
+      if (dot(was, now) < 0) reversed.push(child);
+    }
+  }
+  return reversed;
 }

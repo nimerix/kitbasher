@@ -13,6 +13,7 @@ import {
   movedOutside,
   octahedron,
   offChainMismatches,
+  reversedAgainst,
   straddling,
   straddlingTriangles,
   trianglesWhollyOn,
@@ -101,6 +102,26 @@ it('drops a split whose placement would collapse a triangle', () => {
   expect(movedOutside(mesh, cut, result.chain)).toBe(0);
   expect([...result.skipped]).toEqual(straddlingTriangles(cut, fn, 1e-6));
   expect(result.skipped.length).toBeGreaterThan(0);
+});
+
+it('refuses a placement that would reverse a triangle against the one it is cut from', () => {
+  // Every point on the plane x = 0.013 is placed 0.2 mm along +x, past the next column of vertices.
+  const { mesh, topology } = modelOf(softBox([2, 1.5, 1], 0.3));
+  const cut = cloneRefineMesh(mesh, true);
+  const ids = Uint32Array.from({ length: cut.weldedCount }, (_, i) => i);
+  const fn = (x: number) => x - 0.013;
+  const field = Float32Array.from(ids, (i) => fn(cut.position[i * 3]));
+  const result = cutAlongField(cut, topology, ids, field, (_x, y, z, out) =>
+    out.set([0.213, y, z]),
+  );
+  const parentOf = new Map<number, number>();
+  for (const [parent, children] of result.children)
+    for (const child of children) parentOf.set(child, parent);
+  expect(reversedAgainst(mesh, cut, parentOf)).toBe(0);
+  expect(result.skipped.length).toBeGreaterThan(0);
+  expect([...result.skipped]).toEqual(straddlingTriangles(cut, fn, 1e-6));
+  expect(closedMesh(cut)).toBe(true);
+  expect(meshMinTriangleArea(cut)).toBeGreaterThan(1e-12);
 });
 
 // A seeded generator, so the planes are the same on every run.

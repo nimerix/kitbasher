@@ -17,6 +17,7 @@ import type { EdgeSolve } from '../../src/core/refine-edge';
 import { type Shape, estimateNoise, noiseRings } from '../../src/core/refine-fit';
 import {
   type RefineMesh,
+  type RefineTopology,
   addGeometryVertex,
   addTriangle,
   addWeldedVertex,
@@ -1436,5 +1437,117 @@ export function maxMove(before: RefineMesh, after: RefineMesh) {
       worst,
       Math.hypot(...[0, 1, 2].map((a) => after.position[v * 3 + a] - before.position[v * 3 + a])),
     );
+  return worst;
+}
+
+/**
+ * Triangles of `after` whose normal opposes that of the triangle they come from in `before`: their
+ * parent in `parentOf`, else the triangle of the same id.
+ */
+export function reversedAgainst(
+  before: RefineMesh,
+  after: RefineMesh,
+  parentOf: Map<number, number>,
+) {
+  const normal = (mesh: RefineMesh, t: number) => {
+    const p = ([0, 1, 2] as const).map((k) => weldedCorner(mesh, t, k) * 3);
+    const u = [0, 1, 2].map((a) => mesh.position[p[1] + a] - mesh.position[p[0] + a]);
+    const v = [0, 1, 2].map((a) => mesh.position[p[2] + a] - mesh.position[p[0] + a]);
+    return [u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]];
+  };
+  let reversed = 0;
+  for (let t = 0; t < after.triangleCount; t++) {
+    const parent = parentOf.get(t) ?? t;
+    if (parent >= before.triangleCount) continue;
+    const [a, b] = [normal(after, t), normal(before, parent)];
+    if (a[0] * b[0] + a[1] * b[1] + a[2] * b[2] < 0) reversed++;
+  }
+  return reversed;
+}
+
+/**
+ * The chain vertices with every band vertex of weight at least 0.9 (where the cut runs) within
+ * `reach` of them in `after` at full weight: where the edge is sharp rather than blending into the
+ * scan. `reach` should exceed an edge length plus the largest move of a point onto the edge.
+ */
+export function fullWeightChain(
+  after: RefineMesh,
+  solve: EdgeSolve,
+  weights: Float64Array,
+  chain: Uint32Array,
+  reach = 0.12,
+) {
+  const [band] = solve.bands;
+  return [...chain].filter((v) =>
+    band.vertices.every((w, i) => {
+      if (band.zone[i] === BandZone.Beyond || weights[i] < 0.9 || weights[i] === 1) return true;
+      const d = Math.hypot(
+        ...[0, 1, 2].map((a) => after.position[w * 3 + a] - after.position[v * 3 + a]),
+      );
+      return d > reach;
+    }),
+  );
+}
+
+/**
+ * Largest distance of the two triangles on each cut edge between `keep` vertices from the two
+ * surfaces `distances` measures: each triangle's corners and centroid against the surface it lies
+ * nearer, one triangle per surface. -1 when no such edge has two triangles.
+ */
+export function facesOffSurfaces(
+  mesh: RefineMesh,
+  edges: Uint32Array,
+  keep: number[],
+  distances: ((x: number, y: number, z: number) => number)[],
+) {
+  const kept = new Set(keep);
+  const key = (a: number, b: number) => Math.min(a, b) * mesh.weldedCount + Math.max(a, b);
+  const sides = new Map<number, number[]>();
+  for (let k = 0; k < edges.length; k += 2)
+    if (kept.has(edges[k]) && kept.has(edges[k + 1])) sides.set(key(edges[k], edges[k + 1]), []);
+  for (let t = 0; t < mesh.triangleCount; t++) {
+    const w = ([0, 1, 2] as const).map((k) => weldedCorner(mesh, t, k));
+    for (let k = 0; k < 3; k++) sides.get(key(w[k], w[(k + 1) % 3]))?.push(t);
+  }
+  let worst = -1;
+  for (const triangles of sides.values()) {
+    if (triangles.length !== 2) continue;
+    const errors = triangles.map((t) => {
+      const points = ([0, 1, 2] as const).map((k) => {
+        const v = weldedCorner(mesh, t, k) * 3;
+        return [mesh.position[v], mesh.position[v + 1], mesh.position[v + 2]];
+      });
+      points.push([0, 1, 2].map((a) => (points[0][a] + points[1][a] + points[2][a]) / 3));
+      return distances.map((d) => Math.max(...points.map((p) => d(p[0], p[1], p[2]))));
+    });
+    const pair =
+      errors[0][0] + errors[1][1] <= errors[0][1] + errors[1][0]
+        ? Math.max(errors[0][0], errors[1][1])
+        : Math.max(errors[0][1], errors[1][0]);
+    worst = Math.max(worst, pair);
+  }
+  return worst;
+}
+
+/** Largest move of a vertex with a neighbour that did not move, among those `where` admits. */
+export function seamMove(
+  before: RefineMesh,
+  after: RefineMesh,
+  topology: RefineTopology,
+  where: (x: number, y: number, z: number) => boolean = () => true,
+) {
+  const moveOf = (v: number) =>
+    Math.hypot(...[0, 1, 2].map((a) => after.position[v * 3 + a] - before.position[v * 3 + a]));
+  let worst = 0;
+  for (let v = 0; v < before.weldedCount; v++) {
+    const move = moveOf(v);
+    const p = [0, 1, 2].map((a) => before.position[v * 3 + a]);
+    if (!(move > 0) || !where(p[0], p[1], p[2])) continue;
+    for (let j = topology.neighbourStart[v]; j < topology.neighbourStart[v + 1]; j++)
+      if (moveOf(topology.neighbours[j]) === 0) {
+        worst = Math.max(worst, move);
+        break;
+      }
+  }
   return worst;
 }
