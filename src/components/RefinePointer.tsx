@@ -21,6 +21,7 @@ import {
 } from '../core/store';
 import type { GuidePoint } from '../core/refine-band';
 import type { RefineBrush } from '../core/refine-brush';
+import { prepareEditedForPicking } from '../core/bvh';
 import { triangleCount } from '../core/geometry';
 import { workerIndexTriangles } from '../core/spatial-index';
 import { partMeshes } from '../xr/part-meshes';
@@ -735,6 +736,9 @@ export function RefinePointerController({ pressed }: { pressed: () => boolean })
     /** Takes a press that would start a gesture while the surface has no index: nothing happens. */
     const refuse = (pointer: number) => {
       cancelledPointer = pointer;
+      // A build someone cancelled is asked for again, so the surface does not stay unpickable.
+      const { preview } = useEditor.getState().refine ?? {};
+      if (preview && !surfaceReady({ preview })) prepareEditedForPicking(preview);
       updateCursor();
       return true;
     };

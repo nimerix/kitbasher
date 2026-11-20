@@ -354,9 +354,8 @@ test('undoes each point and each handle drag as its own step', async ({ page }) 
   }
 });
 
-// Viewport defect: a middle handle lies 0.155 mm under its own guide's previewed sharp edge,
-// past the 0.085 mm depth allowance, so it cannot be picked.
-test.fixme('drags the middle handle of a guide on an exterior edge', async ({ page }) => {
+// The handle lies 0.155 mm under its own guide's previewed sharp edge and must stay reachable.
+test('drags the middle handle of a guide on an exterior edge', async ({ page }) => {
   await openRefine(page);
   for (const x of [-3, 0, 3]) await clickSurface(page, crest(x));
   await expect.poll(() => inStore(page, (s) => !!s.refine!.draft)).toBe(true);
