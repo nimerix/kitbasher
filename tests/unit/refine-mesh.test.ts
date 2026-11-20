@@ -1,10 +1,21 @@
 import { describe, expect, it } from 'vitest';
-import { Box3, BufferAttribute, Float16BufferAttribute, Matrix4, Quaternion, Vector3 } from 'three';
+import {
+  Box3,
+  BufferAttribute,
+  BufferGeometry,
+  Float16BufferAttribute,
+  InterleavedBuffer,
+  InterleavedBufferAttribute,
+  Matrix4,
+  Quaternion,
+  Vector3,
+} from 'three';
 import {
   buildRefineMesh,
   cloneRefineMesh,
   foldedTriangles,
   moveVertex,
+  setTriangle,
   vertexNormal,
   writeRefinedGeometry,
 } from '../../src/core/refine-mesh';
@@ -425,5 +436,125 @@ describe.each(cases)('storage that cannot hold new values, %s', (_, options) => 
     moveVertex(mesh, centre, 0.3035, 0, 0.004);
     const out = writeRefinedGeometry(source, matrix, mesh);
     expect(fanNormalError(out, mesh, centre)).toBeLessThan(0.5);
+  });
+});
+
+/**
+ * Closed triangular bipyramid whose equator vertices 0 and 1 are `gap` apart along x, poles 3 and 4.
+ * `store` builds the position attribute from the final coordinates.
+ */
+function bipyramid(
+  indexed: boolean,
+  origin: number,
+  gap: number,
+  size: number,
+  store: (points: number[]) => BufferAttribute | InterleavedBufferAttribute,
+) {
+  const o = origin;
+  const points = [
+    [o, o, o],
+    [o + gap, o, o],
+    [o, o + size, o],
+    [o, o + size / 2, o + size],
+    [o, o + size / 2, o - size],
+  ].flat();
+  const geometry = new BufferGeometry();
+  geometry.setAttribute('position', new BufferAttribute(new Float64Array(points), 3));
+  geometry.setIndex([3, 0, 1, 3, 1, 2, 3, 2, 0, 4, 1, 0, 4, 2, 1, 4, 0, 2]);
+  const result = indexed ? geometry : geometry.toNonIndexed();
+  result.computeVertexNormals();
+  result.setAttribute('position', store(Array.from(result.getAttribute('position').array)));
+  return result;
+}
+
+describe.each(cases)('promoted storage, %s', (_, options) => {
+  const indexed = 'indexed' in options;
+  const promoted = [
+    [
+      'interleaved Float64',
+      1000,
+      2e-5,
+      1,
+      0.1,
+      (points: number[]) => {
+        const padded = new Float64Array((points.length / 3) * 4);
+        for (let i = 0; i < points.length / 3; i++)
+          padded.set(points.slice(i * 3, i * 3 + 3), i * 4);
+        return new InterleavedBufferAttribute(new InterleavedBuffer(padded, 4), 3, 0);
+      },
+      Float64Array,
+    ],
+    [
+      'Int32 above 2^24',
+      2 ** 24,
+      1,
+      4,
+      8,
+      (points: number[]) => new BufferAttribute(new Int32Array(points), 3),
+      Float64Array,
+    ],
+  ] as const;
+  it.each(promoted)(
+    'keeps two %s vertices that Float32 would merge apart',
+    (_, origin, gap, size, push, store, Type) => {
+      const source = bipyramid(indexed, origin, gap, size, store);
+      // Geometry vertices of the two close equator vertices and the first pole.
+      const [ga, gb, gp] = indexed ? [0, 1, 3] : [1, 2, 0];
+      const position = source.getAttribute('position');
+      expect(Math.fround(position.getX(ga))).toBe(Math.fround(position.getX(gb)));
+      const mesh = buildRefineMesh(source, new Matrix4());
+      const [a, b, pole] = [ga, gb, gp].map((g) => mesh.weldOf[g]);
+      expect(a).not.toBe(b);
+      moveVertex(
+        mesh,
+        pole,
+        mesh.position[pole * 3] + push,
+        mesh.position[pole * 3 + 1],
+        mesh.position[pole * 3 + 2],
+      );
+      const out = writeRefinedGeometry(source, new Matrix4(), mesh);
+      expect(closed(out)).toBe(true);
+      const written = out.getAttribute('position');
+      expect(written.array).toBeInstanceOf(Type);
+      const [x, y] = [a, b].map((v) => written.getX(writtenVertexOf(out, mesh, v)));
+      expect(x).not.toBe(y);
+      expect(y - x).toBeCloseTo(gap, 9);
+    },
+  );
+
+  it('keeps Int16 positions when a triangle is only reordered', () => {
+    const source = cornerTetrahedron(
+      indexed,
+      (points) => new BufferAttribute(new Int16Array(points), 3),
+    );
+    const mesh = buildRefineMesh(source, new Matrix4());
+    const [p, q, r] = mesh.corners.slice(0, 3);
+    setTriangle(mesh, 0, q, r, p);
+    const out = writeRefinedGeometry(source, new Matrix4(), mesh);
+    const before = source.getAttribute('position').array;
+    const after = out.getAttribute('position').array;
+    expect(after).toBeInstanceOf(Int16Array);
+    for (let c = 0; c < mesh.triangleCount * 3; c++) {
+      const vertex = out.index ? out.index.getX(c) : c;
+      const g = mesh.corners[c];
+      expect(Array.from(after.subarray(vertex * 3, vertex * 3 + 3))).toEqual(
+        Array.from(before.subarray(g * 3, g * 3 + 3)),
+      );
+    }
+  });
+
+  it('carries a NaN normal of an untouched vertex bit for bit', () => {
+    const source = cornerTetrahedron(indexed);
+    const mesh = buildRefineMesh(source, new Matrix4());
+    const moved = mesh.weldOf[0];
+    let g = 0;
+    while (mesh.weldOf[g] === moved) g++;
+    const normal = source.getAttribute('normal').array as Float32Array;
+    new Uint32Array(normal.buffer, normal.byteOffset, normal.length)[g * 3] = 0x7f800001;
+    moveVertex(mesh, moved, -0.1, -0.1, -0.1);
+    const out = writeRefinedGeometry(source, new Matrix4(), mesh);
+    const written = out.getAttribute('normal').array as Float32Array;
+    const bits = new Uint32Array(written.buffer, written.byteOffset, written.length);
+    expect(bits[g * 3]).toBe(0x7f800001);
   });
 });

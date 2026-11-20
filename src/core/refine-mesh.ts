@@ -351,30 +351,12 @@ function encode(attribute: Attribute, i: number, k: number, value: number) {
   else attribute.setComponent(i, k, value);
 }
 
-/** Component `k` of item `i` exactly as stored. */
-function stored(attribute: Attribute, i: number, k: number): number {
-  return isInterleaved(attribute)
-    ? attribute.data.array[i * attribute.data.stride + attribute.offset + k]
-    : attribute.array[i * attribute.itemSize + k];
-}
-
-/**
- * Output for a position or normal attribute. A plain Float32 or Float64 attribute keeps its array
- * type and copies stored bits; any other is written as Float32 holding the decoded values.
- */
-function vertexOutput(attribute: Attribute, count: number) {
-  const plain =
-    !isInterleaved(attribute) &&
-    !('isFloat16BufferAttribute' in attribute) &&
-    (attribute.array instanceof Float32Array || attribute.array instanceof Float64Array);
+/** The stored components of item `i`, as a view into the attribute's array. */
+function storedItem(attribute: Attribute, i: number): TypedArray {
   const size = attribute.itemSize;
-  const Array = plain ? (attribute.array.constructor as ArrayType) : Float32Array;
-  const target = new BufferAttribute(new Array(count * size), size, plain && attribute.normalized);
-  const read = plain ? stored : decoded;
-  const copy = (from: number, to: number) => {
-    for (let k = 0; k < size; k++) target.array[to * size + k] = read(attribute, from, k);
-  };
-  return { target, copy };
+  if (!isInterleaved(attribute)) return attribute.array.subarray(i * size, i * size + size);
+  const start = i * attribute.data.stride + attribute.offset;
+  return attribute.data.array.subarray(start, start + size);
 }
 
 /** An empty attribute of `count` items with the class, array type, item size and normalization. */
@@ -394,6 +376,36 @@ function blankLike(attribute: Attribute, count: number): Attribute {
     normalized: boolean,
   ) => BufferAttribute;
   return new Class(array, size, attribute.normalized);
+}
+
+const isFloat = (array: TypedArray) =>
+  array instanceof Float32Array || array instanceof Float64Array;
+
+/**
+ * Output for a position or normal attribute. Without `promote` it keeps the source's storage. With
+ * it, a plain float attribute keeps its array type and any other becomes a plain float attribute
+ * wide enough that no two distinct source values round together.
+ */
+function vertexOutput(attribute: Attribute, count: number, promote: boolean) {
+  const size = attribute.itemSize;
+  let target: Attribute;
+  if (!promote) target = blankLike(attribute, count);
+  else {
+    const array = attribute.array;
+    const Array = isFloat(array)
+      ? (array.constructor as ArrayType)
+      : array instanceof Int32Array || array instanceof Uint32Array
+        ? Float64Array
+        : Float32Array;
+    const normalized = Array === array.constructor && attribute.normalized;
+    target = new BufferAttribute(new Array(count * size), size, normalized);
+  }
+  const bitwise = target.array.constructor === attribute.array.constructor;
+  const copy = (from: number, to: number) => {
+    if (bitwise) target.array.set(storedItem(attribute, from), to * size);
+    else for (let k = 0; k < size; k++) target.array[to * size + k] = decoded(attribute, from, k);
+  };
+  return { target, copy };
 }
 
 /** True when nothing was moved, created or rewired, so the source can be returned as it is. */
@@ -522,7 +534,10 @@ export function writeRefinedGeometry(
   }
 
   const count = from.length;
-  const position = vertexOutput(sourcePosition, count);
+  // Promoted only when a moved or created vertex must be written; otherwise storage stays as is.
+  let promote = false;
+  for (let v = 0; v < weldedCount && !promote; v++) promote = touched[v] === 1;
+  const position = vertexOutput(sourcePosition, count, promote);
   const outPosition = position.target;
   for (let i = 0; i < count; i++) {
     const g = from[i];
@@ -561,7 +576,7 @@ export function writeRefinedGeometry(
       }
   }
 
-  const normal = vertexOutput(sourceNormal, count);
+  const normal = vertexOutput(sourceNormal, count, promote);
   for (let i = 0; i < count; i++) {
     const g = from[i];
     const c = normalFrom[i];
@@ -583,8 +598,7 @@ export function writeRefinedGeometry(
     const color = blankLike(sourceColor, count);
     for (let i = 0; i < count; i++) {
       const g = from[i];
-      if (g < sourceVertexCount)
-        for (let k = 0; k < size; k++) color.array[i * size + k] = stored(sourceColor, g, k);
+      if (g < sourceVertexCount) color.array.set(storedItem(sourceColor, g), i * size);
       else for (let k = 0; k < size; k++) encode(color, i, k, mesh.color[g * size + k]);
     }
     result.setAttribute('color', color);
