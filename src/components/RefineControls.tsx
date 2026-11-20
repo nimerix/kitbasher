@@ -585,8 +585,9 @@ function EdgeControls({ view, targets, owned }: ModeProps) {
   // A live Strength edit puts back each target's own value on Escape.
   const beginStrength = () => {
     if (!targets.length) {
+      // Straight back into the default: the setter would write to whatever is selected by then.
       const saved = view.edge.strength;
-      return () => editor().setRefineEdge({ strength: saved });
+      return () => editor().restoreRefineDefaults({ edge: { strength: saved } });
     }
     // Each target as it was, edited mark included, so a cancelled edit leaves no trace.
     const ids = new Set(targets.map((f) => f.id));

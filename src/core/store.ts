@@ -629,6 +629,11 @@ interface EditorState {
   restoreRefineFeatures: (
     saved: readonly { id: string; feature: RefineProposal; edited?: boolean }[],
   ) => void;
+  /** Puts back the session's Edge and Region defaults as saved; never touches a feature. */
+  restoreRefineDefaults: (saved: {
+    edge?: Partial<RefineSession['edge']>;
+    region?: Partial<RefineSession['region']>;
+  }) => void;
   setRefineRegion: (
     options: Partial<RefineSession['region']>,
     each?: Record<string, Partial<RefineSession['region']>>,
@@ -3396,6 +3401,18 @@ export const useEditor = create<EditorState>((set, get) => ({
     set({ refine: { ...refine, edge, features } });
     scheduleRefineDraft();
   },
+  restoreRefineDefaults: ({ edge, region }) => {
+    const { refine } = get();
+    if (!refine) return;
+    refineDrag = null;
+    set({
+      refine: {
+        ...refine,
+        edge: { ...refine.edge, ...edge },
+        region: { ...refine.region, ...region },
+      },
+    });
+  },
   restoreRefineFeatures: (saved) => {
     const { refine } = get();
     if (!refine) return;
@@ -3811,20 +3828,25 @@ export const useEditor = create<EditorState>((set, get) => ({
     const found: RefineFeature[] = proposals
       .filter((feature) => !repeatsKept(feature, kept, model.mesh))
       .map((feature) => ({ id: uid(), state: 'pending', origin: 'detected', feature }));
-    // A selected proposal the run replaces passes its place in the selection to its counterpart.
+    // A selected proposal the run replaces passes its place in the selection to its counterpart:
+    // an identical proposal first, then one that covers it and is covered by it.
     const ids = new Set(kept.map((f) => f.id));
     const byId = new Map(current!.features.map((f) => [f.id, f]));
     const taken = new Set<string>();
-    const selected = current!.selected.flatMap((id) => {
-      if (ids.has(id)) return [id];
-      const old = byId.get(id);
-      const next =
-        old &&
-        found.find((f) => !taken.has(f.id) && sameDetection(old.feature, f.feature, model.mesh));
-      if (!next) return [];
-      taken.add(next.id);
-      return [next.id];
-    });
+    const heir = new Map<string, string>();
+    const replaced = current!.selected.filter((id) => !ids.has(id) && byId.has(id));
+    for (const match of [identical, sameDetection])
+      for (const id of replaced) {
+        if (heir.has(id)) continue;
+        const old = byId.get(id)!.feature;
+        const next = found.find((f) => !taken.has(f.id) && match(old, f.feature, model.mesh));
+        if (!next) continue;
+        taken.add(next.id);
+        heir.set(id, next.id);
+      }
+    const selected = current!.selected.flatMap((id) =>
+      ids.has(id) ? [id] : heir.has(id) ? [heir.get(id)!] : [],
+    );
     set({ refine: { ...current!, detect, features: [...kept, ...found], selected } });
     if (
       selected.some((id, i) => id !== current!.selected[i]) ||
@@ -6004,20 +6026,22 @@ function repeatsKept(proposal: RefineProposal, kept: RefineFeature[], mesh: Refi
           repeatedRegionShare,
     );
   const samples = drawnSamples(proposal.input);
-  // A solve of the new proposal is never made here; one is only compared when already at hand.
-  const solved = refineSolves.get(proposal.input.segments)?.solve as EdgeSolve | null | undefined;
   return kept.some((f) => {
     const drawn = drawnCurve(f);
     if (drawn && mostlyNear(samples, drawn)) return true;
     // An accepted edge is on the surface now, so a guide drawn there lies on its solved curve.
-    if (f.state === 'accepted' && f.curve && mostlyNear(samples, f.curve)) return true;
-    return !!(f.curve && solved?.curve && mostlyNear(curveSamples(solved.curve), f.curve));
+    return f.state === 'accepted' && !!f.curve && mostlyNear(samples, f.curve);
   });
 }
 
+/** Whether a new detection is the very proposal it replaces. */
+const identical = (old: RefineProposal, next: RefineProposal) =>
+  JSON.stringify(old) === JSON.stringify(next);
+
 /**
- * Whether a new detection repeats one it replaces: an edge whose guide runs along the other's
- * guide, or a region more than half inside the other by area, each way.
+ * Whether a new detection repeats one it replaces, each covering the other: edges whose guides
+ * run along each other, or regions each more than half inside the other by area. A fragment of
+ * the old one does not stand in for it.
  */
 function sameDetection(old: RefineProposal, next: RefineProposal, mesh: RefineMesh) {
   if (old.type === 'region' || next.type === 'region')
@@ -6028,8 +6052,9 @@ function sameDetection(old: RefineProposal, next: RefineProposal, mesh: RefineMe
       insideShare(old.input.triangles, next.input.triangles, mesh) > repeatedRegionShare
     );
   if (!solvable(old.input) || !solvable(next.input)) return false;
-  const drawn = { points: Float64Array.from(drawnSamples(old.input).flat()), closed: false };
-  return mostlyNear(drawnSamples(next.input), drawn);
+  const [a, b] = [drawnSamples(old.input), drawnSamples(next.input)];
+  const line = (samples: Vec3[]) => ({ points: Float64Array.from(samples.flat()), closed: false });
+  return mostlyNear(b, line(a)) && mostlyNear(a, line(b));
 }
 
 /** Whether at least repeatedEdgeShare of `samples` lie within repeatedEdge of `curve`. */
@@ -6038,13 +6063,6 @@ function mostlyNear(samples: Vec3[], curve: Pick<EdgeCurve, 'points' | 'closed'>
   for (const p of samples) if (distanceToCurve(curve, p) <= repeatedEdge) near++;
   return near >= samples.length * repeatedEdgeShare;
 }
-
-/** The points of a curve, as samples. */
-const curveSamples = ({ points }: Pick<EdgeCurve, 'points'>) =>
-  Array.from(
-    { length: points.length / 3 },
-    (_, i) => [...points.subarray(i * 3, i * 3 + 3)] as Vec3,
-  );
 
 /** The share of the area of `triangles` that lies in `other`. */
 function insideShare(triangles: Uint32Array, other: Uint32Array, mesh: RefineMesh) {

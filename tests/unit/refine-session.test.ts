@@ -26,6 +26,7 @@ import {
   writeRefinedGeometry,
 } from '../../src/core/refine-mesh';
 import { fitCurve, type EdgeCurve } from '../../src/core/refine-curve';
+import type { GuidePoint } from '../../src/core/refine-band';
 import type { RefineProposal } from '../../src/core/refine-detect';
 import type { RegionInput } from '../../src/core/refine-region';
 import * as cutCode from '../../src/core/refine-cut';
@@ -2108,6 +2109,92 @@ describe('refine session integrity', { timeout: 20_000 }, () => {
     editor().transform('box', { position: [1, 0, 0] });
     expect(editor().refine).toBeNull();
     expect(toast()).toBe('The part changed, so the refinement was cancelled.');
+  });
+
+  it.each(['short first', 'whole first'] as const)(
+    'passes a selected edge on to its exact replacement, not a fragment of it (%s)',
+    async (order) => {
+      setup([boxPart()], ['box']);
+      await ready();
+      const [from, to] = [crest(-1.2), crest(1.2)];
+      const at = (t: number): GuidePoint => ({
+        triangle: from.triangle,
+        position: [0, 1, 2].map(
+          (k) => from.position[k] + t * (to.position[k] - from.position[k]),
+        ) as [number, number, number],
+      });
+      const line = (a: GuidePoint, b: GuidePoint): RefineProposal => ({
+        type: 'edge',
+        input: {
+          segments: [{ kind: 'line', points: [a, b] }],
+          joints: [],
+          closed: false,
+          width: null,
+          strength: 1,
+        },
+      });
+      const whole = line(from, to);
+      const short = line(at(0.4), at(0.6));
+      const publish = async (proposals: RefineProposal[]) => {
+        const held = holdDetect();
+        const detection = editor().detectRefine();
+        held.finish(proposals.map((p) => structuredClone(p)));
+        await detection;
+      };
+      await publish([whole]);
+      editor().selectRefine([session().features[0].id]);
+      await publish(order === 'short first' ? [short, whole] : [whole, short]);
+      const chosen = session().features.find((f) => f.id === session().selected[0])!;
+      expect(session().selected).toHaveLength(1);
+      expect(chosen.feature).toEqual(whole);
+      // Without an exact match, a fragment alone does not stand in for the whole.
+      await publish([short]);
+      expect(session().selected).toEqual([]);
+    },
+  );
+
+  it('passes a selected edge on to one that covers it and is covered by it', async () => {
+    setup([boxPart()], ['box']);
+    await ready();
+    const line = (a: GuidePoint, b: GuidePoint): RefineProposal => ({
+      type: 'edge',
+      input: {
+        segments: [{ kind: 'line', points: [a, b] }],
+        joints: [],
+        closed: false,
+        width: null,
+        strength: 1,
+      },
+    });
+    const publish = async (proposals: RefineProposal[]) => {
+      const held = holdDetect();
+      const detection = editor().detectRefine();
+      held.finish(proposals);
+      await detection;
+    };
+    await publish([line(crest(-1.2), crest(1.2))]);
+    editor().selectRefine([session().features[0].id]);
+    // The same edge drawn a little differently: each covers the other.
+    const again = line(crest(-1.18), crest(1.21));
+    await publish([again]);
+    expect(session().features.find((f) => f.id === session().selected[0])!.feature).toEqual(again);
+  });
+
+  it('puts the Edge default back as captured, whatever is selected by then', async () => {
+    setup([boxPart()], ['box']);
+    await ready();
+    const id = crestGuide();
+    editor().setRefineEdge({ strength: 0.8 });
+    editor().selectRefine([]);
+    const feature = session().features.find((f) => f.id === id)!;
+    const saved = session().edge.strength;
+    // A live drag of the default, then the panel retargets to the guide before the restore.
+    editor().setRefineEdge({ strength: 0.2 });
+    expect(session().edge.strength).toBe(0.2);
+    editor().selectRefine([id]);
+    editor().restoreRefineDefaults({ edge: { strength: saved } });
+    expect(session().edge.strength).toBe(saved);
+    expect(session().features.find((f) => f.id === id)).toBe(feature);
   });
 
   it('keeps a closed path closed when its shared first and last point is removed', async () => {
