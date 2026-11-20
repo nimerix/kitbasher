@@ -11,6 +11,7 @@ import {
 } from 'three';
 import { Matrix, solve } from 'ml-matrix';
 import { hasClosedEdges, weldedPositionIndex } from '../../src/core/mesh-topology';
+import { BandZone, type EdgeBand, type GuidePoint } from '../../src/core/refine-band';
 import { type Shape, estimateNoise } from '../../src/core/refine-fit';
 import {
   type RefineMesh,
@@ -1228,4 +1229,83 @@ export function shapeParameters(shape: Shape) {
     case 'cone':
       return [...shape.apex, ...shape.axis, shape.angle];
   }
+}
+
+/** Closest point to `p` on triangle a, b, c (Ericson, Real-Time Collision Detection 5.1.5). */
+function closestOnTriangle(p: Vec3, a: Vec3, b: Vec3, c: Vec3): Vec3 {
+  const sub = (u: Vec3, v: Vec3): Vec3 => [u[0] - v[0], u[1] - v[1], u[2] - v[2]];
+  const dot = (u: Vec3, v: Vec3) => u[0] * v[0] + u[1] * v[1] + u[2] * v[2];
+  const along = (from: Vec3, d: Vec3, t: number): Vec3 => [
+    from[0] + d[0] * t,
+    from[1] + d[1] * t,
+    from[2] + d[2] * t,
+  ];
+  const ab = sub(b, a),
+    ac = sub(c, a),
+    ap = sub(p, a);
+  const d1 = dot(ab, ap),
+    d2 = dot(ac, ap);
+  if (d1 <= 0 && d2 <= 0) return a;
+  const bp = sub(p, b);
+  const d3 = dot(ab, bp),
+    d4 = dot(ac, bp);
+  if (d3 >= 0 && d4 <= d3) return b;
+  const vc = d1 * d4 - d3 * d2;
+  if (vc <= 0 && d1 >= 0 && d3 <= 0) return along(a, ab, d1 / (d1 - d3));
+  const cp = sub(p, c);
+  const d5 = dot(ab, cp),
+    d6 = dot(ac, cp);
+  if (d6 >= 0 && d5 <= d6) return c;
+  const vb = d5 * d2 - d1 * d6;
+  if (vb <= 0 && d2 >= 0 && d6 <= 0) return along(a, ac, d2 / (d2 - d6));
+  const va = d3 * d6 - d5 * d4;
+  if (va <= 0 && d4 - d3 >= 0 && d5 - d6 >= 0)
+    return along(b, sub(c, b), (d4 - d3) / (d4 - d3 + (d5 - d6)));
+  const denominator = 1 / (va + vb + vc);
+  const v = vb * denominator,
+    w = vc * denominator;
+  return [0, 1, 2].map((k) => a[k] + ab[k] * v + ac[k] * w) as Vec3;
+}
+
+/** The surface point nearest `p`, by brute force over every triangle, as a clicked guide point. */
+export function pointOn(mesh: RefineMesh, p: Vec3): GuidePoint {
+  const at = (t: number, k: 0 | 1 | 2): Vec3 => {
+    const w = weldedCorner(mesh, t, k) * 3;
+    return [mesh.position[w], mesh.position[w + 1], mesh.position[w + 2]];
+  };
+  let best: GuidePoint = { triangle: 0, position: p },
+    nearest = Infinity;
+  for (let t = 0; t < mesh.triangleCount; t++) {
+    const q = closestOnTriangle(p, at(t, 0), at(t, 1), at(t, 2));
+    const d = Math.hypot(q[0] - p[0], q[1] - p[1], q[2] - p[2]);
+    if (d < nearest) {
+      nearest = d;
+      best = { triangle: t, position: q };
+    }
+  }
+  return best;
+}
+
+/** Number of band vertices in `zone`. */
+export function zoneCount(band: EdgeBand, zone: BandZone) {
+  return band.zone.reduce((count, z) => count + +(z === zone), 0);
+}
+
+/**
+ * Farthest a flank vertex lies from its face: each flank is measured against whichever of the
+ * planes y = `faceY` and z = `faceZ` it lies closer to overall.
+ */
+export function maxFlankError(mesh: RefineMesh, band: EdgeBand, faceY = 1.5, faceZ = 1) {
+  let worst = 0;
+  for (const zone of [BandZone.Left, BandZone.Right]) {
+    let y = 0,
+      z = 0;
+    band.vertices.forEach((v, i) => {
+      if (band.zone[i] !== zone) return;
+      y = Math.max(y, Math.abs(mesh.position[v * 3 + 1] - faceY));
+      z = Math.max(z, Math.abs(mesh.position[v * 3 + 2] - faceZ));
+    });
+    worst = Math.max(worst, Math.min(y, z));
+  }
+  return worst;
 }
