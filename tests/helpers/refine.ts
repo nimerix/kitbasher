@@ -1,6 +1,7 @@
 import {
   BufferAttribute,
   BufferGeometry,
+  ConeGeometry,
   DataUtils,
   Float16BufferAttribute,
   type InterleavedBufferAttribute,
@@ -8,6 +9,7 @@ import {
   Vector3,
 } from 'three';
 import { hasClosedEdges, weldedPositionIndex } from '../../src/core/mesh-topology';
+import { estimateNoise } from '../../src/core/refine-fit';
 import {
   type RefineMesh,
   addGeometryVertex,
@@ -17,6 +19,7 @@ import {
   buildTopology,
   setTriangle,
   triangleNormal,
+  vertexNormal,
   weldedCorner,
 } from '../../src/core/refine-mesh';
 import type { Vec3 } from '../../src/core/types';
@@ -99,7 +102,8 @@ export function radii(geometry: BufferGeometry) {
 
 /** The working model the Refine modules take: mesh, topology and noise. */
 export function modelFrom(mesh: RefineMesh) {
-  return { mesh, topology: buildTopology(mesh), noise: 0.004 };
+  const topology = buildTopology(mesh);
+  return { mesh, topology, noise: estimateNoise(mesh, topology) };
 }
 
 export function modelOf(geometry: BufferGeometry, matrix = new Matrix4()) {
@@ -583,4 +587,106 @@ export function movedOutside(before: RefineMesh, after: RefineMesh, chain: Uint3
     )
       moved++;
   return moved;
+}
+
+/** Points and unit normals as flat arrays, in the order a fit takes them. */
+export type SurfaceSample = [points: Float32Array, normals: Float32Array];
+
+/** Welded vertices of the geometry that `keep` accepts, with their area-weighted normals. */
+export function surfaceWhere(
+  geometry: BufferGeometry,
+  keep: (x: number, y: number, z: number) => boolean,
+) {
+  const { mesh, topology } = modelOf(geometry);
+  const points: number[] = [],
+    normals: number[] = [];
+  const normal = new Float32Array(3);
+  for (let v = 0; v < mesh.weldedCount; v++) {
+    const [x, y, z] = mesh.position.subarray(v * 3, v * 3 + 3);
+    if (!keep(x, y, z)) continue;
+    vertexNormal(mesh, topology, v, normal);
+    points.push(x, y, z);
+    normals.push(...normal);
+  }
+  return [new Float32Array(points), new Float32Array(normals)] as SurfaceSample;
+}
+
+/** Vertices of the upper face, above mid-height and at least `inset` inside the box in x and z. */
+export function topFace(geometry: BufferGeometry, inset = 0.35) {
+  geometry.computeBoundingBox();
+  const { min, max } = geometry.boundingBox!;
+  const middle = (min.y + max.y) / 2;
+  return surfaceWhere(
+    geometry,
+    (x, y, z) =>
+      y > middle &&
+      x > min.x + inset &&
+      x < max.x - inset &&
+      z > min.z + inset &&
+      z < max.z - inset,
+  );
+}
+
+/** Vertices with |y| below `half`: the straight wall of a capped shape about Y. */
+export function wall(geometry: BufferGeometry, half = 0.6) {
+  return surfaceWhere(geometry, (_, y) => Math.abs(y) < half);
+}
+
+/** Vertices within `radius` of the vertex nearest the middle of the topmost 0.1 mm band. */
+export function patch(geometry: BufferGeometry, radius = 2.5) {
+  geometry.computeBoundingBox();
+  const top = geometry.boundingBox!.max.y - 0.1;
+  const [band] = surfaceWhere(geometry, (_, y) => y > top);
+  const count = band.length / 3;
+  const middle = [0, 1, 2].map((axis) => {
+    let sum = 0;
+    for (let i = 0; i < count; i++) sum += band[i * 3 + axis];
+    return sum / count;
+  });
+  let seed = 0;
+  const distance = (i: number, to: number[]) =>
+    Math.hypot(band[i * 3] - to[0], band[i * 3 + 1] - to[1], band[i * 3 + 2] - to[2]);
+  for (let i = 1; i < count; i++) if (distance(i, middle) < distance(seed, middle)) seed = i;
+  const centre = [band[seed * 3], band[seed * 3 + 1], band[seed * 3 + 2]];
+  return surfaceWhere(
+    geometry,
+    (x, y, z) => Math.hypot(x - centre[0], y - centre[1], z - centre[2]) < radius,
+  );
+}
+
+/**
+ * The open side of a ConeGeometry (apex at y = height / 2, opening down -Y), each vertex moved
+ * along its normal by a seeded uniform offset of up to `jitter`.
+ */
+export function coneSide(radius: number, height: number, jitter: number, seed = 1) {
+  const geometry = new ConeGeometry(radius, height, 64, 32, true);
+  const position = geometry.getAttribute('position'),
+    normal = geometry.getAttribute('normal');
+  const points = new Float32Array(position.count * 3),
+    normals = new Float32Array(position.count * 3);
+  let state = seed;
+  const next = () => {
+    state = (Math.imul(state, 1664525) + 1013904223) >>> 0;
+    return state / 4294967296;
+  };
+  for (let i = 0; i < position.count; i++) {
+    const offset = jitter * (2 * next() - 1);
+    for (let axis = 0; axis < 3; axis++) {
+      const n = normal.array[i * 3 + axis];
+      normals[i * 3 + axis] = n;
+      points[i * 3 + axis] = position.array[i * 3 + axis] + n * offset;
+    }
+  }
+  return [points, normals] as SurfaceSample;
+}
+
+/** Angle in degrees between two directions. */
+export function angleDeg(a: ArrayLike<number>, b: ArrayLike<number>) {
+  const dot = a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+  const cross = Math.hypot(
+    a[1] * b[2] - a[2] * b[1],
+    a[2] * b[0] - a[0] * b[2],
+    a[0] * b[1] - a[1] * b[0],
+  );
+  return (Math.atan2(cross, dot) * 180) / Math.PI;
 }
