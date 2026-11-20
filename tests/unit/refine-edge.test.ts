@@ -1,6 +1,6 @@
 import { Matrix4 } from 'three';
 import { describe, expect, it } from 'vitest';
-import { type EdgeInput, applyEdge, edgeFade, solveEdge } from '../../src/core/refine-edge';
+import { type EdgeInput, applyEdge, moveWeights, solveEdge } from '../../src/core/refine-edge';
 import { type RefineMesh, cloneRefineMesh } from '../../src/core/refine-mesh';
 import type { GuidePoint } from '../../src/core/refine-band';
 import type { GuideKind } from '../../src/core/refine-curve';
@@ -9,6 +9,7 @@ import {
   dihedralAcross,
   maxMove,
   meshMinTriangleArea,
+  modelFrom,
   modelOf,
   movedOutside,
   pointOn,
@@ -17,6 +18,7 @@ import {
 } from '../helpers/refine';
 import {
   type SoftOptions,
+  bulgedBox,
   extrudedProfile,
   softBox,
   softCylinder,
@@ -50,11 +52,15 @@ const refineBoxEdge = (options: SoftOptions = {}, matrix = new Matrix4()) => {
   const result = applyEdge(out, model.topology, solve, 1, true);
   return { model, solve, out, result };
 };
-/** Chain vertices clear of both fades: |x| <= 1.6 - edgeFade(0.6). */
+/** Length at each end of the guide, mm, that the tests leave out as within the blend to the scan. */
+const fade = 0.6;
+/** Chain vertices clear of both ends' blends: |x| <= 1.6 - fade. */
 const core = (out: RefineMesh, chain: Uint32Array) =>
-  [...chain].filter((v) => Math.abs(out.position[v * 3]) <= 1.6 - edgeFade(0.6));
+  [...chain].filter((v) => Math.abs(out.position[v * 3]) <= 1.6 - fade);
 const offEdge = (out: RefineMesh, v: number, y: number, z: number) =>
   Math.hypot(out.position[v * 3 + 1] - y, out.position[v * 3 + 2] - z);
+const moveOf = (before: RefineMesh, after: RefineMesh, v: number) =>
+  Math.hypot(...[0, 1, 2].map((a) => after.position[v * 3 + a] - before.position[v * 3 + a]));
 
 describe('solveEdge and applyEdge on one segment', () => {
   it('puts an exterior edge on the true edge, straight, at 90 degrees', () => {
@@ -95,8 +101,8 @@ describe('solveEdge and applyEdge on one segment', () => {
     expect(solve.sign[0]).toBe(1);
     const out = cloneRefineMesh(model.mesh, true);
     const { cut } = applyEdge(out, model.topology, solve, 1, true);
-    // The arc runs from angle 0 to 240 degrees; its fades cover edgeFade(0.6) mm of each end.
-    const clear = edgeFade(0.6) / 1.5;
+    // The arc runs from angle 0 to 240 degrees; its fades cover fade mm of each end.
+    const clear = fade / 1.5;
     const chain = [...cut!.chain].filter((v) => {
       const angle = Math.atan2(out.position[v * 3 + 2], out.position[v * 3]);
       const turn = angle < 0 ? angle + 2 * Math.PI : angle;
@@ -175,9 +181,7 @@ describe('solveEdge and applyEdge on one segment', () => {
     expect(solve.sign[0]).toBe(1);
     const out = cloneRefineMesh(model.mesh, true);
     const { cut } = applyEdge(out, model.topology, solve, 1, true);
-    const chain = [...cut!.chain].filter(
-      (v) => Math.abs(out.position[v * 3]) <= 2.4 - edgeFade(0.6),
-    );
+    const chain = [...cut!.chain].filter((v) => Math.abs(out.position[v * 3]) <= 2.4 - fade);
     expect(chain.length).toBeGreaterThan(20);
     for (const v of chain) expect(offEdge(out, v, 1.5, -1)).toBeLessThan(0.02);
     expect(Math.abs(dihedralAcross(out, cut!.edges, chain) - 90)).toBeLessThan(1);
@@ -190,5 +194,46 @@ describe('solveEdge and applyEdge on one segment', () => {
     expect(chain.length).toBeGreaterThan(20);
     for (const v of chain) expect(offEdge(out, v, 1.5, 1)).toBeLessThan(0.02);
     expect(closedMesh(out)).toBe(true);
+  });
+
+  it('puts the edge on its true line where one flank is a profile per slice', () => {
+    const model = modelOf(bulgedBox([2, 1.5, 1], 0.3, 0.15));
+    const bump = (x: number) => 0.15 * Math.exp(-((x / 0.5) ** 2));
+    const lift = (x: number, y: number) => (bump(x) * (y + 1.5)) / 3;
+    const points = [-1.2, -0.9, -0.6, -0.3, 0, 0.3, 0.6, 0.9, 1.2].map((x) =>
+      pointOn(model.mesh, [x, 1.5 - crest + lift(x, 1.5 - crest), 1 - crest]),
+    );
+    const solve = solveEdge(model.mesh, model.topology, inputOf('spline', points), model.noise)!;
+    expect(solve).not.toBeNull();
+    expect(solve.flanks[0].map((flank) => flank.kind)).toEqual(['profile', 'plane']);
+    const out = cloneRefineMesh(model.mesh, true);
+    const { cut } = applyEdge(out, model.topology, solve, 1, true);
+    const chain = [...cut!.chain].filter((v) => Math.abs(out.position[v * 3]) <= 1.2 - fade);
+    expect(chain.length).toBeGreaterThan(10);
+    for (const v of chain)
+      expect(offEdge(out, v, 1.5 + bump(out.position[v * 3]), 1)).toBeLessThan(0.03);
+  });
+
+  it('changes nothing it made sharp when run again over its own result', () => {
+    const { model, solve, out } = refineBoxEdge();
+    const weights = moveWeights(model.mesh, model.topology, solve);
+    const again = modelFrom(out);
+    const points = [pointOn(out, [-1.6, 1.5, 1]), pointOn(out, [1.6, 1.5, 1])];
+    const second = solveEdge(again.mesh, again.topology, inputOf('line', points), again.noise)!;
+    expect(second).not.toBeNull();
+    const twice = cloneRefineMesh(again.mesh, true);
+    applyEdge(twice, again.topology, second, 1, true);
+    let full = 0,
+      firstBlend = 0,
+      secondBlend = 0;
+    solve.bands[0].vertices.forEach((v, i) => {
+      if (weights[i] === 1) full = Math.max(full, moveOf(out, twice, v));
+      else if (weights[i] > 0) {
+        firstBlend = Math.max(firstBlend, moveOf(model.mesh, out, v));
+        secondBlend = Math.max(secondBlend, moveOf(out, twice, v));
+      }
+    });
+    expect(full).toBeLessThan(0.002);
+    expect(secondBlend).toBeLessThan(firstBlend);
   });
 });
