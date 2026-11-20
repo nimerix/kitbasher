@@ -6681,6 +6681,11 @@ optgroup {
   font-size: 11px;
   color: var(--muted);
 }
+/* Ends takes the whole row, with its title above, so a resolved "Auto (Fade)" fits each select. */
+.refine-choice:has(> .refine-ends) {
+  grid-template-columns: minmax(0, 1fr);
+  gap: 5px;
+}
 .refine-ends {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
