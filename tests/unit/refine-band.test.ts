@@ -253,6 +253,32 @@ describe('buildBand', () => {
     expect(countWhere(mesh, band, [BandZone.Soft], clean)).toBe(0);
   });
 
+  it('exports each flank surface with one edge point per slice', () => {
+    const { mesh, topology, noise } = modelOf(softBox([2, 1.5, 1], 0.3));
+    const guide = edgeGuide(mesh, -1.2, 1.2);
+    const band = buildBand(mesh, topology, 'line', guide, 0.6, noise)!;
+    const [left, right] = band.flanks;
+    expect([left.kind, right.kind]).toEqual(band.fits);
+    // Left is the face y = 1.5 and Right the face z = 1, read well away from the fillet.
+    expect(left.distance(0.3, 1.5, 0.2)).toBeLessThan(0.01);
+    expect(right.distance(0.3, 1, 1.0)).toBeLessThan(0.01);
+    expect(left.distance(0.3, 1.6, 0.2)).toBeCloseTo(0.1, 1);
+    const at = new Float64Array(3);
+    left.project(0.3, 1.6, 0.2, at);
+    expect(Math.abs(at[1] - 1.5)).toBeLessThan(0.01);
+    left.normal(0.3, 1.6, 0.2, at);
+    expect(at[1]).toBeGreaterThan(0.999);
+    right.normal(0.3, 1, 1.0, at);
+    expect(at[2]).toBeGreaterThan(0.999);
+    expect(left.local).toBeGreaterThan(noise / 2);
+    expect(left.local).toBeLessThanOrEqual(2 * noise);
+    // Slices are 4 edge lengths long, centred on the guide's middle.
+    const length = band.drawn.lengths[band.drawn.lengths.length - 1];
+    const slices = Math.max(1, Math.round(length / (4 * clickedEdge(mesh, topology, guide))));
+    expect(band.edge.length / 3).toBeGreaterThanOrEqual(slices - 1);
+    expect(band.edge.length / 3).toBeLessThanOrEqual(slices + 1);
+  });
+
   it('swaps Left and Right and nothing else when the guide is drawn the other way', () => {
     const { mesh, topology, noise } = modelOf(softBox([2, 1.5, 1], 0.3));
     const [a, b] = edgeGuide(mesh, -1.2, 1.2);
