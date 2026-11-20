@@ -28,8 +28,6 @@ interface Split {
 /** A child is collapsed below this fraction of its parent's area, or below `tinyArea`. */
 const collapsedFraction = 1e-6;
 const tinyArea = 1e-12;
-/** A planned chain vertex closer than this to any other vertex would merge with it on export. */
-const coincident = 1e-4;
 
 const cellKey = (x: number, y: number, z: number) =>
   Math.imul(x, 73856093) ^ Math.imul(y, 19349663) ^ Math.imul(z, 83492791);
@@ -236,9 +234,10 @@ export function cutAlongField(
     }
     return true;
   };
-  // Revises every planned chain vertex within `coincident` of another vertex's final position, the
-  // later of two chain vertices. Chain vertices sit in a spatial hash under the 27 cells around their
-  // own, so each other vertex needs one lookup.
+  // Revises every planned chain vertex within the mesh's clearance of another vertex's final
+  // position, where the two could merge on export: the later of two chain vertices. Chain vertices
+  // sit in a spatial hash under the 27 cells around their own, so each other vertex needs one lookup.
+  const coincident = mesh.clearance;
   const reviseCoincident = () => {
     const ids: number[] = [];
     const at: number[] = [];

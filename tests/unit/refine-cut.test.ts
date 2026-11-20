@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { BufferAttribute, Matrix4 } from 'three';
+import { BufferAttribute, type BufferGeometry, Matrix4, Vector3 } from 'three';
 import { cloneRefineMesh, writeRefinedGeometry } from '../../src/core/refine-mesh';
 import { cutAlongField, remapTriangles } from '../../src/core/refine-cut';
 import {
@@ -12,9 +12,11 @@ import {
   modelOf,
   movedOutside,
   octahedron,
+  offChainMismatches,
   straddling,
   straddlingTriangles,
   trianglesWhollyOn,
+  writtenVertexOf,
 } from '../helpers/refine';
 import { type SoftOptions, softBox } from '../helpers/soft-edges';
 
@@ -133,6 +135,9 @@ it.each(cases)(
       expect(closed(writeRefinedGeometry(geometry, new Matrix4(), cut))).toBe(true);
       expect(meshMinTriangleArea(cut)).toBeGreaterThanOrEqual(1e-12);
       expect(straddling(cut, fn, 1e-6)).toBe(result.skipped.length);
+      const onChain = new Set(result.chain);
+      for (let v = 0; v < cut.weldedCount; v++)
+        if (cut.touched[v]) expect(onChain.has(v)).toBe(true);
     }
   },
 );
@@ -183,6 +188,58 @@ it('drops a midpoint retry that lands on an unrelated vertex', () => {
   });
   expect(onDroppedEdge.length).toBe(2);
   expect([...result.skipped]).toEqual(onDroppedEdge);
+});
+
+it('keeps a midpoint retry clear of an unrelated vertex in the mesh-local scale', () => {
+  // The midpoint-retry octahedron above, scaled by 100, with the -x corner 3e-6 off the midpoint:
+  // 3e-4 apart in world space, yet one weld cell apart once written back.
+  const geometry = octahedron(false);
+  const position = geometry.getAttribute('position');
+  for (let i = 0; i < position.count; i++)
+    if (position.getX(i) === -1) position.setXYZ(i, 0.500003, 0, 0.5);
+  geometry.computeVertexNormals();
+  const matrix = new Matrix4().makeScale(100, 100, 100);
+  const { mesh, topology } = modelOf(geometry, matrix);
+  const cut = cloneRefineMesh(mesh, true);
+  const ids = Uint32Array.from({ length: cut.weldedCount }, (_, i) => i);
+  const px = ids.find((i) => cut.position[i * 3] === 100)!;
+  const field = Float32Array.from(ids, (i) => (i === px ? 1e-9 : -1));
+  cutAlongField(cut, topology, ids, field, (x, y, z, out) => out.set([x, y, z]), 0);
+  expect(closedMesh(cut)).toBe(true);
+  expect(closed(writeRefinedGeometry(geometry, matrix, cut))).toBe(true);
+});
+
+it('leaves a translated octahedron closed when an exact-zero placement is refused', () => {
+  // +z is exactly on the zero set and is placed onto +x, which is refused; it stays where it is.
+  const geometry = octahedron(false);
+  const matrix = new Matrix4().makeTranslation(new Vector3(1234.567, -987.654, 4321.0987));
+  const { mesh, topology } = modelOf(geometry, matrix);
+  const cut = cloneRefineMesh(mesh, true);
+  const ids = Uint32Array.from({ length: cut.weldedCount }, (_, i) => i);
+  const world = (x: number, y: number, z: number) => new Vector3(x, y, z).applyMatrix4(matrix);
+  const near = (point: Vector3, x: number, y: number, z: number) =>
+    point.distanceTo(new Vector3(x, y, z)) < 1e-3;
+  const at = (point: Vector3) =>
+    ids.find((i) =>
+      near(point, cut.position[i * 3], cut.position[i * 3 + 1], cut.position[i * 3 + 2]),
+    )!;
+  const plusX = world(1, 0, 0),
+    plusZ = world(0, 0, 1);
+  const [px, py, pz] = [at(plusX), at(world(0, 1, 0)), at(plusZ)];
+  const field = Float32Array.from(ids, (i) => (i === pz ? 0 : i === px || i === py ? 1 : -1));
+  const result = cutAlongField(cut, topology, ids, field, (x, y, z, out) =>
+    out.set(near(plusZ, x, y, z) ? plusX.toArray() : [x, y, z]),
+  );
+  expect(result.chain).toContain(pz);
+  const written = writeRefinedGeometry(geometry, matrix, cut);
+  expect(closed(written)).toBe(true);
+  expect(offChainMismatches(geometry, written, cut, result.chain)).toBe(0);
+  // The refused vertex stayed put, so it keeps its source bits rather than a round trip's.
+  const source = cut.weldOf.indexOf(pz);
+  const out = writtenVertexOf(written, cut, pz);
+  const stored = (g: BufferGeometry, i: number) =>
+    Array.from(g.getAttribute('position').array.slice(i * 3, i * 3 + 3));
+  expect(stored(written, out)).toEqual(stored(geometry, source));
 });
 
 const ramp = (x: number) => (x + 2) / 4;

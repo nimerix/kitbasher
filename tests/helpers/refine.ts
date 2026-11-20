@@ -381,6 +381,31 @@ function writtenFromSource(written: BufferGeometry, mesh: RefineMesh) {
   return pairs;
 }
 
+/** Written vertices of source vertices off `chain` whose position or normal bits differ from the source. */
+export function offChainMismatches(
+  source: BufferGeometry,
+  written: BufferGeometry,
+  mesh: RefineMesh,
+  chain: Uint32Array,
+) {
+  const on = new Set(chain);
+  const [position, normal] = ['position', 'normal'].map((name) => [
+    bits(source.getAttribute(name).array),
+    bits(written.getAttribute(name).array),
+  ]);
+  let mismatches = 0;
+  for (const [i, g] of writtenFromSource(written, mesh)) {
+    if (on.has(mesh.weldOf[g])) continue;
+    if (
+      [position, normal].some(([before, after]) =>
+        [0, 1, 2].some((axis) => before[g * 3 + axis] !== after[i * 3 + axis]),
+      )
+    )
+      mismatches++;
+  }
+  return mismatches;
+}
+
 /**
  * Components of untouched source vertices whose written value decodes differently from the source.
  * A Float32 output is held to the Float32 rounding of the decoded source value.
