@@ -707,3 +707,153 @@ export function angleDeg(a: ArrayLike<number>, b: ArrayLike<number>) {
   );
   return (Math.atan2(cross, dot) * 180) / Math.PI;
 }
+
+/** Farthest any of the flat xyz points lies by the distance function `fn`. */
+export function maxDistance(points: Float32Array, fn: (x: number, y: number, z: number) => number) {
+  let farthest = 0;
+  for (let i = 0; i < points.length; i += 3)
+    farthest = Math.max(farthest, fn(points[i], points[i + 1], points[i + 2]));
+  return farthest;
+}
+
+/** Root mean square of the distance function `fn` over the points of a curve. */
+export function rms(
+  curve: { points: Float32Array },
+  fn: (x: number, y: number, z: number) => number,
+) {
+  let sum = 0;
+  for (let i = 0; i < curve.points.length; i += 3)
+    sum += fn(curve.points[i], curve.points[i + 1], curve.points[i + 2]) ** 2;
+  return Math.sqrt(sum / (curve.points.length / 3));
+}
+
+/** A seeded uniform generator in [-1, 1), so noisy samples are the same on every run. */
+function signedRandom(seed: number) {
+  let state = seed;
+  return () => {
+    state = (Math.imul(state, 1664525) + 1013904223) >>> 0;
+    return (state / 4294967296) * 2 - 1;
+  };
+}
+
+/** Samples 0.05 apart from `from` to `to`, each moved off the line by up to `noise` per axis. */
+export function noisyLine(from: Vec3, to: Vec3, noise: number, seed = 1) {
+  const next = signedRandom(seed);
+  const d = [0, 1, 2].map((axis) => to[axis] - from[axis]);
+  const length = Math.hypot(...d);
+  const u = d.map((value) => value / length);
+  // Two unit directions across the line.
+  const helper = Math.abs(u[0]) < 0.9 ? [1, 0, 0] : [0, 1, 0];
+  const a = normalized(cross(u, helper)),
+    b = cross(u, a);
+  const count = Math.ceil(length / 0.05);
+  const points: number[] = [];
+  for (let i = 0; i <= count; i++) {
+    const [p, q] = [next() * noise, next() * noise];
+    for (let axis = 0; axis < 3; axis++)
+      points.push(from[axis] + (d[axis] * i) / count + a[axis] * p + b[axis] * q);
+  }
+  return new Float32Array(points);
+}
+
+function cross(a: number[], b: number[]) {
+  return [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+}
+
+function normalized(v: number[]) {
+  const length = Math.hypot(...v);
+  return v.map((value) => value / length);
+}
+
+/**
+ * Samples 0.05 apart along the arc of `radius` about the origin in the XZ plane, from angle `from`
+ * to `to` (x = r cos, z = r sin), moved radially and in y by up to `noise`. A full turn does not
+ * repeat its first sample.
+ */
+export function noisyArc(radius: number, from: number, to: number, noise: number, seed = 2) {
+  const next = signedRandom(seed);
+  const full = Math.abs(to - from) >= Math.PI * 2 - 1e-9;
+  const count = Math.ceil((radius * Math.abs(to - from)) / 0.05);
+  const points: number[] = [];
+  for (let i = 0; i < (full ? count : count + 1); i++) {
+    const angle = from + ((to - from) * i) / count;
+    const r = radius + next() * noise;
+    points.push(r * Math.cos(angle), next() * noise, r * Math.sin(angle));
+  }
+  return new Float32Array(points);
+}
+
+/** Samples 0.05 apart in x along y = 0.5 sin(x), x from 0 to 12, moved by up to `noise` in y and z. */
+export function noisyWave(noise: number, seed = 3) {
+  const next = signedRandom(seed);
+  const points: number[] = [];
+  for (let i = 0; i <= 240; i++) {
+    const x = i * 0.05;
+    points.push(x, 0.5 * Math.sin(x) + next() * noise, next() * noise);
+  }
+  return new Float32Array(points);
+}
+
+/** Distance from a point to the curve y = 0.5 sin(x), z = 0. */
+export function waveDistance(x: number, y: number, z: number) {
+  let nearest = Infinity;
+  for (let t = x - 1; t <= x + 1; t += 0.0005)
+    nearest = Math.min(nearest, Math.hypot(x - t, y - 0.5 * Math.sin(t), z));
+  return nearest;
+}
+
+/**
+ * The four sides, in order around the loop, of a `width` by `depth` rectangle centred on the
+ * origin in the XZ plane, each as noisy samples that stop 0.3 short of the corners.
+ */
+export function rectangleSides(width: number, depth: number, noise: number) {
+  const [w, d] = [width / 2, depth / 2];
+  const corners: Vec3[] = [
+    [-w, 0, -d],
+    [w, 0, -d],
+    [w, 0, d],
+    [-w, 0, d],
+  ];
+  return corners.map((from, i) => {
+    const to = corners[(i + 1) % 4];
+    const length = Math.hypot(to[0] - from[0], to[2] - from[2]);
+    const inset = (a: Vec3, b: Vec3) =>
+      [0, 1, 2].map((axis) => a[axis] + ((b[axis] - a[axis]) * 0.3) / length) as Vec3;
+    return noisyLine(inset(from, to), inset(to, from), noise, i + 11);
+  });
+}
+
+/** Points of a curve marked as sharp corners. */
+export function cornersOf(curve: { points: Float32Array; corner: Uint8Array }) {
+  const result: Vec3[] = [];
+  curve.corner.forEach((sharp, i) => {
+    if (sharp) result.push([curve.points[i * 3], curve.points[i * 3 + 1], curve.points[i * 3 + 2]]);
+  });
+  return result;
+}
+
+/** Distance from `point` to the nearest corner of the rectangle of `rectangleSides`. */
+export function nearestRectangleCorner(point: Vec3, width: number, depth: number) {
+  return Math.min(
+    ...[-1, 1].flatMap((sx) =>
+      [-1, 1].map((sz) =>
+        Math.hypot(point[0] - (sx * width) / 2, point[1], point[2] - (sz * depth) / 2),
+      ),
+    ),
+  );
+}
+
+/** Longest distance between consecutive points of a curve, including the closing span. */
+export function largestGap(curve: { points: Float32Array; closed: boolean }) {
+  const p = curve.points,
+    count = p.length / 3;
+  let largest = 0;
+  for (let i = 0; i < (curve.closed ? count : count - 1); i++) {
+    const j = (i + 1) % count;
+    largest = Math.max(
+      largest,
+      Math.hypot(p[j * 3] - p[i * 3], p[j * 3 + 1] - p[i * 3 + 1], p[j * 3 + 2] - p[i * 3 + 2]),
+    );
+  }
+  return largest;
+}
