@@ -47,7 +47,7 @@ export interface RegionSolve {
 }
 
 /** Detail stands this many times the region's roughness off its surface. */
-const detailScale = 6;
+const detailScale = 4;
 /** Rings of base vertices around an island whose moves carry it. */
 const ringDepth = 4;
 /** The scale of a normal distribution from its median absolute value. */
