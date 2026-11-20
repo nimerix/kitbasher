@@ -5,8 +5,9 @@ import {
   type GuidePoint,
   buildBand,
   estimateWidth,
+  minBandAngle,
 } from '../../src/core/refine-band';
-import type { RefineMesh } from '../../src/core/refine-mesh';
+import { type RefineMesh, weldedCorner } from '../../src/core/refine-mesh';
 import type { Vec3 } from '../../src/core/types';
 import { countWhere, maxZoneDistance, modelOf, pointOn, zoneCount } from '../helpers/refine';
 import {
@@ -25,10 +26,40 @@ const edgeGuide = (mesh: RefineMesh, x0: number, x1: number) => {
   return [pointOn(mesh, [x0, 1.5 - crest, 1 - crest]), pointOn(mesh, [x1, 1.5 - crest, 1 - crest])];
 };
 /**
- * Flanks reach the fillet where it lies within 3 * noise of its face, 0.3 (1 - cos a) = 3 * noise,
- * so the soft half-width is 0.3 sin(45 deg - a).
+ * Flanks reach a 0.3 mm fillet where it lies within 3 * noise of its face, 0.3 (1 - cos a) = 3 * noise,
+ * and where its normals turn no more than 2 * minBandAngle from the face's, so the soft half-width is
+ * 0.3 sin(45 deg - a) with a the smaller of the two angles.
  */
-const filletSoft = (noise: number) => 0.3 * Math.sin(Math.PI / 4 - Math.acos(1 - noise / 0.1));
+const filletSoft = (noise: number) =>
+  0.3 *
+  Math.sin(Math.PI / 4 - Math.min(Math.acos(1 - noise / 0.1), (2 * minBandAngle * Math.PI) / 180));
+/** Guide on the box's fillet, `offset` mm along the arc from the crest toward the face z = 1. */
+const arcGuide = (mesh: RefineMesh, ends: number[], offset = 0) =>
+  ends.map((x) => {
+    const angle = Math.PI / 4 + offset / 0.3;
+    return pointOn(mesh, [x, 1.2 + 0.3 * Math.cos(angle), 0.7 + 0.3 * Math.sin(angle)]);
+  });
+/** Mean length of the edges at the clicked triangles' corners. */
+function clickedEdge(
+  mesh: RefineMesh,
+  topology: ReturnType<typeof modelOf>['topology'],
+  guide: GuidePoint[],
+) {
+  let sum = 0,
+    count = 0;
+  for (const { triangle } of guide)
+    for (const k of [0, 1, 2] as const) {
+      const v = weldedCorner(mesh, triangle, k);
+      for (let j = topology.neighbourStart[v]; j < topology.neighbourStart[v + 1]; j++) {
+        const w = topology.neighbours[j];
+        sum += Math.hypot(
+          ...[0, 1, 2].map((a) => mesh.position[v * 3 + a] - mesh.position[w * 3 + a]),
+        );
+        count++;
+      }
+    }
+  return sum / count;
+}
 const softZones = [BandZone.Soft, BandZone.Left, BandZone.Right];
 
 /** The guide reversed must swap Left and Right and negate `cross`, and change nothing else. */
@@ -49,9 +80,10 @@ describe('buildBand', () => {
   it('finds the softened zone and both flanks of a box edge', () => {
     const { mesh, topology, noise } = modelOf(softBox([2, 1.5, 1], 0.3));
     const band = buildBand(mesh, topology, 'line', edgeGuide(mesh, -1.2, 1.2), 0.6, noise)!;
-    // Flanks fit within 3 * 0.0086 of each face, so 0.3 (1 - cos a) = 0.026 gives a = 23.9 deg and the soft half-width is 0.3 sin(45 - 23.9 deg) = 0.108, +-1/3.
-    expect(band.soft).toBeGreaterThan(0.072);
-    expect(band.soft).toBeLessThan(0.144);
+    // Flanks fit within 3 * 0.0086 of each face, 0.3 (1 - cos a) = 0.026 at a = 23.9 deg, and face
+    // within 20 deg of it, so a = 20 deg and the soft half-width is 0.3 sin(45 - 20 deg) = 0.127, +-1/3.
+    expect(band.soft).toBeGreaterThan(0.085);
+    expect(band.soft).toBeLessThan(0.169);
     expect(zoneCount(band, BandZone.Left)).toBeGreaterThan(50);
     expect(zoneCount(band, BandZone.Right)).toBeGreaterThan(50);
     // Drawn along +x, Left (normal x tangent) is the face y = 1.5 and Right the face z = 1.
@@ -97,17 +129,35 @@ describe('buildBand', () => {
     expect(below).toBeGreaterThan(0);
   });
 
-  it('never reaches a folded layer that is near in space but far over the surface', () => {
-    const { mesh, topology, noise } = modelOf(foldedStrip(0.3));
-    // The concave fillet's crest, where the top layer (y = 0.4) turns up into the wall x = 0.
+  it('edits no folded layer below the guided one', () => {
+    // Layers 0.2 apart folding 0.3 past the fillet: at width 1 the band reaches both lower layers.
+    const spaced = modelOf(foldedStrip(0.3));
     const guide = [
-      pointOn(mesh, [crest, 0.4 + crest, -1.5]),
-      pointOn(mesh, [crest, 0.4 + crest, 1.5]),
+      pointOn(spaced.mesh, [crest, 0.4 + crest, -1.5]),
+      pointOn(spaced.mesh, [crest, 0.4 + crest, 1.5]),
     ];
-    const band = buildBand(mesh, topology, 'line', guide, 0.6, noise)!;
+    const band = buildBand(spaced.mesh, spaced.topology, 'line', guide, 1, spaced.noise)!;
     expect(band).not.toBeNull();
-    // The second layer (y = 0.2) and the third (y = 0) lie within 0.6 of the guide in space.
-    expect(countWhere(mesh, band, [...softZones, BandZone.Beyond], (p) => p[1] < 0.3)).toBe(0);
+    expect(countWhere(spaced.mesh, band, [BandZone.Beyond], (p) => p[1] < 0.3)).toBeGreaterThan(0);
+    expect(countWhere(spaced.mesh, band, softZones, (p) => p[1] < 0.3)).toBe(0);
+
+    // Layers 0.045 apart under a 0.15 fillet, as in the review: 5e6665e edited 555 lower vertices.
+    const fillet = 0.15,
+      inset = fillet - fillet / Math.SQRT2;
+    const tight = modelOf(
+      foldedStrip(
+        fillet,
+        { step: 0.032, ripple: 0.004, noise: 0.002 },
+        { gap: 0.045, reach: 0.19, under: 0.21, tail: 0.35, wall: 1.31 },
+      ),
+    );
+    const top = [-1.5, 1.5].map((z) => pointOn(tight.mesh, [inset, 0.09 + inset, z]));
+    const close = buildBand(tight.mesh, tight.topology, 'line', top, 0.54, tight.noise)!;
+    expect(close).not.toBeNull();
+    expect(countWhere(tight.mesh, close, [BandZone.Beyond], (p) => p[1] < 0.0675)).toBeGreaterThan(
+      0,
+    );
+    expect(countWhere(tight.mesh, close, softZones, (p) => p[1] < 0.0675)).toBe(0);
   });
 
   it('stops at the ends of an open guide', () => {
@@ -238,7 +288,8 @@ describe('buildBand', () => {
     const { mesh, topology } = modelOf(softBox([2, 1.5, 1], 0.3, { step: 0.012 }));
     const guide = edgeGuide(mesh, -1.2, 1.2);
     let start = performance.now();
-    const band = buildBand(mesh, topology, 'line', guide, 1.1, 0.0086)!;
+    // The band is the vertices within 1.2 of the guide along the surface.
+    const band = buildBand(mesh, topology, 'line', guide, 1.2, 0.0086)!;
     const built = performance.now() - start;
     start = performance.now();
     estimateWidth(mesh, topology, 'line', guide, 0.0086);
@@ -256,9 +307,9 @@ describe('estimateWidth', () => {
   it('estimates a width from the softened zone', () => {
     const { mesh, topology, noise } = modelOf(softBox([2, 1.5, 1], 0.3));
     const w = estimateWidth(mesh, topology, 'line', edgeGuide(mesh, -1.2, 1.2), noise);
-    // soft + max(2 soft, 6 edges): 0.108 + max(0.216, 6 * 0.06 mm edge) = 0.47, +-1/3.
-    expect(w).toBeGreaterThan(0.31);
-    expect(w).toBeLessThan(0.62);
+    // soft + max(2 soft, 6 edges): 0.127 + max(0.254, 6 * 0.066 mm edge) = 0.52, +-1/3.
+    expect(w).toBeGreaterThan(0.35);
+    expect(w).toBeLessThan(0.7);
   });
 
   it('finds no edge under a guide on a flat face', () => {
@@ -268,5 +319,155 @@ describe('estimateWidth', () => {
     const z = 1 - crest - 0.5;
     const near = [pointOn(mesh, [-1.2, 1.5, z]), pointOn(mesh, [1.2, 1.5, z])];
     expect(estimateWidth(mesh, topology, 'line', near, noise)).toBeLessThan(0.7);
+    // 0.3 from the crest line the guide is on the clean face, 0.21 from the soft zone.
+    const nearer = [-1.2, 1.2].map((x) => pointOn(mesh, [x, 1.5, 1 - crest - 0.3]));
+    expect(estimateWidth(mesh, topology, 'line', nearer, noise)).toBe(0);
+    expect(buildBand(mesh, topology, 'line', nearer, 0.6, noise)).toBeNull();
   });
+
+  describe('rebuilds the band it estimates', () => {
+    const box = modelOf(softBox([2, 1.5, 1], 0.3));
+    const step = modelOf(softStep(0.3));
+    const cylinder = modelOf(softCylinder(1.5, 1, 0.3));
+    const cases: {
+      name: string;
+      model: () => ReturnType<typeof modelOf>;
+      kind: 'line' | 'arc';
+      guide: (mesh: RefineMesh) => GuidePoint[];
+    }[] = [
+      {
+        name: 'box edge on its crest',
+        model: () => box,
+        kind: 'line',
+        guide: (m) => arcGuide(m, [-1.2, 1.2]),
+      },
+      ...[-0.2, -0.1, 0.1, 0.2].map((offset) => ({
+        name: `box edge ${offset} mm off its crest`,
+        model: () => box,
+        kind: 'line' as const,
+        guide: (m: RefineMesh) => arcGuide(m, [-1.2, 1.2], offset),
+      })),
+      {
+        name: 'full-length box edge',
+        model: () => box,
+        kind: 'line',
+        guide: (m) => arcGuide(m, [-1.7, 1.7]),
+      },
+      {
+        name: 'full-length step edge',
+        model: () => step,
+        kind: 'line',
+        guide: (m) => [-2, 2].map((z) => pointOn(m, [crest, crest, z])),
+      },
+      {
+        name: 'cylinder rim',
+        model: () => cylinder,
+        kind: 'arc',
+        guide: (m) =>
+          [0, 1, 2].map((k) => {
+            const turn = (k * 2 * Math.PI) / 3;
+            return pointOn(m, [
+              (1.5 - crest) * Math.cos(turn),
+              1 - crest,
+              (1.5 - crest) * Math.sin(turn),
+            ]);
+          }),
+      },
+      {
+        name: 'box at 0.012 mm spacing',
+        model: () => modelOf(softBox([2, 1.5, 1], 0.3, { step: 0.012 })),
+        kind: 'line',
+        guide: (m) => arcGuide(m, [-1.2, 1.2]),
+      },
+    ];
+    it.each(cases)(
+      'on the $name',
+      ({ model, kind, guide }) => {
+        const { mesh, topology, noise } = model();
+        const points = guide(mesh);
+        const width = estimateWidth(mesh, topology, kind, points, noise);
+        expect(width).toBeGreaterThan(0);
+        const edge = clickedEdge(mesh, topology, points);
+        // The estimate reads `soft` from one band at max(24 edges, 1.5 mm).
+        const generous = buildBand(mesh, topology, kind, points, Math.max(24 * edge, 1.5), noise)!;
+        expect(generous).not.toBeNull();
+        const band = buildBand(mesh, topology, kind, points, width, noise)!;
+        expect(band).not.toBeNull();
+        process.stdout.write(
+          `width ${width.toFixed(3)}: soft ${band.soft.toFixed(3)} against ${generous.soft.toFixed(3)}, edge ${edge.toFixed(3)}\n`,
+        );
+        expect(Math.abs(band.soft - generous.soft)).toBeLessThanOrEqual(edge);
+      },
+      30000,
+    );
+  });
+});
+
+describe('a single softened edge between clean faces', () => {
+  /** Clean-face band vertices off their own flank: on y = 1.5 (Left) and z = 1 (Right), clear of the fillet and ends. */
+  const misplaced = (mesh: RefineMesh, band: EdgeBand) => {
+    const wrong = [0, 0],
+      clean = [0, 0];
+    band.vertices.forEach((v, i) => {
+      const [x, y, z] = mesh.position.subarray(v * 3, v * 3 + 3);
+      if (Math.abs(x) >= 1.67) return;
+      if (Math.abs(y - 1.5) < 0.01 && z < 0.68) {
+        clean[0]++;
+        wrong[0] += +(band.zone[i] !== BandZone.Left);
+      }
+      if (Math.abs(z - 1) < 0.01 && y < 1.18) {
+        clean[1]++;
+        wrong[1] += +(band.zone[i] !== BandZone.Right);
+      }
+    });
+    return { wrong, clean };
+  };
+
+  it('keeps every clean-face vertex on its flank from the estimated width to three times it', () => {
+    const { mesh, topology, noise } = modelOf(softBox([2, 1.5, 1], 0.3));
+    const guide = edgeGuide(mesh, -1.2, 1.2);
+    const width = estimateWidth(mesh, topology, 'line', guide, noise);
+    for (const factor of [1, 1.5, 2, 2.5, 3]) {
+      const band = buildBand(mesh, topology, 'line', guide, factor * width, noise)!;
+      expect(band).not.toBeNull();
+      const { wrong, clean } = misplaced(mesh, band);
+      expect(Math.min(...clean)).toBeGreaterThan(50);
+      expect(wrong).toEqual([0, 0]);
+    }
+  });
+
+  it('keeps every clean-face vertex on its flank at 0.012 mm spacing', () => {
+    const { mesh, topology, noise } = modelOf(softBox([2, 1.5, 1], 0.3, { step: 0.012 }));
+    const guide = edgeGuide(mesh, -1.2, 1.2);
+    const width = estimateWidth(mesh, topology, 'line', guide, noise);
+    for (const w of [0.4, width, 3 * width]) {
+      const band = buildBand(mesh, topology, 'line', guide, w, noise)!;
+      expect(band).not.toBeNull();
+      const { wrong, clean } = misplaced(mesh, band);
+      expect(Math.min(...clean)).toBeGreaterThan(100);
+      expect(wrong).toEqual([0, 0]);
+    }
+  }, 60000);
+});
+
+describe('cost', () => {
+  it('builds a 100,000-vertex band along a 40 mm spline in under a second', () => {
+    const { mesh, topology } = modelOf(softBox([20, 2, 2], 0.3, { step: 0.04 }));
+    const inset = 0.3 - 0.3 / Math.SQRT2;
+    const guide = [-20, -10, 0, 10, 20].map((x) => pointOn(mesh, [x, 2 - inset, 2 - inset]));
+    let start = performance.now();
+    const band = buildBand(mesh, topology, 'spline', guide, 2.2, 0.0086)!;
+    const built = performance.now() - start;
+    start = performance.now();
+    const width = estimateWidth(mesh, topology, 'spline', guide, 0.0086);
+    const estimated = performance.now() - start;
+    process.stdout.write(
+      `${band?.vertices.length} vertices: buildBand ${built.toFixed(0)} ms, estimateWidth ${estimated.toFixed(0)} ms (${width.toFixed(3)} mm)\n`,
+    );
+    expect(band).not.toBeNull();
+    expect(band.vertices.length).toBeGreaterThan(90000);
+    expect(width).toBeGreaterThan(0);
+    expect(built).toBeLessThan(1000);
+    expect(estimated).toBeLessThan(2000);
+  }, 120000);
 });

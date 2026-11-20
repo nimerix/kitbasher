@@ -293,23 +293,40 @@ export function bulgedBox(half: Vec3, fillet: number, bulge: number, options?: S
   }).geometry();
 }
 
+/** Where a folded strip's layers lie: `gap` apart, folding `reach` mm past the fillet and again at x = `under`. */
+export interface Folds {
+  gap: number;
+  reach: number;
+  under: number;
+  /** Length of the bottom layer past the farther fold, and height of the wall's top. */
+  tail?: number;
+  wall?: number;
+}
+
 /**
- * An open sheet extruded z -2..2 whose profile folds into three flat layers 0.2 mm apart (y = 0, 0.2
- * and 0.4, joined by folds of radius 0.1 at x = -2.1 and 2.1), then turns up into a wall at x = 0
- * through a concave fillet of radius `fillet`. The top layer and the bottom layer face +y.
+ * An open sheet extruded z -2..2 whose profile folds into three flat layers (y = 0, gap and 2 gap)
+ * and turns up into a wall at x = 0 through a concave fillet of radius `fillet`. The folds, of radius
+ * gap / 2, run along z: the top layer folds under at x = fillet + reach and the middle layer folds
+ * again at x = under. The top and bottom layers face +y.
  */
-export function foldedStrip(fillet: number, options?: SoftOptions) {
+export function foldedStrip(
+  fillet: number,
+  options?: SoftOptions,
+  { gap, reach, under, tail = 1.5, wall = 1.4 }: Folds = { gap: 0.2, reach: 0.3, under: -0.3 },
+) {
   const surface = new Surface(options);
   const { step } = surface.options;
-  const fold = 0.1;
+  const fold = gap / 2,
+    near = fillet + reach,
+    top = 2 * gap;
   const path = new Path(false);
-  path.line([2, 0], [-2.1, 0]);
-  path.arc([-2.1, fold], fold, -Math.PI / 2, -Math.PI);
-  path.line([-2.1, 0.2], [2.1, 0.2]);
-  path.arc([2.1, 0.2 + fold], fold, -Math.PI / 2, Math.PI);
-  path.line([2.1, 0.4], [fillet, 0.4]);
-  path.arc([fillet, 0.4 + fillet], fillet, -Math.PI / 2, -Math.PI / 2);
-  path.line([0, 0.4 + fillet], [0, 1.4]);
+  path.line([Math.max(near, under) + tail, 0], [under, 0]);
+  path.arc([under, fold], fold, -Math.PI / 2, -Math.PI);
+  path.line([under, gap], [near, gap]);
+  path.arc([near, gap + fold], fold, -Math.PI / 2, Math.PI);
+  path.line([near, top], [fillet, top]);
+  path.arc([fillet, top + fillet], fillet, -Math.PI / 2, -Math.PI / 2);
+  path.line([0, top + fillet], [0, wall]);
   const columns = Math.round(path.length / step),
     layers = Math.max(2, Math.round(4 / step));
   const spacing = path.length / columns;
