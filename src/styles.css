@@ -6718,8 +6718,8 @@ optgroup {
 .refine-counts {
   margin: 12px 16px 0;
 }
-/* Narrower toolbars show Pin, Joint, Warp and Refine as icons, so the strip still fits on one
-   row. Their names stay in the tooltip and for assistive technology. */
+/* Narrower toolbars show Pin, Anchors, Joint, Warp and Refine as icons, so the strip still fits
+   on one row. Their names stay in the tooltip and for assistive technology. */
 @media (max-width: 1500px) {
   .toolbar-left .compact-tool {
     position: relative;

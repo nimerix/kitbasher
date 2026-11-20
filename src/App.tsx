@@ -469,7 +469,7 @@ function Toolbar({
           <span>Pin</span>
         </button>
         <button
-          className={`tool-button ${tool === 'anchors' ? 'active' : ''}`}
+          className={`tool-button compact-tool ${tool === 'anchors' ? 'active' : ''}`}
           title={withShortcut('Rigid anchor fit', keys.anchors)}
           onClick={() => useEditor.getState().setTool('anchors')}
         >
