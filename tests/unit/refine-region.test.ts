@@ -538,6 +538,40 @@ describe('solveRegion and applyRegion', () => {
     for (const { settled, after } of moves) expect(after).toBeLessThan(settled ? 0.001 : 0.01);
   });
 
+  it('flattens a painted disc onto its full-weight flat centre past a low-weight outer ring', () => {
+    const model = modelOf(
+      heightGrid(
+        (x, y) => {
+          const u = Math.min(1, Math.max(0, (Math.hypot(x, y) - 0.1) / 0.06));
+          return 0.025 * u * u * (3 - 2 * u);
+        },
+        24,
+        24,
+        -0.72,
+        -0.72,
+        0.06,
+      ),
+    );
+    const { mesh, topology } = model;
+    const disc = trianglesWhere(mesh, (x, y) => Math.hypot(x, y) < 0.33);
+    const solve = solveRegion(mesh, topology, flatten(disc, { keepDetail: false }), 0.001)!;
+    expect(solve).not.toBeNull();
+    const centre = Array.from(solve.vertices).findIndex(
+      (v) => Math.hypot(mesh.position[v * 3], mesh.position[v * 3 + 1]) < 1e-6,
+    );
+    expect(solve.weight[centre]).toBe(1);
+    // The flat centre holds most of the weight the fit gives the base, the blend to the 8th power.
+    let total = 0,
+      flat = 0;
+    solve.vertices.forEach((v, i) => {
+      const w = solve.weight[i] ** 8;
+      total += w;
+      if (Math.abs(mesh.position[v * 3 + 2]) < 1e-6) flat += w;
+    });
+    expect(flat / total).toBeGreaterThan(0.7);
+    expect(Math.abs(solve.target[centre * 3 + 2])).toBeLessThan(0.005);
+  });
+
   it('keeps a shallow groove at a set offset, and a deep one at the automatic offset', () => {
     for (const [depth, detail] of [
       [0.06, 0.03],

@@ -15,13 +15,13 @@ export type Shape =
   | { kind: 'cone'; apex: Vec3; axis: Vec3; angle: number };
 export interface ShapeFit {
   shape: Shape;
-  /** RMS distance of inliers. */
+  /** RMS distance of inliers, each counting by its weight when the fit has weights. */
   rms: number;
-  /** Fraction of the input points within 3 * noise of the shape. */
+  /** Fraction of the input points, or of their total weight, within 3 * noise of the shape. */
   support: number;
   /**
-   * True when rms <= 2 * noise and at least half of the points support the fit. Noise is floored at
-   * 1e-9 mm so exact data passes at zero noise.
+   * True when rms <= 2 * noise and at least half of the points (or of the weight) support the fit.
+   * Noise is floored at 1e-9 mm so exact data passes at zero noise.
    */
   within: boolean;
 }
@@ -133,6 +133,53 @@ function median(values: Float64Array) {
   return values.length ? selectInPlace(Float64Array.from(values), (values.length - 1) >> 1) : 0;
 }
 
+/**
+ * The least value whose own weight and that of every smaller value reach half of `total`; at equal
+ * weights the lower median. Reorders `values` and `weights` together.
+ */
+function weightedMedianInPlace(values: Float64Array, weights: Float64Array, total: number) {
+  if (!values.length) return 0;
+  const half = total / 2;
+  const swap = (i: number, j: number) => {
+    const v = values[i],
+      w = weights[i];
+    values[i] = values[j];
+    weights[i] = weights[j];
+    values[j] = v;
+    weights[j] = w;
+  };
+  let low = 0,
+    high = values.length - 1,
+    before = 0;
+  while (low < high) {
+    const pivot = values[(low + high) >> 1];
+    let less = low,
+      i = low,
+      more = high;
+    while (i <= more) {
+      if (values[i] < pivot) swap(less++, i++);
+      else if (values[i] > pivot) swap(i, more--);
+      else i++;
+    }
+    let below = before;
+    for (let k = low; k < less; k++) below += weights[k];
+    if (below >= half) {
+      high = less - 1;
+      continue;
+    }
+    let through = below;
+    for (let k = less; k <= more; k++) through += weights[k];
+    if (through >= half) return pivot;
+    before = through;
+    low = more + 1;
+  }
+  return values[Math.min(low, high)];
+}
+
+function weightedMedian(values: Float64Array, weights: Float64Array, total: number) {
+  return weightedMedianInPlace(Float64Array.from(values), Float64Array.from(weights), total);
+}
+
 /** One murmur-style mixing step of a 32-bit hash. */
 function mix(hash: number, word: number) {
   hash = Math.imul(hash ^ word, 0x5bd1e995);
@@ -178,16 +225,25 @@ function samplingOrder(points: Float32Array, normals: Float32Array, limit: numbe
   return Uint32Array.from(indices.slice(0, limit));
 }
 
-/** Points centred on their mean and scaled to unit RMS radius, so every fit is well conditioned. */
+/**
+ * Points centred on their mean and scaled to unit RMS radius, so every fit is well conditioned.
+ * `prior` holds each point's weight, null when every point counts once; `total` is their sum.
+ */
 interface Cloud {
   count: number;
   p: Float64Array;
   n: Float64Array;
   centre: Vec3;
   scale: number;
+  prior: Float64Array | null;
+  total: number;
 }
 
-function cloudOf(points: Float32Array, normals: Float32Array): Cloud | null {
+function cloudOf(
+  points: Float32Array,
+  normals: Float32Array,
+  prior: Float64Array | null,
+): Cloud | null {
   const count = Math.floor(points.length / 3);
   const centre: Vec3 = [0, 0, 0];
   for (let i = 0; i < count; i++) for (let k = 0; k < 3; k++) centre[k] += points[i * 3 + k];
@@ -206,7 +262,12 @@ function cloudOf(points: Float32Array, normals: Float32Array): Cloud | null {
     const length = Math.hypot(normals[i * 3], normals[i * 3 + 1], normals[i * 3 + 2]);
     if (length > 0) for (let k = 0; k < 3; k++) n[i * 3 + k] = normals[i * 3 + k] / length;
   }
-  return { count, p, n, centre, scale };
+  let total = count;
+  if (prior) {
+    total = 0;
+    for (let i = 0; i < count; i++) total += prior[i];
+  }
+  return { count, p, n, centre, scale, prior, total };
 }
 
 /**
@@ -220,15 +281,22 @@ interface Model {
   perturb(state: Float64Array, step: Float64Array): Float64Array;
 }
 
-/** Tukey biweights from residuals, with a scale of 1.4826 times the median absolute residual. */
+/**
+ * Tukey biweights from residuals, with a scale of 1.4826 times the median absolute residual,
+ * weighted by the cloud's prior when it has one.
+ */
 function reweight(
+  cloud: Cloud,
   residual: Float64Array,
   noise: number,
   weight: Float64Array,
   absolute: Float64Array,
 ) {
   for (let i = 0; i < residual.length; i++) absolute[i] = Math.abs(residual[i]);
-  const scale = Math.max(1.4826 * selectInPlace(absolute, (absolute.length - 1) >> 1), noise);
+  const middle = cloud.prior
+    ? weightedMedianInPlace(absolute, Float64Array.from(cloud.prior), cloud.total)
+    : selectInPlace(absolute, (absolute.length - 1) >> 1);
+  const scale = Math.max(1.4826 * middle, noise);
   const cut = tukey * scale;
   for (let i = 0; i < residual.length; i++) {
     const u = residual[i] / cut;
@@ -329,7 +397,14 @@ function subset(cloud: Cloud, indices: ArrayLike<number>): Cloud {
       p[j * 3 + k] = cloud.p[indices[j] * 3 + k];
       n[j * 3 + k] = cloud.n[indices[j] * 3 + k];
     }
-  return { count, p, n, centre: cloud.centre, scale: cloud.scale };
+  let prior: Float64Array | null = null,
+    total = count;
+  if (cloud.prior) {
+    prior = Float64Array.from(indices, (i) => cloud.prior![i]);
+    total = 0;
+    for (let j = 0; j < count; j++) total += prior[j];
+  }
+  return { count, p, n, centre: cloud.centre, scale: cloud.scale, prior, total };
 }
 
 /** Number of distinct k-subsets of n items. */
@@ -345,7 +420,8 @@ function subsets(n: number, k: number) {
  * are drawn from them: enough to find a surface that holds half of them with the chance
  * `confidence`, or every sample when that is fewer, so a minority off the surface cannot move it.
  * Drawing stops early only once a candidate keeps more than `settling` of all points within the
- * noise. A candidate `refused` on the scored points can never be the start.
+ * noise. A candidate `refused` on the scored points can never be the start. With a prior every
+ * count, median and share is of weight, and samples are drawn in proportion to it.
  */
 function robust<M extends Scorer>(
   cloud: Cloud,
@@ -353,9 +429,8 @@ function robust<M extends Scorer>(
   fitter: Fitter<M>,
   order: Uint32Array,
   refused: (cloud: Cloud, candidate: Fitted) => boolean,
-  prior: Float64Array | null,
 ): Fitted | null {
-  const { count } = cloud;
+  const { count, prior } = cloud;
   const model = fitter.model(cloud);
   const scored = subset(cloud, order);
   const scorer = fitter.model(scored);
@@ -363,15 +438,16 @@ function robust<M extends Scorer>(
     full = scored.count < count ? new Float64Array(count) : null,
     scoredWeight = new Float64Array(scored.count),
     scoredAbsolute = new Float64Array(scored.count);
+  const scoredPrior = scored.prior;
   const confirmed = (candidate: Float64Array) => {
     if (!full) return true;
     model.residuals(candidate, full);
     let near = 0;
-    for (let i = 0; i < count; i++) if (Math.abs(full[i]) <= noise) near++;
-    return near > settling * count;
+    for (let i = 0; i < count; i++) if (Math.abs(full[i]) <= noise) near += prior ? prior[i] : 1;
+    return near > settling * cloud.total;
   };
   const allowed = (candidate: Float64Array) => {
-    reweight(distance, noise, scoredWeight, scoredAbsolute);
+    reweight(scored, distance, noise, scoredWeight, scoredAbsolute);
     return !refused(scored, { state: candidate, inward: false, weight: scoredWeight });
   };
   let state: Float64Array | null = null,
@@ -386,22 +462,25 @@ function robust<M extends Scorer>(
         below = 0,
         level = 0;
       for (let i = 0; i < scored.count; i++) {
+        const w = scoredPrior ? scoredPrior[i] : 1;
         distance[i] = Math.abs(distance[i]);
-        if (distance[i] <= noise) near++;
-        if (distance[i] < least) below++;
-        if (distance[i] <= least + medianTie) level++;
+        if (distance[i] <= noise) near += w;
+        if (distance[i] < least) below += w;
+        if (distance[i] <= least + medianTie) level += w;
       }
-      // The median is below the least so far only when more than half of the values are.
-      const lower = below > (scored.count - 1) >> 1;
-      // Two samples that each fit their own points exactly tie on the median; more points wins.
-      const tied = !lower && level > (scored.count - 1) >> 1 && near > most;
+      // The median is below the least so far only when at least half of the weight is.
+      const lower = below >= scored.total / 2;
+      // Two samples that each fit their own points exactly tie on the median; more near wins.
+      const tied = !lower && level >= scored.total / 2 && near > most;
       const better = lower || tied;
       // Nearly all of the sample alone can be far fewer of the cloud.
-      const settles = near > settling * scored.count && confirmed(candidate);
+      const settles = near > settling * scored.total && confirmed(candidate);
       if (!(better || settles) || !allowed(candidate)) continue;
       if (settles) settled = true;
       if (better) {
-        least = median(distance);
+        least = scoredPrior
+          ? weightedMedian(distance, scoredPrior, scored.total)
+          : median(distance);
         most = near;
         state = candidate;
       }
@@ -414,6 +493,16 @@ function robust<M extends Scorer>(
   const ones = new Float64Array(size).fill(1),
     picked = new Uint32Array(size);
   const sample = () => consider(fitter.starts(subset(scored, picked), ones));
+  // Running sums of the scored weights, so a draw lands on a point in proportion to its weight.
+  const cumulative = scoredPrior ? new Float64Array(n) : null;
+  let squares = 0;
+  if (scoredPrior)
+    for (let i = 0, sum = 0; i < n; i++) {
+      cumulative![i] = sum += scoredPrior[i];
+      squares += scoredPrior[i] ** 2;
+    }
+  // Weight worth fewer than `size` equal points can leave too little outside a part-drawn sample.
+  const drawable = !scoredPrior || scored.total ** 2 >= size * squares;
   if (n > size) {
     let p = 1;
     for (let i = 0; i < size; i++) p *= Math.max(0, half - i) / (n - i);
@@ -432,12 +521,24 @@ function robust<M extends Scorer>(
         picked[k]++;
         for (let j = k + 1; j < size; j++) picked[j] = picked[j - 1] + 1;
       }
-    } else {
+    } else if (drawable) {
       let seed = 0x2545f491;
       const random = () => (seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0) / 4294967296;
+      const pick = () => {
+        if (!cumulative) return Math.floor(random() * n);
+        const target = random() * cumulative[n - 1];
+        let low = 0,
+          high = n - 1;
+        while (low < high) {
+          const middle = (low + high) >> 1;
+          if (cumulative[middle] > target) high = middle;
+          else low = middle + 1;
+        }
+        return low;
+      };
       for (let draw = 0; !settled && draw < draws; draw++) {
         for (let filled = 0; filled < size;) {
-          const i = Math.floor(random() * n);
+          const i = pick();
           if (!picked.subarray(0, filled).includes(i)) picked[filled++] = i;
         }
         sample();
@@ -449,14 +550,14 @@ function robust<M extends Scorer>(
     absolute = new Float64Array(count);
   for (let round = 0; state && round < rounds; round++) {
     model.residuals(state, residual);
-    reweight(residual, noise, weight, absolute);
+    reweight(cloud, residual, noise, weight, absolute);
     if (prior) for (let i = 0; i < count; i++) weight[i] *= prior[i];
     state = fitter.refit(cloud, model, weight, state);
   }
   const final: Float64Array | null = state;
   if (!final || !final.every(Number.isFinite)) return null;
   model.residuals(final, residual);
-  reweight(residual, noise, weight, absolute);
+  reweight(cloud, residual, noise, weight, absolute);
   if (prior) for (let i = 0; i < count; i++) weight[i] *= prior[i];
   let inliers = 0,
     facing = 0;
@@ -572,27 +673,30 @@ const sphereFitter: Fitter<Model> = {
 };
 
 /**
- * Unit axis from the normals of the points with weight: the eigenvector of least spread, about
- * their mean when `centred`.
+ * Unit axis from the normals of the points with weight, each counting by it: the eigenvector of
+ * least spread, about their mean when `centred`.
  */
 function normalAxis(cloud: Cloud, centred: boolean, weight: Float64Array) {
   const mean = [0, 0, 0];
   let total = 0;
   const used = (i: number) =>
     weight[i] > 0 && (cloud.n[i * 3] !== 0 || cloud.n[i * 3 + 1] !== 0 || cloud.n[i * 3 + 2] !== 0);
+  let normals = 0;
   for (let i = 0; i < cloud.count; i++) {
     if (!used(i)) continue;
-    total++;
-    for (let k = 0; k < 3; k++) mean[k] += cloud.n[i * 3 + k];
+    normals++;
+    total += weight[i];
+    for (let k = 0; k < 3; k++) mean[k] += weight[i] * cloud.n[i * 3 + k];
   }
-  if (total < 3) return null;
+  if (normals < 3) return null;
   for (let k = 0; k < 3; k++) mean[k] = centred ? mean[k] / total : 0;
   const covariance = new Float64Array(9);
   for (let i = 0; i < cloud.count; i++) {
     if (!used(i)) continue;
     const n = cloud.n.subarray(i * 3, i * 3 + 3);
     for (let r = 0; r < 3; r++)
-      for (let c = 0; c < 3; c++) covariance[r * 3 + c] += (n[r] - mean[r]) * (n[c] - mean[c]);
+      for (let c = 0; c < 3; c++)
+        covariance[r * 3 + c] += weight[i] * (n[r] - mean[r]) * (n[c] - mean[c]);
   }
   const { values, vectors } = eigen3(covariance);
   if (values[1] <= 1e-10 * values[2]) return null;
@@ -766,8 +870,9 @@ function shapeOf(
 
 /**
  * Robust fit that ignores points standing off the surface. Null when the points cannot define the
- * shape. With `weights`, each point counts by its weight in the reweighted refit and the all-point
- * start.
+ * shape. With `weights`, each point counts by its weight wherever the fit counts points, and points
+ * of zero weight are left out before it starts; the points scored are picked as without weights
+ * from those that remain.
  */
 export function fitShape(
   points: Float32Array,
@@ -776,21 +881,49 @@ export function fitShape(
   noise: number,
   weights: Float64Array | null = null,
 ): ShapeFit | null {
-  const order = samplingOrder(points, normals, scoringPoints);
-  return fitKind(points, normals, kind, noise, order, weights);
+  if (!weights) {
+    const order = samplingOrder(points, normals, scoringPoints);
+    return fitKind(points, normals, kind, noise, order);
+  }
+  const used: number[] = [];
+  let largest = 0;
+  weights.forEach((w, i) => {
+    if (!(w > 0)) return;
+    used.push(i);
+    largest = Math.max(largest, w);
+  });
+  if (used.length < minimumPoints[kind]) return null;
+  // Scaled to a largest weight of 1, so equal weights are exactly the unweighted fit.
+  const prior = Float64Array.from(used, (i) => weights[i] / largest);
+  let sum = 0,
+    squares = 0;
+  for (const w of prior) {
+    sum += w;
+    squares += w * w;
+  }
+  // Too small: worth fewer than the kind's minimum of equal points, by (sum w)^2 / sum w^2.
+  if (!(sum * sum >= minimumPoints[kind] * squares)) return null;
+  const pick = (values: Float32Array) =>
+    Float32Array.from(
+      { length: used.length * 3 },
+      (_, n) => values[used[(n / 3) | 0] * 3 + (n % 3)],
+    );
+  const [kept, keptNormals] = [pick(points), pick(normals)];
+  const order = samplingOrder(kept, keptNormals, scoringPoints);
+  return fitKind(kept, keptNormals, kind, noise, order, prior);
 }
 
-/** `fitShape` scoring and sampling the points at `order`. */
+/** `fitShape` scoring and sampling the points at `order`, each counting by `prior` when given. */
 function fitKind(
   points: Float32Array,
   normals: Float32Array,
   kind: ShapeKind,
   noise: number,
   order: Uint32Array,
-  weights: Float64Array | null = null,
+  prior: Float64Array | null = null,
 ): ShapeFit | null {
   if (points.length / 3 < minimumPoints[kind]) return null;
-  const cloud = cloudOf(points, normals);
+  const cloud = cloudOf(points, normals, prior);
   if (!cloud) return null;
   const floor = Math.max(noise, exact);
   const scaled = floor / cloud.scale;
@@ -804,7 +937,7 @@ function fitKind(
     kind !== 'plane' &&
     flatness(points, kind, candidate) < scaled &&
     !normalsResolve(points, kind, candidate);
-  const fitted = robust(cloud, scaled, fitter, order, refused, weights);
+  const fitted = robust(cloud, scaled, fitter, order, refused);
   if (!fitted) return null;
   const shape = shapeOf(kind, cloud, fitted.state, fitted.inward);
   if (!shape || refused(cloud, fitted)) return null;
@@ -812,15 +945,16 @@ function fitKind(
     kept = 0,
     near = 0;
   for (let i = 0; i < cloud.count; i++) {
+    const w = prior ? prior[i] : 1;
     const d = shapeDistance(shape, points[i * 3], points[i * 3 + 1], points[i * 3 + 2]);
     // Counted against the noise itself: the weights' own scale always keeps at least half.
-    if (Math.abs(d) <= 3 * floor) near++;
+    if (Math.abs(d) <= 3 * floor) near += w;
     if (fitted.weight[i] <= 0) continue;
-    sum += d * d;
-    kept++;
+    sum += w * d * d;
+    kept += w;
   }
   const rms = Math.sqrt(sum / kept);
-  const support = near / cloud.count;
+  const support = near / cloud.total;
   return { shape, rms, support, within: rms <= 2 * floor && support >= 0.5 };
 }
 
@@ -837,11 +971,12 @@ function flatness(cloud: Cloud, kind: ShapeKind, fitted: Fitted) {
   let count = 0;
   for (let i = 0; i < cloud.count; i++) {
     if (fitted.weight[i] <= 0) continue;
+    const w = cloud.prior ? cloud.prior[i] : 1;
     projectToShape(local, cloud.p[i * 3], cloud.p[i * 3 + 1], cloud.p[i * 3 + 2], projected);
-    count++;
+    count += w;
     for (let r = 0; r < 3; r++) {
-      sum[r] += projected[r];
-      for (let c = 0; c < 3; c++) products[r * 3 + c] += projected[r] * projected[c];
+      sum[r] += w * projected[r];
+      for (let c = 0; c < 3; c++) products[r * 3 + c] += w * projected[r] * projected[c];
     }
   }
   const covariance = products.map((v, k) => v - (sum[Math.floor(k / 3)] * sum[k % 3]) / count);
@@ -855,7 +990,8 @@ function flatness(cloud: Cloud, kind: ShapeKind, fitted: Fitted) {
 function normalsResolve(cloud: Cloud, kind: ShapeKind, fitted: Fitted) {
   const local = shapeOf(kind, { ...cloud, centre: [0, 0, 0], scale: 1 }, fitted.state, false)!;
   const fittedNormals: Vec3[] = [],
-    measured: Vec3[] = [];
+    measured: Vec3[] = [],
+    weights: number[] = [];
   const h = 1e-6;
   for (let i = 0; i < cloud.count; i++) {
     const n = cloud.n.subarray(i * 3, i * 3 + 3);
@@ -871,18 +1007,21 @@ function normalsResolve(cloud: Cloud, kind: ShapeKind, fitted: Fitted) {
     if (!(Math.hypot(g[0], g[1], g[2]) > 0)) continue;
     fittedNormals.push(normalize(g));
     measured.push([n[0], n[1], n[2]]);
+    weights.push(cloud.prior ? cloud.prior[i] : 1);
   }
   if (!fittedNormals.length) return false;
   const products = new Float64Array(9);
-  for (const g of fittedNormals)
-    for (let r = 0; r < 3; r++) for (let c = 0; c < 3; c++) products[r * 3 + c] += g[r] * g[c];
+  fittedNormals.forEach((g, i) => {
+    for (let r = 0; r < 3; r++)
+      for (let c = 0; c < 3; c++) products[r * 3 + c] += weights[i] * g[r] * g[c];
+  });
   const principal = eigen3(products).vectors[2];
   const angle = (a: Vec3, b: Vec3) => Math.acos(Math.min(1, Math.abs(dot(a, b))));
   let spread = 0,
     error = 0;
   fittedNormals.forEach((g, i) => {
-    spread += angle(g, principal) ** 2;
-    error += angle(g, measured[i]) ** 2;
+    spread += weights[i] * angle(g, principal) ** 2;
+    error += weights[i] * angle(g, measured[i]) ** 2;
   });
   return error < spread / 4;
 }

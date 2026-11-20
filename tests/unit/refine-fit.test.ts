@@ -29,10 +29,12 @@ import {
   patch,
   quadricRms,
   reordered,
+  ringedCloud,
   sevenVertexFan,
   shapeParameters,
   shapeRms,
   shuffled,
+  steppedSheets,
   sphereCap,
   surfaceWhere,
   tangentPatch,
@@ -492,5 +494,44 @@ describe('estimateNoise', () => {
     const start = performance.now();
     estimateNoise(mesh, topology);
     expect(performance.now() - start).toBeLessThan(1000);
+  });
+});
+
+describe('fitShape with weights', () => {
+  it('ignores points of zero weight', () => {
+    const { points, normals } = steppedSheets();
+    const weights = new Float64Array(points.length / 3).fill(1, 0, 16);
+    const fit = fitShape(points, normals, 'plane', 0.001, weights);
+    expect(fit).not.toBeNull();
+    expect(Math.abs(shapeDistance(fit!.shape, 0, 0, 0))).toBeLessThan(0.001);
+    expect(fit!.support).toBe(1);
+  });
+
+  it('fits the full-weight points ahead of a low-weight majority', () => {
+    const { points, normals } = steppedSheets();
+    const weights = new Float64Array(points.length / 3).fill(0.25 ** 8).fill(1, 0, 16);
+    const fit = fitShape(points, normals, 'plane', 0.001, weights);
+    expect(fit).not.toBeNull();
+    expect(Math.abs(shapeDistance(fit!.shape, 0, 0, 0))).toBeLessThan(0.001);
+    expect(fit!.within).toBe(true);
+  });
+
+  it('matches the unweighted fit at equal weights and refuses all zero weights', () => {
+    for (const kind of ['plane', 'sphere', 'cylinder', 'cone'] as const) {
+      const { points, normals } = kind === 'plane' ? steppedSheets() : ringedCloud(kind);
+      const count = points.length / 3;
+      const unweighted = fitShape(points, normals, kind, 0.001);
+      const equal = fitShape(points, normals, kind, 0.001, new Float64Array(count).fill(0.5));
+      expect(unweighted).not.toBeNull();
+      expect(equal).not.toBeNull();
+      for (let i = 0; i < count; i++) {
+        const [x, y, z] = points.subarray(i * 3, i * 3 + 3);
+        const difference =
+          shapeDistance(unweighted!.shape, x, y, z) - shapeDistance(equal!.shape, x, y, z);
+        expect(Math.abs(difference)).toBeLessThan(1e-7);
+      }
+      expect(equal!.support).toBeCloseTo(unweighted!.support, 12);
+      expect(fitShape(points, normals, kind, 0.001, new Float64Array(count))).toBeNull();
+    }
   });
 });

@@ -1665,3 +1665,40 @@ export function chainPieces(mesh: RefineMesh, chain: Uint32Array) {
   }
   return pieces;
 }
+
+/**
+ * A 4 x 4 sheet at z = 0 (the first 16 points) and an 8 x 8 sheet at z = 0.025 over it, both on a
+ * 0.06 mm grid with normals up.
+ */
+export function steppedSheets() {
+  const points: number[] = [],
+    normals: number[] = [];
+  for (const [size, z] of [
+    [4, 0],
+    [8, 0.025],
+  ])
+    for (let j = 0; j < size; j++)
+      for (let i = 0; i < size; i++) {
+        points.push(i * 0.06, j * 0.06, z);
+        normals.push(0, 0, 1);
+      }
+  return { points: Float32Array.from(points), normals: Float32Array.from(normals) };
+}
+
+/** Ten rings of 32 points on a unit sphere, cylinder or cone, rippled 0.003 mm off the surface. */
+export function ringedCloud(kind: 'sphere' | 'cylinder' | 'cone') {
+  const points: number[] = [],
+    normals: number[] = [];
+  for (let row = 0; row < 10; row++)
+    for (let col = 0; col < 32; col++) {
+      const theta = (2 * Math.PI * col) / 32;
+      const z = kind === 'sphere' ? -0.9 + 0.2 * row : 0.6 + 0.1 * row;
+      const radius = kind === 'sphere' ? Math.sqrt(1 - z * z) : kind === 'cone' ? z * 0.6 : 1;
+      const radial = radius + 0.003 * Math.sin(theta * 3 + row);
+      const [x, y] = [Math.cos(theta), Math.sin(theta)];
+      points.push(radial * x, radial * y, z);
+      const nz = kind === 'sphere' ? z : kind === 'cone' ? -radius * 0.6 : 0;
+      normals.push(radius * x, radius * y, nz);
+    }
+  return { points: Float32Array.from(points), normals: Float32Array.from(normals) };
+}
