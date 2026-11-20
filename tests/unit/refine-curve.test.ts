@@ -99,6 +99,10 @@ describe('refine curves', () => {
     expect(slot.closed).toBe(false);
     expect(slot.corner.every((sharp) => sharp === 0)).toBe(true);
     expect(largestGap(slot)).toBeLessThanOrEqual(0.05 * (1 + 1e-4));
+    const slotDistance = (x: number, y: number, z: number) =>
+      (x <= 0 ? Math.min(Math.abs(z - 1), Math.abs(z + 1)) : Math.abs(Math.hypot(x, z) - 1)) +
+      Math.abs(y);
+    expect(maxDistance(slot.points, slotDistance)).toBeLessThan(0.01);
   });
 
   it('finds the closest point and station', () => {
@@ -157,5 +161,112 @@ describe('refine curves', () => {
       expect(Math.hypot(out[0] - x, out[1] - y, out[2] - z)).toBeLessThan(1e-3);
     }
     expect(largestGap(spline)).toBeLessThanOrEqual(0.05 * (1 + 1e-4));
+  });
+
+  it('fits collinear samples given as an arc with their line', () => {
+    for (const noise of [0, 0.02]) {
+      const c = fitCurve('arc', noisyLine([0, 0, 0], [6, 0, 0], noise), 3, 0.05);
+      expect(maxDistance(c.points, (_x, y, z) => Math.hypot(y, z))).toBeLessThan(0.01);
+      expect(Math.abs(c.lengths[c.lengths.length - 1] - 6)).toBeLessThan(0.05);
+    }
+  });
+
+  it('keeps a 350 degree arc open and a closed circle closed through joining', () => {
+    const sweep = (350 * Math.PI) / 180;
+    const open = fitCurve('arc', noisyArc(5, 0, sweep, 0.02), 3, 0.05);
+    expect(open.closed).toBe(false);
+    expect(Math.abs(totalLength(open) / (5 * sweep) - 1)).toBeLessThan(0.01);
+    const circle = fitCurve('arc', noisyArc(5, 0, Math.PI * 2, 0.02), 3, 0.05);
+    expect(circle.closed).toBe(true);
+    const joined = joinCurves([circle], ['arc'], [], true, 0.05);
+    expect(joined.closed).toBe(true);
+    expect(joined.points.length / 3).toBeGreaterThan(3);
+    expect(Math.abs(totalLength(joined) / totalLength(circle) - 1)).toBeLessThan(0.01);
+  });
+
+  it('keeps sparse splines on their samples', () => {
+    const sparse = new Float32Array([0, 0, 0, 0.1, 0.06, 0, 0.25, 0, 0, 2, 0.03, 0]);
+    const c = fitCurve('spline', sparse, 4, 0.05);
+    expect(c.lengths[c.lengths.length - 1]).toBeLessThan(2.2);
+    for (let i = 1; i < c.points.length; i += 3) {
+      expect(c.points[i]).toBeGreaterThanOrEqual(-0.06);
+      expect(c.points[i]).toBeLessThanOrEqual(0.12);
+    }
+    const out = new Float32Array(3);
+    for (const samples of [
+      new Float32Array([0, 0, 0, 1, 0.05, 0, 2, 0, 0]),
+      new Float32Array([0, 0, 0, 2, 0.5, 0]),
+    ]) {
+      const fitted = fitCurve('spline', samples, 4, 0.05);
+      for (let i = 0; i < samples.length; i += 3) {
+        const [x, y, z] = samples.subarray(i, i + 3);
+        closestOnCurve(fitted, x, y, z, out);
+        expect(Math.hypot(out[0] - x, out[1] - y, out[2] - z)).toBeLessThan(1e-4);
+      }
+    }
+  });
+
+  it('joins lines at a shallow intersection far beyond their ends', () => {
+    const lines = [
+      fitCurve('line', noisyLine([0, 0, 0], [1, 0, 0], 0), 2, 0.05),
+      fitCurve('line', noisyLine([8, 0.2, 0], [9, 0.3, 0], 0), 2, 0.05),
+    ];
+    const joined = joinCurves(lines, ['line', 'line'], ['sharp'], false, 0.05);
+    const [joint] = cornersOf(joined);
+    expect(Math.hypot(joint[0] - 6, joint[1], joint[2])).toBeLessThan(0.01);
+  });
+
+  it('joins a spline to a line touching it far along', () => {
+    // Crests 2 pi apart, each a little lower than the next, so only the one at x = 42.04 touches.
+    const samples: number[] = [];
+    for (let i = 0; i <= 1000; i++) {
+      const x = i * 0.05;
+      samples.push(x, (1 + 0.0005 * (x - 42.04)) * Math.cos(x - 42.04), 0);
+    }
+    const spline = fitCurve('spline', new Float32Array(samples), 60, 0.05);
+    const p = spline.points;
+    let top = 0;
+    for (let i = 0; i < p.length / 3; i++)
+      if (Math.abs(p[i * 3] - 42.04) < 0.5 && p[i * 3 + 1] > p[top * 3 + 1]) top = i;
+    const contact = p.subarray(top * 3, top * 3 + 3);
+    const [cx, cy, cz] = contact;
+    const line = fitCurve('line', noisyLine([cx, cy, cz], [cx + 10, cy, cz], 0), 2, 0.05);
+    const joined = joinCurves([spline, line], ['spline', 'line'], ['sharp'], false, 0.05);
+    const [joint] = cornersOf(joined);
+    expect(Math.hypot(joint[0] - cx, joint[1] - cy, joint[2] - cz)).toBeLessThan(0.01);
+  });
+
+  it('notices a curve reversed in place after a lookup', () => {
+    const c = fitCurve('line', noisyLine([0, 0, 0], [50, 0, 0], 0), 2, 0.05);
+    const out = new Float32Array(3);
+    closestOnCurve(c, 0, 0.01, 0, out);
+    const count = c.points.length / 3;
+    for (let i = 0; i < count / 2; i++)
+      for (let axis = 0; axis < 3; axis++) {
+        const [a, b] = [i * 3 + axis, (count - 1 - i) * 3 + axis];
+        [c.points[a], c.points[b]] = [c.points[b], c.points[a]];
+      }
+    for (const end of [0, count - 1]) {
+      const [x, y, z] = c.points.subarray(end * 3, end * 3 + 3);
+      closestOnCurve(c, x, y + 0.01, z, out);
+      expect(Math.hypot(out[0] - x, out[1] - y, out[2] - z)).toBeLessThan(1e-4);
+    }
+  });
+
+  it('keeps degenerate controls and one-point curves', () => {
+    const repeated = new Float32Array([0, 0, 0, 0, 0, 0, 4, 0, 0]);
+    for (const c of [drawnCurve('arc', repeated, 0.05), fitCurve('arc', repeated, 3, 0.05)]) {
+      expect(c.points.length).toBeGreaterThan(0);
+      expect(c.points.every(Number.isFinite)).toBe(true);
+      expect(c.lengths[c.lengths.length - 1]).toBeCloseTo(4, 4);
+    }
+    const single = fitCurve('line', new Float32Array([1, 2, 3]), 2, 0.05);
+    const joined = joinCurves([single], ['line'], [], false, 0.05);
+    expect(Array.from(joined.points)).toEqual([1, 2, 3]);
+  });
+
+  it('keeps Float32 points within step far from the origin', () => {
+    const c = fitCurve('line', noisyLine([300, 0, 0], [305, 0, 0], 0), 2, 0.05);
+    expect(largestGap(c)).toBeLessThanOrEqual(0.05);
   });
 });
