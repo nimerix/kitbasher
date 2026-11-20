@@ -59,6 +59,12 @@ top of the viewport, with Studio as the default. Smaller screens use collapsible
   optional snap to neighbour, Close gap at an overlap depth, and a gap readout.
   Apply bakes the warp as one undo step without modifying pins, anchors, joints,
   or any other part. Cancel discards it.
+- Offer a Refine tool (E) that rebuilds softened edges on a scanned part from
+  line, arc and spline guides, treats painted regions (smooth, flatten or snap
+  to a shape) while keeping detail, offers crease, flatten and smooth brushes,
+  and proposes guides and regions for review. Apply bakes the result as one
+  undo step without modifying pins, anchors, joints, or any other part. Cancel
+  discards it.
 - Paint only edge-connected mesh patches; optional fixed seed-plane angle and
   distance tolerances exclude adjacent bends and prevent plane drift across strokes.
 - Fit painted planes with area-weighted moments. Offer mate with signed offset,

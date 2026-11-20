@@ -20,6 +20,17 @@ export interface Release {
 // Newest first. Each title must be unique: it names the release's link.
 export const releases: Release[] = [
   {
+    date: '2026-11-20',
+    title: 'Refine edges and surfaces on scans',
+    changes: [
+      {
+        kind: 'new',
+        text: 'Refine rebuilds softened edges from a line, arc or spline laid along them, smooths, flattens or shape-snaps a painted area while keeping rivets and other detail, adds crease, flatten and smooth brushes, and can propose guides for you to accept or adjust.',
+        guide: 'refine',
+      },
+    ],
+  },
+  {
     date: '2026-11-19',
     title: 'Smoother warp pulls and finer voxel remeshing',
     changes: [
