@@ -1,5 +1,6 @@
 import {
   useEffect,
+  useId,
   useMemo,
   useRef,
   useState,
@@ -40,7 +41,7 @@ import {
   withEnd,
 } from './refine-panel';
 import { SurfaceBrushControls } from './SurfaceBrushControls';
-import { LogRangeInput, NumericInput, RadioGroup, Section, Switch } from './ui';
+import { LogRangeInput, NumericInput, RadioGroup, Section } from './ui';
 
 const editor = () => useEditor.getState();
 
@@ -110,6 +111,17 @@ function useSliderEdit({
   latest.current = { owned, onSet, live, begin };
   const row = useRef<HTMLElement | null>(null);
   const finish = useRef(() => {});
+  // Drops the edit, putting a live one back; the drag stays cancelled until its pointer is let go.
+  const cancel = useRef(() => {});
+  cancel.current = () => {
+    const current = edit.current;
+    const { restore } = current;
+    current.pending = null;
+    current.restore = null;
+    current.cancelled = true;
+    setDraft(null);
+    restore?.();
+  };
   finish.current = () => {
     const current = edit.current;
     const next = current.pending;
@@ -129,11 +141,21 @@ function useSliderEdit({
     const blurred = (event: Event) => {
       if (isSlider(event.target) && !edit.current.dragging) finish.current();
     };
+    // The window losing focus mid-drag cancels it: the release may never reach the page.
+    const deactivated = (event: Event) => {
+      if (event.type === 'blur' && event.target !== window) return;
+      if (event.type === 'visibilitychange' && document.visibilityState !== 'hidden') return;
+      if (edit.current.dragging) cancel.current();
+    };
     element.addEventListener('change', changed);
     element.addEventListener('focusout', blurred);
+    window.addEventListener('blur', deactivated);
+    document.addEventListener('visibilitychange', deactivated);
     return () => {
       element.removeEventListener('change', changed);
       element.removeEventListener('focusout', blurred);
+      window.removeEventListener('blur', deactivated);
+      document.removeEventListener('visibilitychange', deactivated);
     };
   }, []);
   const change = (next: number) => {
@@ -160,26 +182,30 @@ function useSliderEdit({
       const current = edit.current;
       current.cancelled = false;
       current.dragging = true;
-      window.addEventListener('pointerup', () => edit.current.dragging && finish.current(), {
-        once: true,
-      });
+      window.addEventListener(
+        'pointerup',
+        () => {
+          if (!edit.current.dragging) return;
+          if (edit.current.cancelled) {
+            edit.current.dragging = false;
+            edit.current.cancelled = false;
+          } else finish.current();
+        },
+        { once: true },
+      );
       if (mixed && draft === null) change(least);
     },
     onKeyDown: (event: KeyboardEvent) => {
       if (!isSlider(event.target)) return;
       const current = edit.current;
       if (event.key !== 'Escape') {
-        current.cancelled = false;
+        // A key starts a new edit only once no cancelled drag is still held.
+        if (!current.dragging) current.cancelled = false;
         return;
       }
       if (current.pending === null && !current.restore) return;
       event.preventDefault();
-      const { restore } = current;
-      current.pending = null;
-      current.restore = null;
-      current.cancelled = true;
-      setDraft(null);
-      restore?.();
+      cancel.current();
     },
   };
 }
@@ -278,12 +304,25 @@ function SwitchRow({
   mixed: boolean;
   onChange: (checked: boolean) => void;
 }) {
+  const mixedId = useId();
+  // The ui Switch's markup, described by the visible Mixed: a switch role has no mixed state.
+  const on = checked && !mixed;
   return (
     <div className="appearance-row">
       <span>{title}</span>
       <span className="refine-switch">
-        {mixed ? <small>Mixed</small> : null}
-        <Switch label={label} checked={checked && !mixed} onChange={onChange} />
+        {mixed ? <small id={mixedId}>Mixed</small> : null}
+        <button
+          type="button"
+          role="switch"
+          aria-label={label}
+          aria-checked={on}
+          aria-describedby={mixed ? mixedId : undefined}
+          className={`toggle ${on ? 'on' : ''}`}
+          onClick={() => onChange(!on)}
+        >
+          <span />
+        </button>
       </span>
     </div>
   );

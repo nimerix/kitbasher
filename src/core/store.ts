@@ -5646,6 +5646,15 @@ const refineSolves = new WeakMap<
   { mesh: RefineMesh; input: unknown; solve: EdgeSolve | RegionSolve | null }
 >();
 
+/**
+ * The latest solve of each proposal (same keys) and the model it was made over, on the model's
+ * own surface or on a draft built from it: what the preview last showed, for display.
+ */
+const latestSolves = new WeakMap<
+  object,
+  { model: RefineMesh; input: unknown; solve: EdgeSolve | RegionSolve | null }
+>();
+
 const sameSolveInput = (a: unknown, b: unknown) => {
   if (a === b) return true;
   const [x, y] = [a as EdgeInput, b as EdgeInput];
@@ -5669,8 +5678,10 @@ function solveProposal<P extends RefineProposal>(
   type Solve = (P extends { type: 'edge' } ? EdgeSolve : RegionSolve) | null;
   const key = proposal.type === 'edge' ? proposal.input.segments : proposal;
   const cached = refineSolves.get(key);
-  if (cached?.mesh === mesh && sameSolveInput(cached.input, proposal.input))
+  if (cached?.mesh === mesh && sameSolveInput(cached.input, proposal.input)) {
+    latestSolves.set(key, { model: model.mesh, input: proposal.input, solve: cached.solve });
     return cached.solve as Solve;
+  }
   const { edge, region } = refineCode!;
   const solve =
     proposal.type === 'edge'
@@ -5678,6 +5689,7 @@ function solveProposal<P extends RefineProposal>(
       : region.solveRegion(mesh, model.topology, proposal.input, model.noise);
   // Only a solve on a model's own surface can be asked for again.
   if (mesh === model.mesh) refineSolves.set(key, { mesh, input: proposal.input, solve });
+  latestSolves.set(key, { model: model.mesh, input: proposal.input, solve });
   return solve as Solve;
 }
 
@@ -6176,10 +6188,17 @@ export function drawingRefineGuide(refine: RefineSession) {
   return guide && (refine.drawing || !solvable(guide.feature.input)) ? guide.id : null;
 }
 
-/** The solve last made for a pending feature on the working surface, or null; for display. */
+/**
+ * The latest solve of a pending feature's current input over the working surface, as the preview
+ * last made it (on a draft when features before it moved the surface), or null; for display.
+ */
 export function refineSolved(refine: RefineSession, feature: RefineFeature) {
   const proposal = feature.feature;
-  const cached = refineSolves.get(proposal.type === 'edge' ? proposal.input.segments : proposal);
+  const key = proposal.type === 'edge' ? proposal.input.segments : proposal;
+  const latest = latestSolves.get(key);
+  if (latest && latest.model === refine.model?.mesh && sameSolveInput(latest.input, proposal.input))
+    return latest.solve;
+  const cached = refineSolves.get(key);
   return cached &&
     cached.mesh === refine.model?.mesh &&
     sameSolveInput(cached.input, proposal.input)

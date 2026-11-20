@@ -18,7 +18,10 @@ import {
   targetKey,
   withEnd,
 } from '../../src/components/refine-panel';
-import type { EdgeSolve } from '../../src/core/refine-edge';
+import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
+import { applyEdge, solveEdge, type EdgeInput, type EdgeSolve } from '../../src/core/refine-edge';
+import { cloneRefineMesh } from '../../src/core/refine-mesh';
+import { softBox } from '../helpers/soft-edges';
 import {
   drawingRefineGuide,
   refineDraftLimit,
@@ -351,6 +354,38 @@ describe('Refine store helpers for the panel and keys', () => {
     editor().setRefineEdge({}, { [session().selected[0]]: { ends: ['hold', null] } });
     expect(edge().ends).toEqual(['hold', null]);
     expect(session().edge.ends).toEqual([null, null]);
+  });
+
+  it('reads the latest solve as previewed, made on the draft after an earlier edge', async () => {
+    const geometry = mergeGeometries([
+      softBox([2, 1.5, 1], 0.3),
+      softBox([2, 1.5, 1], 0.25).translate(6, 0, 0),
+    ]);
+    setup([boxPart({ geometry })], ['box']);
+    await ready();
+    for (const [x, radius] of [
+      [0, 0.3],
+      [6, 0.25],
+    ]) {
+      editor().selectRefine([]);
+      const cut = radius * (1 - Math.SQRT1_2);
+      for (const dx of [-1.2, 1.2])
+        editor().addRefinePoint(surfacePoint([x + dx, 1.5 - cut, 1 - cut]));
+    }
+    editor().selectRefine(session().features.map((f) => f.id));
+    editor().setRefineEdge({ ends: ['hold', null] });
+    const { model, features } = session();
+    const { mesh, topology, noise } = model!;
+    const draft = cloneRefineMesh(mesh, false);
+    const expected = features.map(({ feature }, index) => {
+      const input = feature.input as EdgeInput;
+      const solve = solveEdge(index ? draft : mesh, topology, input, noise)!;
+      if (!index) applyEdge(draft, topology, solve, input.strength, false);
+      return solve.width;
+    });
+    expect(expected[0]).not.toBeCloseTo(expected[1], 3);
+    const solved = features.map((f) => (refineSolved(session(), f) as EdgeSolve).width);
+    expect(solved).toEqual(expected);
   });
 
   it('reads the solve the draft made, with the ends it chose', async () => {
