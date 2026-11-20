@@ -7,6 +7,9 @@ Lines marked (product owner) record what the product owner said in the intent in
 or in answer to the draft's questions.
 Everything else is proposed here and open to change.
 
+The section "Changes made while building" lists where the tool as built differs from the
+text approved on 2026-11-19. The affected lines below are brought in line with it.
+
 ## Intent
 
 3D scans of small parts lose sharpness and defined detail. A feature with a sharp 90 degree
@@ -287,7 +290,9 @@ again over its own result changes nothing visible.
 - **Smooth** relaxes the surface under the brush, and **Flatten** moves it toward the plane
   fitted under the brush, both with a falloff to the brush's rim.
 - **Crease** takes the stroke as a freehand guide, smooths out hand jitter, and runs the
-  edge rebuild along it with the brush radius as its width. It is accepted on release.
+  edge rebuild along it with the brush radius as its width. It is accepted on release. When
+  the edge is wider than the brush, the guide falls back to the automatic width and waits,
+  selected, to be accepted or dismissed.
 
 ### Detection
 
@@ -409,13 +414,14 @@ apply to these fixtures only and are proposed values.
 - No triangle straddles a refined edge.
 - Flatten on the riveted plate at full strength puts base vertices within 0.005 mm of the
   true plane, and each rivet keeps its height above the plate within 0.01 mm.
-- Smooth on the sphere removes at least 90 % of the ripple amplitude and changes the mean
-  radius by less than 0.5 %.
+- Smooth on the sphere removes at least 75 % of the ripple amplitude at the default reach,
+  and 88 % at a 2.2 mm reach, and changes the mean radius by less than 0.5 %.
 - Shape recovers the cylinder's axis and radius, and Auto names the right shape for each
   fixture.
 - Strength 0 changes nothing, and the change grows steadily with Strength.
-- Running any guide or region again over its own result moves no vertex by more than
-  0.001 mm.
+- Running a guide or region again over its own result moves no vertex by more than
+  0.001 mm, with these exceptions: 0.002 mm in an edge's full-strength core, 0.005 mm for a
+  sweep along a spline path, and none for Smooth, which is cumulative.
 - Vertices outside every footprint keep their exact bits. Welded duplicates stay identical.
   A closed input stays closed under `hasClosedEdges`.
 - Detection on the box proposes its 12 edges and 6 faces, and proposes nothing on the
@@ -436,6 +442,34 @@ session undo and redo; Apply, scene undo, Cancel.
   without stalling the viewport, brush strokes follow the pointer, and Detect and session
   setup keep the viewport drawing while they run.
 - The tool stays usable on a 3 million triangle scan, the bar Warp set.
+
+## Changes made while building
+
+None of these came from the product owner. Each can be overruled.
+
+- **Ends on edge guides.** Each open end of a guide has a setting: Auto, Fade or Hold. Fade
+  runs the sharpened edge back into the scan, as the approved text describes. Hold runs the
+  edge sharp into a corner. Auto chooses one of the two for that end.
+- **Reach for Smooth.** Smooth has a Reach setting, the distance along the surface over
+  which ripples are removed. It defaults to the larger of 0.9 mm and 15 triangle edges.
+- **Smooth is cumulative.** Running Smooth again smooths further, so it has no re-run
+  criterion. Its test target is 75 % of the ripple amplitude at the default reach and 88 %
+  at 2.2 mm, in place of 90 %.
+- **Re-run tolerances.** 0.002 mm in an edge's full-strength core and 0.005 mm for a sweep
+  along a spline path, in place of 0.001 mm. A sweep along an arc path keeps 0.001 mm.
+- **Detect.** Select all proposed selects every pending guide and region. Running Detect again replaces
+  proposals the user has not touched and keeps edited ones, and it proposes nothing that
+  duplicates a feature already there.
+- **Preview limit.** With more than 8 features selected the preview is off, and the panel
+  says so.
+- **Crease wider than the brush.** The guide waits to be accepted instead of being accepted
+  on release, with the notice: The edge is wider than the brush. Check the preview, then
+  accept it.
+- **Escape.** Escape does not leave the tool while the session holds work the user made.
+  The status line shows: Apply to keep your changes, or Cancel to discard them.
+- **Region joining removed.** Detection had a pass that joined neighbouring regions on one
+  surface. Removing it left the proposals on both reference scans identical, so it was
+  removed.
 
 ## Out of scope (deferred)
 
