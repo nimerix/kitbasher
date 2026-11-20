@@ -18,7 +18,7 @@ import { chooseTransformTool, executeEditorCommand, shortcutCommand } from '../c
 import { isEditableTarget, keyboardContextMenu } from '../core/context-menu';
 import { actionRepeats, keyName, matchKeyAction } from '../core/keybindings';
 import { usePreferences } from '../core/preferences';
-import { refineTargets } from '../components/refine-panel';
+import { refineHoldsWork, refineTargets } from '../components/refine-panel';
 
 /** Key actions that choose a tool. */
 export const keyTools = {
@@ -34,7 +34,8 @@ export const keyTools = {
 /**
  * What Escape, Delete and Enter do in the Refine tool. Escape dismisses the guide being drawn in
  * Edge mode and lets go of (deselects, never dismisses) a crease guide waiting in Brush mode;
- * otherwise it returns false and the tool is left. Delete dismisses and Enter accepts the mode's
+ * otherwise, unless the session holds work leaving would lose, it returns false and the tool is
+ * left. Delete dismisses and Enter accepts the mode's
  * targets; Enter first finishes a spline being drawn. Without a ready session they do nothing,
  * and Delete never reaches the scene's parts.
  */
@@ -47,7 +48,9 @@ export function refineKey(
     const guide = refine?.mode === 'edge' && drawingRefineGuide(refine);
     if (guide) state.dismissRefine([guide]);
     else if (refine?.mode === 'brush' && refineTargets(refine).length) state.selectRefine([]);
-    else return false;
+    // Leaving would discard the session; with work in it Escape stays (the status line says how
+    // to leave), and only an empty or untouched session lets the tool go.
+    else if (!refine || !refineHoldsWork(refine)) return false;
     return true;
   }
   if (!refine) return true;

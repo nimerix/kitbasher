@@ -50,6 +50,7 @@ import {
   X,
 } from 'lucide-react';
 import { liveHost, liveSession, useEditor, type RefineMode, type WarpGizmo } from './core/store';
+import { refineHoldsWork, refineLeaveHint } from './components/refine-panel';
 import {
   chooseTransformTool,
   downloadCurrentScene,
@@ -652,6 +653,10 @@ function StatusBar() {
           ? 'building'
           : s.refine.mode
         : undefined,
+    ),
+    // Escape keeps the tool while leaving would lose work, so the hint says how to leave.
+    refineWork = useEditor(
+      (s) => s.tool === 'refine' && s.refine?.stage === 'ready' && refineHoldsWork(s.refine),
     );
   const hold = useShortcut('holdOrbit'),
     cancel = useShortcut('cancel'),
@@ -685,7 +690,7 @@ function StatusBar() {
                   : surfacePainting
                     ? `Drag to paint · Alt erases${smaller || larger ? ` · ${[smaller, larger].filter(Boolean).join(' / ')} brush size` : ''} · ${orbitHint} orbits`
                     : refineMode
-                      ? refineHints(refineMode, smaller, larger)
+                      ? `${refineHints(refineMode, smaller, larger)}${refineWork ? ` ${refineLeaveHint}` : ''}`
                       : warpStage === 'warp'
                         ? warpAdd === 'line'
                           ? `Drag on the surface to draw a line · Esc discards it · ${orbitHint} orbits`

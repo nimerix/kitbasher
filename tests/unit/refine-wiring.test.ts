@@ -12,6 +12,8 @@ import {
   foldWarning,
   manualStart,
   manualStarts,
+  refineHoldsWork,
+  refineLeaveHint,
   refineTargets,
   shared,
   skippedWarning,
@@ -203,6 +205,39 @@ describe('Refine preview limit hint', () => {
   });
 });
 
+describe('Refine work that leaving would lose', () => {
+  const model = {};
+  const base: Record<string, unknown> = { start: model, model, triangles: [], features: [] };
+  const feature = (state: 'pending' | 'accepted', origin: 'hand' | 'detected', edited?: boolean) =>
+    ({ id: 'f', state, origin, ...(edited ? { edited } : {}) }) as RefineFeature;
+  const holds = (session: Record<string, unknown>) =>
+    refineHoldsWork({ ...base, ...session } as unknown as RefineSession);
+
+  it('counts accepted work not yet applied', () => {
+    expect(holds({ model: {}, features: [feature('accepted', 'hand')] })).toBe(true);
+  });
+  it('counts a pending feature the user drew or made', () => {
+    expect(holds({ features: [feature('pending', 'hand')] })).toBe(true);
+  });
+  it('counts a detected proposal the user edited', () => {
+    expect(holds({ features: [feature('pending', 'detected', true)] })).toBe(true);
+  });
+  it('counts painted triangles', () => {
+    expect(holds({ triangles: [4] })).toBe(true);
+  });
+  it('does not count an empty session', () => {
+    expect(holds({})).toBe(false);
+  });
+  it('does not count untouched detected proposals', () => {
+    expect(
+      holds({ features: [feature('pending', 'detected'), feature('pending', 'detected')] }),
+    ).toBe(false);
+  });
+  it('says how to leave in one sentence', () => {
+    expect(refineLeaveHint).toBe('Apply to keep your changes, or Cancel to discard them.');
+  });
+});
+
 describe('Refine panel targets', () => {
   const edge = (id: string, state: RefineFeature['state'] = 'pending', closed = false) =>
     ({
@@ -284,13 +319,14 @@ describe('Refine store helpers for the panel and keys', () => {
       return session().selected[0];
     };
     const state = (id: string) => session().features.find((f) => f.id === id)?.state;
-    // Escape lets go of it and keeps it; with nothing selected it is not Refine's to handle.
+    // Escape lets go of it and keeps it; a second Escape keeps the tool, since leaving would
+    // lose the guide.
     const first = pendingGuide();
     expect(refineKey(editor(), 'cancel')).toBe(true);
     expect(session().selected).toEqual([]);
     expect(state(first)).toBe('pending');
-    expect(refineKey(editor(), 'cancel')).toBe(false);
-    expect(editor().refine).not.toBeNull();
+    expect(refineKey(editor(), 'cancel')).toBe(true);
+    expect(session().features.map((f) => f.state)).toEqual(['pending']);
     // Delete dismisses it.
     editor().selectRefine([first]);
     refineKey(editor(), 'delete');
@@ -307,6 +343,36 @@ describe('Refine store helpers for the panel and keys', () => {
     const drawn = session().selected[0];
     expect(refineKey(editor(), 'cancel')).toBe(true);
     expect(state(drawn)).toBeUndefined();
+  });
+
+  it('keeps the tool on Escape in every mode while the session holds work, and only then', async () => {
+    setup([boxPart()], ['box']);
+    await ready();
+    const modes = ['edge', 'region', 'brush', 'detect'] as const;
+    // An empty session: Escape is not Refine's to handle, so the tool is left.
+    for (const mode of modes) {
+      editor().setRefineMode(mode);
+      expect(refineKey(editor(), 'cancel'), mode).toBe(false);
+    }
+    // Painted triangles, then a pending hand guide nobody has selected.
+    const works = [
+      () => useEditor.setState({ refine: { ...session(), triangles: [0, 1] } }),
+      () => {
+        useEditor.setState({ refine: { ...session(), triangles: [] } });
+        editor().setRefineMode('edge');
+        editor().addRefinePoint(crest(-1.2));
+        editor().addRefinePoint(crest(1.2));
+        editor().selectRefine([]);
+      },
+    ];
+    for (const work of works)
+      for (const mode of modes) {
+        work();
+        editor().setRefineMode(mode);
+        const before = session();
+        expect(refineKey(editor(), 'cancel'), mode).toBe(true);
+        expect(session(), mode).toBe(before);
+      }
   });
 
   it('says once that a feature does not solve, whatever other features do', async () => {

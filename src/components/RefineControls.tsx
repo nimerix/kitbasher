@@ -78,12 +78,25 @@ function currentTarget() {
 /** Whether a setting rendered for `target` may still write: the panel still edits that target. */
 const ownedBy = (target: string) => () => currentTarget() === target;
 
+/** Keys that change a range input's value. */
+const editingKeys = new Set([
+  'ArrowLeft',
+  'ArrowRight',
+  'ArrowUp',
+  'ArrowDown',
+  'PageUp',
+  'PageDown',
+  'Home',
+  'End',
+]);
+
 /**
  * One slider's edit. Unless `live`, a value is shown while dragged and set once, when let go or
  * changed by key; a blur during a drag waits for the release. A live edit sets each value and
  * remembers, through `begin`, how to put back what it started from. Escape cancels the edit (a
  * live one with one write back) and the rest of that drag is ignored; so is a value whose target
- * is no longer the panel's. A press on a mixed slider starts at `least`, the value it shows.
+ * is no longer the panel's, and a live drag whose control goes away is put back. A press on a
+ * mixed slider starts at `least`, the value it shows.
  */
 function useSliderEdit({
   owned,
@@ -205,9 +218,12 @@ function useSliderEdit({
       element.removeEventListener('focusout', blurred);
       window.removeEventListener('blur', deactivated);
       document.removeEventListener('visibilitychange', deactivated);
-      // A control that goes away, or whose target changed, drops its draft and its drag.
+      // A control that goes away, or whose target changed, drops its draft and its drag; a live
+      // drag it abandons is put back as it was before the drag began.
+      const { restore } = current;
       current.pending = null;
       current.restore = null;
+      restore?.();
       current.detach?.();
       current.detach = null;
       current.dragging = false;
@@ -245,9 +261,10 @@ function useSliderEdit({
       if (!isSlider(event.target)) return;
       const current = edit.current;
       if (event.key !== 'Escape') {
-        // A key ends a cancelled drag unless its pointer is known to be pressed still.
+        // A key that edits the slider ends a cancelled drag: the user has moved on from it. Any
+        // other key does so only once its pointer is no longer known to be pressed.
         if (!current.dragging) current.cancelled = false;
-        else if (current.cancelled && !current.held) release();
+        else if (current.cancelled && (editingKeys.has(event.key) || !current.held)) release();
         return;
       }
       if (current.pending === null && !current.restore) return;
