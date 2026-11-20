@@ -694,6 +694,8 @@ interface Part {
 const sameShare = 0.9;
 /** A flank refitted at a corner keeps clear of the other face by this many soft half-widths. */
 const cornerClear = 2;
+/** A vertex the band leaves out within this many local noises of a corrected surface joins the cut. */
+const asideLocal = 3;
 /** Rings of cells, each an edge length, searched for the cut vertices nearest a point. */
 const weightRings = 4;
 /** Snap fractions a path's cut tries, the cutter's own first. */
@@ -2101,8 +2103,67 @@ export function applyEdge(
     }
     if (sides === 3) stays.push(v);
   });
-  const vertices = Uint32Array.from([...cutting, ...stays]);
+  // A vertex the band leaves Beyond that lies beside the solved edge, within half the band's width of
+  // it, on one of the corrected surfaces (within 3 local of that side's flank), next to a cut vertex
+  // on the other side, and between the first and last places the cut already crosses, is where that
+  // surface runs: it joins the field where it stands, unmoved and unweighted, so the cut can bridge
+  // the stretch the band leaves out but never run past its ends or into a taper's foot.
+  const aside: number[] = [];
+  const asideField: number[] = [];
+  // The first and last stations along the edge where the cut already crosses (mesh edges between
+  // cut vertices on opposite sides of the field), found when first needed.
+  let crossed: number[] | undefined;
+  const crossedSpan = () => {
+    if (crossed) return crossed;
+    let [first, last] = [Infinity, -Infinity];
+    const crossing = new Float64Array(3);
+    for (const v of cutting) {
+      const i = indexOf.get(v)!;
+      for (let j = topology.neighbourStart[v]; j < topology.neighbourStart[v + 1]; j++) {
+        const u = topology.neighbours[j];
+        const k = indexOf.get(u);
+        if (u < v || k === undefined || !(weights[k] > cutWeight) || !(apartAt[i] * apartAt[k] < 0))
+          continue;
+        const station = closestOnCurve(
+          solve.curve,
+          (position[v * 3] + position[u * 3]) / 2,
+          (position[v * 3 + 1] + position[u * 3 + 1]) / 2,
+          (position[v * 3 + 2] + position[u * 3 + 2]) / 2,
+          crossing,
+        );
+        [first, last] = [Math.min(first, station), Math.max(last, station)];
+      }
+    }
+    return (crossed = [first, last]);
+  };
+  const along = new Float64Array(3);
+  const span = solve.curve.closed ? Infinity : curveLength(solve.curve);
+  frame.vertices.forEach((v, k) => {
+    if (frame.zone[k] !== BandZone.Beyond || frame.held[k]) return;
+    const sides = new Set<number>();
+    for (let j = topology.neighbourStart[v]; j < topology.neighbourStart[v + 1]; j++) {
+      const i = indexOf.get(topology.neighbours[j]);
+      if (i !== undefined && weights[i] > cutWeight) sides.add(Math.sign(apartAt[i]));
+    }
+    if (!sides.size) return;
+    const p = [position[v * 3], position[v * 3 + 1], position[v * 3 + 2]];
+    const station = closestOnCurve(solve.curve, p[0], p[1], p[2], along);
+    if (!solve.curve.closed && !(station > 0 && station < span)) return;
+    if (Math.hypot(p[0] - along[0], p[1] - along[1], p[2] - along[2]) > solve.width / 2) return;
+    const surface = surfaces(p[0], p[1], p[2]);
+    const d = [0, 1].map((side) => surface.distance(side, p[0], p[1], p[2]));
+    const side = d[1] < d[0] ? 1 : 0;
+    const local = solve.bands[frame.owner[k]].flanks[side].local;
+    if (!(d[side] <= asideLocal * local) || d[0] === d[1]) return;
+    if (!sides.has(Math.sign(d[1] - d[0]))) return;
+    // Only between crossings the cut already has, so it bridges a gap and never runs further.
+    if (!solve.curve.closed && !(station > crossedSpan()[0] && station < crossedSpan()[1])) return;
+    aside.push(v);
+    asideField.push(d[0] - d[1]);
+  });
+  const vertices = Uint32Array.from([...cutting, ...stays, ...aside]);
   const field = new Float32Array(vertices.length);
+  asideField.forEach((value, k) => (field[cutting.length + stays.length + k] = value));
   const cells = new Map<number, number[]>();
   const cellOf = (x: number, y: number, z: number) =>
     Math.imul(Math.floor(x / edge), 73856093) ^
@@ -2151,7 +2212,7 @@ export function applyEdge(
   };
 
   const on = new Float64Array(3);
-  const kept: number[] = [...stays];
+  const kept: number[] = [...stays, ...aside];
   for (const [v, i] of indexOf) if (frame.pinned[i]) kept.push(v);
   const keptAt = new Set(
     kept.map((v) => `${position[v * 3]},${position[v * 3 + 1]},${position[v * 3 + 2]}`),
