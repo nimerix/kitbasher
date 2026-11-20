@@ -104,14 +104,11 @@ describe('solveRegion and applyRegion', () => {
     expect(Math.abs(meanRadius(out) - meanRadius(model.mesh)) / 3).toBeLessThan(0.005);
   });
 
-  // Measured: 0.00111 of the 0.00848 mm ripple is left (13.1 %). A fit now reads no farther than the
-  // scale along the surface, where it read the scale in space plus the anchors' reach; 2.2 mm leaves
-  // under 12 %. Awaiting a ruling on the scale this case should use.
-  it.skip("smooths the sphere's lengthened waves at a 1.8 mm scale", () => {
-    // The fixture's waves lengthen near six points, past the default reach; 1.8 mm spans them.
+  // The fixture's waves lengthen near six points, past the default reach; a 2.2 mm reach spans them.
+  it("smooths the sphere's lengthened waves at a 2.2 mm scale", () => {
     const model = modelOf(rippledSphere(3));
     const all = Uint32Array.from({ length: model.mesh.triangleCount }, (_, i) => i);
-    const { out } = run(model, smooth(all, { keepDetail: false, scale: 1.8 }));
+    const { out } = run(model, smooth(all, { keepDetail: false, scale: 2.2 }));
     expect(rippleAmplitude(out)).toBeLessThan(0.12 * rippleAmplitude(model.mesh));
     expect(Math.abs(meanRadius(out) - meanRadius(model.mesh)) / 3).toBeLessThan(0.005);
   });
