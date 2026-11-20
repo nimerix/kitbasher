@@ -1,8 +1,10 @@
-# Restore: sharp edges and clean surfaces on scanned parts
+# Refine: sharp edges and clean surfaces on scanned parts
 
-Status: approved 2026-11-19. Date: 2026-11-19.
+Status: approved 2026-11-19, then revised the same day with the product owner's answers to
+its four questions. Date: 2026-11-19.
 
-Lines marked (product owner) record what the product owner said in the intent interview.
+Lines marked (product owner) record what the product owner said in the intent interview
+or in answer to the draft's questions.
 Everything else is proposed here and open to change.
 
 ## Intent
@@ -14,7 +16,7 @@ and a flatten or smooth brush for surfaces. That handles simple problems, but co
 features, such as long straight edges or edges that follow a curve, end up looking
 distorted. (product owner)
 
-Restore is one tool in Kitbasher for this job. It has four parts that work together
+Refine is one tool in Kitbasher for this job. It has four parts that work together
 (product owner):
 
 - **Guided edges.** Lay a line, arc or spline along a softened edge. The tool rebuilds the
@@ -58,7 +60,7 @@ is dense enough to hold a sharp edge.
 - Checking dimensional accuracy against a CAD original. Success is judged by eye.
   (product owner)
 - General sculpting beyond the three brushes named here (inflate, grab, clay and so on).
-- Headset support and MCP tools. Restore is desktop only, as Warp is
+- Headset support and MCP tools. Refine is desktop only, as Warp is
   (`src/xr/runtime.ts:230`).
 - Guides and regions that are saved with the scene and can be re-edited after Apply.
 - Changing Warp, Align or the remesher.
@@ -71,25 +73,25 @@ is dense enough to hold a sharp edge.
 - Flattening or smoothing away detail the user did not ask to remove.
 - Opening a hole or leaving a crack. A closed scan stays closed.
 - Making existing features slower, or changing export bytes for parts that were not
-  restored.
+  refined.
 
 ## Assumptions
 
 These fill gaps the interview did not cover. Correct any that are wrong.
 
-1. Restore works on one part at a time in a session with Apply and Cancel. Apply bakes the
+1. Refine works on one part at a time in a session with Apply and Cancel. Apply bakes the
    result into the mesh as one undo step. This follows Warp.
 2. Apply leaves pins, anchors, pivot, joints and plane constraints as they were, and moves
    no other part. This follows Warp (`docs/design.md:60`).
 3. "Laying out a line along a perimeter" means guides chain into paths: segments joined end
    to end, with corners, and closed loops.
-4. A restored edge is fully sharp. There is no option to leave a small radius.
-5. Detail that is recessed into a surface (a groove, a dent) is kept in the same way as
-   detail that protrudes from it.
+4. A refined edge is fully sharp. There is no option to leave a small radius.
+5. The detail offset measures deviation in either direction, so detail recessed into a
+   surface (a groove, a dent) is kept in the same way as detail that protrudes from it.
 6. The crease brush is a freehand guide: the dragged path marks the edge and its direction,
    and the same edge rebuild runs along it. The flatten and smooth brushes behave as in
    other apps and do not protect detail under them.
-7. A restored edge may add triangles along itself. Elsewhere the triangle count does not
+7. A refined edge may add triangles along itself. Elsewhere the triangle count does not
    change.
 8. The two scans and reference photos stay outside the repository.
 
@@ -103,13 +105,13 @@ These fill gaps the interview did not cover. Correct any that are wrong.
 - Geometry can be indexed or non-indexed. Welding uses `weldedPositionIndex` at 1e-5
   (`src/core/mesh-topology.ts:5`), and every duplicate of a welded vertex must receive
   identical bits, or unindexed scans crack.
-- Undo history has a byte budget of 1 GiB (`src/core/history-budget.ts:4`). A restored part
+- Undo history has a byte budget of 1 GiB (`src/core/history-budget.ts:4`). A refined part
   is one step in it.
 - `faceAdjacency` (`src/core/surfaces.ts:22`) runs on the main thread and is slow on very
   large meshes (12.6 s at 10 million triangles, `docs/verification.md`). Session setup
   belongs in a worker, as Warp's is (`src/core/warp-job.ts`).
 - Warp does not change topology today, so nothing in the editor yet inserts vertices into a
-  mesh while keeping it closed. Restore is the first tool that needs to.
+  mesh while keeping it closed. Refine is the first tool that needs to.
 - The browser build has no general sparse solver. `ml-matrix` is dense and suits small
   fits. Warp's conjugate gradient solver (`src/core/warp-solve.ts:480`) is specific to its
   grid.
@@ -152,7 +154,7 @@ accepted, then baked into the session's working surface, with session undo to st
 (2) A stack of features re-evaluated from the scan on every change. (3) Features saved with
 the scene. **Chosen: 1.** Brush strokes cannot be re-evaluated in a stack without an order
 that surprises the user, and every edit would cost the whole stack. Option 3 needs a scene
-format change and doubles a restored scan's share of the file, as the Warp design found.
+format change and doubles a refined scan's share of the file, as the Warp design found.
 
 **The crease brush.** (1) A classic pinch that pulls vertices toward the stroke. (2) A
 freehand guide that runs the edge rebuild along the stroke. **Chosen: 2.** Option 1 is the
@@ -163,14 +165,15 @@ the edge and its direction, the same as a line does.
 
 ### User experience
 
-Restore is a tool in the tool strip with an inspector panel. Select one part and choose it.
+Refine is a tool in the tool strip with an inspector panel. Select one part and choose it.
 
 ```
-  ┌ Restore ───────────────────────────────┐
+  ┌ Refine ───────────────────────────────┐
   │ [Edge] [Region] [Brush] [Detect]       │
   │                                        │
   │ Edge     ◉ Line  ○ Arc  ○ Spline       │
   │ Width    ───●──────────  0.60 mm       │
+  │ Strength ──────────●───  100 %         │
   │ Joints   ◉ Sharp ○ Smooth              │
   │ [Dismiss]                   [Accept]   │
   │────────────────────────────────────────│
@@ -198,7 +201,9 @@ accepts, brush strokes and edits. These steps are session-local, as in Warp.
 4. Points can be dragged along the surface, added and deleted. Width sets how far to either
    side the tool reads and rebuilds. It starts from the tool's own estimate of how wide the
    softened band is.
-5. Accept, or Dismiss.
+5. **Strength** sets how loosely the edge follows the guide's line, arc or spline, from no
+   change to fully on it. (product owner)
+6. Accept, or Dismiss.
 
 #### Region
 
@@ -208,14 +213,14 @@ accepts, brush strokes and edits. These steps are session-local, as in Warp.
    - **Smooth** removes ripples and imperfections and keeps the scan's curvature, like a
      smooth brush in other apps.
    - **Flatten** snaps the area to a true plane.
-   - **Shape** snaps the area to a cylinder, cone, sphere or sweep. Auto picks the one that
-     fits best and names it, and the user can override it. Sweep is how this spec reads
-     "follow an arc" (see Open questions).
+   - **Shape** snaps the area to a cylinder, cone or sphere. Auto picks the one that fits
+     best and names it, and the user can override it.
 3. **Strength** sets how loosely the area follows the treatment, from no change to fully
    on the shape.
 4. **Keep detail** is on by default. Detail standing off the fitted surface is outlined in
-   the preview and survives. A threshold sets how far off the surface counts as detail.
-   Erasing paint from a spot leaves that spot untouched.
+   the preview and survives. **Offset** sets how far a feature must deviate from the
+   surface to be preserved. (product owner) Erasing paint from a spot leaves that spot
+   untouched.
 5. **Blend** sets the width of the band at the region's border where the change fades out,
    so the region does not end in a step.
 6. Accept, or Dismiss.
@@ -333,13 +338,13 @@ PR_TITLE='<title>' PR_BODY_FILE='<body-file>' node scripts/check-pull-request.mj
 ## Project structure
 
 ```
-src/core/restore-*.ts          fitting, edge rebuild, regions, brushes, detection, session
-src/core/restore-*.worker.ts   session setup and detection off the main thread
-src/components/Restore*.tsx    panel, guide and region drawing, overlays
+src/core/refine-*.ts          fitting, edge rebuild, regions, brushes, detection, session
+src/core/refine-*.worker.ts   session setup and detection off the main thread
+src/components/Refine*.tsx    panel, guide and region drawing, overlays
 src/core/store.ts              session state and actions, beside Warp's
-src/core/types.ts              'restore' added to Tool
-tests/unit/restore-*.test.ts   unit tests
-tests/e2e/restore*.spec.ts     Playwright
+src/core/types.ts              'refine' added to Tool
+tests/unit/refine-*.test.ts   unit tests
+tests/e2e/refine*.spec.ts     Playwright
 tests/helpers/soft-edges.ts    synthetic softened fixtures
 src/docs/                      a guide, and a changelog entry in changelog.ts
 docs/design.md                 the acceptance line for the tool
@@ -364,9 +369,9 @@ export function hasClosedEdges(
 
 ## Boundaries
 
-- **Always:** run `npm test`, the Restore Playwright specs, `npm run format:check` and
+- **Always:** run `npm test`, the Refine Playwright specs, `npm run format:check` and
   `npm run build` before each commit, since CI does not run tests. Add a changelog entry.
-  Keep existing benchmarks no slower and exports of unrestored parts bit-identical.
+  Keep existing benchmarks no slower and exports of unrefined parts bit-identical.
 - **Ask first:** adding a dependency; changing the scene format; changing anything under
   `mcp/` or `native/`; changing how Warp or Align behave while sharing their code.
 - **Never:** write into `part.geometry` before Apply; move a vertex outside a shown
@@ -376,7 +381,7 @@ export function hasClosedEdges(
 
 ### Success criteria
 
-The acceptance test is the product owner's eye (product owner): parts 45 and 57, restored
+The acceptance test is the product owner's eye (product owner): parts 45 and 57, refined
 entirely in Kitbasher, compared with their reference photos. Long straight edges are
 straight, curved edges are clean, flat plates are flat, the tanks have no ripples, and
 rivets and other small detail are intact. No tolerance is measured on the real parts.
@@ -398,7 +403,7 @@ apply to these fixtures only and are proposed values.
 - An arc guide on the cylinder's rim puts every edge vertex within 0.02 mm of the true
   circle.
 - A closed four-segment path around a box face meets at four corners with no gap.
-- No triangle straddles a restored edge.
+- No triangle straddles a refined edge.
 - Flatten on the riveted plate at full strength puts base vertices within 0.005 mm of the
   true plane, and each rivet keeps its height above the plate within 0.01 mm.
 - Smooth on the sphere removes at least 90 % of the ripple amplitude and changes the mean
@@ -433,17 +438,20 @@ session undo and redo; Apply, scene undo, Cancel.
 
 - Guides and regions saved with the scene and re-editable after Apply. Needs a scene format
   change.
-- Leaving a chosen radius or chamfer on a restored edge. Not asked for.
+- Leaving a chosen radius or chamfer on a refined edge. Not asked for.
 - Headset and MCP support. Follows Warp.
-- Restoring several parts in one session. One part at a time keeps Apply's guards simple.
+- Refining several parts in one session. One part at a time keeps Apply's guards simple.
+- Snapping a region to a tube or other section carried along a curve, for pipe elbows and
+  hoses. Not asked for; Smooth covers them.
 
 ## Open questions
 
-None open. The spec was approved as written, so its readings of the four questions it
-raised stand:
+None open. The product owner answered the four questions the draft raised:
 
-1. **"Follow an arc" for a region** is Sweep: a constant cross-section carried along an arc
-   or spline.
-2. **Recessed detail** inside a flattened region is kept, like rivets are (assumption 5).
-3. **After Apply**, guides and regions are baked and gone, as with Warp (assumption 1).
-4. **Name.** The tool is called Restore.
+1. **"Follow an arc"** is about edges, not regions: it is a constant spline that represents
+   the edge of the corner. The guide's arc and spline kinds cover it, and Strength is its
+   looseness. The Sweep shape the draft proposed for regions is removed.
+2. **Preserved detail** is controlled by an offset: how far a feature deviates from the
+   surface decides whether it is preserved.
+3. **After Apply**, guides and regions are baked and gone, as with Warp.
+4. **Name.** The tool is called Refine.
