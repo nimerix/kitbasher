@@ -35,6 +35,8 @@ const exact = 1e-9;
 const confidence = 0.999;
 /** Most points a seed candidate is scored on. */
 const scoringPoints = 4096;
+/** Share of all points within the noise that ends the seed search before every draw is scored. */
+const settling = 0.9;
 
 /** Eigenvalues ascending and their unit eigenvectors (row i for value i) of a symmetric 3x3. */
 function eigen3(matrix: ArrayLike<number>) {
@@ -339,26 +341,34 @@ function subsets(n: number, k: number) {
  * the least median absolute residual. Candidates are scored on the points at `order` and samples
  * are drawn from them: enough to find a surface that holds half of them with the chance
  * `confidence`, or every sample when that is fewer, so a minority off the surface cannot move it.
- * Drawing stops once a candidate keeps more than half of all points within the noise.
+ * Drawing stops early only once a candidate keeps more than `settling` of all points within the
+ * noise. A candidate `refused` on the scored points can never be the start.
  */
 function robust<M extends Scorer>(
   cloud: Cloud,
   noise: number,
   fitter: Fitter<M>,
   order: Uint32Array,
+  refused: (cloud: Cloud, candidate: Fitted) => boolean,
 ): Fitted | null {
   const { count } = cloud;
   const model = fitter.model(cloud);
   const scored = subset(cloud, order);
   const scorer = fitter.model(scored);
   const distance = new Float64Array(scored.count),
-    full = scored.count < count ? new Float64Array(count) : null;
+    full = scored.count < count ? new Float64Array(count) : null,
+    scoredWeight = new Float64Array(scored.count),
+    scoredAbsolute = new Float64Array(scored.count);
   const confirmed = (candidate: Float64Array) => {
     if (!full) return true;
     model.residuals(candidate, full);
     let near = 0;
     for (let i = 0; i < count; i++) if (Math.abs(full[i]) <= noise) near++;
-    return 2 * near > count;
+    return near > settling * count;
+  };
+  const allowed = (candidate: Float64Array) => {
+    reweight(distance, noise, scoredWeight, scoredAbsolute);
+    return !refused(scored, { state: candidate, inward: false, weight: scoredWeight });
   };
   let state: Float64Array | null = null,
     least = Infinity,
@@ -374,13 +384,13 @@ function robust<M extends Scorer>(
         if (distance[i] <= noise) near++;
         if (distance[i] < least) below++;
       }
-      if (2 * near > scored.count) {
-        // A majority of the sample alone can be a minority of the cloud.
-        if (!confirmed(candidate)) continue;
-        settled = true;
-      }
       // The median is below the least so far only when more than half of the values are.
-      if (below > (scored.count - 1) >> 1) {
+      const better = below > (scored.count - 1) >> 1;
+      // Nearly all of the sample alone can be far fewer of the cloud.
+      const settles = near > settling * scored.count && confirmed(candidate);
+      if (!(better || settles) || !allowed(candidate)) continue;
+      if (settles) settled = true;
+      if (better) {
         least = median(distance);
         state = candidate;
       }
@@ -396,6 +406,7 @@ function robust<M extends Scorer>(
   if (half >= size) {
     let p = 1;
     for (let i = 0; i < size; i++) p *= (half - i) / (n - i);
+    // The 0.999 chance is stated for clouds of at least 4 * size points.
     const draws = p < 1 ? Math.ceil(Math.log(1 - confidence) / Math.log(1 - p)) : 1;
     if (subsets(n, size) <= draws) {
       for (let k = 0; k < size; k++) picked[k] = k;
@@ -767,16 +778,14 @@ function fitKind(
     cylinder: cylinderFitter,
     cone: coneFitter,
   }[kind];
-  const fitted = robust(cloud, scaled, fitter, order);
+  const refused = (points: Cloud, candidate: Fitted) =>
+    kind !== 'plane' &&
+    flatness(points, kind, candidate) < scaled &&
+    !normalsResolve(points, kind, candidate);
+  const fitted = robust(cloud, scaled, fitter, order, refused);
   if (!fitted) return null;
   const shape = shapeOf(kind, cloud, fitted.state, fitted.inward);
-  if (!shape) return null;
-  if (
-    kind !== 'plane' &&
-    flatness(cloud, kind, fitted) < scaled &&
-    !normalsResolve(cloud, kind, fitted)
-  )
-    return null;
+  if (!shape || refused(cloud, fitted)) return null;
   let sum = 0,
     kept = 0,
     near = 0;
@@ -798,7 +807,8 @@ function fitKind(
  * noise the points do not define the curvature, and the fit would only chase it.
  */
 function flatness(cloud: Cloud, kind: ShapeKind, fitted: Fitted) {
-  const local = shapeOf(kind, { ...cloud, centre: [0, 0, 0], scale: 1 }, fitted.state, false)!;
+  const local = shapeOf(kind, { ...cloud, centre: [0, 0, 0], scale: 1 }, fitted.state, false);
+  if (!local) return Infinity;
   const projected = new Float32Array(3);
   const sum = [0, 0, 0],
     products = new Float64Array(9);

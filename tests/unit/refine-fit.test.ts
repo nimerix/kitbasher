@@ -273,6 +273,25 @@ describe('fitAuto', () => {
     expect(fit.support).toBeGreaterThan(fitShape(...sample, 'plane', 0.004)!.support);
   });
 
+  it('keeps scoring seeds past a near-flat cylinder that holds a majority', () => {
+    const sample = tangentPatch(600, 400, 9, 0.62, 100);
+    const indices = Array.from({ length: sample[0].length / 3 }, (_, i) => i);
+    // Each row holds 6 cylinder points, then 4 plane points.
+    const orders = {
+      reversed: [...indices].reverse(),
+      'plane first': [...indices.filter((i) => i % 10 >= 6), ...indices.filter((i) => i % 10 < 6)],
+    };
+    const fit = fitAuto(...sample, 0.004);
+    expect(fit.shape.kind).toBe('cylinder');
+    for (const [name, order] of Object.entries(orders)) {
+      const other = fitAuto(...reordered(sample, order), 0.004);
+      expect(other.shape.kind, name).toBe('cylinder');
+      const [a, b] = [shapeParameters(fit.shape), shapeParameters(other.shape)];
+      for (let k = 0; k < a.length; k++) expect(Math.abs(a[k] - b[k]), name).toBeLessThan(1e-6);
+    }
+    expect(fitAuto(...tangentPatch(400, 600, 9, 0.62, 100), 0.004).shape.kind).toBe('plane');
+  });
+
   it('gives the same shape for points in either order', () => {
     const samples = [
       topFace(rivetedPlate().geometry),
