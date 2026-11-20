@@ -1602,3 +1602,66 @@ export function seamMove(
   }
   return worst;
 }
+
+/**
+ * Clicked points at the four corners of the crests around the top face of softBox(half, fillet), in
+ * order around the face: (+x, +z), (+x, -z), (-x, -z), (-x, +z).
+ */
+export function topCrestCorners(mesh: RefineMesh, half: Vec3 = [2, 1.5, 1], fillet = 0.3) {
+  const crest = fillet - fillet / Math.SQRT2;
+  const [x, y, z] = half.map((h) => h - crest);
+  return (
+    [
+      [x, y, z],
+      [x, y, -z],
+      [-x, y, -z],
+      [-x, y, z],
+    ] as Vec3[]
+  ).map((p) => pointOn(mesh, p));
+}
+
+/** Distance from `point` to the nearest vertex of `chain`. */
+export function nearestChainDistance(mesh: RefineMesh, chain: Uint32Array, point: Vec3) {
+  let nearest = Infinity;
+  for (const v of chain)
+    nearest = Math.min(
+      nearest,
+      Math.hypot(...[0, 1, 2].map((a) => mesh.position[v * 3 + a] - point[a])),
+    );
+  return nearest;
+}
+
+/**
+ * The connected pieces of the graph of mesh edges joining two `chain` vertices: each piece's size
+ * and how many of its vertices have one such edge, or -1 ends when a vertex has more than two.
+ */
+export function chainPieces(mesh: RefineMesh, chain: Uint32Array) {
+  const on = new Set(chain);
+  const next = new Map([...chain].map((v) => [v, new Set<number>()]));
+  const corners = weldedCorners(mesh);
+  for (let c = 0; c < corners.length; c++) {
+    const a = corners[c],
+      b = corners[c % 3 === 2 ? c - 2 : c + 1];
+    if (a !== b && on.has(a) && on.has(b)) {
+      next.get(a)!.add(b);
+      next.get(b)!.add(a);
+    }
+  }
+  const seen = new Set<number>();
+  const pieces: { size: number; ends: number }[] = [];
+  for (const start of chain) {
+    if (seen.has(start)) continue;
+    const piece = [start];
+    seen.add(start);
+    for (let i = 0; i < piece.length; i++)
+      for (const w of next.get(piece[i])!)
+        if (!seen.has(w)) {
+          seen.add(w);
+          piece.push(w);
+        }
+    const degrees = piece.map((v) => next.get(v)!.size);
+    const ends = degrees.some((d) => d > 2) ? -1 : degrees.filter((d) => d < 2).length;
+    pieces.push({ size: piece.length, ends });
+  }
+  return pieces;
+}

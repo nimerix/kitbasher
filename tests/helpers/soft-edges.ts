@@ -863,3 +863,84 @@ export function heightField(
       surface.quad(index[i][j], index[i][j + 1], index[i + 1][j + 1], index[i + 1][j]);
   return surface.geometry();
 }
+
+/**
+ * A closed outline extruded y 0..height with its top rim filleted and its bottom rim sharp. The
+ * outline is a counter-clockwise path in (x, -z); built extruded along z, then turned so z is y.
+ */
+function extrudedOutline(outline: Path, height: number, fillet: number, options?: SoftOptions) {
+  const surface = new Surface(options);
+  const { step } = surface.options;
+  // The wall's profile in (outward offset, height): up the wall, round the rim, in over the top.
+  const profile = filletedPath(
+    [
+      [0, 0],
+      [0, height],
+      [-0.5, height],
+    ],
+    fillet,
+    false,
+  );
+  const columns = Math.round(outline.length / step),
+    rows = Math.max(2, Math.round(profile.length / step));
+  const grid: number[][] = [];
+  for (let i = 0; i <= rows; i++) {
+    const rim = i === 0 || i === rows;
+    const { point: offset, normal: across } = profile.at(
+      (i + (rim ? 0 : surface.wobble())) * (profile.length / rows),
+    );
+    const row: number[] = [];
+    for (let j = 0; j < columns; j++) {
+      const { point, normal } = outline.at(((j + surface.wobble()) * outline.length) / columns);
+      row.push(
+        surface.add(
+          [point[0] + normal[0] * offset[0], point[1] + normal[1] * offset[0], offset[1]],
+          [normal[0] * across[0], normal[1] * across[0], across[1]],
+          i === 0,
+        ),
+      );
+    }
+    grid.push(row);
+  }
+  for (let i = 0; i < rows; i++)
+    for (let j = 0; j < columns; j++) {
+      const j1 = (j + 1) % columns;
+      surface.quad(grid[i][j], grid[i][j1], grid[i + 1][j1], grid[i + 1][j]);
+    }
+  cap(surface, grid[rows], height, true, step);
+  cap(surface, grid[0], 0, false, step);
+  return surface.geometry().rotateX(-Math.PI / 2);
+}
+
+/**
+ * A stadium slot: two semicircles of radius 1 about (+-1.5, 0) joined by lines 3 mm long at
+ * z = +-1, extruded y 0..1 with the top rim filleted.
+ */
+export function softSlot(fillet: number, options?: SoftOptions) {
+  const outline = new Path(true);
+  outline.line([-1.5, -1], [1.5, -1]);
+  outline.arc([1.5, 0], 1, -Math.PI / 2, Math.PI);
+  outline.line([1.5, 1], [-1.5, 1]);
+  outline.arc([-1.5, 0], 1, Math.PI / 2, Math.PI);
+  return extrudedOutline(outline, 1, fillet, options);
+}
+
+/**
+ * A prism over the polygon `corners` in (x, z), its upright edges rounded by `rounding` (over 0.5,
+ * so the top's inner rim, 0.5 in from the wall, stays a simple polygon), extruded y 0..1 with the
+ * top rim filleted.
+ */
+export function softPrism(
+  corners: Vec2[],
+  rounding: number,
+  fillet: number,
+  options?: SoftOptions,
+) {
+  const outline = corners.map(([x, z]): Vec2 => [x, -z]);
+  const area = outline.reduce(
+    (sum, p, i) => sum + orient([0, 0], p, outline[(i + 1) % outline.length]),
+    0,
+  );
+  if (area < 0) outline.reverse();
+  return extrudedOutline(filletedPath(outline, rounding, true), 1, fillet, options);
+}
