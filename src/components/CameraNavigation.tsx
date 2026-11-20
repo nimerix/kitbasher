@@ -15,7 +15,7 @@ import {
   viewDirections,
 } from '../core/navigation';
 import type { CameraDirection, CameraStep } from '../core/navigation';
-import { paintingWarpRegion, useEditor } from '../core/store';
+import { brushingRefine, paintingRefine, paintingWarpRegion, useEditor } from '../core/store';
 import { usePreferences, useShortcut, withShortcut } from '../core/preferences';
 import { clampPendingZoom, wheelZoom, zoomGlideStep } from '../core/zoom';
 import { IconButton } from './ui';
@@ -30,7 +30,10 @@ const drawnSelection = (state: Editor) =>
 const initialOrbitTarget: [number, number, number] = [0, 54, 0];
 /** Whether a left drag paints with a surface brush rather than moving the camera. */
 const brushOwnsLeftDrag = (state: Editor) =>
-  ((state.tool === 'align' && state.operation.mode === 'surface') || paintingWarpRegion(state)) &&
+  ((state.tool === 'align' && state.operation.mode === 'surface') ||
+    paintingWarpRegion(state) ||
+    paintingRefine(state) ||
+    brushingRefine(state)) &&
   !state.navigationMode &&
   !state.temporaryOrbit &&
   !state.pivotPicking;

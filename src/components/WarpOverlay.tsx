@@ -34,10 +34,11 @@ import { surfacePoints } from './surface-points';
 import { pointAccent, pointIdle, WarpHandleShapes } from './WarpStroke';
 
 const noRaycast: Mesh['raycast'] = () => {};
-const autoIdle = '#a4aab2',
-  foldColor = '#f06a6a';
-const closedColor = new Color('#7fd18b'),
-  openColor = new Color('#f06a6a');
+const autoIdle = '#a4aab2';
+/** Triangles that folded over, and a seam that closed, also drawn by Refine. */
+export const foldColor = '#f06a6a';
+export const closedColor = new Color('#7fd18b');
+const openColor = new Color('#f06a6a');
 
 /** The warped surface the part draws instead of its own, once a grid is laid. */
 export const shownWarpPreview = (warp: WarpSession | null, partId: string) =>

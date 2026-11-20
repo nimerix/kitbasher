@@ -1,5 +1,6 @@
 import {
   Component,
+  lazy,
   memo,
   Suspense,
   useCallback,
@@ -58,8 +59,11 @@ import {
   measureDistance,
   paintingWarpArea,
   paintingWarpRegion,
+  paintingRefine,
+  brushingRefine,
   sceneLighting,
   refitWarpTree,
+  shownRefinePreview,
   useEditor,
 } from '../core/store';
 import { PrecisionDrag } from '../core/precision';
@@ -68,6 +72,13 @@ import { CombinedTransform } from './CombinedTransform';
 import { ManagedTransformControls } from './ManagedTransformControls';
 import { WarpOverlay, shownWarpPreview } from './WarpOverlay';
 import { beginWarpStroke, endingWarpStroke, WarpStrokeController } from './WarpStroke';
+import {
+  beginRefinePointer,
+  endingRefinePointer,
+  pressingRefineProposal,
+  previewRaycast,
+  RefinePointerController,
+} from './RefinePointer';
 import { transformSelection } from '../core/transform-selection';
 import { referencePlanes, resolvePart } from '../core/references';
 import type { Part, SurfacePoint, FitAnchor, SceneDocument, SceneLight } from '../core/types';
@@ -118,6 +129,11 @@ class ViewportBoundary extends Component<{ children: ReactNode }, { error: strin
 }
 
 const noRaycast = () => {};
+// Loaded with the first Refine session, with the curve code it draws through.
+const RefineOverlay = lazy(() =>
+  import('./RefineOverlay').then(({ RefineOverlay }) => ({ default: RefineOverlay })),
+);
+const toolsPicking = ['align', 'joint', 'measure', 'anchors', 'pins', 'warp', 'refine'];
 // A press on a gizmo handle also reaches whatever lies under it, but it is not a selection click.
 let gizmoPressed = false;
 const gizmoWasPressed = () => gizmoPressed;
@@ -162,6 +178,8 @@ const PartMesh = memo(function PartMesh({
   const warpPreview = useEditor((s) => shownWarpPreview(s.warp, part.id));
   // Lines and points drawn on the warped surface stay in front of it.
   const warping = useEditor((s) => s.tool === 'warp' && s.warp?.partId === part.id);
+  const refinePreview = useEditor((s) => shownRefinePreview(s.refine, part.id));
+  const refining = useEditor((s) => s.tool === 'refine' && s.refine?.partId === part.id);
   const [proxy, setProxy] = useState<{ source: BufferGeometry; geometry: BufferGeometry } | null>(
     null,
   );
@@ -179,10 +197,11 @@ const PartMesh = memo(function PartMesh({
     !!nearby ||
     inspecting ||
     wireframe ||
-    (!headset &&
-      (pivotPicking || ['align', 'joint', 'measure', 'anchors', 'pins', 'warp'].includes(tool)));
-  // Display proxies use the original face IDs. Warp keeps the same IDs on the preview.
+    (!headset && (pivotPicking || toolsPicking.includes(tool)));
+  // Display proxies use the original face IDs. Warp keeps the same IDs on the preview; Refine's
+  // preview face t is triangle t of its working surface.
   const drawing =
+    refinePreview ??
     warpPreview ??
     (proxy?.source === part.geometry && shouldDrawProxy(detail, moving, headset, precision)
       ? proxy.geometry
@@ -207,6 +226,8 @@ const PartMesh = memo(function PartMesh({
   const raycast = useMemo(() => {
     const pick = nearby ? nearbyRaycast(nearby.shows) : pickRaycast;
     const source = sourceRaycast(part.geometry, pick);
+    // The store keeps the Refine preview's own picking tree current through every change.
+    if (refinePreview) return previewRaycast(pick);
     if (!warpPreview) return source;
     let indexedVersion = -1;
     return function (this: Mesh, ...args: Parameters<Mesh['raycast']>) {
@@ -218,7 +239,7 @@ const PartMesh = memo(function PartMesh({
       }
       pick.apply(this, args);
     };
-  }, [nearby, part.geometry, warpPreview]);
+  }, [nearby, part.geometry, warpPreview, refinePreview]);
   const exploded = useMemo(() => displayedPosition(part, explode, frame), [part, explode, frame]);
   const onClick = (event: ThreeEvent<MouseEvent>) => {
     if (event.button !== 0 || event.delta > 5) return;
@@ -250,6 +271,43 @@ const PartMesh = memo(function PartMesh({
       // Lines and areas are made by their strokes.
       if (state.warpAdd !== 'point') return;
       state.addWarpPoint(toSurface(event), event.faceIndex);
+      return;
+    }
+    const { refine } = state;
+    if (state.tool === 'refine' && refine) {
+      if (
+        refine.stage !== 'ready' ||
+        refine.partId !== part.id ||
+        event.faceIndex == null ||
+        endingRefinePointer()
+      )
+        return;
+      if (explode) {
+        state.notify('Reset the exploded view before refining.', 'info');
+        return;
+      }
+      if (refine.mode === 'edge')
+        state.addRefinePoint({ triangle: event.faceIndex, position: event.point.toArray() });
+      else if (refine.mode === 'detect') {
+        // Proposals near the pointer are taken before this; here a click picks a region under it.
+        const face = event.faceIndex;
+        const region = refine.features.find(
+          (f) =>
+            f.state === 'pending' &&
+            f.feature.type === 'region' &&
+            f.feature.input.triangles.includes(face),
+        );
+        const adding = event.shiftKey || event.metaKey || event.ctrlKey;
+        if (!region) {
+          if (!adding && refine.selected.length) state.selectRefine([]);
+        } else if (!adding) state.selectRefine([region.id]);
+        else
+          state.selectRefine(
+            refine.selected.includes(region.id)
+              ? refine.selected.filter((id) => id !== region.id)
+              : [...refine.selected, region.id],
+          );
+      }
       return;
     }
     if (state.tool === 'align' && state.operation.mode === 'surface') return;
@@ -313,13 +371,24 @@ const PartMesh = memo(function PartMesh({
             } else if (paintingWarpRegion(state)) {
               event.stopPropagation();
               state.paintWarpRegion(toSurface(event), event.faceIndex, event.altKey, true);
-            } else if (beginWarpStroke(event, part.id)) event.stopPropagation();
+            } else if (paintingRefine(state) && state.refine?.partId === part.id) {
+              // A press on a proposal in Detect selects it on release instead.
+              if (pressingRefineProposal()) return;
+              event.stopPropagation();
+              state.paintRefineRegion(toSurface(event), event.faceIndex, event.altKey, true);
+            } else if (beginWarpStroke(event, part.id) || beginRefinePointer(event, part.id))
+              event.stopPropagation();
           }}
           onPointerMove={(event) => {
             const state = useEditor.getState();
             const contact = state.tool === 'align' && state.operation.mode === 'surface';
+            const refineBrush =
+              state.refine?.partId === part.id && (paintingRefine(state) || brushingRefine(state));
             if (
-              (!contact && !paintingWarpRegion(state) && !paintingWarpArea(state)) ||
+              (!contact &&
+                !paintingWarpRegion(state) &&
+                !paintingWarpArea(state) &&
+                !refineBrush) ||
               state.navigationMode ||
               state.temporaryOrbit ||
               state.pivotPicking ||
@@ -331,14 +400,16 @@ const PartMesh = memo(function PartMesh({
             setBrushHit(point);
             if (!state.painting || !(event.buttons & 1)) return;
             if (contact) state.paintSurface(point, event.faceIndex, event.altKey);
-            else state.paintWarpRegion(point, event.faceIndex, event.altKey);
+            else if (refineBrush) {
+              if (paintingRefine(state) && !pressingRefineProposal())
+                state.paintRefineRegion(point, event.faceIndex, event.altKey);
+            } else state.paintWarpRegion(point, event.faceIndex, event.altKey);
           }}
           onPointerOver={(e) => {
             e.stopPropagation();
             document.body.style.cursor = navigationMode
               ? 'grab'
-              : useEditor.getState().pivotPicking ||
-                  ['align', 'joint', 'measure', 'anchors', 'pins', 'warp'].includes(tool)
+              : useEditor.getState().pivotPicking || toolsPicking.includes(tool)
                 ? 'crosshair'
                 : 'pointer';
           }}
@@ -363,8 +434,8 @@ const PartMesh = memo(function PartMesh({
             emissive={selected && !inspecting && !ghost ? '#c77c39' : '#000000'}
             emissiveIntensity={selected && !ghost ? 0.12 : 0}
             // A constant, not slope-scaled, offset: a steep surface must still hide what it covers.
-            polygonOffset={warping}
-            polygonOffsetUnits={warping ? 1 : 0}
+            polygonOffset={warping || refining}
+            polygonOffsetUnits={warping || refining ? 1 : 0}
           />
           {selected &&
           !inspecting &&
@@ -372,6 +443,7 @@ const PartMesh = memo(function PartMesh({
           !wireframe &&
           !nearby &&
           !warpPreview &&
+          !refinePreview &&
           triangleCount(part.geometry) < proxyThreshold ? (
             <Edges threshold={32} color="#e8aa6d" lineWidth={0.8} />
           ) : null}
@@ -1016,6 +1088,7 @@ function Scene({
     view = useEditor((s) => s.view),
     operation = useEditor((s) => s.operation),
     tool = useEditor((s) => s.tool);
+  const refineSession = useEditor((s) => s.tool === 'refine' && s.refine?.stage === 'ready');
   const isolated = useEditor((s) => s.isolated);
   const focused = hasAlignmentView(tool, operation);
   const headset = useXR((s) => !!s.session),
@@ -1149,6 +1222,12 @@ function Scene({
             pressed={() => gizmoPressed}
           />
           <WarpStrokeController pressed={gizmoWasPressed} />
+          {refineSession ? (
+            <Suspense fallback={null}>
+              <RefineOverlay />
+            </Suspense>
+          ) : null}
+          <RefinePointerController pressed={gizmoWasPressed} />
           <PinOverlay />
           <LightHandles />
           <AssemblyAnnotations />
@@ -1266,6 +1345,7 @@ export function Viewport() {
                 event.button !== 0 ||
                 gizmoPressed ||
                 endingWarpStroke() ||
+                endingRefinePointer() ||
                 state.temporaryOrbit ||
                 state.navigationMode ||
                 state.pivotPicking ||
@@ -1274,8 +1354,11 @@ export function Viewport() {
                 tool === 'measure'
               )
                 return;
-              // While warping, an empty click clears the point selection and keeps the part.
-              if (tool !== 'warp' || !state.warp) state.select(null);
+              // While warping or refining, an empty click clears that tool's selection and keeps
+              // the part.
+              if (tool === 'refine' && state.refine) {
+                if (state.refine.selected.length) state.selectRefine([]);
+              } else if (tool !== 'warp' || !state.warp) state.select(null);
               else if (state.warp.selectedPoints.length) state.selectWarpPoints([]);
             }}
           >

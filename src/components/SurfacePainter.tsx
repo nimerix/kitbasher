@@ -1,6 +1,14 @@
 import { useEffect, useMemo } from 'react';
 import { DoubleSide, MeshBasicMaterial, Quaternion, Vector3 } from 'three';
-import { paintingWarpArea, paintingWarpRegion, useEditor, warpBrushRadius } from '../core/store';
+import {
+  brushingRefine,
+  paintingRefine,
+  paintingWarpArea,
+  paintingWarpRegion,
+  refineBrushRadius,
+  useEditor,
+  warpBrushRadius,
+} from '../core/store';
 import { contactColors, patchGeometry } from '../core/surfaces';
 import { worldNormal, worldPoint } from '../core/geometry';
 import { solveAlignment } from '../core/alignment';
@@ -125,7 +133,11 @@ function FlushPreview() {
 
 export function PaintCursor({ part, hit }: { part: Part; hit: SurfacePoint | null }) {
   const radius = useEditor((s) =>
-      paintingWarpRegion(s) || paintingWarpArea(s) ? warpBrushRadius(s) : s.brushRadius,
+      paintingRefine(s) || brushingRefine(s)
+        ? refineBrushRadius(s)
+        : paintingWarpRegion(s) || paintingWarpArea(s)
+          ? warpBrushRadius(s)
+          : s.brushRadius,
     ),
     erase = useEditor((s) => s.brushErase),
     op = useEditor((s) => s.operation),
@@ -134,8 +146,16 @@ export function PaintCursor({ part, hit }: { part: Part; hit: SurfacePoint | nul
     pivotPicking = useEditor((s) => s.pivotPicking);
   const warpRegion = useEditor((s) => paintingWarpRegion(s) && s.warp!.partId === part.id);
   const warpArea = useEditor((s) => paintingWarpArea(s) && s.warp!.partId === part.id);
+  const refinePaint = useEditor((s) => paintingRefine(s) && s.refine!.partId === part.id);
+  const refineBrush = useEditor((s) => brushingRefine(s) && s.refine!.partId === part.id);
   const contact = tool === 'align' && op.mode === 'surface' && !!op.activeSurface;
-  if (!hit || (!contact && !warpRegion && !warpArea) || navigationMode || pivotPicking) return null;
+  if (
+    !hit ||
+    (!contact && !warpRegion && !warpArea && !refinePaint && !refineBrush) ||
+    navigationMode ||
+    pivotPicking
+  )
+    return null;
   const index = op.surfacePairs.findIndex((pair) => pair.id === op.activeSurface?.pairId);
   const normal = worldNormal(part, hit),
     position = worldPoint(part, hit).addScaledVector(normal, 0.03);
@@ -146,7 +166,7 @@ export function PaintCursor({ part, hit }: { part: Part; hit: SurfacePoint | nul
         <ringGeometry args={[radius, radius + Math.max(radius * 0.025, 0.035), 64]} />
         <meshBasicMaterial
           color={
-            warpArea
+            warpArea || refineBrush
               ? pointAccent
               : erase
                 ? '#f18c8c'
