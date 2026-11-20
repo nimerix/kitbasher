@@ -3665,11 +3665,15 @@ export const useEditor = create<EditorState>((set, get) => ({
       get().notify(noEdgeNotice, 'info');
       return;
     }
+    // The brush is the guide's width; where the rounding is wider than the brush, the solver's own.
+    const { model } = refine;
+    const drawn: RefineProposal = { type: 'edge', input };
+    const guide = solveProposal(model, model.mesh, drawn) ? input : { ...input, width: null };
     const feature: RefineFeature = {
       id: uid(),
       state: 'pending',
       origin: 'hand',
-      feature: { type: 'edge', input },
+      feature: { type: 'edge', input: guide },
     };
     acceptFeatures(refine, [...refine.features, feature], [feature]);
   },

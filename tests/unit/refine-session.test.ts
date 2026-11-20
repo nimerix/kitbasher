@@ -1591,15 +1591,14 @@ describe('refine session integrity', { timeout: 20_000 }, () => {
     expect(session().features[0]).toMatchObject({ state: 'accepted', origin: 'hand' });
   });
 
-  // creaseInput (refine-brush.ts) gives the guide the brush radius as its width. The default radius
-  // here is fittedWarpBrushRadius, 0.24 mm, and solveEdge finds no edge on this 0.6 mm fillet below
-  // about 1.0 mm (its own estimate is 1.0 mm). Needs a decision outside the store.
-  it.skip('adds an edge from a crease stroke on a coarse mesh at the default brush radius', async () => {
+  // The default radius here is 0.24 mm and this 0.6 mm fillet needs a guide about 1 mm wide.
+  it('falls back to the automatic width when a crease stroke is narrower than the rounding', async () => {
     setup([coarseBox()], ['box']);
     await ready();
     creaseStroke();
     expect(session().features).toHaveLength(1);
     expect(session().features[0].state).toBe('accepted');
+    expect(edgeInput(session().features[0].id).width).toBeNull();
   });
 
   it('opens a closed loop left with too few corners, keeping its segments in order', async () => {
