@@ -5,6 +5,7 @@ import {
   failTask,
   notify as recordNotification,
   startTask,
+  updateTask,
 } from './activity';
 import type { DriveFileBinding } from './types';
 import {
@@ -79,14 +80,20 @@ import {
   type WarpTransformSelection,
 } from './transform-selection';
 import type { FreeTransformMode, TransformAxis, TransformPatch } from './free-transform';
+import type { GuidePoint } from './refine-band';
 import type { RefineBrush } from './refine-brush';
 import type { EdgeCurve, GuideJoint, GuideKind } from './refine-curve';
 import type { RefineProposal } from './refine-detect';
-import type { EdgeEnd } from './refine-edge';
-import { type RefineMesh, writeRefinedGeometry } from './refine-mesh';
+import type { EdgeEnd, EdgeInput, EdgeSegment, EdgeSolve } from './refine-edge';
+import {
+  type RefineMesh,
+  cloneRefineMesh,
+  foldedTriangles,
+  writeRefinedGeometry,
+} from './refine-mesh';
 import type { RefineModel } from './refine-model';
-import { patchRefinedGeometry } from './refine-preview';
-import type { RegionInput } from './refine-region';
+import { patchRefinedGeometry, patchRefinedVertices } from './refine-preview';
+import type { RegionInput, RegionSolve } from './refine-region';
 import type { NavigationMode } from './navigation';
 import { createSample } from './sample';
 import { useXR } from './xr-session';
@@ -364,6 +371,8 @@ export interface RefineFeature {
   feature: RefineProposal;
   /** The solved edge of an accepted or previewed edge feature, for drawing. */
   curve?: EdgeCurve;
+  /** Pieces an accepted edge's cut came out in; more than 1 when it could not be cut whole. */
+  pieces?: number;
 }
 /** A session undo step. Its model shares every array that did not change with its neighbours. */
 export interface RefineStep {
@@ -402,7 +411,12 @@ export interface RefineSession {
   region: Omit<RegionInput, 'triangles'>;
   brush: { kind: RefineBrush; strength: number };
   detect: { where: 'part' | 'painted'; sensitivity: number; minLength: number; running: boolean };
+  /** Triangles of the working surface that the last accept folded over. */
   folds: Uint32Array;
+  /** Triangles of the working surface that the last accept's cuts left straddling an edge. */
+  skipped: Uint32Array;
+  /** Whether the selected guide's last spline segment still takes points. */
+  drawing: boolean;
   undo: RefineStep[];
   redo: RefineStep[];
 }
@@ -585,6 +599,37 @@ interface EditorState {
   applyRefine: () => boolean;
   undoRefine: () => void;
   redoRefine: () => void;
+  setRefineMode: (mode: RefineMode) => void;
+  /** Also updates the selected pending edges' width, strength and ends. */
+  setRefineEdge: (options: Partial<RefineSession['edge']>) => void;
+  /** Also updates the selected pending regions. */
+  setRefineRegion: (options: Partial<RefineSession['region']>) => void;
+  setRefineBrush: (options: Partial<RefineSession['brush']>) => void;
+  setRefineDetect: (options: Partial<Omit<RefineSession['detect'], 'running'>>) => void;
+  /** Adds a point to the guide being drawn, starting one if none is selected. `close` is set when the point is the path's first point. */
+  addRefinePoint: (point: GuidePoint, close?: boolean) => void;
+  moveRefinePoint: (feature: string, segment: number, index: number, point: GuidePoint) => void;
+  removeRefinePoint: (feature: string, segment: number, index: number) => void;
+  /** Ends the spline segment being drawn. */
+  finishRefineGuide: () => void;
+  paintRefineRegion: (
+    point: SurfacePoint,
+    triangle: number,
+    erase?: boolean,
+    begin?: boolean,
+  ) => boolean;
+  /** Turns the painted triangles into a pending region with the current region settings, and selects it. */
+  makeRefineRegion: () => void;
+  selectRefine: (ids: string[]) => void;
+  /** Accepts the given pending features, or the selected ones. */
+  acceptRefine: (ids?: string[]) => void;
+  dismissRefine: (ids?: string[]) => void;
+  beginRefineStroke: (point: GuidePoint) => void;
+  moveRefineStroke: (point: GuidePoint) => void;
+  endRefineStroke: () => void;
+  detectRefine: () => Promise<void>;
+  cancelRefineDetect: () => void;
+  setRefineBrushRadius: (radius: number) => void;
   setOperation: (patch: Partial<AssemblyOperation>) => void;
   resetPicks: () => void;
   pick: (point: SurfacePoint) => void;
@@ -3259,7 +3304,9 @@ export const useEditor = create<EditorState>((set, get) => ({
       ...refine.redo,
       refineStep(refine),
     ]);
-    set({ refine: showRefine({ ...refine, ...step, ...kept, draft: null, folds: noFolds }) });
+    refineStroke = null;
+    set({ refine: showRefine({ ...refine, ...step, ...kept, ...unsteppedRefine }) });
+    scheduleRefineDraft();
   },
   redoRefine: () => {
     const { refine } = get();
@@ -3270,8 +3317,370 @@ export const useEditor = create<EditorState>((set, get) => ({
       [...refine.undo, refineStep(refine)],
       refine.redo.slice(0, -1),
     );
-    set({ refine: showRefine({ ...refine, ...step, ...kept, draft: null, folds: noFolds }) });
+    refineStroke = null;
+    set({ refine: showRefine({ ...refine, ...step, ...kept, ...unsteppedRefine }) });
+    scheduleRefineDraft();
   },
+  setRefineMode: (mode) => {
+    const { refine } = get();
+    if (refine) set({ painting: false, refine: { ...refine, mode, drawing: false } });
+  },
+  setRefineEdge: (options) => {
+    const { refine } = get();
+    if (!refine) return;
+    const edge = { ...refine.edge, ...options };
+    const patch: Partial<EdgeInput> = {};
+    for (const key of ['width', 'strength', 'ends'] as const)
+      if (key in options) Object.assign(patch, { [key]: edge[key] });
+    const features = updateSelected(refine, (proposal) =>
+      proposal.type === 'edge' ? { type: 'edge', input: { ...proposal.input, ...patch } } : null,
+    );
+    set({ refine: { ...refine, edge, features } });
+    scheduleRefineDraft();
+  },
+  setRefineRegion: (options) => {
+    const { refine } = get();
+    if (!refine) return;
+    const region = { ...refine.region, ...options };
+    const features = updateSelected(refine, (proposal) =>
+      proposal.type === 'region'
+        ? { type: 'region', input: { ...proposal.input, ...options } }
+        : null,
+    );
+    set({ refine: { ...refine, region, features } });
+    scheduleRefineDraft();
+  },
+  setRefineBrush: (options) => {
+    const { refine } = get();
+    if (refine) set({ refine: { ...refine, brush: { ...refine.brush, ...options } } });
+  },
+  setRefineDetect: (options) => {
+    const { refine } = get();
+    if (refine)
+      set({
+        refine: {
+          ...refine,
+          detect: { ...refine.detect, ...options, running: refine.detect.running },
+        },
+      });
+  },
+  addRefinePoint: (point, close = false) => {
+    const refine = readyRefine();
+    if (!refine || refine.mode !== 'edge') return;
+    const { edge } = refine;
+    const guide = drawnGuide(refine);
+    if (!guide) {
+      if (close) return;
+      const feature: RefineFeature = {
+        id: uid(),
+        state: 'pending',
+        origin: 'hand',
+        feature: {
+          type: 'edge',
+          input: {
+            segments: [{ kind: edge.kind, points: [point] }],
+            joints: [],
+            closed: false,
+            width: edge.width,
+            strength: edge.strength,
+            ends: edge.ends,
+          },
+        },
+      };
+      commitRefine({
+        features: [...refine.features, feature],
+        selected: [feature.id],
+        drawing: edge.kind === 'spline',
+      });
+      return;
+    }
+    const input = guide.feature.input;
+    const segments = [...input.segments];
+    const last = segments[segments.length - 1];
+    const first = segments[0].points[0];
+    const end = last.points[last.points.length - 1];
+    const open = takesPoints(last, refine.drawing);
+    let next: EdgeInput;
+    let drawing = false;
+    if (close) {
+      if (segments.length === 1 && last.kind === 'arc' && last.points.length === 3)
+        next = { ...input, closed: true, joints: [edge.joint] };
+      else if (segments.length > 1 && open) {
+        segments[segments.length - 1] = { ...last, points: [...last.points, first] };
+        next = { ...input, segments, closed: true, joints: [...input.joints, edge.joint] };
+      } else if (!open && edge.kind !== 'arc' && (segments.length > 1 || last.points.length > 2)) {
+        segments.push({ kind: edge.kind, points: [end, first] });
+        next = { ...input, segments, closed: true, joints: [...input.joints, edge.joint] };
+      } else return;
+    } else if (open) {
+      segments[segments.length - 1] = { ...last, points: [...last.points, point] };
+      next = { ...input, segments };
+      drawing = last.kind === 'spline' && refine.drawing;
+    } else {
+      segments.push({ kind: edge.kind, points: [end, point] });
+      next = { ...input, segments, joints: [...input.joints, edge.joint] };
+      drawing = edge.kind === 'spline';
+    }
+    commitRefine({
+      features: withProposal(refine, guide.id, { type: 'edge', input: next }),
+      drawing,
+    });
+  },
+  moveRefinePoint: (id, segment, index, point) => {
+    const refine = readyRefine();
+    const feature = refine?.features.find((f) => f.id === id);
+    if (!refine || feature?.state !== 'pending' || feature.feature.type !== 'edge') return;
+    const input = feature.feature.input;
+    const old = input.segments[segment]?.points[index];
+    if (!old) return;
+    // A point two segments share, or the closing point, moves in both.
+    const segments = input.segments.map((s) => ({
+      ...s,
+      points: s.points.map((p) => (samePoint(p, old) ? point : p)),
+    }));
+    const features = withProposal(refine, id, { type: 'edge', input: { ...input, segments } });
+    const key = `${refine.id} ${id} ${segment} ${index}`;
+    // One step per drag: further moves of the point just moved replace it in place.
+    if (refineDrag?.key === key && refineDrag.step === refine.undo[refine.undo.length - 1])
+      set({ refine: { ...refine, features } });
+    else {
+      commitRefine({ features });
+      refineDrag = { key, step: get().refine?.undo.at(-1) };
+    }
+    scheduleRefineDraft();
+  },
+  removeRefinePoint: (id, segment, index) => {
+    const refine = readyRefine();
+    const feature = refine?.features.find((f) => f.id === id);
+    if (!refine || feature?.state !== 'pending' || feature.feature.type !== 'edge') return;
+    if (!feature.feature.input.segments[segment]?.points[index]) return;
+    const input = withoutPoint(feature.feature.input, segment, index);
+    commitRefine(
+      input
+        ? { features: withProposal(refine, id, { type: 'edge', input }) }
+        : {
+            features: refine.features.filter((f) => f.id !== id),
+            selected: refine.selected.filter((s) => s !== id),
+            drawing: false,
+          },
+    );
+  },
+  finishRefineGuide: () => {
+    const { refine } = get();
+    if (refine?.drawing) set({ refine: { ...refine, drawing: false } });
+  },
+  paintRefineRegion: (point, triangle, erase = false, begin = false) => {
+    const state = get(),
+      refine = readyRefine();
+    if (
+      !refine ||
+      !paintingRefine(state) ||
+      point.partId !== refine.partId ||
+      state.navigationMode ||
+      state.temporaryOrbit ||
+      state.pivotPicking ||
+      (!begin && !state.painting)
+    )
+      return false;
+    const part = state.scene.parts.find((p) => p.id === refine.partId);
+    const { mesh, topology } = refine.model!;
+    if (!part?.visible || !(triangle >= 0 && triangle < mesh.triangleCount)) return false;
+    const center = worldPoint(part, point).toArray() as Vec3;
+    const under = refineCode!.paint.trianglesUnderBrush(
+      mesh,
+      topology,
+      triangle,
+      center,
+      refineBrushRadius(state),
+    );
+    let triangles: number[];
+    if (erase || state.brushErase) {
+      const removed = new Set(under);
+      triangles = refine.triangles.filter((t) => !removed.has(t));
+    } else triangles = [...new Set([...refine.triangles, ...under])].sort((a, b) => a - b);
+    const same =
+      triangles.length === refine.triangles.length &&
+      triangles.every((t, i) => t === refine.triangles[i]);
+    if (begin) {
+      set({ painting: true });
+      commitRefine({ triangles: same ? refine.triangles : triangles });
+    } else if (!same) set({ refine: { ...refine, triangles } });
+    return true;
+  },
+  makeRefineRegion: () => {
+    const refine = readyRefine();
+    if (!refine || refine.mode !== 'region' || !refine.triangles.length) return;
+    const feature: RefineFeature = {
+      id: uid(),
+      state: 'pending',
+      origin: 'hand',
+      feature: {
+        type: 'region',
+        input: { ...refine.region, triangles: Uint32Array.from(refine.triangles) },
+      },
+    };
+    commitRefine({
+      features: [...refine.features, feature],
+      selected: [feature.id],
+      triangles: [],
+      drawing: false,
+    });
+  },
+  selectRefine: (ids) => {
+    const { refine } = get();
+    if (!refine) return;
+    const known = new Set(refine.features.map((f) => f.id));
+    set({ refine: { ...refine, selected: ids.filter((id) => known.has(id)), drawing: false } });
+    scheduleRefineDraft();
+  },
+  acceptRefine: (ids) => {
+    const refine = readyRefine();
+    if (!refine) return;
+    const wanted = new Set(ids ?? refine.selected);
+    const targets = refine.features.filter((f) => f.state === 'pending' && wanted.has(f.id));
+    if (targets.length) acceptFeatures(refine, refine.features, targets);
+  },
+  dismissRefine: (ids) => {
+    const refine = readyRefine();
+    if (!refine) return;
+    const wanted = new Set(ids ?? refine.selected);
+    const features = refine.features.filter((f) => f.state !== 'pending' || !wanted.has(f.id));
+    if (features.length === refine.features.length) return;
+    const kept = new Set(features.map((f) => f.id));
+    commitRefine({
+      features,
+      selected: refine.selected.filter((id) => kept.has(id)),
+      drawing: false,
+    });
+  },
+  beginRefineStroke: (point) => {
+    let refine = readyRefine();
+    if (!refine || refine.mode !== 'brush') return;
+    if (refine.selected.length || refine.draft) {
+      refine = showRefine({ ...refine, selected: [], draft: null, drawing: false });
+      set({ refine });
+    }
+    const model = refine.model!;
+    const crease = refine.brush.kind === 'crease';
+    refineStroke = {
+      session: refine.id,
+      model,
+      mesh: crease ? model.mesh : cloneRefineMesh(model.mesh, false),
+      shownTouched: crease ? model.mesh.touched : model.mesh.touched.slice(),
+      points: [point],
+      last: point.position,
+      moved: false,
+    };
+    if (!crease) dabRefine(refineStroke, point);
+  },
+  moveRefineStroke: (point) => {
+    const stroke = liveStroke();
+    const refine = get().refine;
+    if (!stroke || !refine) return;
+    if (refine.brush.kind === 'crease') {
+      stroke.points.push(point);
+      return;
+    }
+    const [x, y, z] = stroke.last;
+    const travel = Math.hypot(point.position[0] - x, point.position[1] - y, point.position[2] - z);
+    if (travel >= refineBrushRadius(get()) / 4) dabRefine(stroke, point);
+  },
+  endRefineStroke: () => {
+    const stroke = liveStroke();
+    refineStroke = null;
+    const refine = get().refine;
+    if (!stroke || !refine?.model) return;
+    if (refine.brush.kind !== 'crease') {
+      if (!stroke.moved) return;
+      commitRefine({ model: { ...stroke.model, mesh: stroke.mesh } });
+      const { preview, source } = get().refine!;
+      if (preview) refitWarpTree(source, preview);
+      return;
+    }
+    const input = refineCode!.brush.creaseInput(
+      stroke.points,
+      refineBrushRadius(get()),
+      refine.brush.strength,
+    );
+    if (!input) {
+      get().notify(noEdgeNotice, 'info');
+      return;
+    }
+    const feature: RefineFeature = {
+      id: uid(),
+      state: 'pending',
+      origin: 'hand',
+      feature: { type: 'edge', input },
+    };
+    acceptFeatures(refine, [...refine.features, feature], [feature]);
+  },
+  detectRefine: async () => {
+    const refine = readyRefine();
+    if (!refine || refine.detect.running) return;
+    const model = refine.model!;
+    const { where, sensitivity, minLength } = refine.detect;
+    const controller = new AbortController();
+    refineJobs.add(controller);
+    refineDetect = controller;
+    const taskId = startTask({
+      title: 'Finding edges and surfaces',
+      progress: 0,
+      notify: false,
+      cancel: () => controller.abort(),
+    });
+    set({ refine: { ...refine, detect: { ...refine.detect, running: true } } });
+    let proposals: RefineProposal[] | null = null;
+    try {
+      proposals = await refineCode!.job.detectRefineJob(
+        model,
+        {
+          triangles: where === 'painted' ? Uint32Array.from(refine.triangles) : null,
+          sensitivity,
+          minLength,
+        },
+        controller.signal,
+        (progress) => updateTask(taskId, { progress }),
+      );
+    } catch (error) {
+      if (controller.signal.aborted) cancelTask(taskId);
+      else failTask(taskId, error instanceof Error ? error.message : String(error));
+    }
+    refineJobs.delete(controller);
+    if (refineDetect === controller) refineDetect = null;
+    const current = get().refine;
+    if (current?.id !== refine.id) return;
+    const detect = { ...current.detect, running: false };
+    if (!proposals) {
+      set({ refine: { ...current, detect } });
+      return;
+    }
+    if (current.model !== model) {
+      cancelTask(taskId);
+      set({ refine: { ...current, detect } });
+      get().notify('The surface changed, so detection was stopped.', 'info');
+      return;
+    }
+    completeTask(taskId);
+    const found: RefineFeature[] = proposals.map((feature) => ({
+      id: uid(),
+      state: 'pending',
+      origin: 'detected',
+      feature,
+    }));
+    set({ refine: { ...current, detect, features: [...current.features, ...found] } });
+  },
+  cancelRefineDetect: () => refineDetect?.abort(),
+  setRefineBrushRadius: (radius) =>
+    set((state) =>
+      state.refine && Number.isFinite(radius)
+        ? {
+            warpBrush: new Map(keptWarpBrush(state, state.warpBrush)).set(
+              state.refine.partId,
+              Math.max(0.05, Math.min(100, radius)),
+            ),
+          }
+        : {},
+    ),
   setOperation: (patch) =>
     set((state) => {
       const op = state.operation;
@@ -4678,7 +5087,7 @@ useEditor.subscribe((state, previous) => {
 export const refineUndoLimit = 50;
 /** The most memory session undo and redo may hold beyond the working surface, in bytes. */
 export const refineUndoBytes = 512 * 1024 * 1024;
-const noFolds = new Uint32Array(0);
+const noFolds: Uint32Array = new Uint32Array(0);
 
 /** Whether the session holds work that ending it would lose. */
 export const refineEdited = (refine: RefineSession) => refine.model !== refine.start;
@@ -4715,9 +5124,41 @@ const newRefineSession = (part: Part, epoch: number): RefineSession => ({
   // detectDefaults, written out so the store does not load detection before a session needs it.
   detect: { where: 'part', sensitivity: 0.5, minLength: 1.5, running: false },
   folds: noFolds,
+  skipped: noFolds,
+  drawing: false,
   undo: [],
   redo: [],
 });
+
+const importRefineCode = () =>
+  Promise.all([
+    import('./refine-edge'),
+    import('./refine-region'),
+    import('./refine-brush'),
+    import('./refine-paint'),
+    import('./refine-cut'),
+    import('./refine-model'),
+    import('./refine-job'),
+  ]).then(([edge, region, brush, paint, cut, model, job]) => ({
+    edge,
+    region,
+    brush,
+    paint,
+    cut,
+    model,
+    job,
+  }));
+/** The Refine modules, loaded with the first session so the app does not load them until used. */
+let refineCode: Awaited<ReturnType<typeof importRefineCode>> | null = null;
+let refineCodeLoad: ReturnType<typeof importRefineCode> | null = null;
+const loadRefineCode = () =>
+  (refineCodeLoad ??= importRefineCode().then(
+    (code) => (refineCode = code),
+    (error) => {
+      refineCodeLoad = null;
+      throw error;
+    },
+  ));
 
 /** Every running build or detection of the session, aborted when it ends. */
 const refineJobs = new Set<AbortController>();
@@ -4754,12 +5195,11 @@ async function buildRefine(refine: RefineSession, part: Part) {
   const matrix = partMatrix(part);
   let model: RefineModel;
   try {
-    // Loaded with the first session, so the app does not load Refine until it is used.
-    const [{ buildRefineModelJob }, { refineModelInput }] = await Promise.all([
-      import('./refine-job'),
-      import('./refine-model'),
-    ]);
-    model = await buildRefineModelJob(refineModelInput(part.geometry, matrix), controller.signal);
+    const { job, model: build } = await loadRefineCode();
+    model = await job.buildRefineModelJob(
+      build.refineModelInput(part.geometry, matrix),
+      controller.signal,
+    );
   } catch (error) {
     // Ending the session has already cleared its jobs; a cancel from the activity centre has not.
     if (!refineJobs.delete(controller) || useEditor.getState().refine?.id !== refine.id) return;
@@ -4871,6 +5311,442 @@ export function commitRefine(next: Partial<RefineSession>) {
     [],
   );
   useEditor.setState({ refine: showRefine({ ...updated, ...kept }) });
+  scheduleRefineDraft();
+}
+
+/** The detection running in the session, which Cancel aborts. */
+let refineDetect: AbortController | null = null;
+
+/** The point last dragged and the step its drag recorded, so a drag is one step. */
+let refineDrag: { key: string; step: RefineStep | undefined } | null = null;
+
+interface RefineStroke {
+  session: string;
+  model: RefineModel;
+  /** Smooth and Flatten: the stroke's own copy of the surface, sharing all but positions. */
+  mesh: RefineMesh;
+  /** The touched flags the preview was last written with. */
+  shownTouched: Uint8Array;
+  points: GuidePoint[];
+  /** Where the last dab was made. */
+  last: Vec3;
+  moved: boolean;
+}
+let refineStroke: RefineStroke | null = null;
+
+/** The stroke under way, if the session it began on still holds the surface it began from. */
+function liveStroke() {
+  const refine = readyRefine();
+  if (refineStroke && (refine?.id !== refineStroke.session || refine.model !== refineStroke.model))
+    refineStroke = null;
+  return refineStroke;
+}
+
+/** One brush dab on the stroke's surface, written into the preview. */
+function dabRefine(stroke: RefineStroke, point: GuidePoint) {
+  const state = useEditor.getState(),
+    refine = state.refine!;
+  const { topology, noise } = stroke.model;
+  const dab = {
+    triangle: point.triangle,
+    center: point.position,
+    radius: refineBrushRadius(state),
+    strength: refine.brush.strength,
+    noise,
+  };
+  const { smoothDab, flattenDab } = refineCode!.brush;
+  const moved = (refine.brush.kind === 'flatten' ? flattenDab : smoothDab)(
+    stroke.mesh,
+    topology,
+    dab,
+  );
+  stroke.last = point.position;
+  if (!moved.length) return;
+  stroke.moved = true;
+  const part = state.scene.parts.find((p) => p.id === refine.partId);
+  const { preview, source } = refine;
+  if (!preview || !part) return;
+  const shown = { touched: stroke.shownTouched, crease: stroke.mesh.crease };
+  if (
+    previewMeshes.get(preview) === stroke.mesh ||
+    previewMeshes.get(preview) === stroke.model.mesh
+  ) {
+    if (
+      patchRefinedVertices(preview, source, partMatrix(part), shown, stroke.mesh, topology, moved)
+    ) {
+      for (const v of moved) stroke.shownTouched[v] = stroke.mesh.touched[v];
+      previewMeshes.set(preview, stroke.mesh);
+      return;
+    }
+  }
+  // The preview cannot be patched in place: write it afresh from the stroke's surface.
+  previewMeshes.delete(preview);
+  const shownRefine = showRefine({ ...refine, draft: stroke.mesh });
+  stroke.shownTouched.set(stroke.mesh.touched.subarray(0, stroke.shownTouched.length));
+  useEditor.setState({ refine: { ...shownRefine, draft: refine.draft } });
+}
+
+/**
+ * Solves already made against a model's surface: by a region's proposal, and by an edge's segments
+ * with the other inputs that change its solve, so a new Strength reuses it.
+ */
+const refineSolves = new WeakMap<
+  object,
+  { mesh: RefineMesh; input: unknown; solve: EdgeSolve | RegionSolve | null }
+>();
+
+const sameSolveInput = (a: unknown, b: unknown) => {
+  if (a === b) return true;
+  const [x, y] = [a as EdgeInput, b as EdgeInput];
+  return (
+    x.segments === y.segments &&
+    x.closed === y.closed &&
+    x.width === y.width &&
+    x.joints.length === y.joints.length &&
+    x.joints.every((joint, i) => joint === y.joints[i]) &&
+    (x.ends?.[0] ?? null) === (y.ends?.[0] ?? null) &&
+    (x.ends?.[1] ?? null) === (y.ends?.[1] ?? null)
+  );
+};
+
+/** Solves `proposal` on `mesh` with the model's topology, reusing a solve on the same surface. */
+function solveProposal<P extends RefineProposal>(
+  model: RefineModel,
+  mesh: RefineMesh,
+  proposal: P,
+): (P extends { type: 'edge' } ? EdgeSolve : RegionSolve) | null {
+  type Solve = (P extends { type: 'edge' } ? EdgeSolve : RegionSolve) | null;
+  const key = proposal.type === 'edge' ? proposal.input.segments : proposal;
+  const cached = refineSolves.get(key);
+  if (cached?.mesh === mesh && sameSolveInput(cached.input, proposal.input))
+    return cached.solve as Solve;
+  const { edge, region } = refineCode!;
+  const solve =
+    proposal.type === 'edge'
+      ? edge.solveEdge(mesh, model.topology, proposal.input, model.noise)
+      : region.solveRegion(mesh, model.topology, proposal.input, model.noise);
+  // Only a solve on a model's own surface can be asked for again.
+  if (mesh === model.mesh) refineSolves.set(key, { mesh, input: proposal.input, solve });
+  return solve as Solve;
+}
+
+/** Proposals already reported as unsolvable, so a guide that finds no edge says so once. */
+const reported = new WeakSet<RefineProposal>();
+
+/**
+ * Bakes `targets`, pending features of `features`, into the working surface in list order as one
+ * step. A feature that does not solve stays as it was and is reported. Changes nothing when none
+ * solves.
+ */
+function acceptFeatures(
+  refine: RefineSession,
+  features: RefineFeature[],
+  targets: RefineFeature[],
+) {
+  const { cut, edge, region } = refineCode!;
+  let model = refine.model!;
+  let triangles: Uint32Array = Uint32Array.from(refine.triangles);
+  let folds = noFolds,
+    skipped = noFolds;
+  const byId = new Map(features.map((f) => [f.id, f]));
+  const notices = new Set<string>();
+  let accepted = false;
+  for (const target of targets) {
+    const feature = byId.get(target.id)!;
+    const proposal = feature.feature;
+    if (proposal.type === 'edge') {
+      const solve = solvable(proposal.input) ? solveProposal(model, model.mesh, proposal) : null;
+      if (!solve) {
+        notices.add(noEdgeNotice);
+        continue;
+      }
+      const mesh = cloneRefineMesh(model.mesh, true);
+      const result = edge.applyEdge(mesh, model.topology, solve, proposal.input.strength, true);
+      const children = result.cut?.children;
+      model = result.cut ? refineCode!.model.modelFromMesh(mesh, model) : { ...model, mesh };
+      if (children?.size) {
+        const remap = (t: Uint32Array) => cut.remapTriangles(t, children);
+        triangles = remap(triangles);
+        folds = remap(folds);
+        skipped = remap(skipped);
+        for (const [id, f] of byId)
+          if (f.state === 'pending' && f.feature.type === 'region')
+            byId.set(id, {
+              ...f,
+              feature: {
+                type: 'region',
+                input: { ...f.feature.input, triangles: remap(f.feature.input.triangles) },
+              },
+            });
+      }
+      folds = union(folds, result.folded);
+      skipped = union(skipped, result.skipped);
+      byId.set(feature.id, {
+        ...feature,
+        state: 'accepted',
+        curve: solve.curve,
+        ...(result.cut ? { pieces: result.pieces } : {}),
+      });
+    } else {
+      const solve = solveProposal(model, model.mesh, proposal);
+      if (!solve) {
+        notices.add(smallRegionNotice);
+        continue;
+      }
+      const mesh = cloneRefineMesh(model.mesh, false);
+      const changed = region.applyRegion(mesh, solve);
+      folds = union(folds, foldedTriangles(mesh, model.topology, model.mesh.position, changed));
+      model = { ...model, mesh };
+      byId.set(feature.id, { ...feature, state: 'accepted' });
+    }
+    accepted = true;
+  }
+  const { notify } = useEditor.getState();
+  for (const notice of notices) notify(notice, 'info');
+  if (!accepted) return;
+  commitRefine({
+    model,
+    features: features.map((f) => byId.get(f.id)!),
+    selected: [],
+    draft: null,
+    triangles: [...triangles],
+    folds,
+    skipped,
+    drawing: false,
+  });
+  if (skipped.length || folds.length) notify(cutNotice, 'info');
+}
+
+/** The sorted union of two sorted triangle sets. */
+const union = (a: Uint32Array, b: Uint32Array) =>
+  b.length ? Uint32Array.from(new Set([...a, ...b])).sort() : a;
+
+/** The selected pending features, in list order: what the draft previews. */
+const drafted = (refine: RefineSession) => {
+  const selected = new Set(refine.selected);
+  return refine.features.filter((f) => f.state === 'pending' && selected.has(f.id));
+};
+
+/** What the draft was last built from. */
+let builtDraft: { session: string; model: RefineModel; proposals: RefineProposal[] } | null = null;
+/** Per draft, the welded vertices it moved off its model's surface. */
+const draftMoves = new WeakMap<RefineMesh, { base: RefineMesh; moved: Uint32Array }>();
+let draftFrame = 0;
+
+/** Rebuilds the draft once per frame in a browser, at once without one. */
+function scheduleRefineDraft() {
+  if (typeof window === 'undefined' || typeof requestAnimationFrame !== 'function')
+    rebuildRefineDraft();
+  else if (!draftFrame)
+    draftFrame = requestAnimationFrame(() => {
+      draftFrame = 0;
+      rebuildRefineDraft();
+    });
+}
+
+function rebuildRefineDraft() {
+  const refine = readyRefine();
+  if (!refine) return;
+  const model = refine.model!;
+  const features = drafted(refine);
+  const proposals = features.map((f) => f.feature);
+  if (
+    builtDraft?.session === refine.id &&
+    builtDraft.model === model &&
+    (refine.draft !== null) === proposals.length > 0 &&
+    builtDraft.proposals.length === proposals.length &&
+    builtDraft.proposals.every((p, i) => p === proposals[i])
+  )
+    return;
+  builtDraft = { session: refine.id, model, proposals };
+  if (!proposals.length) {
+    useEditor.setState({ refine: showDraft(refine, null, noFolds) });
+    return;
+  }
+  const { edge, region } = refineCode!;
+  const mesh = cloneRefineMesh(model.mesh, false);
+  const moved: Uint32Array[] = [];
+  const curves = new Map<string, EdgeCurve | undefined>();
+  const notices: string[] = [];
+  for (const { id, feature: proposal } of features) {
+    // Until something moves, the draft's surface is the model's, whose solves are kept.
+    const on = moved.some((m) => m.length) ? mesh : model.mesh;
+    if (proposal.type === 'edge') {
+      if (!solvable(proposal.input)) {
+        curves.set(id, undefined);
+        continue;
+      }
+      const solve = solveProposal(model, on, proposal);
+      curves.set(id, solve?.curve);
+      if (solve)
+        moved.push(
+          edge.applyEdge(mesh, model.topology, solve, proposal.input.strength, false).changed,
+        );
+      else if (!reported.has(proposal)) {
+        reported.add(proposal);
+        notices.push(noEdgeNotice);
+      }
+    } else {
+      const solve = solveProposal(model, on, proposal);
+      if (solve) moved.push(region.applyRegion(mesh, solve));
+      else if (!reported.has(proposal)) {
+        reported.add(proposal);
+        notices.push(smallRegionNotice);
+      }
+    }
+  }
+  const curved = refine.features.map((f) => {
+    if (!curves.has(f.id) || f.curve === curves.get(f.id)) return f;
+    const { curve: _, ...rest } = f;
+    const curve = curves.get(f.id);
+    return curve ? { ...rest, curve } : rest;
+  });
+  const changed = Uint32Array.from(new Set(moved.flatMap((m) => [...m])));
+  draftMoves.set(mesh, { base: model.mesh, moved: changed });
+  useEditor.setState({ refine: showDraft({ ...refine, features: curved }, mesh, changed) });
+  const { notify } = useEditor.getState();
+  for (const notice of notices) notify(notice, 'info');
+}
+
+/**
+ * Brings the preview to `draft`, or to the model without one, writing only the vertices the shown
+ * draft and the new one moved off the model; showRefine when the preview shows anything else.
+ */
+function showDraft(refine: RefineSession, draft: RefineMesh | null, changed: Uint32Array) {
+  const { preview, source } = refine;
+  const model = refine.model!;
+  const next = { ...refine, draft };
+  const shown = preview && previewMeshes.get(preview);
+  const part = useEditor.getState().scene.parts.find((p) => p.id === refine.partId);
+  const before = shown === model.mesh ? null : shown && draftMoves.get(shown);
+  if (!preview || !shown || !part || (shown !== model.mesh && before?.base !== model.mesh))
+    return showRefine(next);
+  const mesh = draft ?? model.mesh;
+  const candidates = before ? [...before.moved, ...changed] : changed;
+  if (
+    !patchRefinedVertices(
+      preview,
+      source,
+      partMatrix(part),
+      shown,
+      mesh,
+      model.topology,
+      candidates,
+    )
+  )
+    return showRefine(next);
+  previewMeshes.set(preview, mesh);
+  refitWarpTree(source, preview);
+  return next;
+}
+
+/** What undo and redo reset: none of it is recorded in a step. */
+const unsteppedRefine = { draft: null, folds: noFolds, skipped: noFolds, drawing: false };
+
+const noEdgeNotice =
+  'No edge found under this guide. Move it onto the rounded edge or change Width.';
+const smallRegionNotice = 'This area is too small to fit a surface. Paint more of it.';
+const cutNotice = 'Some triangles along this edge could not be cut cleanly. Check the marked area.';
+
+/** The session, when it is ready for work. */
+function readyRefine() {
+  const { refine } = useEditor.getState();
+  return refine?.stage === 'ready' && refine.model && refineCode ? refine : null;
+}
+
+/** The brush radius on the session's part: what was set on it, or Warp's fitted start. */
+export function refineBrushRadius(state: Pick<EditorState, 'scene' | 'refine' | 'warpBrush'>) {
+  const { refine, warpBrush } = state;
+  const set = refine && warpBrush.get(refine.partId);
+  if (typeof set === 'number') return set;
+  const part = refine && state.scene.parts.find((part) => part.id === refine.partId);
+  return part ? fittedWarpBrushRadius(part) : 0;
+}
+
+/** Whether a press on the part paints triangles: Region, or Detect in a painted area. */
+export const paintingRefine = (state: Pick<EditorState, 'tool' | 'refine'>) =>
+  state.tool === 'refine' &&
+  (state.refine?.mode === 'region' ||
+    (state.refine?.mode === 'detect' && state.refine.detect.where === 'painted'));
+
+/** Whether a press on the part makes a brush stroke. */
+export const brushingRefine = (state: Pick<EditorState, 'tool' | 'refine'>) =>
+  state.tool === 'refine' && state.refine?.mode === 'brush';
+
+const pointsNeeded = { line: 2, arc: 3, spline: 2 } as const;
+
+/** Whether a segment takes another point: a line until 2, an arc until 3, a spline until finished. */
+const takesPoints = (segment: EdgeSegment, drawing: boolean) =>
+  segment.points.length < pointsNeeded[segment.kind] || (segment.kind === 'spline' && drawing);
+
+/** Whether every segment of a guide has the points its kind needs. */
+const solvable = (input: EdgeInput) =>
+  input.segments.every((s) => s.points.length >= pointsNeeded[s.kind]);
+
+const samePoint = (a: GuidePoint, b: GuidePoint) =>
+  a.triangle === b.triangle && a.position.every((x, k) => x === b.position[k]);
+
+/** The guide new points extend: the one selected feature when it is an open pending edge. */
+function drawnGuide(refine: RefineSession) {
+  if (refine.selected.length !== 1) return null;
+  const feature = refine.features.find((f) => f.id === refine.selected[0]);
+  return feature?.state === 'pending' &&
+    feature.feature.type === 'edge' &&
+    !feature.feature.input.closed
+    ? (feature as RefineFeature & { feature: { type: 'edge' } })
+    : null;
+}
+
+const withProposal = (refine: RefineSession, id: string, feature: RefineProposal) =>
+  refine.features.map((f) => (f.id === id ? { ...f, feature } : f));
+
+/** The features with each selected pending one's proposal replaced by `change`'s, unless null. */
+function updateSelected(
+  refine: RefineSession,
+  change: (proposal: RefineProposal) => RefineProposal | null,
+) {
+  const selected = new Set(refine.selected);
+  return refine.features.map((f) => {
+    const feature = f.state === 'pending' && selected.has(f.id) ? change(f.feature) : null;
+    return feature ? { ...f, feature } : f;
+  });
+}
+
+/**
+ * The guide without point `index` of `segment`, or null when no point is left. A point two
+ * segments share leaves the earlier one, which the later then starts from; the closing point opens
+ * the path. A segment left with fewer than 2 points is dropped with its joint.
+ */
+function withoutPoint(input: EdgeInput, segment: number, index: number): EdgeInput | null {
+  const segments = input.segments.map((s) => ({ kind: s.kind, points: [...s.points] }));
+  const joints = [...input.joints];
+  let closed = input.closed;
+  if (index === 0 && segment > 0) {
+    segment -= 1;
+    index = segments[segment].points.length - 1;
+  }
+  const n = segments.length;
+  const points = segments[segment].points;
+  const lastPoint = index === points.length - 1;
+  if (closed && ((segment === 0 && index === 0) || (segment === n - 1 && lastPoint))) {
+    closed = false;
+    joints.pop();
+    if (n === 1) points.splice(index, 1);
+    else {
+      segments[0].points.shift();
+      segments[n - 1].points.pop();
+    }
+  } else if (lastPoint && segment < n - 1) {
+    points.pop();
+    if (points.length) segments[segment + 1].points[0] = points[points.length - 1];
+    else segments[segment + 1].points.shift();
+  } else points.splice(index, 1);
+  // Joint k joins segments k and k + 1; a dropped segment takes the joint at its emptied end.
+  for (let k; (k = segments.findIndex((s) => s.points.length < 2)) >= 0 && segments.length > 1;) {
+    joints.splice(k < segments.length - 1 ? k : k - 1, 1);
+    segments.splice(k, 1);
+  }
+  return segments[0].points.length ? { ...input, segments, joints, closed } : null;
 }
 
 // A refinement is built from one geometry of one scene at one pose. Undo, another editor,

@@ -6,8 +6,13 @@ import { partMatrix, triangleCount } from '../../src/core/geometry';
 import { detectDefaults } from '../../src/core/refine-detect';
 import { writeRefinedGeometry } from '../../src/core/refine-mesh';
 import { patchRefinedGeometry } from '../../src/core/refine-preview';
+import { solveEdge } from '../../src/core/refine-edge';
 import {
+  brushingRefine,
   commitRefine,
+  fittedWarpBrushRadius,
+  paintingRefine,
+  refineBrushRadius,
   refineEdited,
   refineUndoBytes,
   refineUndoLimit,
@@ -17,7 +22,7 @@ import {
   type RefineStep,
 } from '../../src/core/store';
 import { useXR } from '../../src/core/xr-session';
-import type { Part } from '../../src/core/types';
+import type { Joint, Part } from '../../src/core/types';
 import { changedVertices, closed, modelOf, splitEdge } from '../helpers/refine';
 import {
   boxPart,
@@ -30,9 +35,11 @@ import {
   rebuiltModel,
   session,
   setup,
+  surfacePoint,
   toast,
+  trianglesArea,
 } from '../helpers/refine-session';
-import { softBox } from '../helpers/soft-edges';
+import { rivetedPlate, softBox } from '../helpers/soft-edges';
 
 const job = vi.hoisted(() => ({ failure: null as Error | null }));
 vi.mock('../../src/core/refine-job', async (importOriginal) => {
@@ -440,5 +447,500 @@ describe('refine apply', () => {
     expect(editor().applyRefine()).toBe(false);
     expect(toast()).toBe('Unlock Box to apply the refinement.');
     expect(editor().past.length).toBe(past);
+  });
+});
+
+const crest = (x: number) => surfacePoint([x, 1.5 - 0.0879, 1 - 0.0879]); // 0.3 - 0.3 / sqrt(2)
+const top = (x: number, z = 0) => surfacePoint([x, 1.5, z]);
+const shownMesh = () => session().draft ?? session().model!.mesh;
+/** The preview as writeRefinedGeometry writes what it shows afresh. */
+const freshShown = () => {
+  const part = editor().scene.parts.find((p) => p.id === session().partId)!;
+  return writeRefinedGeometry(session().source, partMatrix(part), shownMesh());
+};
+const edgeInput = (id = session().features[0].id) => {
+  const feature = session().features.find((f) => f.id === id)!.feature;
+  if (feature.type !== 'edge') throw new Error('not an edge');
+  return feature.input;
+};
+/** Draws a line guide along the box's front top crest and returns its id. */
+const crestGuide = (from = -1.6, to = 1.6) => {
+  editor().selectRefine([]);
+  editor().addRefinePoint(crest(from));
+  editor().addRefinePoint(crest(to));
+  return session().selected[0];
+};
+/** Paints with one press at each world point, on a part at the origin. */
+const paint = (points: [number, number, number][], erase = false) => {
+  for (const p of points) {
+    const { triangle, position } = surfacePoint(p);
+    editor().paintRefineRegion(
+      { partId: session().partId, point: position, normal: [0, 1, 0] },
+      triangle,
+      erase,
+      true,
+    );
+    editor().endPaintStroke();
+  }
+};
+
+describe('refine guides', () => {
+  it('previews a line guide without changing the model, then bakes it on accept', async () => {
+    setup([boxPart()], ['box']);
+    await ready();
+    const model = session().model!;
+    editor().addRefinePoint(crest(-1.6));
+    editor().addRefinePoint(crest(1.6));
+    expect(session().model).toBe(model);
+    expect(session().draft).not.toBeNull();
+    expect(session().features[0].curve).toBeDefined();
+    expect(differingAttributes(session().preview!, freshShown())).toEqual([]);
+    editor().acceptRefine();
+    expect(session().features[0].state).toBe('accepted');
+    expect(session().model!.mesh.triangleCount).toBeGreaterThan(model.mesh.triangleCount);
+    expect(triangleCount(session().preview!)).toBe(session().model!.mesh.triangleCount);
+    expect(session().features[0].pieces).toBe(1);
+    expect(session().selected).toEqual([]);
+    expect(session().draft).toBeNull();
+    expect(differingAttributes(session().preview!, fresh())).toEqual([]);
+  });
+
+  it('steps back and forward through accepts', async () => {
+    setup([boxPart()], ['box']);
+    await ready();
+    const start = session().model!;
+    crestGuide();
+    editor().acceptRefine();
+    const accepted = session().model!;
+    editor().undoRefine();
+    expect(session().model).toBe(start);
+    expect(session().features[0].state).toBe('pending');
+    expect(triangleCount(session().preview!)).toBe(start.mesh.triangleCount);
+    editor().redoRefine();
+    expect(session().model).toBe(accepted);
+    expect(session().features[0].state).toBe('accepted');
+    expect(differingAttributes(session().preview!, fresh())).toEqual([]);
+  });
+
+  it('applies as one undo step, keeps links, and scene undo restores the source geometry', async () => {
+    const pin = {
+      id: 'pin',
+      point: [0, 0, 0],
+      target: [0, 0, 0],
+      kind: 'hard',
+      priority: 50,
+    } as NonNullable<Part['pins']>[number];
+    const anchor = { id: 'anchor', point: [1, 0, 0], target: [1, 0, 0] } as NonNullable<
+      Part['anchors']
+    >[number];
+    const other = plate('other');
+    const joint: Joint = {
+      id: 'j',
+      name: 'Hinge',
+      parentId: 'other',
+      childId: 'box',
+      parentAnchor: [-20, 0, 0],
+      childAnchor: [20, 0, 0],
+      restRotation: [0, 0, 0, 1],
+      rotationLocks: [true, true, false],
+      keepConnected: true,
+    };
+    setup([boxPart({ pins: [pin], anchors: [anchor] }), other], ['box'], { joints: [joint] });
+    await ready();
+    crestGuide();
+    editor().acceptRefine();
+    const before = editor().scene;
+    const past = editor().past.length;
+    expect(editor().applyRefine()).toBe(true);
+    const part = editor().scene.parts[0];
+    expect(editor().past.length).toBe(past + 1);
+    expect(part.source).toBe('Refine · box.stl');
+    expect(part.pins).toEqual(before.parts[0].pins);
+    expect(part.anchors).toEqual(before.parts[0].anchors);
+    expect(editor().scene.joints).toEqual(before.joints);
+    expect(editor().scene.parts[1]).toBe(before.parts[1]);
+    expect(closed(part.geometry)).toBe(true);
+    editor().setTool('select');
+    editor().undo();
+    expect(editor().scene.parts[0].geometry).toBe(before.parts[0].geometry);
+  });
+
+  it('keeps a guide that finds no edge, changes nothing, and says why', async () => {
+    setup([boxPart()], ['box']);
+    await ready();
+    editor().addRefinePoint(top(-1, 0));
+    editor().addRefinePoint(top(1, 0));
+    expect(session().features).toHaveLength(1);
+    expect(session().features[0].curve).toBeUndefined();
+    expect(session().draft!.position).toEqual(session().model!.mesh.position);
+    expect(toast()).toBe(
+      'No edge found under this guide. Move it onto the rounded edge or change Width.',
+    );
+    const model = session().model;
+    useEditor.setState({ toast: null });
+    editor().acceptRefine();
+    expect(session().model).toBe(model);
+    expect(session().features[0].state).toBe('pending');
+    expect(toast()).toBe(
+      'No edge found under this guide. Move it onto the rounded edge or change Width.',
+    );
+  });
+
+  it('passes forced ends to the solve', async () => {
+    setup([boxPart()], ['box']);
+    await ready();
+    crestGuide(-1.2, 1.2);
+    const { mesh, topology, noise } = session().model!;
+    const drafts: Float64Array[] = [];
+    for (const end of ['hold', 'taper'] as const) {
+      editor().setRefineEdge({ ends: [end, end] });
+      expect(session().edge.ends).toEqual([end, end]);
+      expect(edgeInput().ends).toEqual([end, end]);
+      expect(solveEdge(mesh, topology, edgeInput(), noise)!.ends).toEqual([end, end]);
+      drafts.push(session().draft!.position.slice());
+    }
+    expect(drafts[0]).not.toEqual(drafts[1]);
+    expect(differingAttributes(session().preview!, freshShown())).toEqual([]);
+  });
+
+  it('builds segments, joints and closed paths point by point, one step each', async () => {
+    setup([boxPart()], ['box']);
+    await ready();
+    const undo = session().undo.length;
+    const [a, b, c, d] = [top(-1, -0.5), top(1, -0.5), top(1, 0.5), top(-1, 0.5)];
+    editor().addRefinePoint(a);
+    editor().addRefinePoint(b);
+    editor().setRefineEdge({ joint: 'smooth' });
+    editor().addRefinePoint(c);
+    expect(session().undo.length).toBe(undo + 3);
+    let input = edgeInput();
+    expect(input.segments.map((s) => s.points)).toEqual([
+      [a, b],
+      [b, c],
+    ]);
+    expect(input.joints).toEqual(['smooth']);
+    editor().setRefineEdge({ kind: 'arc', joint: 'sharp' });
+    editor().addRefinePoint(d);
+    editor().addRefinePoint(a, true);
+    input = edgeInput();
+    expect(input.segments.map((s) => s.kind)).toEqual(['line', 'line', 'arc']);
+    expect(input.segments[2].points).toEqual([c, d, a]);
+    expect(input.joints).toEqual(['smooth', 'sharp', 'sharp']);
+    expect(input.closed).toBe(true);
+    // Moving the closing point moves it in both segments that share it, as one step per drag.
+    const steps = session().undo.length;
+    editor().moveRefinePoint(session().features[0].id, 0, 0, top(-1.1, -0.5));
+    editor().moveRefinePoint(session().features[0].id, 0, 0, top(-1.2, -0.5));
+    expect(session().undo.length).toBe(steps + 1);
+    input = edgeInput();
+    expect(input.segments[0].points[0]).toEqual(top(-1.2, -0.5));
+    expect(input.segments[2].points[2]).toEqual(top(-1.2, -0.5));
+    // Removing the closing point opens the path there.
+    editor().removeRefinePoint(session().features[0].id, 0, 0);
+    input = edgeInput();
+    expect(input.closed).toBe(false);
+    expect(input.segments.map((s) => s.points)).toEqual([
+      [b, c],
+      [c, d],
+    ]);
+    // The first segment, left with one point, goes with the joint at that point.
+    expect(input.joints).toEqual(['sharp']);
+    // A point shared by two segments leaves the earlier, which the later starts from.
+    editor().removeRefinePoint(session().features[0].id, 0, 1);
+    expect(edgeInput().segments.map((s) => s.points)).toEqual([[b, d]]);
+    expect(edgeInput().joints).toEqual([]);
+    editor().undoRefine();
+    expect(edgeInput().segments).toHaveLength(2);
+
+    // A spline takes points until it is finished; the next point starts a new segment.
+    editor().selectRefine([]);
+    editor().setRefineEdge({ kind: 'spline' });
+    for (const x of [-1, -0.5, 0, 0.5]) editor().addRefinePoint(top(x, 0.2));
+    const spline = session().selected[0];
+    expect(edgeInput(spline).segments).toHaveLength(1);
+    expect(edgeInput(spline).segments[0].points).toHaveLength(4);
+    editor().finishRefineGuide();
+    editor().addRefinePoint(top(1, 0.2));
+    expect(edgeInput(spline).segments).toHaveLength(2);
+    expect(edgeInput(spline).segments[1].points).toEqual([top(0.5, 0.2), top(1, 0.2)]);
+    editor().dismissRefine();
+    expect(session().features.some((f) => f.id === spline)).toBe(false);
+    expect(session().draft).toBeNull();
+  });
+
+  it('keeps the preview equal to a fresh one through draft rebuilds', async () => {
+    setup([boxPart()], ['box']);
+    await ready();
+    const preview = session().preview!;
+    const id = crestGuide(-1.4, 1.2);
+    expect(differingAttributes(preview, freshShown())).toEqual([]);
+    editor().moveRefinePoint(id, 0, 1, crest(1.5));
+    expect(differingAttributes(preview, freshShown())).toEqual([]);
+    editor().setRefineEdge({ strength: 0.5 });
+    expect(differingAttributes(preview, freshShown())).toEqual([]);
+    editor().selectRefine([]);
+    expect(session().draft).toBeNull();
+    expect(differingAttributes(preview, fresh())).toEqual([]);
+    expect(session().preview).toBe(preview);
+  });
+});
+
+describe('refine regions', () => {
+  it('paints a region, makes it pending, and flattens on accept', async () => {
+    const { geometry, rivets } = rivetedPlate();
+    setup([boxPart({ id: 'plate', name: 'Plate', geometry })], ['plate']);
+    await ready();
+    editor().setRefineMode('region');
+    editor().setRefineBrushRadius(1);
+    const undo = session().undo.length;
+    paint(
+      [-1.4, 0, 1.4].flatMap((x) =>
+        [-0.6, 0.6].map((z) => [x, 0.5, z] as [number, number, number]),
+      ),
+    );
+    expect(session().undo.length).toBe(undo + 6);
+    expect(session().triangles.length).toBeGreaterThan(1000);
+    editor().makeRefineRegion();
+    expect(session().triangles).toEqual([]);
+    expect(session().features).toHaveLength(1);
+    expect(session().selected).toEqual([session().features[0].id]);
+    editor().setRefineRegion({ treatment: 'flatten' });
+    const feature = session().features[0].feature;
+    expect(feature.type === 'region' && feature.input.treatment).toBe('flatten');
+    expect(differingAttributes(session().preview!, freshShown())).toEqual([]);
+    const start = session().model!;
+    editor().acceptRefine();
+    expect(session().features[0].state).toBe('accepted');
+    const { mesh } = session().model!;
+    let base = 0;
+    for (let v = 0; v < mesh.weldedCount; v++) {
+      const [x, y, z] = [0, 1, 2].map((k) => mesh.position[v * 3 + k]);
+      if (y < 0.4 || Math.abs(x) > 1.8 || Math.abs(z) > 0.9) continue;
+      if (rivets.some((r) => Math.hypot(x - r.x, z - r.z) < 0.7)) continue;
+      base++;
+      expect(Math.abs(y - 0.5)).toBeLessThan(0.005);
+    }
+    expect(base).toBeGreaterThan(500);
+    expect(mesh.corners).toBe(start.mesh.corners);
+    expect(differingAttributes(session().preview!, fresh())).toEqual([]);
+  });
+
+  it('erases paint and refuses an area too small to fit', async () => {
+    setup([boxPart()], ['box']);
+    await ready();
+    editor().setRefineMode('region');
+    editor().setRefineBrushRadius(0.3);
+    paint([[0, 1.5, 0]]);
+    const painted = session().triangles.length;
+    expect(painted).toBeGreaterThan(0);
+    paint([[0, 1.5, 0]], true);
+    expect(session().triangles).toEqual([]);
+    editor().setRefineBrushRadius(0.05);
+    editor().setRefineRegion({ treatment: 'flatten' });
+    paint([[0, 1.5, 0]]);
+    editor().makeRefineRegion();
+    expect(toast()).toBe('This area is too small to fit a surface. Paint more of it.');
+  });
+
+  it('remaps a pending region when an edge is accepted through it', async () => {
+    setup([boxPart()], ['box']);
+    await ready();
+    editor().setRefineMode('region');
+    editor().setRefineBrushRadius(2);
+    paint([[0, 1.5, 0]]);
+    editor().makeRefineRegion();
+    const regionId = session().features[0].id;
+    const regionOf = () => {
+      const f = session().features.find((f) => f.id === regionId)!.feature;
+      if (f.type !== 'region') throw new Error('not a region');
+      return f.input.triangles;
+    };
+    const before = regionOf();
+    editor().setRefineMode('edge');
+    // A light edge still cuts, and bends the triangles it splits little.
+    editor().setRefineEdge({ strength: 0.3 });
+    const edge = crestGuide();
+    editor().acceptRefine([edge]);
+    const previous = session().undo.at(-1)!.model.mesh;
+    const { mesh } = session().model!;
+    expect(mesh.triangleCount).toBeGreaterThan(previous.triangleCount);
+    const after = regionOf();
+    expect(after.length).toBeGreaterThan(before.length);
+    expect(after.every((t) => t < mesh.triangleCount)).toBe(true);
+    // The original triangles, through their own corners on the new surface, cover the same area.
+    const original = trianglesArea({ ...mesh, corners: previous.corners }, before);
+    expect(Math.abs(trianglesArea(mesh, after) / original - 1)).toBeLessThan(0.01);
+    expect(session().features.find((f) => f.id === regionId)!.state).toBe('pending');
+  });
+});
+
+describe('refine brushes', () => {
+  it('brushes as one undo step per stroke', async () => {
+    setup([boxPart()], ['box']);
+    await ready();
+    editor().setRefineMode('brush');
+    editor().setRefineBrushRadius(0.4);
+    const start = session().model!;
+    const position = start.mesh.position.slice();
+    const undo = session().undo.length;
+    editor().beginRefineStroke(top(-0.5));
+    for (let i = 1; i <= 5; i++) editor().moveRefineStroke(top(-0.5 + i * 0.15));
+    editor().endRefineStroke();
+    expect(session().undo.length).toBe(undo + 1);
+    const { mesh } = session().model!;
+    expect(mesh.position).not.toEqual(position);
+    expect(mesh.corners).toBe(start.mesh.corners);
+    expect(mesh.weldOf).toBe(start.mesh.weldOf);
+    expect(session().model!.topology).toBe(start.topology);
+    expect(differingAttributes(session().preview!, fresh())).toEqual([]);
+    editor().undoRefine();
+    expect(session().model!.mesh.position).toEqual(position);
+    expect(differingAttributes(session().preview!, fresh())).toEqual([]);
+
+    editor().setRefineBrush({ kind: 'flatten' });
+    editor().beginRefineStroke(top(0.5));
+    editor().moveRefineStroke(top(0.6));
+    editor().endRefineStroke();
+    expect(session().undo.length).toBe(undo + 1);
+    expect(differingAttributes(session().preview!, fresh())).toEqual([]);
+  });
+
+  it('adds an accepted edge from a crease stroke', async () => {
+    setup([boxPart()], ['box']);
+    await ready();
+    editor().setRefineMode('brush');
+    editor().setRefineBrush({ kind: 'crease', strength: 1 });
+    editor().setRefineBrushRadius(0.4);
+    const undo = session().undo.length;
+    editor().beginRefineStroke(crest(-1.5));
+    for (let x = -1.4; x <= 1.5; x += 0.1) editor().moveRefineStroke(crest(x));
+    editor().endRefineStroke();
+    expect(session().features).toHaveLength(1);
+    expect(session().features[0]).toMatchObject({ state: 'accepted', origin: 'hand' });
+    expect(session().features[0].feature.type).toBe('edge');
+    expect(session().model!.mesh.crease.includes(1)).toBe(true);
+    expect(session().undo.length).toBe(undo + 1);
+
+    // Too short a stroke changes nothing.
+    const model = session().model;
+    editor().beginRefineStroke(crest(0));
+    editor().moveRefineStroke(crest(0.05));
+    editor().endRefineStroke();
+    expect(session().model).toBe(model);
+    expect(toast()).toBe(
+      'No edge found under this guide. Move it onto the rounded edge or change Width.',
+    );
+  });
+
+  it('keeps the brush radius per part, starting from the fitted radius', async () => {
+    setup([boxPart()], ['box']);
+    await ready();
+    const part = editor().scene.parts[0];
+    expect(refineBrushRadius(editor())).toBe(fittedWarpBrushRadius(part));
+    editor().setRefineBrushRadius(0.7);
+    expect(refineBrushRadius(editor())).toBe(0.7);
+    expect(editor().warpBrush.get('box')).toBe(0.7);
+    editor().setRefineMode('region');
+    expect(paintingRefine(editor())).toBe(true);
+    expect(brushingRefine(editor())).toBe(false);
+    editor().setRefineMode('detect');
+    expect(paintingRefine(editor())).toBe(false);
+    editor().setRefineDetect({ where: 'painted' });
+    expect(paintingRefine(editor())).toBe(true);
+    editor().setRefineMode('brush');
+    expect(brushingRefine(editor())).toBe(true);
+  });
+});
+
+describe('refine detection', () => {
+  it('adds detected proposals without touching the model or the undo stack', async () => {
+    setup([boxPart()], ['box']);
+    await ready();
+    const model = session().model,
+      undo = session().undo.length;
+    await editor().detectRefine();
+    expect(
+      session().features.filter((f) => f.origin === 'detected' && f.state === 'pending'),
+    ).toHaveLength(18);
+    expect(session().model).toBe(model);
+    expect(session().undo.length).toBe(undo);
+    expect(session().selected).toEqual([]);
+    expect(session().detect.running).toBe(false);
+    const task = useActivity
+      .getState()
+      .tasks.find((t) => t.title === 'Finding edges and surfaces')!;
+    expect(task.status).toBe('completed');
+  });
+
+  it('accepts several selected proposals together as one step', async () => {
+    setup([boxPart()], ['box']);
+    await ready();
+    await editor().detectRefine();
+    const edges = session()
+      .features.filter((f) => f.feature.type === 'edge')
+      .slice(0, 3)
+      .map((f) => f.id);
+    editor().selectRefine(edges);
+    expect(session().draft).not.toBeNull();
+    expect(differingAttributes(session().preview!, freshShown())).toEqual([]);
+    const undo = session().undo.length;
+    editor().acceptRefine();
+    expect(
+      session()
+        .features.filter((f) => f.state === 'accepted')
+        .map((f) => f.id),
+    ).toEqual(edges);
+    expect(session().undo.length).toBe(undo + 1);
+    expect(differingAttributes(session().preview!, fresh())).toEqual([]);
+  });
+
+  it('drops a detection that finished after the model changed', async () => {
+    setup([boxPart()], ['box']);
+    await ready();
+    const detection = editor().detectRefine();
+    crestGuide();
+    editor().acceptRefine();
+    await detection;
+    expect(session().features.filter((f) => f.origin === 'detected')).toHaveLength(0);
+    expect(toast()).toBe('The surface changed, so detection was stopped.');
+    expect(session().detect.running).toBe(false);
+  });
+
+  it('never applies a proposal that was not accepted', async () => {
+    setup([boxPart()], ['box']);
+    await ready();
+    const geometry = editor().scene.parts[0].geometry;
+    await editor().detectRefine();
+    expect(editor().applyRefine()).toBe(false);
+    expect(editor().scene.parts[0].geometry).toBe(geometry);
+  });
+
+  it('stops a running detection and its worker on cancel', async () => {
+    setup([boxPart()], ['box']);
+    await ready();
+    const terminate = vi.fn();
+    class StuckWorker {
+      onmessage = null;
+      onerror = null;
+      onmessageerror = null;
+      postMessage() {}
+      terminate = terminate;
+    }
+    vi.stubGlobal('Worker', StuckWorker);
+    try {
+      const detection = editor().detectRefine();
+      expect(session().detect.running).toBe(true);
+      editor().cancelRefineDetect();
+      await detection;
+    } finally {
+      vi.unstubAllGlobals();
+    }
+    expect(terminate).toHaveBeenCalled();
+    expect(session().detect.running).toBe(false);
+    expect(session().features).toEqual([]);
+    const task = useActivity
+      .getState()
+      .tasks.find((t) => t.title === 'Finding edges and surfaces')!;
+    expect(task.status).toBe('cancelled');
   });
 });

@@ -1,3 +1,4 @@
+import { Vector3 } from 'three';
 import type {
   BufferAttribute,
   BufferGeometry,
@@ -32,6 +33,9 @@ function copyItem(source: Attribute, target: BufferAttribute, from: number, to: 
     target.array.set(storedItem(source, from), to * size);
   else for (let k = 0; k < size; k++) target.array[to * size + k] = decoded(source, from, k);
 }
+
+const anyTouched = (mesh: Pick<RefineMesh, 'touched'>, count: number) =>
+  mesh.touched.subarray(0, count).includes(1);
 
 const plainFloat = (attribute: Attribute) =>
   !('isInterleavedBufferAttribute' in attribute) &&
@@ -96,25 +100,10 @@ export function patchRefinedGeometry(
   next: RefineMesh,
   topology: RefineTopology,
 ): boolean {
-  if (
-    next.corners !== shown.corners ||
-    next.weldOf !== shown.weldOf ||
-    next.triangleCount !== shown.triangleCount ||
-    next.vertexCount !== shown.vertexCount ||
-    next.weldedCount !== shown.weldedCount ||
-    next.flipped !== shown.flipped ||
-    topology.triangleStart.length !== next.weldedCount + 1
-  )
-    return false;
-  const { weldOf, corners, weldedCount } = next;
-  const { triangleStart, trianglesOf, neighbourStart, neighbours } = topology;
+  if (!sameLayout(shown, next, topology)) return false;
   const moved: number[] = [];
   const creased: number[] = [];
-  let shownTouched = false,
-    nextTouched = false;
-  for (let v = 0; v < weldedCount; v++) {
-    shownTouched ||= shown.touched[v] === 1;
-    nextTouched ||= next.touched[v] === 1;
+  for (let v = 0; v < next.weldedCount; v++) {
     const p = v * 3;
     if (
       shown.touched[v] !== next.touched[v] ||
@@ -125,10 +114,61 @@ export function patchRefinedGeometry(
       moved.push(v);
     if (shown.crease[v] !== next.crease[v]) creased.push(v);
   }
+  return writeChanges(preview, source, matrixWorld, shown, next, topology, moved, creased);
+}
+
+/**
+ * As patchRefinedGeometry when `next` differs from what the preview shows only at the welded
+ * vertices `changed`, which costs time in proportion to them rather than to the mesh. `shown` gives
+ * the touched and crease flags the preview was written with; its positions are not read, so `next`
+ * may be the very mesh the preview was written from, moved in place since. The bounds grow to
+ * take the moved vertices in, rather than being measured afresh over the whole preview.
+ */
+export function patchRefinedVertices(
+  preview: BufferGeometry,
+  source: BufferGeometry,
+  matrixWorld: Matrix4,
+  shown: Pick<RefineMesh, 'touched' | 'crease'>,
+  next: RefineMesh,
+  topology: RefineTopology,
+  changed: Iterable<number>,
+): boolean {
+  if (!sameLayout(next, next, topology)) return false;
+  const moved = [...new Set(changed)];
+  const creased = moved.filter((v) => shown.crease[v] !== next.crease[v]);
+  return writeChanges(preview, source, matrixWorld, shown, next, topology, moved, creased, true);
+}
+
+const sameLayout = (shown: RefineMesh, next: RefineMesh, topology: RefineTopology) =>
+  next.corners === shown.corners &&
+  next.weldOf === shown.weldOf &&
+  next.triangleCount === shown.triangleCount &&
+  next.vertexCount === shown.vertexCount &&
+  next.weldedCount === shown.weldedCount &&
+  next.flipped === shown.flipped &&
+  topology.triangleStart.length === next.weldedCount + 1;
+
+function writeChanges(
+  preview: BufferGeometry,
+  source: BufferGeometry,
+  matrixWorld: Matrix4,
+  shownFlags: Pick<RefineMesh, 'touched' | 'crease'>,
+  next: RefineMesh,
+  topology: RefineTopology,
+  moved: number[],
+  creased: number[],
+  grow = false,
+): boolean {
+  const { weldOf, corners, weldedCount } = next;
+  const { triangleStart, trianglesOf, neighbourStart, neighbours } = topology;
+  const shown: RefineMesh = { ...next, touched: shownFlags.touched, crease: shownFlags.crease };
   const sourcePosition = source.getAttribute('position');
   const sourceNormal = source.getAttribute('normal');
   // Without a moved vertex the writer keeps the source's storage, which differs unless plain float.
-  if ((!shownTouched || !nextTouched) && !(plainFloat(sourcePosition) && plainFloat(sourceNormal)))
+  if (
+    !(plainFloat(sourcePosition) && plainFloat(sourceNormal)) &&
+    !(anyTouched(shown, weldedCount) && anyTouched(next, weldedCount))
+  )
     return false;
   if (!moved.length && !creased.length) return true;
 
@@ -272,7 +312,18 @@ export function patchRefinedGeometry(
     attribute.addUpdateRange(low * attribute.itemSize, (high - low + 1) * attribute.itemSize);
     attribute.needsUpdate = true;
   }
-  preview.computeBoundingBox();
-  preview.computeBoundingSphere();
+  const { boundingBox: box, boundingSphere: sphere } = preview;
+  if (grow && box && sphere) {
+    const point = new Vector3();
+    for (const v of moved)
+      eachCorner(v, (c) => {
+        point.fromBufferAttribute(position, output(c));
+        box.expandByPoint(point);
+        sphere.expandByPoint(point);
+      });
+  } else {
+    preview.computeBoundingBox();
+    preview.computeBoundingSphere();
+  }
   return true;
 }

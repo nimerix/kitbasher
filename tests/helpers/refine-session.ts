@@ -3,6 +3,9 @@ import type { BufferGeometry } from 'three';
 import { useEditor, type RefineSession, type RefineStep } from '../../src/core/store';
 import { cloneRefineMesh, moveVertex } from '../../src/core/refine-mesh';
 import { buffersOf, modelFromMesh, type RefineModel } from '../../src/core/refine-model';
+import type { RefineMesh } from '../../src/core/refine-mesh';
+import type { GuidePoint } from '../../src/core/refine-band';
+import { pointOn } from './refine';
 import type { Part, SceneDocument } from '../../src/core/types';
 import { softBox } from './soft-edges';
 
@@ -24,8 +27,12 @@ export const boxPart = (overrides: Partial<Part> = {}): Part => ({
   ...overrides,
 });
 
-export function setup(parts: Part[], selected: string[] = []) {
-  const scene: SceneDocument = { name: 'Refine', parts, joints: [] };
+export function setup(
+  parts: Part[],
+  selected: string[] = [],
+  links: Pick<SceneDocument, 'joints'> = { joints: [] },
+) {
+  const scene: SceneDocument = { name: 'Refine', parts, ...links };
   editor().setScene(scene);
   useEditor.setState({ selected });
   return scene;
@@ -101,4 +108,23 @@ export function differingAttributes(a: BufferGeometry, b: BufferGeometry) {
   if (!!ia !== !!ib || (ia && ib && (ia.length !== ib.length || ia.some((v, i) => v !== ib[i]))))
     differ.push('index');
   return differ;
+}
+
+/** A point on the session's working surface nearest `p`, as a click on it. */
+export const surfacePoint = (p: [number, number, number]): GuidePoint =>
+  pointOn(session().model!.mesh, p);
+
+/** Total area of `triangles` of `mesh`. */
+export function trianglesArea(mesh: RefineMesh, triangles: ArrayLike<number>) {
+  const { position, weldOf, corners } = mesh;
+  let area = 0;
+  for (let i = 0; i < triangles.length; i++) {
+    const [a, b, c] = [0, 1, 2].map((k) => weldOf[corners[triangles[i] * 3 + k]] * 3);
+    const u = [0, 1, 2].map((k) => position[b + k] - position[a + k]),
+      w = [0, 1, 2].map((k) => position[c + k] - position[a + k]);
+    area +=
+      Math.hypot(u[1] * w[2] - u[2] * w[1], u[2] * w[0] - u[0] * w[2], u[0] * w[1] - u[1] * w[0]) /
+      2;
+  }
+  return area;
 }
