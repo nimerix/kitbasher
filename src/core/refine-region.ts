@@ -53,6 +53,15 @@ export interface RegionSolve {
   fitted: ShapeKind | 'sweep' | null;
   /** Per edge-connected patch, in order of its smallest triangle: what it was fitted as. */
   fits: (ShapeKind | 'sweep' | null)[];
+  /** Per patch, as `fits`: the settings the solve used, where the input left them automatic. */
+  resolved: (RegionResolved | null)[];
+}
+/** The mm a patch's solve used for each setting an input may leave null. */
+export interface RegionResolved {
+  blend: number;
+  scale: number;
+  /** Null when no detail was looked for. */
+  detail: number | null;
 }
 
 /** Detail stands this many times the region's roughness off its surface. */
@@ -117,12 +126,14 @@ export function solveRegion(
   const weight = new Float32Array(count);
   const detail = new Uint8Array(count);
   const fits: (Fitted | null)[] = [];
+  const resolved: (RegionResolved | null)[] = [];
   let solved = false;
   // Each patch has its own fit, detail and blend; a vertex two patches share is on both borders.
   for (const triangles of patchesOf(mesh, topology, input.triangles)) {
     const patch = solvePatch(mesh, topology, triangles, input, noise);
     if (patch === 'refused') return null;
     fits.push(patch?.fitted ?? null);
+    resolved.push(patch?.resolved ?? null);
     if (!patch) continue;
     solved = true;
     patch.vertices.forEach((v, i) => {
@@ -134,7 +145,7 @@ export function solveRegion(
     });
   }
   if (!solved) return null;
-  return { vertices, target, weight, detail, fitted: fits[0], fits };
+  return { vertices, target, weight, detail, fitted: fits[0], fits, resolved };
 }
 
 /** Writes the solve's checked positions, unchanged, wherever its weight is above 0. */
@@ -183,6 +194,8 @@ interface Base {
   detail: Uint8Array;
   held: Uint8Array;
   fitted: Fitted | null;
+  /** The offset that counted as detail, or null when none was looked for. */
+  limit: number | null;
 }
 
 interface PatchSolve {
@@ -191,6 +204,7 @@ interface PatchSolve {
   weight: Float32Array;
   detail: Uint8Array;
   fitted: Fitted | null;
+  resolved: RegionResolved;
 }
 
 function solvePatch(
@@ -218,8 +232,16 @@ function solvePatch(
       : fitBase(mesh, topology, region, input, noise, normals, edge, blend);
   if (!base) return null;
   for (let i = 0; i < count; i++)
-    if (!border[i] && !base.detail[i] && !base.held[i])
-      return settle(mesh, topology, region, base, blend, input.strength, edge);
+    if (!border[i] && !base.detail[i] && !base.held[i]) {
+      const settled = settle(mesh, topology, region, base, blend, input.strength, edge);
+      if (settled === 'refused') return settled;
+      const resolved = {
+        blend: input.blend ?? 4 * edge,
+        scale: input.scale ?? smoothScale(edge),
+        detail: base.limit,
+      };
+      return { ...settled, resolved };
+    }
   return null;
 }
 
@@ -254,11 +276,12 @@ function fitBase(
   if (!first) return null;
   const kind = first.kind;
   let projected: Float32Array | null = null;
+  const offsetUsed: { limit: number | null } = { limit: null };
   const classify = (shape: Surface) => {
     const sample = sampled(shape, points, input.keepDetail);
     projected = sample.projected;
     const detail = sample.offset
-      ? detailOf(topology, region, sample.offset, noise, input.detail, points, normals)
+      ? detailOf(topology, region, sample.offset, noise, input.detail, points, normals, offsetUsed)
       : new Uint8Array(count);
     return { detail, held: facingAway(sample.normal, normals, detail) };
   };
@@ -310,7 +333,7 @@ function fitBase(
     for (let axis = 0; axis < 3; axis++)
       move[i * 3 + axis] = projected[i * 3 + axis] - position[v + axis];
   }
-  return { move, detail, held, fitted: kind };
+  return { move, detail, held, fitted: kind, limit: offsetUsed.limit };
 }
 
 /**
@@ -433,6 +456,7 @@ function smoothBase(
   const scale = input.scale ?? smoothScale(edge);
   const free = Uint8Array.from(vertices, (v, i) => (border[i] || crease[v] ? 0 : 1));
   let detail: Uint8Array = new Uint8Array(count);
+  const offsetUsed: { limit: number | null } = { limit: null };
   let start = position;
   if (input.keepDetail) {
     const base = smoothTargets(mesh, topology, vertices, free, 2 * scale, smoothRounds, crease);
@@ -445,7 +469,7 @@ function smoothBase(
         offset[i] += (position[v + axis] - base[i * 3 + axis]) * normals[i * 3 + axis];
       }
     }
-    detail = detailOf(topology, region, offset, noise, input.detail, points, normals);
+    detail = detailOf(topology, region, offset, noise, input.detail, points, normals, offsetUsed);
     if (detail.includes(1)) {
       start = position.slice();
       for (let i = 0; i < count; i++)
@@ -459,7 +483,7 @@ function smoothBase(
     if (free[i])
       for (let axis = 0; axis < 3; axis++)
         move[i * 3 + axis] = target[i * 3 + axis] - position[vertices[i] * 3 + axis];
-  return { move, detail, held: new Uint8Array(count), fitted: null };
+  return { move, detail, held: new Uint8Array(count), fitted: null, limit: offsetUsed.limit };
 }
 
 /**
@@ -476,11 +500,13 @@ function detailOf(
   threshold: number | null,
   points: Float32Array,
   normals: Float32Array,
+  used?: { limit: number | null },
 ): Uint8Array {
   const { vertices, indexOf } = region;
   const count = vertices.length;
   const local = roughness(offset, noise);
   const limit = threshold ?? detailScale * local;
+  if (used) used.limit = limit;
   const detail = new Uint8Array(count);
   const queue: number[] = [];
   for (let i = 0; i < count; i++)
@@ -613,7 +639,7 @@ function settle(
   blend: Float32Array,
   strength: number,
   edge: number,
-): PatchSolve | 'refused' {
+): Omit<PatchSolve, 'resolved'> | 'refused' {
   const { vertices, border } = region;
   const count = vertices.length;
   const { position, crease } = mesh;

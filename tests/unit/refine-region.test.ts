@@ -76,6 +76,22 @@ describe('solveRegion and applyRegion', () => {
       ).toBeLessThan(0.01);
   });
 
+  it('reports the settings it used, so taking one off Auto at that value changes nothing', () => {
+    const model = modelOf(rivetedPlate().geometry);
+    const region = topRegion(model.mesh);
+    const auto = run(model, flatten(region));
+    const [used] = auto.solve.resolved;
+    expect(used!.blend).toBeGreaterThan(0);
+    expect(used!.scale).toBeGreaterThan(0);
+    expect(used!.detail).toBeGreaterThan(0);
+    const manual = run(model, flatten(region, { ...used! }));
+    expect(manual.solve.resolved[0]).toEqual(used);
+    expect(manual.out.position).toEqual(auto.out.position);
+    // A set value is reported as set, and no offset is reported when no detail is looked for.
+    const set = run(model, flatten(region, { blend: 0.5, keepDetail: false })).solve.resolved[0]!;
+    expect(set).toMatchObject({ blend: 0.5, detail: null });
+  });
+
   it('flattens rivets too when Keep detail is off', () => {
     const { geometry, rivets } = rivetedPlate();
     const model = modelOf(geometry);

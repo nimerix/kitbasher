@@ -754,12 +754,27 @@ function RegionControls({ view, targets, owned }: ModeProps) {
       : null;
   const model = view.model!;
   const set = (options: Partial<RefineSession['region']>) => editor().setRefineRegion(options);
-  // Selected regions all start from the model's rule until the solver reports what it used.
+  // Each selected region starts from what its own solve used; the model's rule stands in without one.
   const seed =
     (setting: 'detail' | 'blend' | 'scale', range: { min: number; max: number }) => () => {
-      const start = manualStart(autoRule(setting, model), range);
-      set({ [setting]: start.value });
-      return start.adjusted;
+      const rule = autoRule(setting, model);
+      if (!targets.length) {
+        const start = manualStart(rule, range);
+        set({ [setting]: start.value });
+        return start.adjusted;
+      }
+      const { each, adjusted } = manualStarts(
+        targets.map((f) => {
+          const used = (refineSolved(editor().refine!, f) as RegionSolve | null)?.resolved;
+          return { id: f.id, start: used?.find((patch) => patch)?.[setting] ?? rule };
+        }),
+        range,
+      );
+      editor().setRefineRegion(
+        {},
+        Object.fromEntries(Object.entries(each).map(([id, value]) => [id, { [setting]: value }])),
+      );
+      return adjusted;
     };
   const smooth = !treatment.mixed && treatment.value === 'smooth';
   const fitted = !shape.mixed && shape.value === 'auto' ? fittedLabel(solve?.fitted ?? null) : null;
