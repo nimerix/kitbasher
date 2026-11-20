@@ -2,9 +2,13 @@ import { useEffect, useRef } from 'react';
 import { joinLiveSession } from '../core/live';
 import {
   committedScene,
+  brushingRefine,
+  drawingRefineGuide,
   liveSession,
+  paintingRefine,
   paintingWarpArea,
   paintingWarpRegion,
+  refineBrushRadius,
   useEditor,
   warpBrushRadius,
 } from '../core/store';
@@ -14,6 +18,17 @@ import { chooseTransformTool, executeEditorCommand, shortcutCommand } from '../c
 import { isEditableTarget, keyboardContextMenu } from '../core/context-menu';
 import { actionRepeats, keyName, matchKeyAction } from '../core/keybindings';
 import { usePreferences } from '../core/preferences';
+
+/** Key actions that choose a tool. */
+export const keyTools = {
+  select: 'select',
+  align: 'align',
+  joint: 'joint',
+  anchors: 'anchors',
+  warp: 'warp',
+  refine: 'refine',
+  measure: 'measure',
+} as const;
 
 export function useLiveSession() {
   useEffect(() => (liveSession ? joinLiveSession() : undefined), []);
@@ -146,22 +161,14 @@ export function useKeyboard(openScene: () => void, searchParts: () => void) {
         scale: 'scale',
         transform: 'transform',
       } as const;
-      const tools = {
-        select: 'select',
-        align: 'align',
-        joint: 'joint',
-        anchors: 'anchors',
-        warp: 'warp',
-        measure: 'measure',
-      } as const;
       if (action in transformTools) {
         event.preventDefault();
         chooseTransformTool(transformTools[action as keyof typeof transformTools]);
         return;
       }
-      if (action in tools) {
+      if (action in keyTools) {
         event.preventDefault();
-        state.setTool(tools[action as keyof typeof tools]);
+        state.setTool(keyTools[action as keyof typeof keyTools]);
         return;
       }
       switch (action) {
@@ -182,15 +189,20 @@ export function useKeyboard(openScene: () => void, searchParts: () => void) {
         case 'brushSmaller':
         case 'brushLarger': {
           const warping = paintingWarpRegion(state) || paintingWarpArea(state);
-          if (!paintingSurface && !warping) return;
+          const refining = paintingRefine(state) || brushingRefine(state);
+          if (!paintingSurface && !warping && !refining) return;
           event.preventDefault();
           const radius = Number(
             (
-              (warping ? warpBrushRadius(state) : state.brushRadius) *
-              (action === 'brushSmaller' ? 0.8 : 1.25)
+              (warping
+                ? warpBrushRadius(state)
+                : refining
+                  ? refineBrushRadius(state)
+                  : state.brushRadius) * (action === 'brushSmaller' ? 0.8 : 1.25)
             ).toFixed(2),
           );
           if (warping) state.setWarpBrushRadius(radius);
+          else if (refining) state.setRefineBrushRadius(radius);
           else state.setBrush({ radius });
           return;
         }
@@ -234,6 +246,11 @@ export function useKeyboard(openScene: () => void, searchParts: () => void) {
             state.setNavigationMode(null);
             return;
           }
+          const guide = state.tool === 'refine' && state.refine && drawingRefineGuide(state.refine);
+          if (guide) {
+            state.dismissRefine([guide]);
+            return;
+          }
           const wasSelecting = state.tool === 'select';
           state.setTool('select');
           state.resetPicks();
@@ -244,10 +261,19 @@ export function useKeyboard(openScene: () => void, searchParts: () => void) {
           event.preventDefault();
           if (state.tool === 'warp' && state.warp) {
             if (state.warp.stage === 'warp') state.removeWarpPoints();
+          } else if (state.tool === 'refine' && state.refine) {
+            if (state.refine.selected.length) state.dismissRefine();
           } else executeEditorCommand('delete');
           return;
         case 'apply':
-          if (nativeActivation || !['align', 'joint'].includes(state.tool)) return;
+          if (nativeActivation) return;
+          if (state.tool === 'refine' && state.refine) {
+            event.preventDefault();
+            if (state.refine.drawing) state.finishRefineGuide();
+            else state.acceptRefine();
+            return;
+          }
+          if (!['align', 'joint'].includes(state.tool)) return;
           event.preventDefault();
           if (state.tool === 'joint') state.createJoint();
           else state.applyAlignment();

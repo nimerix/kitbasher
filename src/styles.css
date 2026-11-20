@@ -6658,8 +6658,55 @@ optgroup {
 .transform-mode-buttons.with-scale {
   grid-template-columns: repeat(3, minmax(0, 1fr));
 }
-/* Narrower toolbars show Pin, Joint and Warp as icons, so the strip still fits on one row. Their
-   names stay in the tooltip and for assistive technology. */
+/* Refine: Warp's controls, with four modes, a shared label column and selects. */
+.display-segmented.refine-modes {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+.display-segmented.refine-pair {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+.refine-controls .warp-point-setting {
+  grid-template-columns: 64px minmax(0, 1fr) 58px 18px;
+  margin: 8px 0;
+}
+.refine-choice {
+  display: grid;
+  grid-template-columns: 64px minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  margin: 8px 0;
+  font-size: 11px;
+  color: var(--muted);
+}
+.refine-ends {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+.refine-ends > label {
+  display: grid;
+  gap: 3px;
+}
+.refine-ends select,
+.refine-controls .brush-radius > select {
+  min-width: 0;
+  padding: 6px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: #22262b;
+  color: var(--text);
+}
+.refine-controls .brush-radius {
+  margin: 8px 0;
+}
+.refine-spaced {
+  margin-top: 10px;
+}
+.refine-counts {
+  margin: 12px 16px 0;
+}
+/* Narrower toolbars show Pin, Joint, Warp and Refine as icons, so the strip still fits on one
+   row. Their names stay in the tooltip and for assistive technology. */
 @media (max-width: 1500px) {
   .toolbar-left .compact-tool {
     position: relative;
@@ -6674,11 +6721,14 @@ optgroup {
   }
 }
 @media (max-width: 1700px) {
-  .toolbar-left .warp-tool {
+  .toolbar-left .warp-tool,
+  .toolbar-left .refine-tool {
     position: relative;
   }
   .toolbar-left .warp-tool > span,
-  .toolbar-left .warp-tool > kbd {
+  .toolbar-left .warp-tool > kbd,
+  .toolbar-left .refine-tool > span,
+  .toolbar-left .refine-tool > kbd {
     position: absolute;
     width: 1px;
     height: 1px;

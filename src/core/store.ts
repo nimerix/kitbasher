@@ -5738,6 +5738,23 @@ export const paintingRefine = (state: Pick<EditorState, 'tool' | 'refine'>) =>
 export const brushingRefine = (state: Pick<EditorState, 'tool' | 'refine'>) =>
   state.tool === 'refine' && state.refine?.mode === 'brush';
 
+/** The guide still being drawn: the one selected open pending edge while a segment takes points. */
+export function drawingRefineGuide(refine: RefineSession) {
+  const guide = drawnGuide(refine);
+  return guide && (refine.drawing || !solvable(guide.feature.input)) ? guide.id : null;
+}
+
+/** The solve last made for a pending feature on the working surface, or null; for display. */
+export function refineSolved(refine: RefineSession, feature: RefineFeature) {
+  const proposal = feature.feature;
+  const cached = refineSolves.get(proposal.type === 'edge' ? proposal.input.segments : proposal);
+  return cached &&
+    cached.mesh === refine.model?.mesh &&
+    sameSolveInput(cached.input, proposal.input)
+    ? cached.solve
+    : null;
+}
+
 const pointsNeeded = { line: 2, arc: 3, spline: 2 } as const;
 
 /** Whether a segment takes another point: a line until 2, an arc until 3, a spline until finished. */
