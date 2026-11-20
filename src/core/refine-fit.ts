@@ -17,10 +17,10 @@ export interface ShapeFit {
   shape: Shape;
   /** RMS distance of inliers. */
   rms: number;
-  /** Fraction of the input points the final weights keep. */
+  /** Fraction of the input points within 3 * noise of the shape. */
   support: number;
   /**
-   * True when rms <= 2 * noise and the fit keeps at least half of its points. Noise is floored at
+   * True when rms <= 2 * noise and at least half of the points support the fit. Noise is floored at
    * 1e-9 mm so exact data passes at zero noise.
    */
   within: boolean;
@@ -247,8 +247,6 @@ interface Fitted {
   /** True when the normals face against the model's outward direction. */
   inward: boolean;
   weight: Float64Array;
-  /** Fraction of the points the final weights keep. */
-  support: number;
 }
 
 type Scorer = Pick<Model, 'residuals' | 'gradient'>;
@@ -348,7 +346,7 @@ function robust<M extends Scorer>(cloud: Cloud, noise: number, fitter: Fitter<M>
     facing += weight[i] * dot(model.gradient(final, i), cloud.n.subarray(i * 3, i * 3 + 3));
   }
   if (!inliers) return null;
-  return { state: final, inward: facing < 0, weight, support: inliers / count };
+  return { state: final, inward: facing < 0, weight };
 }
 
 const at = (cloud: Cloud, i: number): Vec3 => [
@@ -675,15 +673,18 @@ export function fitShape(
   )
     return null;
   let sum = 0,
-    kept = 0;
+    kept = 0,
+    near = 0;
   for (let i = 0; i < cloud.count; i++) {
-    if (fitted.weight[i] <= 0) continue;
     const d = shapeDistance(shape, points[i * 3], points[i * 3 + 1], points[i * 3 + 2]);
+    // Counted against the noise itself: the weights' own scale always keeps at least half.
+    if (Math.abs(d) <= 3 * floor) near++;
+    if (fitted.weight[i] <= 0) continue;
     sum += d * d;
     kept++;
   }
   const rms = Math.sqrt(sum / kept);
-  const { support } = fitted;
+  const support = near / cloud.count;
   return { shape, rms, support, within: rms <= 2 * floor && support >= 0.5 };
 }
 

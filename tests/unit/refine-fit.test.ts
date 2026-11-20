@@ -177,6 +177,16 @@ describe('fitShape whichever way the normals face', () => {
 });
 
 describe('fitShape support', () => {
+  it('reports low support for a cloud with no surface in it', () => {
+    let seed = 7;
+    const random = () => (seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0) / 4294967296;
+    const points = Float32Array.from({ length: 3000 }, () => random());
+    const normals = Float32Array.from({ length: 3000 }, (_, i) => (i % 3 === 2 ? 1 : 0));
+    const fit = fitShape(points, normals, 'plane', 0.004)!;
+    // A plane through a unit cube of scatter has about 2.4 % of it within 3 * noise.
+    expect(fit.support).toBeLessThan(0.2);
+    expect(fit.within).toBe(false);
+  });
   it('finds a cone holding 600 of 1000 points', () => {
     const sample = coneWithStrays();
     const fit = fitShape(...sample, 'cone', 0.004)!;
