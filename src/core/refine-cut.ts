@@ -27,6 +27,46 @@ interface Patch {
   triangles: Set<number>;
   faces: number[][];
   dropped: number[];
+  /** Per face, the triangle of the patch it came from (see `ownersOf`). */
+  owners?: number[];
+}
+
+/** Squared distance from p to the triangle a, b, c (each 3 numbers). */
+function triangleDistance(p: number[], a: number[], b: number[], c: number[]) {
+  const sub = (u: number[], v: number[]) => [u[0] - v[0], u[1] - v[1], u[2] - v[2]];
+  const ab = sub(b, a),
+    ac = sub(c, a),
+    ap = sub(p, a);
+  const d1 = dot3(ab, ap),
+    d2 = dot3(ac, ap);
+  const at = (q: number[]) => dot3(sub(p, q), sub(p, q));
+  const along = (u: number[], f: number) => [a[0] + u[0] * f, a[1] + u[1] * f, a[2] + u[2] * f];
+  if (d1 <= 0 && d2 <= 0) return at(a);
+  const bp = sub(p, b);
+  const d3 = dot3(ab, bp),
+    d4 = dot3(ac, bp);
+  if (d3 >= 0 && d4 <= d3) return at(b);
+  const vc = d1 * d4 - d3 * d2;
+  if (vc <= 0 && d1 >= 0 && d3 <= 0) return at(along(ab, d1 / (d1 - d3)));
+  const cp = sub(p, c);
+  const d5 = dot3(ab, cp),
+    d6 = dot3(ac, cp);
+  if (d6 >= 0 && d5 <= d6) return at(c);
+  const vb = d5 * d2 - d1 * d6;
+  if (vb <= 0 && d2 >= 0 && d6 <= 0) return at(along(ac, d2 / (d2 - d6)));
+  const va = d3 * d6 - d5 * d4;
+  if (va <= 0 && d4 - d3 >= 0 && d5 - d6 >= 0) {
+    const f = (d4 - d3) / (d4 - d3 + (d5 - d6));
+    return at([b[0] + (c[0] - b[0]) * f, b[1] + (c[1] - b[1]) * f, b[2] + (c[2] - b[2]) * f]);
+  }
+  const denominator = 1 / (va + vb + vc);
+  const v = vb * denominator,
+    w = vc * denominator;
+  return at([
+    a[0] + ab[0] * v + ac[0] * w,
+    a[1] + ab[1] * v + ac[1] * w,
+    a[2] + ab[2] * v + ac[2] * w,
+  ]);
 }
 
 /** A split welded edge: the new welded vertex and where it lies from the lower welded end. */
@@ -826,6 +866,62 @@ export function cutAlongField(
         }
     }
   };
+  // Each face of a patch belongs to one triangle of the patch as it stands before the rebuild, so a
+  // painted triangle keeps its own footprint: faces are taken nearest pair first, each going to the
+  // nearest triangle to its centroid that has room, a triangle's room being its share, by its own
+  // area, of the faces' area; a face no triangle has room for goes to the nearest. A triangle left
+  // with none then takes the face nearest its own centroid from one that has more than one.
+  const ownersOf = (patch: Patch) => {
+    const parents = [...patch.triangles].sort((a, b) => a - b);
+    const at = parents.map((t) =>
+      cornersOf(t).map((v) => [0, 1, 2].map((a) => mesh.position[v * 3 + a])),
+    );
+    const areaOf = (q: number[][]) =>
+      Math.hypot(
+        ...crossOf(
+          [q[1][0] - q[0][0], q[1][1] - q[0][1], q[1][2] - q[0][2]],
+          [q[2][0] - q[0][0], q[2][1] - q[0][1], q[2][2] - q[0][2]],
+        ),
+      ) / 2;
+    const corners = patch.faces.map((face) => face.map((node) => nodeAt(node, [0, 0, 0])));
+    const centres = corners.map((q) => [0, 1, 2].map((a) => (q[0][a] + q[1][a] + q[2][a]) / 3));
+    const faceArea = corners.map(areaOf);
+    const parentArea = at.map(areaOf);
+    const scale =
+      faceArea.reduce((x, y) => x + y, 0) / (parentArea.reduce((x, y) => x + y, 0) || 1);
+    const room = parentArea.map((a) => a * scale);
+    const distance = centres.map((c) => at.map(([a, b, d]) => triangleDistance(c, a, b, d)));
+    const pairs: number[][] = [];
+    distance.forEach((row, f) => row.forEach((d, k) => pairs.push([d, f, k])));
+    pairs.sort((x, y) => x[0] - y[0] || x[1] - y[1] || x[2] - y[2]);
+    const owners = new Array<number>(centres.length).fill(-1);
+    const load = parents.map(() => 0);
+    for (const [, f, k] of pairs) {
+      if (owners[f] >= 0 || (load[k] > 0 && load[k] + faceArea[f] > room[k])) continue;
+      owners[f] = k;
+      load[k] += faceArea[f];
+    }
+    owners.forEach((k, f) => {
+      if (k < 0) owners[f] = distance[f].indexOf(Math.min(...distance[f]));
+    });
+    const count = parents.map((_, k) => owners.filter((o) => o === k).length);
+    parents.forEach((_, k) => {
+      if (count[k]) return;
+      const own = [0, 1, 2].map((a) => (at[k][0][a] + at[k][1][a] + at[k][2][a]) / 3);
+      let best = -1,
+        least = Infinity;
+      centres.forEach((c, f) => {
+        if (count[owners[f]] < 2) return;
+        const d = (c[0] - own[0]) ** 2 + (c[1] - own[1]) ** 2 + (c[2] - own[2]) ** 2;
+        if (d < least) [least, best] = [d, f];
+      });
+      if (best < 0) return;
+      count[owners[best]]--;
+      owners[best] = k;
+      count[k] = 1;
+    });
+    return owners.map((k) => parents[k]);
+  };
   const saved = [zero, placed, splitT, splitAt, flat, splitCreased].map((list) => list.slice());
   const restore = () =>
     [zero, placed, splitT, splitAt, flat, splitCreased].forEach((list, k) =>
@@ -892,6 +988,7 @@ export function cutAlongField(
     restore();
     patched.clear();
   }
+  for (const patch of patches) patch.owners = ownersOf(patch);
   const inPatch = new Set(patches.flatMap((patch) => [...patch.triangles]));
   for (const patch of patches) for (const i of patch.dropped) splitT[i] = NaN;
   const chain: number[] = [];
@@ -984,12 +1081,17 @@ export function cutAlongField(
         return splitVertex(ga, gb);
       }),
     );
-    const reused = ids.length;
+    // Each triangle's first face takes its id; the rest are added.
+    const owned = new Map<number, number[]>(ids.map((t) => [t, []]));
     corners.forEach(([a, b, c], k) => {
-      if (k < reused) setTriangle(mesh, ids[k], a, b, c);
-      else ids.push(addTriangle(mesh, a, b, c));
+      const owner = patch.owners![k];
+      const list = owned.get(owner)!;
+      if (list.length === 0) {
+        setTriangle(mesh, owner, a, b, c);
+        list.push(owner);
+      } else list.push(addTriangle(mesh, a, b, c));
     });
-    for (const t of patch.triangles) children.set(t, ids);
+    for (const [t, list] of owned) children.set(t, list);
   }
 
   // Sides after the cut: chain vertices are on the zero set, other vertices keep their field sign.

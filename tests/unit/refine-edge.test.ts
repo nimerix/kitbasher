@@ -13,6 +13,7 @@ import type { GuidePoint } from '../../src/core/refine-band';
 import { type GuideKind, closestOnCurve } from '../../src/core/refine-curve';
 import {
   closedMesh,
+  cutLineage,
   dihedralAcross,
   facesOffSurfaces,
   fullWeightChain,
@@ -583,6 +584,20 @@ describe('solveEdge and applyEdge on one segment', () => {
       expect(result.folded).toHaveLength(0);
       expect(closedMesh(out)).toBe(true);
     }
+  });
+
+  it('maps each triangle of a rebuilt patch to the one triangle it came from', () => {
+    // The 0.06 mm sampled rim is cut with a rebuilt patch (see the one-piece test).
+    const { model, solve } = rimCase();
+    const before = cloneRefineMesh(model.mesh, false);
+    applyEdge(before, model.topology, solve, 1, false);
+    const out = cloneRefineMesh(model.mesh, true);
+    const { cut } = applyEdge(out, model.topology, solve, 1, true);
+    const lineage = cutLineage(before, out, cut!.children);
+    expect(lineage.shared).toBe(0);
+    expect(lineage.childless).toBe(0);
+    // Every child stays within a triangle (0.06 mm sampling) of the one it came from.
+    expect(lineage.farthest).toBeLessThan(0.06);
   });
 
   it('passes both corrected surfaces through the solved edge', () => {

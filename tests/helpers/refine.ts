@@ -1702,3 +1702,75 @@ export function ringedCloud(kind: 'sphere' | 'cylinder' | 'cone') {
     }
   return { points: Float32Array.from(points), normals: Float32Array.from(normals) };
 }
+
+/** Area and centroid of triangle t of a mesh as it stands. */
+export function meshTriangle(mesh: RefineMesh, t: number) {
+  const p = ([0, 1, 2] as const).map((k) => {
+    const v = weldedCorner(mesh, t, k) * 3;
+    return [mesh.position[v], mesh.position[v + 1], mesh.position[v + 2]];
+  });
+  const u = [0, 1, 2].map((a) => p[1][a] - p[0][a]),
+    w = [0, 1, 2].map((a) => p[2][a] - p[0][a]);
+  const area =
+    Math.hypot(u[1] * w[2] - u[2] * w[1], u[2] * w[0] - u[0] * w[2], u[0] * w[1] - u[1] * w[0]) / 2;
+  return { area, centroid: [0, 1, 2].map((a) => (p[0][a] + p[1][a] + p[2][a]) / 3) };
+}
+
+/** Squared distance from p to the triangle t of a mesh as it stands. */
+function toTriangle(mesh: RefineMesh, t: number, p: number[]) {
+  const [a, b, c] = ([0, 1, 2] as const).map((k) => {
+    const v = weldedCorner(mesh, t, k) * 3;
+    return [mesh.position[v], mesh.position[v + 1], mesh.position[v + 2]];
+  });
+  const sub = (u: number[], v: number[]) => [u[0] - v[0], u[1] - v[1], u[2] - v[2]];
+  const dot = (u: number[], v: number[]) => u[0] * v[0] + u[1] * v[1] + u[2] * v[2];
+  const square = (q: number[]) => dot(sub(p, q), sub(p, q));
+  const mix = (u: number[], v: number[], f: number) => u.map((x, k) => x + (v[k] - x) * f);
+  const ab = sub(b, a),
+    ac = sub(c, a),
+    ap = sub(p, a),
+    bp = sub(p, b),
+    cp = sub(p, c);
+  const [d1, d2, d3, d4, d5, d6] = [
+    dot(ab, ap),
+    dot(ac, ap),
+    dot(ab, bp),
+    dot(ac, bp),
+    dot(ab, cp),
+    dot(ac, cp),
+  ];
+  if (d1 <= 0 && d2 <= 0) return square(a);
+  if (d3 >= 0 && d4 <= d3) return square(b);
+  if (d6 >= 0 && d5 <= d6) return square(c);
+  const vc = d1 * d4 - d3 * d2,
+    vb = d5 * d2 - d1 * d6,
+    va = d3 * d6 - d5 * d4;
+  if (vc <= 0 && d1 >= 0 && d3 <= 0) return square(mix(a, b, d1 / (d1 - d3)));
+  if (vb <= 0 && d2 >= 0 && d6 <= 0) return square(mix(a, c, d2 / (d2 - d6)));
+  if (va <= 0 && d4 - d3 >= 0 && d5 - d6 >= 0)
+    return square(mix(b, c, (d4 - d3) / (d4 - d3 + d5 - d6)));
+  const [v, w] = [vb / (va + vb + vc), vc / (va + vb + vc)];
+  return square(a.map((x, k) => x + ab[k] * v + ac[k] * w));
+}
+
+/**
+ * How a cut's lineage treats the triangles it replaced: `shared`, children listed under more than
+ * one parent; `childless`, parents with none; `farthest`, the largest distance from a child's
+ * centroid to its parent as the mesh stood before the cut (`before`).
+ */
+export function cutLineage(before: RefineMesh, after: RefineMesh, children: Map<number, number[]>) {
+  const parents = new Map<number, number>();
+  let shared = 0,
+    childless = 0,
+    farthest = 0;
+  for (const [parent, list] of children) {
+    if (!list.length) childless++;
+    for (const child of list) {
+      if (parents.has(child)) shared++;
+      parents.set(child, parent);
+      const distance = Math.sqrt(toTriangle(before, parent, meshTriangle(after, child).centroid));
+      farthest = Math.max(farthest, distance);
+    }
+  }
+  return { shared, childless, farthest };
+}
