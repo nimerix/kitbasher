@@ -84,22 +84,34 @@ const area = (p: Float64Array, out: Float64Array) => {
 
 /**
  * Puts a chain of mesh edges on the zero set of `field` among `vertices`.
- * `place` maps a point on the zero set to its final position. The mesh must be a topology clone.
+ * `place` maps a point on the zero set, at `t` along the welded edge from `a` to `b`, to its final
+ * position, and returns false when the chain vertex placed there is not a crease. The mesh must be a
+ * topology clone.
  * `field[i]` is the value at `vertices[i]`; `topology` describes the mesh before the cut.
  * The whole cut is planned on final positions first; a split or snap that would collapse a triangle,
  * reverse one, or land on another vertex is revised or dropped, and the triangles left straddling are
  * reported in `skipped`. A child is reversed when its normal opposes `facing`, the outward normal the
  * surface should have at its centroid on its side of the zero set (the field's sign there), or,
- * without `facing`, the normal of the triangle it is cut from.
+ * without `facing`, the normal of the triangle it is cut from. `beside` gives the side of a vertex
+ * the field does not cover, so a chain edge beside it can still be told to carry the zero set.
  */
 export function cutAlongField(
   mesh: RefineMesh,
   topology: RefineTopology,
   vertices: Uint32Array,
   field: Float32Array,
-  place: (x: number, y: number, z: number, out: Float32Array) => void,
+  place: (
+    x: number,
+    y: number,
+    z: number,
+    out: Float32Array,
+    a: number,
+    b: number,
+    t: number,
+  ) => boolean | void,
   snap = 0.25,
   facing?: (x: number, y: number, z: number, side: 1 | -1, out: Float64Array) => void,
+  beside?: (v: number) => number,
 ): CutResult {
   const { neighbourStart, neighbours, triangleStart, trianglesOf } = topology;
   const weldedCount = mesh.weldedCount;
@@ -126,6 +138,8 @@ export function cutAlongField(
   };
   // Point on the zero set each zero vertex is placed from.
   const point = new Float64Array(count * 3);
+  // The welded edge and fraction along it of that point.
+  const pointEdge = new Float64Array(count * 3);
   const lerp = (a: number, b: number, t: number, out: Float64Array, offset: number) => {
     for (let axis = 0; axis < 3; axis++)
       out[offset + axis] = mesh.position[a * 3 + axis] * (1 - t) + mesh.position[b * 3 + axis] * t;
@@ -134,6 +148,7 @@ export function cutAlongField(
     if (value[i] === 0) {
       zero[i] = 1;
       lerp(welded[i], welded[i], 0, point, i * 3);
+      pointEdge.set([welded[i], welded[i], 0], i * 3);
     }
 
   const edgeA: number[] = [],
@@ -182,6 +197,7 @@ export function cutAlongField(
     const k = local.get(v)!;
     zero[k] = 1;
     lerp(a, b, edgeT[i], point, k * 3);
+    pointEdge.set([a, b, edgeT[i]], k * 3);
   }
 
   // The plan: final positions of placed zero vertices and splits, as Float32 as the mesh stores them.
@@ -189,22 +205,36 @@ export function cutAlongField(
   const at = new Float64Array(3);
   const placed = new Uint8Array(count);
   const placedAt = new Float32Array(count * 3);
+  // Whether each zero vertex and split is a crease, as `place` decided when planning it.
+  const creased = new Uint8Array(count);
   const isPlaced = (v: number) => {
     const i = local.get(v);
     return i !== undefined && placed[i] === 1;
   };
   for (let i = 0; i < count; i++) {
     if (!zero[i]) continue;
-    place(point[i * 3], point[i * 3 + 1], point[i * 3 + 2], out);
+    const [a, b, t] = pointEdge.subarray(i * 3, i * 3 + 3);
+    creased[i] = +(place(point[i * 3], point[i * 3 + 1], point[i * 3 + 2], out, a, b, t) !== false);
     placedAt.set(out, i * 3);
     placed[i] = 1;
   }
   const splitT = new Float64Array(edgeT.length).fill(NaN);
   const splitAt = new Float32Array(edgeT.length * 3);
+  const splitCreased = new Uint8Array(edgeT.length);
+  // A split left flat lies where the zero set crosses the edge as the mesh stands, unplaced.
+  const flat = new Uint8Array(edgeT.length);
+  const flatten = (i: number) => {
+    flat[i] = 1;
+    splitCreased[i] = 0;
+    splitT[i] = edgeT[i];
+    lerp(edgeA[i], edgeB[i], splitT[i], at, 0);
+    for (let axis = 0; axis < 3; axis++) splitAt[i * 3 + axis] = at[axis];
+  };
   const planSplit = (i: number, t: number) => {
     splitT[i] = t;
+    flat[i] = 0;
     lerp(edgeA[i], edgeB[i], t, at, 0);
-    place(at[0], at[1], at[2], out);
+    splitCreased[i] = +(place(at[0], at[1], at[2], out, edgeA[i], edgeB[i], t) !== false);
     splitAt.set(out, i * 3);
   };
   for (let i = 0; i < edgeT.length; i++)
@@ -267,21 +297,28 @@ export function cutAlongField(
     pointOf(q, ends, 3);
     return Math.hypot(ends[0] - ends[3], ends[1] - ends[4], ends[2] - ends[5]);
   };
-  // Revises the plan behind a collapsed or reversed child: its splits move to the midpoint, then are
-  // dropped, then its placed vertices stay where they are. False when nothing is left to revise.
+  // Revises the plan behind a collapsed or reversed child: its splits move to the midpoint, then those
+  // that are not a crease are left flat, then are dropped, then its placed vertices stay where they
+  // are, on the chain still unless a crease; behind flat splits its placed vertices stay first. False
+  // when nothing is left to revise.
   const revise = (child: number[]) => {
     const splits = child
       .filter((ref) => ref >= 3)
       .map((ref) => splitOf(corner(ref), corner(ref + 1)));
-    const off = splits.find((i) => splitT[i] !== 0.5);
+    const off = splits.find((i) => splitT[i] !== 0.5 && !flat[i]);
+    // Only a split that is not a crease may be left flat; a crease must lie where it is placed.
+    const placedSplit = splits.find((i) => !flat[i] && !splitCreased[i]);
+    const v = child.map(corner).find(isPlaced);
     if (off !== undefined) planSplit(off, 0.5);
-    else if (splits.length > 0) splitT[splits[0]] = NaN;
+    else if (placedSplit !== undefined) flatten(placedSplit);
+    else if (splits.length > 0 && !(v !== undefined && splits.every((i) => flat[i])))
+      splitT[splits[0]] = NaN;
     else {
-      const v = child.map(corner).find(isPlaced);
       if (v === undefined) return false;
       const k = local.get(v)!;
       placed[k] = 0;
-      if (value[k] !== 0) zero[k] = 0;
+      // A vertex that is not a crease stays on the chain where it stands.
+      if (value[k] !== 0 && creased[k]) zero[k] = 0;
     }
     return true;
   };
@@ -364,7 +401,7 @@ export function cutAlongField(
       revised = true;
       if (e >= firstSplit) {
         const i = ids[e];
-        if (splitT[i] !== 0.5) planSplit(i, 0.5);
+        if (splitT[i] !== 0.5 && !flat[i]) planSplit(i, 0.5);
         else splitT[i] = NaN;
       } else {
         const k = ids[e];
@@ -386,6 +423,11 @@ export function cutAlongField(
       for (const child of divide(cut, far)) {
         child.forEach((ref, k) => pointOf(ref, points, k * 3));
         const collapsed = area(points, childNormal) < limit;
+        // A child of flat splits and corners left where they are lies in its parent's plane.
+        const level = child.every((ref) =>
+          ref >= 3 ? flat[splitOf(corner(ref), corner(ref + 1))] === 1 : !isPlaced(corner(ref)),
+        );
+        if (level && !collapsed) continue;
         const side = facing ? sideOf(child) : 0;
         let reference = parentNormal;
         if (side !== 0) {
@@ -418,7 +460,7 @@ export function cutAlongField(
   for (let i = 0; i < edgeT.length; i++) {
     if (Number.isNaN(splitT[i])) continue;
     const welded = addWeldedVertex(mesh, splitAt[i * 3], splitAt[i * 3 + 1], splitAt[i * 3 + 2]);
-    mesh.crease[welded] = 1;
+    mesh.crease[welded] = splitCreased[i];
     splits.set(edgeA[i] * weldedCount + edgeB[i], { welded, t: splitT[i] });
   }
   for (let k = 0; k < count; k++) {
@@ -426,7 +468,7 @@ export function cutAlongField(
     const v = welded[k];
     if (placed[k]) moveVertex(mesh, v, placedAt[k * 3], placedAt[k * 3 + 1], placedAt[k * 3 + 2]);
     mesh.touched[v] = 1;
-    mesh.crease[v] = 1;
+    mesh.crease[v] = creased[k];
     chain.push(v);
   }
   for (const split of splits.values()) chain.push(split.welded);
@@ -502,9 +544,12 @@ export function cutAlongField(
         b = w[(k + 1) % 3];
       if (!onChain.has(a) || !onChain.has(b)) continue;
       const key = Math.min(a, b) * total + Math.max(a, b);
+      const c = w[(k + 2) % 3];
+      const third =
+        s[(k + 2) % 3] || (beside && !onChain.has(c) && c < weldedCount ? beside(c) : 0);
       const list = thirds.get(key);
-      if (list) list.push(s[(k + 2) % 3]);
-      else thirds.set(key, [s[(k + 2) % 3]]);
+      if (list) list.push(third);
+      else thirds.set(key, [third]);
     }
   }
   // The zero set runs along a chain edge only when the triangles on it lie on opposite sides.

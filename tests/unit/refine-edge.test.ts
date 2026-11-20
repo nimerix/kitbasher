@@ -476,6 +476,69 @@ describe('solveEdge and applyEdge on one segment', () => {
       }
     }
   });
+
+  it('creases exactly where the placement weight is at least 0.5, whatever room the buffers have', () => {
+    const fillet = 0.3,
+      shift = fillet * (1 - Math.SQRT1_2);
+    const model = modelOf(softCylinder(1.5, 1, fillet, { step: 0.06 }));
+    const points = [0, 1, 2].map((k) => {
+      const theta = (k * 2 * Math.PI) / 3;
+      return pointOn(model.mesh, [
+        (1.5 - shift) * Math.cos(theta),
+        1 - shift,
+        (1.5 - shift) * Math.sin(theta),
+      ]);
+    });
+    const solve = solveEdge(model.mesh, model.topology, inputOf('arc', points), model.noise)!;
+    const tight = cloneRefineMesh(model.mesh, true),
+      roomy = cloneRefineMesh(model.mesh, true);
+    tight.position = tight.position.slice(0, model.mesh.weldedCount * 3);
+    roomy.position = new Float64Array(2 * tight.position.length);
+    roomy.position.set(tight.position);
+    const first = applyEdge(tight, model.topology, solve, 1, true).cut!;
+    const second = applyEdge(roomy, model.topology, solve, 1, true).cut!;
+    expect(first).toStrictEqual(second);
+    const creased = [...first.chain].filter((v) => tight.crease[v]);
+    expect(creased.length).toBeGreaterThan(0);
+    expect([...first.chain].filter((v) => tight.crease[v] !== roomy.crease[v])).toEqual([]);
+  });
+
+  it('holds an end whose flanks stop within the 0.3 mm past it, and tapers one whose flanks go on', () => {
+    const radius = 0.12,
+      c = radius * (1 - Math.SQRT1_2);
+    const model = modelOf(softBox([2, 1.5, 1], radius, sharpEdge));
+    // The straight flanks end where the corner's rounding starts, at x = 2 - radius.
+    const endOf = (remaining: number) => {
+      const points = [-1, 2 - radius - remaining].map((x) =>
+        pointOn(model.mesh, [x, 1.5 - c, 1 - c]),
+      );
+      return solveEdge(model.mesh, model.topology, autoWidth(points), model.noise)!.ends[1];
+    };
+    expect(endOf(0.18)).toBe('hold');
+    expect(endOf(0.21)).toBe('hold');
+    expect(endOf(0.36)).toBe('taper');
+  });
+
+  it('cuts one chain in one piece, nothing left straddling or facing against its surface', () => {
+    for (const { model, solve } of [boxCase(), stepCase()]) {
+      const out = cloneRefineMesh(model.mesh, true);
+      const result = applyEdge(out, model.topology, solve, 1, true);
+      expect(result.pieces).toBe(1);
+      expect(result.skipped).toHaveLength(0);
+      expect(result.folded).toHaveLength(0);
+      expect(closedMesh(out)).toBe(true);
+    }
+  });
+
+  it('passes both corrected surfaces through the solved edge', () => {
+    for (const { model, solve } of [boxCase(), stepCase(), rimCase()]) {
+      const surfaces = correctedFlanks(model.mesh, model.topology, solve);
+      const p = solve.curve.points;
+      for (let k = 0; k < p.length; k += 3)
+        for (const surface of surfaces)
+          expect(surface(p[k], p[k + 1], p[k + 2])).toBeLessThan(0.0005);
+    }
+  });
 });
 
 /**

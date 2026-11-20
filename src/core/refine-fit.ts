@@ -962,7 +962,7 @@ export function projectToShape(
   x: number,
   y: number,
   z: number,
-  out: Float32Array,
+  out: Float32Array | Float64Array,
   offset = 0,
 ): void {
   const write = (px: number, py: number, pz: number) => {

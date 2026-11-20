@@ -125,6 +125,27 @@ it('refuses a placement that would reverse a triangle against the one it is cut 
   expect(meshMinTriangleArea(cut)).toBeGreaterThan(1e-12);
 });
 
+it('leaves a split that is not a crease where the zero set crosses rather than drop it', () => {
+  // The same placement as above, but no point is a crease: refused splits stay unplaced on their edge.
+  const { mesh, topology } = modelOf(softBox([2, 1.5, 1], 0.3));
+  const cut = cloneRefineMesh(mesh, true);
+  const ids = Uint32Array.from({ length: cut.weldedCount }, (_, i) => i);
+  const field = Float32Array.from(ids, (i) => cut.position[i * 3] - 0.013);
+  const result = cutAlongField(cut, topology, ids, field, (_x, y, z, out) => {
+    out.set([0.213, y, z]);
+    return false;
+  });
+  const parentOf = new Map<number, number>();
+  for (const [parent, children] of result.children)
+    for (const child of children) parentOf.set(child, parent);
+  expect(reversedAgainst(mesh, cut, parentOf)).toBe(0);
+  expect(result.skipped).toHaveLength(0);
+  expect([...result.chain].some((v) => Math.abs(cut.position[v * 3] - 0.013) < 1e-6)).toBe(true);
+  expect([...result.chain].every((v) => cut.crease[v] === 0)).toBe(true);
+  expect(closedMesh(cut)).toBe(true);
+  expect(meshMinTriangleArea(cut)).toBeGreaterThan(1e-12);
+});
+
 it('keeps a placement off a vertex joined neither to the band nor to its one-ring', () => {
   // Two closed tetrahedra 0.35 mm apart; the lower one's apex is placed on a corner of the upper one.
   const base = cornerTetrahedron(false).getAttribute('position');
