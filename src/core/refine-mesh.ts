@@ -129,6 +129,24 @@ export function cloneRefineMesh(mesh: RefineMesh, topology: boolean): RefineMesh
   };
 }
 
+/** `mesh` with each array cut to what its counts use, for keeping: a cut leaves room to grow. */
+export function trimRefineMesh(mesh: RefineMesh): RefineMesh {
+  const fit = <T extends Float32Array | Float64Array | Uint32Array | Uint8Array>(
+    array: T,
+    length: number,
+  ) => (array.length === length ? array : (array.slice(0, length) as T));
+  const { weldedCount, vertexCount, triangleCount, color, colorSize } = mesh;
+  return {
+    ...mesh,
+    position: fit(mesh.position, weldedCount * 3),
+    touched: fit(mesh.touched, weldedCount),
+    crease: fit(mesh.crease, weldedCount),
+    weldOf: fit(mesh.weldOf, vertexCount),
+    corners: fit(mesh.corners, triangleCount * 3),
+    color: color && fit(color, vertexCount * colorSize),
+  };
+}
+
 export function weldedCorner(mesh: RefineMesh, triangle: number, corner: 0 | 1 | 2): number {
   return mesh.weldOf[mesh.corners[triangle * 3 + corner]];
 }

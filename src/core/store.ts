@@ -91,6 +91,7 @@ import {
   type RefineTopology,
   cloneRefineMesh,
   foldedTriangles,
+  trimRefineMesh,
   writeRefinedGeometry,
 } from './refine-mesh';
 import type { RefineModel } from './refine-model';
@@ -5861,7 +5862,10 @@ function acceptFeatures(
       const mesh = cloneRefineMesh(model.mesh, true);
       const result = edge.applyEdge(mesh, model.topology, solve, proposal.input.strength, true);
       const children = result.cut?.children;
-      model = result.cut ? refineCode!.model.modelFromMesh(mesh, model) : { ...model, mesh };
+      // A cut leaves its arrays room to grow: the model kept, and each undo step, holds what is used.
+      model = result.cut
+        ? refineCode!.model.modelFromMesh(trimRefineMesh(mesh), model)
+        : { ...model, mesh };
       if (children?.size) {
         const remap = (t: Uint32Array) => cut.remapTriangles(t, children);
         const painted = (t: Uint32Array) => closePinholes(model.mesh, model.topology, remap(t));
