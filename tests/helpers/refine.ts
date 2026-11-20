@@ -460,21 +460,30 @@ export function meshMinTriangleArea(mesh: RefineMesh) {
   return smallest;
 }
 
+/** Ids of triangles with one corner above `tolerance` and another below `-tolerance` of `fn`. */
+export function straddlingTriangles(
+  mesh: RefineMesh,
+  fn: (x: number, y: number, z: number) => number,
+  tolerance: number,
+) {
+  const result: number[] = [];
+  for (let t = 0; t < mesh.triangleCount; t++) {
+    const values = ([0, 1, 2] as const).map((k) => {
+      const v = weldedCorner(mesh, t, k) * 3;
+      return fn(mesh.position[v], mesh.position[v + 1], mesh.position[v + 2]);
+    });
+    if (values.some((f) => f > tolerance) && values.some((f) => f < -tolerance)) result.push(t);
+  }
+  return result;
+}
+
 /** Triangles with one corner above `tolerance` and another below `-tolerance` of `fn`. */
 export function straddling(
   mesh: RefineMesh,
   fn: (x: number, y: number, z: number) => number,
   tolerance: number,
 ) {
-  let count = 0;
-  for (let t = 0; t < mesh.triangleCount; t++) {
-    const values = ([0, 1, 2] as const).map((k) => {
-      const v = weldedCorner(mesh, t, k) * 3;
-      return fn(mesh.position[v], mesh.position[v + 1], mesh.position[v + 2]);
-    });
-    if (values.some((f) => f > tolerance) && values.some((f) => f < -tolerance)) count++;
-  }
-  return count;
+  return straddlingTriangles(mesh, fn, tolerance).length;
 }
 
 /** Triangles whose three corners all lie in `chain`. */
@@ -517,6 +526,48 @@ export function loops(mesh: RefineMesh, chain: Uint32Array) {
     sizes.push(piece.every((v) => next.get(v)!.size === 2) ? piece.length : -1);
   }
   return sizes;
+}
+
+/**
+ * Sizes of the connected pieces of the graph of `edges` (pairs of welded ids) over `chain`, or -1
+ * for a piece that is not a simple loop because some vertex in it is in other than two segments.
+ */
+export function edgeLoops(edges: Uint32Array, chain: Uint32Array) {
+  const next = new Map([...chain].map((v) => [v, [] as number[]]));
+  for (let i = 0; i < edges.length; i += 2) {
+    const [a, b] = [edges[i], edges[i + 1]];
+    if (!next.has(a) || !next.has(b)) return [-1];
+    next.get(a)!.push(b);
+    next.get(b)!.push(a);
+  }
+  const seen = new Set<number>();
+  const sizes: number[] = [];
+  for (const start of chain) {
+    if (seen.has(start)) continue;
+    const piece = [start];
+    seen.add(start);
+    for (let i = 0; i < piece.length; i++)
+      for (const w of next.get(piece[i])!)
+        if (!seen.has(w)) {
+          seen.add(w);
+          piece.push(w);
+        }
+    sizes.push(piece.every((v) => next.get(v)!.length === 2) ? piece.length : -1);
+  }
+  return sizes;
+}
+
+/** Closed regular octahedron with vertices on the unit axes and outward winding. */
+export function octahedron(indexed: boolean) {
+  // Vertices: 0 +x, 1 -x, 2 +y, 3 -y, 4 +z, 5 -z.
+  const points = [1, 0, 0, -1, 0, 0, 0, 1, 0, 0, -1, 0, 0, 0, 1, 0, 0, -1];
+  const faces = [0, 2, 4, 2, 1, 4, 1, 3, 4, 3, 0, 4, 2, 0, 5, 1, 2, 5, 3, 1, 5, 0, 3, 5];
+  const geometry = new BufferGeometry();
+  geometry.setAttribute('position', new BufferAttribute(new Float32Array(points), 3));
+  geometry.setIndex(faces);
+  const result = indexed ? geometry : geometry.toNonIndexed();
+  result.computeVertexNormals();
+  return result;
 }
 
 /** Welded vertices of `before`, outside `chain`, whose position in `after` differs in any bit. */

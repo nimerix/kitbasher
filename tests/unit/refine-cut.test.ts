@@ -6,11 +6,14 @@ import {
   closed,
   closedMesh,
   cornerTetrahedron,
+  edgeLoops,
   loops,
   meshMinTriangleArea,
   modelOf,
   movedOutside,
+  octahedron,
   straddling,
+  straddlingTriangles,
   trianglesWhollyOn,
 } from '../helpers/refine';
 import { type SoftOptions, softBox } from '../helpers/soft-edges';
@@ -48,6 +51,11 @@ describe.each(cases)('cutAlongField, %s', (_, options) => {
     const { cut, result } = run();
     expect(loops(cut, result.chain)).toEqual([result.chain.length]);
   });
+  it('reports one closed loop of segments through the whole chain and skips nothing', () => {
+    const { result } = run();
+    expect(edgeLoops(result.edges, result.chain)).toEqual([result.chain.length]);
+    expect(result.skipped.length).toBe(0);
+  });
   it('moves nothing off the cut and marks the chain', () => {
     const { mesh, cut, result } = run();
     expect(movedOutside(mesh, cut, result.chain)).toBe(0);
@@ -74,6 +82,78 @@ it('splits instead of snapping when a snap would put a triangle wholly on the cu
   expect(closedMesh(cut)).toBe(true);
   const split = result.chain[2];
   expect([0, 1, 2].map((axis) => p(split, axis))).toEqual([0, 0, Math.fround(0.1)]);
+});
+
+it('drops a split whose placement would collapse a triangle', () => {
+  // Corners (0,1,0) and (0,0,1) are on the zero set; the refused snap of the origin is at t = 0.0625
+  // along the x axis, and projecting onto x = 0 puts any split of that edge on the origin.
+  const { mesh, topology } = modelOf(cornerTetrahedron(false));
+  const cut = cloneRefineMesh(mesh, true);
+  const ids = Uint32Array.from({ length: cut.weldedCount }, (_, i) => i);
+  const p = (i: number, axis: number) => cut.position[i * 3 + axis];
+  const fn = (x: number, y: number, z: number) => x - 0.0625 + 0.0625 * (y + z);
+  const field = Float32Array.from(ids, (i) => fn(p(i, 0), p(i, 1), p(i, 2)));
+  const result = cutAlongField(cut, topology, ids, field, (_x, y, z, out) => out.set([0, y, z]));
+  expect(closedMesh(cut)).toBe(true);
+  expect(meshMinTriangleArea(cut)).toBeGreaterThan(1e-9);
+  expect(movedOutside(mesh, cut, result.chain)).toBe(0);
+  expect([...result.skipped]).toEqual(straddlingTriangles(cut, fn, 1e-6));
+  expect(result.skipped.length).toBeGreaterThan(0);
+});
+
+// A seeded generator, so the planes are the same on every run.
+const seeded = (seed: number) => () => {
+  seed = (seed + 0x6d2b79f5) | 0;
+  let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+  t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+  return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+};
+
+it.each(cases)(
+  'cuts random planes through the box closed and reports what straddles, %s',
+  (_, options) => {
+    const { mesh, topology } = modelOf(softBox([2, 1.5, 1], 0.3, options));
+    const next = seeded(20261119);
+    for (let plane = 0; plane < 50; plane++) {
+      const n = [next() - 0.5, next() - 0.5, next() - 0.5];
+      const length = Math.hypot(...n);
+      const [nx, ny, nz] = n.map((v) => v / length);
+      const d = (next() - 0.5) * 1.5;
+      const fn = (x: number, y: number, z: number) => nx * x + ny * y + nz * z - d;
+      const cut = cloneRefineMesh(mesh, true);
+      const ids = Uint32Array.from({ length: cut.weldedCount }, (_, i) => i);
+      const p = (i: number, axis: number) => cut.position[i * 3 + axis];
+      const field = Float32Array.from(ids, (i) => fn(p(i, 0), p(i, 1), p(i, 2)));
+      const result = cutAlongField(cut, topology, ids, field, (x, y, z, out) => {
+        const f = fn(x, y, z);
+        out.set([x - f * nx, y - f * ny, z - f * nz]);
+      });
+      expect(closedMesh(cut)).toBe(true);
+      expect(meshMinTriangleArea(cut)).toBeGreaterThanOrEqual(1e-12);
+      expect(straddling(cut, fn, 1e-6)).toBe(result.skipped.length);
+    }
+  },
+);
+
+it('leaves a chord between two snapped vertices out of the segments', () => {
+  // +x and +y snap; the edge between them has -z and +z, both negative, on its two sides.
+  const { topology, mesh } = modelOf(octahedron(false));
+  const cut = cloneRefineMesh(mesh, true);
+  const ids = Uint32Array.from({ length: cut.weldedCount }, (_, i) => i);
+  const p = (i: number, axis: number) => cut.position[i * 3 + axis];
+  const at = (x: number, y: number) => ids.find((i) => p(i, 0) === x && p(i, 1) === y)!;
+  const [px, py] = [at(1, 0), at(0, 1)];
+  const field = Float32Array.from(ids, (i) =>
+    i === px || i === py ? -0.05 : p(i, 0) === -1 || p(i, 1) === -1 ? 1 : -1,
+  );
+  const result = cutAlongField(cut, topology, ids, field, (x, y, z, out) => out.set([x, y, z]));
+  expect([...result.chain]).toEqual(expect.arrayContaining([px, py]));
+  expect(loops(cut, result.chain)).toEqual([-1]);
+  const segments = Array.from({ length: result.edges.length / 2 }, (_, i) =>
+    [result.edges[i * 2], result.edges[i * 2 + 1]].sort().join(),
+  );
+  expect(segments).not.toContain([px, py].sort().join());
+  expect(edgeLoops(result.edges, result.chain)).toEqual([result.chain.length]);
 });
 
 const ramp = (x: number) => (x + 2) / 4;
