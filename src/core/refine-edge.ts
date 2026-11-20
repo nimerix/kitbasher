@@ -53,6 +53,11 @@ export interface EdgeInput {
   width: number | null;
   /** 0 to 1; 1 is fully sharp. */
   strength: number;
+  /**
+   * How each end of an open path (start, finish) is treated; null or absent decides it from the
+   * surface past the end. Ignored on a closed path.
+   */
+  ends?: [EdgeEnd | null, EdgeEnd | null];
 }
 /** How the sharpness ends at an open guide's end: tapered along the edge, or held to the end. */
 export type EdgeEnd = 'taper' | 'hold';
@@ -70,9 +75,10 @@ export interface EdgeSolve {
    */
   deviation: number;
   /**
-   * Per end of the path (start, finish): `taper` where the edge continues past it, so the sharpness
-   * fades along the edge; `hold` where it does not or where it meets an edge already restored, so the
-   * edge stays sharp to the end. Both `hold` on a closed path.
+   * Per end of the path (start, finish), as used: the input's, or else `taper` where the edge
+   * continues past it, so the sharpness fades along the edge, and `hold` where it does not or where
+   * it meets an edge already restored, so the edge stays sharp to the end. Both `hold` on a closed
+   * path.
    */
   ends: [EdgeEnd, EdgeEnd];
   /** One per joint between consecutive segments, plus the closing one on a closed path. */
@@ -128,10 +134,10 @@ const creaseWeight = 0.5;
 const endReach = 0.3;
 const endSlabs = 3;
 const endEdges = 4;
-const endShare = 0.6;
+const endShare = 0.7;
 const endSide = 0.2;
 const endLocal = 10;
-const endAngle = 25;
+const endAngle = 35;
 /**
  * The flanks are refitted from vertices past the soft zone plus these many edge lengths from the
  * edge, then this many more each step, until the edge they meet at moves no more than `settled` mm.
@@ -1013,7 +1019,7 @@ function creasedNear(mesh: RefineMesh, point: ArrayLike<number>, reach: number) 
  * neighbouring flanks that are one surface are refitted as one; the solved curves are joined at the
  * joints, sharp or smooth. A closed path of one arc is a full circle. Null when a segment shows no
  * edge, or when the width leaves no usable core: fewer than `coreEdges` edge lengths of the edge at
- * full weight, or no fully weighted vertex on a flank.
+ * full weight, or no fully weighted vertex moving onto one side.
  */
 export function solveEdge(
   mesh: RefineMesh,
@@ -1093,7 +1099,10 @@ export function solveEdge(
 
   const ends: [EdgeEnd, EdgeEnd] = closed
     ? ['hold', 'hold']
-    : [endOf(mesh, topology, parts[0], 0), endOf(mesh, topology, parts[n - 1], 1)];
+    : [
+        input.ends?.[0] ?? endOf(mesh, topology, parts[0], 0),
+        input.ends?.[1] ?? endOf(mesh, topology, parts[n - 1], 1),
+      ];
   const solve: EdgeSolve = {
     bands: parts.map((part) => part.band),
     flanks: parts.map((part) => part.flanks),
@@ -1110,14 +1119,9 @@ export function solveEdge(
     bounds: Float64Array.from(bounds),
   };
   const frame = frameOf(mesh, topology, solve);
-  const weights = frameWeights(
-    mesh,
-    topology,
-    solve,
-    frame,
-    surfacesOf(mesh, topology, solve, frame),
-  );
-  return usableCore(mesh, solve, frame, weights) ? solve : null;
+  const surfaces = surfacesOf(mesh, topology, solve, frame);
+  const weights = frameWeights(mesh, topology, solve, frame, surfaces);
+  return usableCore(mesh, solve, frame, weights, surfaces) ? solve : null;
 }
 
 /** A joint of a solved path. */
@@ -1350,10 +1354,16 @@ function frameOf(mesh: RefineMesh, topology: RefineTopology, solve: EdgeSolve): 
 
 /**
  * True when at least `coreEdges` edge lengths of the edge, unbroken, have a vertex of full weight in
- * the soft zone or as near the edge as the soft zone is wide, and each side has a vertex of full
- * weight on its flank.
+ * the soft zone or as near the edge as the soft zone is wide, and a vertex of full weight moves onto
+ * each side's corrected surface: from its flank, or from the soft zone to the surface nearer it.
  */
-function usableCore(mesh: RefineMesh, solve: EdgeSolve, frame: Frame, weights: Float64Array) {
+function usableCore(
+  mesh: RefineMesh,
+  solve: EdgeSolve,
+  frame: Frame,
+  weights: Float64Array,
+  surfaces: SurfaceAt,
+) {
   const { position } = mesh;
   const { edge } = frame;
   const near = Math.max(Math.max(...solve.bands.map((band) => band.soft)), 2 * edge);
@@ -1363,8 +1373,8 @@ function usableCore(mesh: RefineMesh, solve: EdgeSolve, frame: Frame, weights: F
   frame.vertices.forEach((v, k) => {
     if (weights[k] < 1) return;
     const zone = frame.zone[k];
-    if (zone === BandZone.Left) sides[0] = true;
-    if (zone === BandZone.Right) sides[1] = true;
+    const p = [position[v * 3], position[v * 3 + 1], position[v * 3 + 2]];
+    sides[sideOf(zone, surfaces(p[0], p[1], p[2]), p)] = true;
     const station = onCurve(
       solve.curve,
       position[v * 3],

@@ -519,8 +519,39 @@ describe('solveEdge and applyEdge on one segment', () => {
     expect(endOf(0.36)).toBe('taper');
   });
 
+  it('uses the ends the input sets and decides only those it leaves null', () => {
+    const radius = 0.12,
+      c = radius * (1 - Math.SQRT1_2);
+    const model = modelOf(softBox([2, 1.5, 1], radius, sharpEdge));
+    const solveTo = (remaining: number, ends?: EdgeInput['ends']) => {
+      const points = [-1, 2 - radius - remaining].map((x) =>
+        pointOn(model.mesh, [x, 1.5 - c, 1 - c]),
+      );
+      return solveEdge(model.mesh, model.topology, { ...autoWidth(points), ends }, model.noise)!;
+    };
+    expect(solveTo(0.36).ends).toEqual(['taper', 'taper']);
+    expect(solveTo(0.36, [null, 'hold']).ends).toEqual(['taper', 'hold']);
+    expect(solveTo(0.18).ends[1]).toBe('hold');
+    expect(solveTo(0.18, ['hold', 'taper']).ends).toEqual(['hold', 'taper']);
+    // The weights follow the end used: in the last 0.05 mm a held end keeps its blend from the
+    // surface past it, a tapered one has faded out.
+    const held = solveTo(0.36, [null, 'hold']),
+      tapered = solveTo(0.36);
+    const endWeight = (solve: EdgeSolve) => {
+      const weights = moveWeights(model.mesh, model.topology, solve);
+      let most = 0;
+      solve.bands[0].vertices.forEach((v, i) => {
+        if (model.mesh.position[v * 3] > 2 - radius - 0.36 - 0.05)
+          most = Math.max(most, weights[i]);
+      });
+      return most;
+    };
+    expect(endWeight(held)).toBeGreaterThan(0.3);
+    expect(endWeight(tapered)).toBeLessThan(0.05);
+  });
+
   it('cuts one chain in one piece, nothing left straddling or facing against its surface', () => {
-    for (const { model, solve } of [boxCase(), stepCase()]) {
+    for (const { model, solve } of [boxCase(), stepCase(), rimCase()]) {
       const out = cloneRefineMesh(model.mesh, true);
       const result = applyEdge(out, model.topology, solve, 1, true);
       expect(result.pieces).toBe(1);

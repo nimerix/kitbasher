@@ -225,6 +225,14 @@ describe('solveEdge and applyEdge on a path', () => {
     expect(solve).not.toBeNull();
     expect(solve.curve.closed).toBe(true);
     expect(solve.ends).toEqual(['hold', 'hold']);
+    // A closed path has no ends to set.
+    const set = solveEdge(
+      model.mesh,
+      model.topology,
+      { ...input, ends: ['taper', 'taper'] },
+      model.noise,
+    )!;
+    expect(set.ends).toEqual(['hold', 'hold']);
     const out = cloneRefineMesh(model.mesh, true);
     const { cut } = applyEdge(out, model.topology, solve, 1, true);
     const chain = cut!.chain;
