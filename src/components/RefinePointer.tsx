@@ -71,6 +71,8 @@ interface HandleDrag {
   x: number;
   y: number;
   moved: boolean;
+  /** Set once the store has been given this drag's first move. */
+  began?: boolean;
   controls: { enabled: boolean } | null;
 }
 type Gesture = Stroke | HandleDrag;
@@ -232,7 +234,11 @@ export function RefinePointerController({ pressed }: { pressed: () => boolean })
       const point = hitAt(d.partId, x, y);
       if (!point) return;
       const { handle } = d;
-      useEditor.getState().moveRefinePoint(handle.feature, handle.segment, handle.index, point);
+      // The first move of a drag starts its own undo step.
+      useEditor
+        .getState()
+        .moveRefinePoint(handle.feature, handle.segment, handle.index, point, !d.began);
+      d.began = true;
       d.current = point;
     };
 
@@ -268,11 +274,7 @@ export function RefinePointerController({ pressed }: { pressed: () => boolean })
           state.moveRefinePoint(handle.feature, handle.segment, handle.index, handle.point);
         return;
       }
-      // A crease stroke changes nothing until it ends; a dabbing stroke is taken back as a step.
-      if (state.refine?.brush.kind === 'crease') return;
-      const steps = state.refine?.undo.length;
-      state.endRefineStroke();
-      if (useEditor.getState().refine?.undo.length !== steps) useEditor.getState().undoRefine();
+      state.cancelRefineStroke();
     };
 
     const move = (event: PointerEvent) => {
