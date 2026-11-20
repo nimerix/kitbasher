@@ -40,11 +40,12 @@ export interface RegionInput {
 export interface RegionSolve {
   vertices: Uint32Array;
   /**
-   * Per region vertex: target position, 0-1 weight, and 1 where it is kept as it stands (detail, or
-   * a face turned away from the fitted surface), 2 where its move eases into kept detail or a
-   * restored edge.
+   * Per region vertex: the world position `applyRegion` writes where its 0-1 weight is above 0,
+   * already blended by that weight and checked for collapsed and turned triangles; the weight; and
+   * 1 where it is kept as it stands (detail, or a face turned away from the fitted surface), 2 where
+   * its move eases into kept detail or a restored edge.
    */
-  target: Float32Array;
+  target: Float64Array;
   weight: Float32Array;
   detail: Uint8Array;
   /** What the first patch's surface was fitted as; null for Smooth. */
@@ -78,8 +79,15 @@ const facing = 0.2;
 const collapse = 1e-3;
 /** Rounds of holding the corners of failed triangles before the solve is refused. */
 const checkRounds = 5;
-/** Refits of Flatten and Shape to the vertices that settle on the surface. */
+/** Refits of Flatten and Shape to the base weighted by its blend, until its weights repeat. */
 const fitRounds = 3;
+/** The least total blend weight that determines a fitted surface. */
+const minimumWeight = 3;
+/**
+ * Each vertex counts in a refit by its blend to this power: the band, which a run moves only part
+ * way, pulls the next run's fit by little, so a second run refits nearly the same surface.
+ */
+const fitWeightPower = 8;
 
 interface Region {
   vertices: Uint32Array;
@@ -89,7 +97,10 @@ interface Region {
   border: Uint8Array;
 }
 
-/** Null when no patch of the region can be fitted or each is all detail. */
+/**
+ * Null when any patch fails its triangle check, so a selection is treated whole or not at all, and
+ * when no patch can be fitted or each is all detail.
+ */
 export function solveRegion(
   mesh: RefineMesh,
   topology: RefineTopology,
@@ -100,7 +111,7 @@ export function solveRegion(
   const { vertices, indexOf } = regionOf(mesh, topology, input.triangles);
   const count = vertices.length;
   const { position } = mesh;
-  const target = new Float32Array(count * 3);
+  const target = new Float64Array(count * 3);
   for (let i = 0; i < count; i++)
     target.set(position.subarray(vertices[i] * 3, vertices[i] * 3 + 3), i * 3);
   const weight = new Float32Array(count);
@@ -110,6 +121,7 @@ export function solveRegion(
   // Each patch has its own fit, detail and blend; a vertex two patches share is on both borders.
   for (const triangles of patchesOf(mesh, topology, input.triangles)) {
     const patch = solvePatch(mesh, topology, triangles, input, noise);
+    if (patch === 'refused') return null;
     fits.push(patch?.fitted ?? null);
     if (!patch) continue;
     solved = true;
@@ -125,21 +137,14 @@ export function solveRegion(
   return { vertices, target, weight, detail, fitted: fits[0], fits };
 }
 
+/** Writes the solve's checked positions, unchanged, wherever its weight is above 0. */
 export function applyRegion(mesh: RefineMesh, solve: RegionSolve): Uint32Array {
   const { vertices, target, weight } = solve;
-  const { position } = mesh;
   const written: number[] = [];
   for (let i = 0; i < vertices.length; i++) {
-    const w = weight[i];
-    if (!(w > 0)) continue;
-    const v = vertices[i];
-    const at = (axis: number) => {
-      const p = position[v * 3 + axis],
-        t = target[i * 3 + axis];
-      return w === 1 ? t : p + w * (t - p);
-    };
-    moveVertex(mesh, v, at(0), at(1), at(2));
-    written.push(v);
+    if (!(weight[i] > 0)) continue;
+    moveVertex(mesh, vertices[i], target[i * 3], target[i * 3 + 1], target[i * 3 + 2]);
+    written.push(vertices[i]);
   }
   return Uint32Array.from(written);
 }
@@ -154,7 +159,7 @@ interface Base {
 
 interface PatchSolve {
   vertices: Uint32Array;
-  target: Float32Array;
+  target: Float64Array;
   weight: Float32Array;
   detail: Uint8Array;
   fitted: ShapeKind | null;
@@ -166,7 +171,7 @@ function solvePatch(
   triangles: Uint32Array,
   input: RegionInput,
   noise: number,
-): PatchSolve | null {
+): PatchSolve | 'refused' | null {
   const region = regionOf(mesh, topology, triangles);
   const { vertices, border } = region;
   const count = vertices.length;
@@ -192,9 +197,10 @@ function solvePatch(
 
 /**
  * Flatten and Shape: base vertices project onto the fitted surface. The surface is fitted again to
- * the vertices that end at full weight, clear of detail and of eased rings, so a second run over
- * the result, where those vertices already lie on it, finds the same surface. A vertex facing away
- * from the surface (a wall, or the far side of a thin part) stays put.
+ * every base vertex clear of detail, of eased rings and of faces turned away, weighted by its blend
+ * to `fitWeightPower`, so the full-weight interior decides it and a second run over the result,
+ * where that interior already lies on it, finds nearly the same surface. A vertex facing away from the surface (a wall,
+ * or the far side of a thin part) stays put. Null when the weighted base cannot fix the surface.
  */
 function fitBase(
   mesh: RefineMesh,
@@ -226,9 +232,8 @@ function fitBase(
   };
   let shape = first.shape;
   let { detail, held } = classify(shape);
-  let settled: Uint8Array | null = null;
+  let used: Float64Array | null = null;
   for (let round = 0; round < fitRounds; round++) {
-    const kept = new Uint8Array(count);
     const near = surfaceDistance(
       mesh,
       topology,
@@ -243,24 +248,14 @@ function fitBase(
       Int32Array.from(vertices, (v) => (crease[v] ? 0 : -1)),
       creaseEase * edge,
     ).distance;
-    let total = 0;
-    for (let i = 0; i < count; i++)
-      if (blend[i] === 1 && !border[i] && near[i] === Infinity && nearCrease[i] === Infinity) {
-        kept[i] = 1;
-        total++;
-      }
-    if (total < 12 || (settled && kept.every((k, i) => k === settled![i]))) break;
-    const pick = (values: Float32Array) => {
-      const out = new Float32Array(total * 3);
-      let n = 0;
-      for (let i = 0; i < count; i++)
-        if (kept[i]) out.set(values.subarray(i * 3, i * 3 + 3), 3 * n++);
-      return out;
-    };
-    const next = fitShape(pick(points), pick(normals), kind, noise);
-    if (!next) break;
-    shape = next.shape;
-    settled = kept;
+    const weights = Float64Array.from(blend, (b, i) =>
+      border[i] || near[i] < Infinity || nearCrease[i] < Infinity ? 0 : b ** fitWeightPower,
+    );
+    if (used && weights.every((w, i) => w === used![i])) break;
+    const next = weightedFit(points, normals, kind, noise, weights);
+    if (!next) return null;
+    shape = next;
+    used = weights;
     ({ detail, held } = classify(shape));
   }
   const move = new Float64Array(count * 3);
@@ -271,6 +266,54 @@ function fitBase(
     for (let axis = 0; axis < 3; axis++) move[i * 3 + axis] = projected[axis] - position[v + axis];
   }
   return { move, detail, held, fitted: kind };
+}
+
+/**
+ * The surface fitted to the points with weight, each counting by its weight; null when their total
+ * weight is under 3 or they lie on one line.
+ */
+function weightedFit(
+  points: Float32Array,
+  normals: Float32Array,
+  kind: ShapeKind,
+  noise: number,
+  weights: Float64Array,
+): Shape | null {
+  const used: number[] = [];
+  let total = 0;
+  const mean = [0, 0, 0];
+  weights.forEach((w, i) => {
+    if (!(w > 0)) return;
+    used.push(i);
+    total += w;
+    for (let axis = 0; axis < 3; axis++) mean[axis] += w * points[i * 3 + axis];
+  });
+  if (total < minimumWeight) return null;
+  const c = new Float64Array(9);
+  for (const i of used)
+    for (let r = 0; r < 3; r++)
+      for (let k = 0; k < 3; k++)
+        c[r * 3 + k] +=
+          weights[i] *
+          (points[i * 3 + r] - mean[r] / total) *
+          (points[i * 3 + k] - mean[k] / total);
+  // The sum of the covariance's pairwise eigenvalue products: 0 when the points lie on one line.
+  const trace = c[0] + c[4] + c[8];
+  const pairs = c[0] * c[4] + c[0] * c[8] + c[4] * c[8] - c[1] * c[3] - c[2] * c[6] - c[5] * c[7];
+  if (!(pairs > 1e-10 * trace * trace)) return null;
+  const pick = (values: Float32Array) =>
+    Float32Array.from(
+      { length: used.length * 3 },
+      (_, n) => values[used[(n / 3) | 0] * 3 + (n % 3)],
+    );
+  const fit = fitShape(
+    pick(points),
+    pick(normals),
+    kind,
+    noise,
+    Float64Array.from(used, (i) => weights[i]),
+  );
+  return fit?.shape ?? null;
 }
 
 /**
@@ -496,7 +539,8 @@ function islandsOf(topology: RefineTopology, region: Region, detail: Uint8Array)
  * within `ringDepth` rings of it, at the least weight of any of its vertices. The base near islands
  * and held vertices eases continuously from its own move to theirs, and into restored edges. Then
  * every triangle that moves is checked; the corners of one that would collapse or turn over are
- * held and the moves found again, and after `checkRounds` such rounds the patch is refused.
+ * held and the moves found again, and after `checkRounds` such rounds the patch is refused. The
+ * positions checked are the ones written.
  */
 function settle(
   mesh: RefineMesh,
@@ -506,7 +550,7 @@ function settle(
   blend: Float32Array,
   strength: number,
   edge: number,
-): PatchSolve | null {
+): PatchSolve | 'refused' {
   const { vertices, border } = region;
   const count = vertices.length;
   const { position, crease } = mesh;
@@ -586,21 +630,19 @@ function settle(
           (sc * (k * w * move[i * 3 + axis] + shared[i * 3 + axis])) / total;
       if (share[i] > 0 || sc < 1) eased[i] = 1;
     }
-    const failed = collapsed(mesh, topology, region, displacement);
+    const target = new Float64Array(count * 3);
+    for (let i = 0; i < count; i++) {
+      const v = vertices[i] * 3;
+      const moved = weight[i] > 0;
+      for (let axis = 0; axis < 3; axis++)
+        target[i * 3 + axis] = position[v + axis] + (moved ? displacement[i * 3 + axis] : 0);
+    }
+    const failed = collapsed(mesh, topology, region, target);
     if (!failed.length) {
-      const target = new Float32Array(count * 3);
-      const flags = new Uint8Array(count);
-      for (let i = 0; i < count; i++) {
-        const v = vertices[i] * 3;
-        const w = weight[i];
-        for (let axis = 0; axis < 3; axis++)
-          target[i * 3 + axis] =
-            w > 0 ? position[v + axis] + displacement[i * 3 + axis] / w : position[v + axis];
-        flags[i] = island[i] >= 0 || held[i] ? 1 : eased[i] ? 2 : 0;
-      }
+      const flags = Uint8Array.from(island, (n, i) => (n >= 0 || held[i] ? 1 : eased[i] ? 2 : 0));
       return { vertices, target, weight, detail: flags, fitted: base.fitted };
     }
-    if (round === checkRounds) return null;
+    if (round === checkRounds) return 'refused';
     for (const i of failed) {
       if (island[i] >= 0) islandHeld[island[i]] = 1;
       else held[i] = 1;
@@ -609,14 +651,14 @@ function settle(
 }
 
 /**
- * Region indices of the corners of triangles that the displacements would shrink below `collapse`
- * of their area or turn by more than 90 degrees.
+ * Region indices of the corners of triangles that moving the region's vertices to `target` would
+ * shrink below `collapse` of their area or turn by more than 90 degrees.
  */
 function collapsed(
   mesh: RefineMesh,
   topology: RefineTopology,
   region: Region,
-  displacement: Float64Array,
+  target: Float64Array,
 ): number[] {
   const { vertices, indexOf } = region;
   const { position, corners, weldOf } = mesh;
@@ -626,8 +668,14 @@ function collapsed(
   const was = new Float64Array(9),
     now = new Float64Array(9);
   for (let i = 0; i < vertices.length; i++) {
-    if (!displacement[i * 3] && !displacement[i * 3 + 1] && !displacement[i * 3 + 2]) continue;
     const v = vertices[i];
+    const p = v * 3;
+    if (
+      target[i * 3] === position[p] &&
+      target[i * 3 + 1] === position[p + 1] &&
+      target[i * 3 + 2] === position[p + 2]
+    )
+      continue;
     for (let j = triangleStart[v]; j < triangleStart[v + 1]; j++) {
       const t = trianglesOf[j];
       if (checked.has(t)) continue;
@@ -637,7 +685,7 @@ function collapsed(
         const k = indexOf[w];
         for (let axis = 0; axis < 3; axis++) {
           was[c * 3 + axis] = position[w * 3 + axis];
-          now[c * 3 + axis] = was[c * 3 + axis] + (k >= 0 ? displacement[k * 3 + axis] : 0);
+          now[c * 3 + axis] = k >= 0 ? target[k * 3 + axis] : was[c * 3 + axis];
         }
       }
       const [ax, ay, az] = crossOf(was),

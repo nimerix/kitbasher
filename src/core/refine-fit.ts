@@ -353,6 +353,7 @@ function robust<M extends Scorer>(
   fitter: Fitter<M>,
   order: Uint32Array,
   refused: (cloud: Cloud, candidate: Fitted) => boolean,
+  prior: Float64Array | null,
 ): Fitted | null {
   const { count } = cloud;
   const model = fitter.model(cloud);
@@ -406,7 +407,7 @@ function robust<M extends Scorer>(
       }
     }
   };
-  consider(fitter.starts(cloud, new Float64Array(count).fill(1)));
+  consider(fitter.starts(cloud, prior ?? new Float64Array(count).fill(1)));
   const { size } = fitter,
     n = scored.count,
     half = Math.ceil(n / 2);
@@ -449,12 +450,14 @@ function robust<M extends Scorer>(
   for (let round = 0; state && round < rounds; round++) {
     model.residuals(state, residual);
     reweight(residual, noise, weight, absolute);
+    if (prior) for (let i = 0; i < count; i++) weight[i] *= prior[i];
     state = fitter.refit(cloud, model, weight, state);
   }
   const final: Float64Array | null = state;
   if (!final || !final.every(Number.isFinite)) return null;
   model.residuals(final, residual);
   reweight(residual, noise, weight, absolute);
+  if (prior) for (let i = 0; i < count; i++) weight[i] *= prior[i];
   let inliers = 0,
     facing = 0;
   for (let i = 0; i < count; i++) {
@@ -761,14 +764,20 @@ function shapeOf(
   }
 }
 
-/** Robust fit that ignores points standing off the surface. Null when the points cannot define the shape. */
+/**
+ * Robust fit that ignores points standing off the surface. Null when the points cannot define the
+ * shape. With `weights`, each point counts by its weight in the reweighted refit and the all-point
+ * start.
+ */
 export function fitShape(
   points: Float32Array,
   normals: Float32Array,
   kind: ShapeKind,
   noise: number,
+  weights: Float64Array | null = null,
 ): ShapeFit | null {
-  return fitKind(points, normals, kind, noise, samplingOrder(points, normals, scoringPoints));
+  const order = samplingOrder(points, normals, scoringPoints);
+  return fitKind(points, normals, kind, noise, order, weights);
 }
 
 /** `fitShape` scoring and sampling the points at `order`. */
@@ -778,6 +787,7 @@ function fitKind(
   kind: ShapeKind,
   noise: number,
   order: Uint32Array,
+  weights: Float64Array | null = null,
 ): ShapeFit | null {
   if (points.length / 3 < minimumPoints[kind]) return null;
   const cloud = cloudOf(points, normals);
@@ -794,7 +804,7 @@ function fitKind(
     kind !== 'plane' &&
     flatness(points, kind, candidate) < scaled &&
     !normalsResolve(points, kind, candidate);
-  const fitted = robust(cloud, scaled, fitter, order, refused);
+  const fitted = robust(cloud, scaled, fitter, order, refused, weights);
   if (!fitted) return null;
   const shape = shapeOf(kind, cloud, fitted.state, fitted.inward);
   if (!shape || refused(cloud, fitted)) return null;

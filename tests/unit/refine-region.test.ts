@@ -1,4 +1,4 @@
-import { BoxGeometry } from 'three';
+import { BoxGeometry, Matrix4 } from 'three';
 import { describe, expect, it } from 'vitest';
 import { type RefineMesh, cloneRefineMesh, foldedTriangles } from '../../src/core/refine-mesh';
 import {
@@ -467,18 +467,75 @@ describe('solveRegion and applyRegion', () => {
     expect(between).toBeLessThan(away + 0.001);
   });
 
-  it("settles a second Smooth to at most half the first run's moves", () => {
-    const model = modelOf(rivetedPlate().geometry);
-    const input = smooth(topRegion(model.mesh));
-    const first = run(model, input);
-    const second = run({ ...modelFrom(first.out), noise: model.noise }, input);
-    const p95 = (before: RefineMesh, after: RefineMesh) => {
-      const moves = Array.from(first.solve.vertices, (v) => distanceMoved(before, after, v)).sort(
-        (a, b) => a - b,
+  it('checks the positions it writes, which are 64-bit and written unchanged', () => {
+    // A fine sheet far from the origin, where a 32-bit target would round its triangles away.
+    const model = modelOf(
+      heightGrid(() => 0, 64, 20, -0.064, -0.02, 0.002),
+      new Matrix4().makeTranslation(32_768, 0, 0),
+    );
+    const { mesh, topology } = model;
+    for (let v = 0; v < mesh.weldedCount; v++)
+      if (Math.abs(mesh.position[v * 3] - 32_768) < 1e-8) mesh.crease[v] = 1;
+    const solve = solveRegion(
+      mesh,
+      topology,
+      flatten(allTriangles(mesh), { keepDetail: false }),
+      0.01,
+    )!;
+    expect(solve.target).toBeInstanceOf(Float64Array);
+    const out = cloneRefineMesh(mesh, false);
+    const written = applyRegion(out, solve);
+    expect(written.length).toBeGreaterThan(0);
+    expect(collapsedTriangles(mesh, out)).toBe(0);
+    expect(foldedTriangles(out, topology, mesh.position, written)).toHaveLength(0);
+    const index = new Map(Array.from(solve.vertices, (v, i) => [v, i]));
+    for (const v of written)
+      for (let axis = 0; axis < 3; axis++)
+        expect(out.position[v * 3 + axis]).toBe(solve.target[index.get(v)! * 3 + axis]);
+  });
+
+  it('refuses the whole selection when one patch still fails its triangle check', () => {
+    // A boss whose cliff faces away from the plane, under a 68 degree ramp: every round of holding
+    // leaves the next ring of the ramp folding over the held one. Beside it, a separate rippled patch.
+    const model = modelOf(
+      heightGrid(
+        (x, y) => {
+          const r = Math.hypot(x, y);
+          if (x > 2) return 0.01 * Math.sin(8 * x) * Math.sin(8 * y);
+          if (r > 0.8) return 0;
+          if (r > 0.75) return (0.6 * (0.8 - r)) / 0.05;
+          return 0.6 + 2.5 * Math.min(0.75 - r, 0.6);
+        },
+        120,
+        40,
+        -2,
+        -1,
+      ),
+    );
+    const boss = trianglesWhere(model.mesh, (x, y) => Math.abs(x) < 1.9 && Math.abs(y) < 0.95);
+    const ripple = trianglesWhere(model.mesh, (x, y) => x > 2.3 && x < 3.9 && Math.abs(y) < 0.95);
+    const solve = (triangles: Uint32Array) =>
+      solveRegion(
+        model.mesh,
+        model.topology,
+        flatten(triangles, { keepDetail: false }),
+        model.noise,
       );
-      return moves[Math.floor(0.95 * (moves.length - 1))];
-    };
-    expect(p95(first.out, second.out)).toBeLessThanOrEqual(0.5 * p95(model.mesh, first.out));
+    expect(solve(boss)).toBeNull();
+    const alone = run(model, flatten(ripple, { keepDetail: false }));
+    expect(alone.solve.fits).toEqual(['plane']);
+    expect(maxMove(model.mesh, alone.out)).toBeGreaterThan(0.001);
+    expect(solve(Uint32Array.from([...boss, ...ripple]))).toBeNull();
+  });
+
+  it('settles a painted cap on a second Flatten', () => {
+    // No detail and no crease: the blend band is most of the region, and its weights change as the
+    // cap flattens, so a fit that switched between sample sets would move the whole cap again.
+    const model = modelOf(heightGrid((x, y) => -0.9 * (x * x + y * y), 28, 28, -0.7, -0.7));
+    const cap = trianglesWhere(model.mesh, (x, y) => Math.hypot(x, y) < 0.31);
+    const moves = twice({ ...model, noise: 0.01 }, flatten(cap, { keepDetail: false }));
+    expect(moves.filter((m) => m.settled).length).toBeGreaterThan(10);
+    for (const { settled, after } of moves) expect(after).toBeLessThan(settled ? 0.001 : 0.01);
   });
 
   it('keeps a shallow groove at a set offset, and a deep one at the automatic offset', () => {
