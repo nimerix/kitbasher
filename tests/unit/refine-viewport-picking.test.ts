@@ -102,7 +102,8 @@ describe('picking a Refine preview', () => {
     editor().undoRefine();
     expect(triangleCount(session().preview!)).toBe(before);
     expectPickingMatches(session().preview!);
-  });
+    // About 2.5 s alone; the default 5 s is too little when other suites load the machine.
+  }, 30_000);
 });
 
 /** Stands in for the index worker, holding each build until `release` runs it. */
