@@ -83,6 +83,8 @@ const flankRun = 3;
  */
 const keptRun = 4.5;
 const marginFloor = 0.5;
+/** A flank vertex off its surface within this many edge lengths of the flank's start is Soft. */
+const shoulderEdges = 1;
 /** Fewest vertices a flank may have. */
 const minimumFlank = 12;
 /** Stations per slice of the frame normals, the solved edge and the zone boundaries. */
@@ -1469,6 +1471,17 @@ function classifyOriented(
     if (zone[i] !== BandZone.Left && zone[i] !== BandZone.Right) continue;
     if (Math.abs(o[i]) >= touching(stops[zone[i] - 1], i, Math.min)) zone[i] = BandZone.Beyond;
   }
+  // A vertex in a flank's run but off its surface by more than the tolerance would be moved by more
+  // than it: on the rounding's shoulder it is Soft, further out Beyond. The evidence below reads the
+  // runs as they were.
+  const runZone = zone.slice();
+  for (let i = 0; i < count; i++) {
+    if (zone[i] !== BandZone.Left && zone[i] !== BandZone.Right) continue;
+    const s = zone[i] - 1;
+    if (Math.abs(fits[s].distance(i)) <= 3 * fits[s].local) continue;
+    const shoulder = touching(sides[s].start, i, Math.max) + shoulderEdges * edge;
+    zone[i] = Math.abs(o[i]) < shoulder ? BandZone.Soft : BandZone.Beyond;
+  }
 
   // Evidence of an edge that does not depend on the width: the solved edge within reach of the
   // guide, the flank surfaces apart there, and flanks that turn far less than the edge does.
@@ -1478,7 +1491,7 @@ function classifyOriented(
   const flatness = flankFlatness(
     o,
     frame.turn,
-    zone,
+    runZone,
     (i) => band.g[i] <= analysis,
     flatFrom * edge,
     angle,
@@ -1513,8 +1526,8 @@ function classifyOriented(
     for (let i = 0; i < count; i++) {
       if (band.g[i] > cap) continue;
       keep.push(i);
-      if (zone[i] !== BandZone.Left && zone[i] !== BandZone.Right) continue;
-      const s = zone[i] - 1,
+      if (runZone[i] !== BandZone.Left && runZone[i] !== BandZone.Right) continue;
+      const s = runZone[i] - 1,
         k = nearestSlice(i) * 2 + s,
         offset = Math.abs(o[i]);
       counts[s]++;

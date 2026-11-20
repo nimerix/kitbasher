@@ -1317,6 +1317,18 @@ export function maxZoneDistance(
   return worst;
 }
 
+/** Flank vertices further from their own flank surface than 3 times its local scale. */
+export function flankOverTolerance(mesh: RefineMesh, band: EdgeBand) {
+  let count = 0;
+  band.vertices.forEach((v, i) => {
+    if (band.zone[i] !== BandZone.Left && band.zone[i] !== BandZone.Right) return;
+    const flank = band.flanks[band.zone[i] - 1];
+    const p = mesh.position;
+    if (!(flank.distance(p[v * 3], p[v * 3 + 1], p[v * 3 + 2]) <= 3 * flank.local)) count++;
+  });
+  return count;
+}
+
 /** Number of band vertices in one of `zones` at a point that `where` accepts. */
 export function countWhere(
   mesh: RefineMesh,

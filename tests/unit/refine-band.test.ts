@@ -10,6 +10,7 @@ import { type RefineMesh, weldedCorner } from '../../src/core/refine-mesh';
 import type { Vec3 } from '../../src/core/types';
 import {
   countWhere,
+  flankOverTolerance,
   maxZoneDistance,
   modelOf,
   pointOn,
@@ -233,6 +234,24 @@ describe('buildBand', () => {
     expect(maxZoneDistance(mesh, band, BandZone.Right, (p) => Math.abs(p[1] - 1))).toBeLessThan(
       flankBound,
     );
+  });
+
+  it('leaves no flank vertex further than 3 local scales from its surface on a cylinder rim', () => {
+    const { mesh, topology, noise } = modelOf(softCylinder(1.5, 1, 0.3));
+    const guide = [0, 1, 2].map((k) => {
+      const turn = (k * 2 * Math.PI) / 3;
+      return pointOn(mesh, [
+        (1.5 - crest) * Math.cos(turn),
+        1 - crest,
+        (1.5 - crest) * Math.sin(turn),
+      ]);
+    });
+    const width = estimateWidth(mesh, topology, 'arc', guide, noise);
+    for (const w of [width, 0.6]) {
+      const band = buildBand(mesh, topology, 'arc', guide, w, noise)!;
+      expect(band).not.toBeNull();
+      expect(flankOverTolerance(mesh, band)).toBe(0);
+    }
   });
 
   it('fits a face that is no single shape with a profile per slice', () => {
@@ -687,6 +706,20 @@ describe('telling an edge from a smooth surface', () => {
     refused(model, 'arc', [at(-50), at(0), at(50)]);
   });
 
+  it('refuses a guide along the crown of a cylinder of radius 0.5 mm', () => {
+    const model = modelOf(softCylinder(0.5, 1.5, 0.1));
+    refused(model, 'line', [pointOn(model.mesh, [0.5, -1, 0]), pointOn(model.mesh, [0.5, 1, 0])]);
+  });
+
+  it('refuses a guide over the crown of a sphere of radius 0.6 mm', () => {
+    const model = modelOf(rippledSphere(0.6));
+    const at = (degrees: number) => {
+      const a = (degrees * Math.PI) / 180;
+      return pointOn(model.mesh, [0.6 * Math.sin(a), 0.6 * Math.cos(a), 0]);
+    };
+    refused(model, 'arc', [at(-50), at(0), at(50)]);
+  });
+
   it('refuses a guide on a gently curved quadric patch', () => {
     // Radii of curvature 2 and 3.3 mm.
     const model = modelOf(heightField(1.5, (x, z) => -0.25 * x * x - 0.15 * z * z));
@@ -702,6 +735,7 @@ describe('telling an edge from a smooth surface', () => {
     { degrees: 45, fillet: 0.25, flank: 0 },
     { degrees: 90, fillet: 0.15, flank: 0 },
     { degrees: 45, fillet: 0.25, flank: 2 },
+    { degrees: 60, fillet: 0.2, flank: 2 },
   ])(
     'finds a $degrees-degree softened edge with fillet $fillet mm and flank radius $flank mm',
     ({ degrees, fillet, flank }) => {
