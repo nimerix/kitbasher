@@ -389,6 +389,10 @@ function circleThrough(p0: V3, p1: V3, p2: V3) {
 
 /** Gaps within this of the smallest are ties, settled by nearness to the nominal joint. */
 const tie = 1e-9;
+/** Directions closer than this many radians are parallel: rounding hides where they would cross. */
+const parallel = 1e-6;
+/** Neighbours whose closest approach is below this many mm meet: no bridge is drawn between them. */
+const meet = 1e-6;
 /** Circle angles are sampled this many times a turn to bracket each local minimum of a gap. */
 const turnSamples = 720;
 const turn = Math.PI * 2;
@@ -657,6 +661,113 @@ function circleApproach(
   }
 }
 
+type Circle = Carrier & { kind: 'circle' };
+
+/**
+ * The points of the line `o + d t` (d unit), t in [lo, hi], that meet a circle: by the quadratic
+ * when the line lies in the circle's plane, else by the crossing point's distance from the centre.
+ */
+function lineMeetsCircle(o: V3, d: V3, lo: number, hi: number, circle: Circle) {
+  const normal = cross(circle.u, circle.v);
+  const w = sub(o, circle.c);
+  const [across, off] = [dot(d, normal), dot(w, normal)];
+  const params: number[] = [];
+  if (Math.abs(across) < Math.sin(parallel)) {
+    if (Math.abs(off) >= meet) return [];
+    const flatD = sub(d, scaled(normal, across)),
+      flatW = sub(w, scaled(normal, off));
+    const [a, b, c] = [dot(flatD, flatD), dot(flatW, flatD), dot(flatW, flatW) - circle.r ** 2];
+    const discriminant = b * b - a * c;
+    if (discriminant < 0) return [];
+    // The stable form of the two roots.
+    const q = -(b + Math.sign(b || 1) * Math.sqrt(discriminant));
+    params.push(q / a);
+    if (q !== 0) params.push(c / q);
+  } else params.push(-off / across);
+  const points: { t: number; point: V3 }[] = [];
+  for (const t of params) {
+    if (!(t >= lo && t <= hi)) continue;
+    const point: V3 = [o[0] + d[0] * t, o[1] + d[1] * t, o[2] + d[2] * t];
+    if (distance(point, nearestOn(circle, point).point) < meet) points.push({ t, point });
+  }
+  return points;
+}
+
+/** The meeting of points `pa` on A and `pb` on B, with their carrier parameters. */
+function meeting(A: Carrier, B: Carrier, pa: V3, pb: V3): Candidate {
+  const [a, b] = [nearestOn(A, pa), nearestOn(B, pb)];
+  return { gap: distance(a.point, b.point), a: a.point, b: b.point, ta: a.t, tb: b.t };
+}
+
+/**
+ * Where two carriers truly meet, in closed form: a line or each polyline piece with a circle, and
+ * circle with circle. Carriers that coincide meet everywhere, so they meet at the nominal joint.
+ * Undefined when neither applies and the gap must be searched numerically.
+ */
+function exactApproach(A: Carrier, B: Carrier, nominal: V3): Candidate[] | undefined {
+  if (A.kind === 'circle' && B.kind === 'circle') {
+    const [na, nb] = [cross(A.u, A.v), cross(B.u, B.v)];
+    const line = cross(na, nb);
+    if (norm(line) < Math.sin(parallel)) {
+      if (Math.abs(dot(sub(B.c, A.c), na)) >= meet) return [];
+      if (distance(A.c, B.c) < meet && Math.abs(A.r - B.r) < meet)
+        return [meeting(A, B, nominal, nominal)];
+      const between = sub(B.c, A.c);
+      const flat = sub(between, scaled(na, dot(between, na)));
+      const d = norm(flat);
+      if (!(d > 0)) return [];
+      const along = (d * d + A.r ** 2 - B.r ** 2) / (2 * d);
+      const height = A.r ** 2 - along ** 2;
+      if (height < 0) return [];
+      const e = scaled(flat, 1 / d),
+        f = cross(na, e);
+      return [-1, 1].map((sign) => {
+        const p = [0, 1, 2].map(
+          (k) => A.c[k] + along * e[k] + sign * Math.sqrt(height) * f[k],
+        ) as V3;
+        return meeting(A, B, p, p);
+      });
+    }
+    // The circles can meet only on the line where their planes cross.
+    const k = dot(na, nb),
+      [ha, hb] = [dot(na, A.c), dot(nb, B.c)];
+    const o = [0, 1, 2].map(
+      (axis) => ((ha - hb * k) * na[axis] + (hb - ha * k) * nb[axis]) / (1 - k * k),
+    ) as V3;
+    return lineMeetsCircle(o, unit(line), -Infinity, Infinity, A)
+      .map(({ point }) => meeting(A, B, point, point))
+      .filter((c) => c.gap < meet);
+  }
+  if (A.kind === 'circle' || B.kind === 'circle') {
+    const [circle, straight] = (A.kind === 'circle' ? [A, B] : [B, A]) as [
+      Circle,
+      Carrier & { kind: 'straight' },
+    ];
+    const found: Candidate[] = [];
+    for (const x of straight.pieces) {
+      if (!(dot(x.d, x.d) > 0)) continue;
+      for (const { t, point } of lineMeetsCircle(x.o, x.d, x.lo, x.hi, circle)) {
+        const q = nearestOn(circle, point);
+        const gap = distance(point, q.point);
+        found.push(
+          A === circle
+            ? { gap, a: q.point, b: point, ta: q.t, tb: x.base + t }
+            : { gap, a: point, b: q.point, ta: x.base + t, tb: q.t },
+        );
+      }
+    }
+    return found;
+  }
+  const [x, y] = [A.pieces, B.pieces];
+  if (x.length === 1 && y.length === 1 && dot(x[0].d, x[0].d) > 0 && dot(y[0].d, y[0].d) > 0) {
+    const offset = sub(y[0].o, x[0].o);
+    const across = sub(offset, scaled(x[0].d, dot(offset, x[0].d)));
+    if (norm(cross(x[0].d, y[0].d)) < Math.sin(parallel) && norm(across) < meet)
+      return [meeting(A, B, nominal, nominal)];
+  }
+  return undefined;
+}
+
 /** Appends the points after `a` along the straight span to `b`, at most `step` apart. */
 function straightRun(a: V3, b: V3, step: number, out: number[]) {
   const length = distance(a, b);
@@ -775,9 +886,12 @@ function guideOf(curve: EdgeCurve, kind: GuideKind): Guide {
  */
 function approach(A: Guide, B: Guide, self: boolean): Candidate {
   const nominal = [0, 1, 2].map((k) => (A.last[k] + B.first[k]) / 2) as V3;
-  const found: Candidate[] = [];
   const [a, b] = [A.carrier, B.carrier];
-  if (a.kind === 'circle') circleApproach(a, b, true, found);
+  const exact = exactApproach(a, b, nominal);
+  const found: Candidate[] = [];
+  // A true meeting always beats a nonzero gap, so the search runs only when there is none.
+  if (exact?.length) found.push(...exact);
+  else if (a.kind === 'circle') circleApproach(a, b, true, found);
   else if (b.kind === 'circle') circleApproach(b, a, false, found);
   else {
     const all = (pieces: Straight[]): [number, number] => [0, pieces.length - 1];
@@ -815,8 +929,8 @@ function approach(A: Guide, B: Guide, self: boolean): Candidate {
 /**
  * Trims or extends neighbours to where they come closest and joins them into one curve. Each
  * neighbour keeps its shape: it is trimmed or extended along its own carrier to its own closest
- * point, and a straight bridge through their midpoint, the joint, closes any remaining gap. A
- * single curve that is already closed comes back unchanged.
+ * point, and a straight bridge through their midpoint, the joint, closes any gap of at least
+ * `meet`. A single curve that is already closed, or that is not being closed, comes back unchanged.
  */
 export function joinCurves(
   curves: EdgeCurve[],
@@ -832,16 +946,18 @@ export function joinCurves(
     return makeCurve(new Float64Array(curves[0].points), true, Uint8Array.from(curves[0].corner));
   if (joints.length !== (closed ? n : n - 1))
     throw new Error('A path needs one joint between each pair of neighbouring curves.');
+  if (n === 1 && !closed)
+    return makeCurve(new Float64Array(curves[0].points), false, Uint8Array.from(curves[0].corner));
   const guides = curves.map((curve, i) => guideOf(curve, kinds[i]));
-  type End = { t: number; point: V3; joint?: V3 };
+  type End = { t: number; point: V3; joint?: V3; gap?: number };
   const starts: (End | undefined)[] = guides.map(() => undefined);
   const ends = [...starts];
   joints.forEach((_, k) => {
     const [i, j] = [k, (k + 1) % n];
     const best = approach(guides[i], guides[j], i === j);
     const joint = [0, 1, 2].map((a) => (best.a[a] + best.b[a]) / 2) as V3;
-    ends[i] = { t: best.ta, point: best.a, joint };
-    starts[j] = { t: best.tb, point: best.b, joint };
+    ends[i] = { t: best.ta, point: best.a, joint, gap: best.gap };
+    starts[j] = { t: best.tb, point: best.b, joint, gap: best.gap };
   });
   const flat: number[] = [],
     corner: number[] = [];
@@ -858,7 +974,7 @@ export function joinCurves(
       // A circle closed on itself meets itself at one point, a whole turn on.
       if (n === 1) t1 = t0 + turn;
     }
-    const bridged = (end: End) => end.joint !== undefined && distance(end.joint, end.point) > tie;
+    const bridged = (end: End) => end.gap !== undefined && end.gap >= meet;
     const piece = [...(from.joint ?? from.point)];
     let a = from.joint ?? from.point;
     if (bridged(from)) {

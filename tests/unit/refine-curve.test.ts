@@ -418,6 +418,117 @@ describe('refine curves', () => {
     expect(largestGap(c)).toBeLessThanOrEqual(step * (1 + 1e-9));
   });
 
+  it('returns a single open curve unchanged', () => {
+    const curves: [EdgeCurve, 'line' | 'arc' | 'spline'][] = [
+      [fitCurve('arc', arcSamples(5, 0, Math.PI / 2), 3, 0.05), 'arc'],
+      [fitCurve('line', noisyLine([0, 0, 0], [4, 1, 0], 0), 2, 0.05), 'line'],
+      [fitCurve('spline', noisyWave(0), 8, 0.05), 'spline'],
+    ];
+    for (const [curve, kind] of curves) {
+      const joined = joinCurves([curve], [kind], [], false, 0.05);
+      expect(joined.closed, kind).toBe(false);
+      expect(joined.points.length, kind).toBe(curve.points.length);
+      for (let i = 0; i < curve.points.length; i++)
+        expect(Math.abs(joined.points[i] - curve.points[i]), kind).toBeLessThanOrEqual(1e-12);
+      expect(largestGap(joined), kind).toBeLessThanOrEqual(0.05 * (1 + 1e-9));
+    }
+  });
+
+  it('joins a skew line at the point where it passes through a circle', () => {
+    // Nearly tangent and nearly in the circle's plane, so it also passes close to the circle nearby.
+    const [angle, tilt, yaw] = [0.872, 8e-5, -0.007];
+    const through = [5 * Math.cos(angle), 0, 5 * Math.sin(angle)];
+    const [tangent, radial] = [
+      [-Math.sin(angle), 0, Math.cos(angle)],
+      [Math.cos(angle), 0, Math.sin(angle)],
+    ];
+    const d = [0, 1, 2].map(
+      (k) =>
+        Math.cos(tilt) * (Math.cos(yaw) * tangent[k] + Math.sin(yaw) * radial[k]) +
+        (k === 1 ? Math.sin(tilt) : 0),
+    );
+    const along = (t: number) => through.map((v, k) => v + d[k] * t);
+    const line = fitCurve('line', Float64Array.from([...along(-3.86), ...along(-1.86)]), 2, 0.05);
+    const arc = fitCurve('arc', arcSamples(5, 0.3, 1.4), 3, 0.05);
+    const joined = joinCurves([line, arc], ['line', 'arc'], ['sharp'], false, 0.05);
+    const [joint] = cornersOf(joined);
+    expect(
+      Math.hypot(joint[0] - through[0], joint[1] - through[1], joint[2] - through[2]),
+    ).toBeLessThan(1e-9);
+  });
+
+  it('joins a spline in the plane of a circle where it crosses the circle', () => {
+    // Weaves across the circle several times within one degree of it.
+    const points = [4, -3, 2, 1, -2, 3].flatMap((offset, k) => {
+      const [angle, radius] = [2 + 0.003 * k, 5 + offset * 1e-5];
+      return [radius * Math.cos(angle), 0, radius * Math.sin(angle)];
+    });
+    const spline = curveThrough(points);
+    const arc = fitCurve('arc', arcSamples(5, 0.3, 1.4), 3, 0.05);
+    const joined = joinCurves([spline, arc], ['spline', 'arc'], ['sharp'], false, 0.05);
+    const [joint] = cornersOf(joined);
+    expect(Math.abs(Math.hypot(joint[0], joint[2]) - 5) + Math.abs(joint[1])).toBeLessThan(1e-9);
+    let nearest = Infinity;
+    for (let k = 0; k + 5 < points.length; k += 3)
+      nearest = Math.min(
+        nearest,
+        segmentDistance(joint, points.slice(k, k + 3), points.slice(k + 3, k + 6)),
+      );
+    expect(nearest).toBeLessThan(1e-9);
+  });
+
+  it('joins two arcs of one circle at the nominal joint on the circle', () => {
+    const first = fitCurve('arc', arcSamples(5, 0, 1), 3, 0.05);
+    const second = fitCurve('arc', arcSamples(5, 1.3, 2.5), 3, 0.05);
+    const joined = joinCurves([first, second], ['arc', 'arc'], ['sharp'], false, 0.05);
+    const [joint] = cornersOf(joined);
+    const end = first.points.subarray(first.points.length - 3),
+      start = second.points.subarray(0, 3);
+    const nominal = [0, 1, 2].map((k) => (end[k] + start[k]) / 2);
+    const scale = 5 / Math.hypot(nominal[0], nominal[2]);
+    const expected = [nominal[0] * scale, 0, nominal[2] * scale];
+    expect(
+      Math.hypot(joint[0] - expected[0], joint[1] - expected[1], joint[2] - expected[2]),
+    ).toBeLessThan(1e-9);
+  });
+
+  it('joins two collinear lines at the nominal joint on their line', () => {
+    const d = [0.8, 0.36, 0.48];
+    const along = (t: number) => d.map((v) => 1 + v * t);
+    const first = fitCurve('line', Float64Array.from([...along(0), ...along(2)]), 2, 0.05);
+    const second = fitCurve('line', Float64Array.from([...along(3), ...along(5)]), 2, 0.05);
+    const joined = joinCurves([first, second], ['line', 'line'], ['sharp'], false, 0.05);
+    const [joint] = cornersOf(joined);
+    const [a, b] = [first.points.subarray(0, 3), first.points.subarray(first.points.length - 3)];
+    const start = second.points.subarray(0, 3);
+    const nominal = [0, 1, 2].map((k) => (b[k] + start[k]) / 2);
+    const direction = [0, 1, 2].map((k) => b[k] - a[k]);
+    const f =
+      [0, 1, 2].reduce((sum, k) => sum + (nominal[k] - a[k]) * direction[k], 0) /
+      [0, 1, 2].reduce((sum, k) => sum + direction[k] ** 2, 0);
+    const expected = [0, 1, 2].map((k) => a[k] + direction[k] * f);
+    expect(
+      Math.hypot(joint[0] - expected[0], joint[1] - expected[1], joint[2] - expected[2]),
+    ).toBeLessThan(1e-9);
+  });
+
+  it('lands exactly on the intersection of a line and a circle nearer the nominal joint', () => {
+    const radians = (degrees: number) => (degrees * Math.PI) / 180;
+    const cases: [number, number, number, [number, number, number]][] = [
+      [-8, 150, 250, [-4, 0, 3]],
+      [2, 30, -60, [4, 0, 3]],
+    ];
+    for (const [end, from, to, expected] of cases) {
+      const line = fitCurve('line', Float64Array.of(-10, 0, 3, end, 0, 3), 2, 0.05);
+      const arc = fitCurve('arc', arcSamples(5, radians(from), radians(to)), 3, 0.05);
+      const joined = joinCurves([line, arc], ['line', 'arc'], ['sharp'], false, 0.05);
+      const [joint] = cornersOf(joined);
+      expect(
+        Math.hypot(joint[0] - expected[0], joint[1] - expected[1], joint[2] - expected[2]),
+      ).toBeLessThan(1e-9);
+    }
+  });
+
   it('resamples a very long line and refuses one too long for its step', () => {
     const long = fitCurve('line', Float64Array.of(0, 0, 0, 1048576, 0, 0), 2, 0.25);
     expect(long.points.length / 3).toBe(4194305);
