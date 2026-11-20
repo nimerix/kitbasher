@@ -1799,6 +1799,19 @@ describe('refine session integrity', { timeout: 20_000 }, () => {
     expect(session()).toBe(moved);
   });
 
+  it('can still cancel a handle drag after the mode changes under it', async () => {
+    setup([boxPart()], ['box']);
+    await ready();
+    const id = crestGuide(-1.4, 1.2);
+    const before = session();
+    editor().moveRefinePoint(id, 0, 1, crest(1.4), true);
+    editor().setRefineMode('region');
+    editor().cancelRefineDrag();
+    expect(session().features).toBe(before.features);
+    expect(session().undo).toBe(before.undo);
+    expect(session().mode).toBe('region');
+  });
+
   it('keeps each failure record, and says at most one thing per Accept press', async () => {
     setup([boxPart()], ['box']);
     await ready();

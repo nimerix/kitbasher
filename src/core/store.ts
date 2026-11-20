@@ -3363,7 +3363,7 @@ export const useEditor = create<EditorState>((set, get) => ({
   },
   setRefineMode: (mode) => {
     if (get().refine?.mode !== mode) discardRefineStroke();
-    refineDrag = null;
+    // A handle drag still under the pointer is left for the pointer code to cancel.
     const { refine } = get();
     if (refine) set({ painting: false, refine: { ...refine, mode, drawing: false } });
   },
