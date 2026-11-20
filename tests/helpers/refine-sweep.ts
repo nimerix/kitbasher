@@ -242,7 +242,8 @@ export function sweptTube(path: TubePath, length: number, radius: CrossSection, 
 
 /**
  * `sweptTube` closed by a fan at each end, as a model, and the triangles of the tube from four rings
- * in from either end: a region the user paints along it.
+ * in from either end: a region the user paints along it. Vertex `ring * rings + around` of the
+ * model's source is the tube's point at that ring and position around it.
  */
 export function sweptTubeModel(path: TubePath, length: number, radius: CrossSection, ripple = 0) {
   const { points, normals, axis, rings, steps } = sweptTube(path, length, radius, ripple);
@@ -274,5 +275,5 @@ export function sweptTubeModel(path: TubePath, length: number, radius: CrossSect
   geometry.setAttribute('position', new BufferAttribute(Float32Array.from(vertices), 3));
   geometry.setIndex(indices);
   geometry.computeVertexNormals();
-  return { model: modelOf(geometry), triangles: Uint32Array.from(painted) };
+  return { model: modelOf(geometry), triangles: Uint32Array.from(painted), rings, steps };
 }

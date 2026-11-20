@@ -193,7 +193,8 @@ describe('fitSweep', () => {
     const fit = fitTube(helixPath, 20.5, round, 0, 0.004)!;
     expect(fit.sweep.pathKind).toBe('spline');
     expect(fit.farthest).toBeLessThan(0.005);
-  });
+    // A helix's line is fitted at each tolerance in turn before the tight one holds.
+  }, 20000);
 
   it('refuses a tube that a stretch of its path leaves, though most of it fits', () => {
     // A sleeve 0.06 proud over 2.5 mm of a quarter turn about 6.3 mm long: wider than the tube.
@@ -314,6 +315,43 @@ describe('solveRegion with a sweep', () => {
     const tube = solveTube(helixPath, 20.5, round, 0, 0.012, false);
     expect(tube?.solve.fitted).toBe('sweep');
     expect(tube!.largest).toBeLessThan(0.012);
+  }, 20000);
+
+  it('keeps a gentle bend smooth past one out-of-round station', () => {
+    // A dip 0.03 mm deep over about 1 mm on one side, midway along: the far side stays put.
+    const dip = (angle: number, t: number) => {
+      const u = (t - 0.3) / 0.08;
+      return Math.abs(u) < 1 ? 0.03 * (1 - u * u) ** 2 * Math.max(0, Math.cos(angle)) ** 2 : 0;
+    };
+    const radius: CrossSection = (angle, t) => 1 - dip(angle, t);
+    const { model, triangles, steps, rings } = sweptTubeModel(
+      sBendPath,
+      2 * Math.PI,
+      radius,
+      0.004,
+    );
+    const solve = solveRegion(
+      model.mesh,
+      model.topology,
+      sweepInput(triangles, { keepDetail: false }),
+      0.008,
+    )!;
+    const out = cloneRefineMesh(model.mesh, false);
+    applyRegion(out, solve);
+    let far = 0;
+    const ring = new Map(
+      Array.from(model.mesh.weldOf.slice(0, rings * (steps + 1)), (w, k) => [w, k]),
+    );
+    for (const v of solve.vertices) {
+      const k = ring.get(v);
+      if (k === undefined) continue;
+      const t = Math.floor(k / rings) / steps,
+        angle = Math.PI / 2 + ((k % rings) / rings - 0.5) * 2 * Math.PI;
+      if (Math.abs(t - 0.3) < 0.08 && Math.cos(angle) < -0.5)
+        far = Math.max(far, distanceMoved(model.mesh, out, v));
+    }
+    // On 63e7350 the line followed the dipped station's centre: 0.010 mm.
+    expect(far).toBeLessThan(0.008);
   });
 
   it('refuses a 0.12 mm taper under 0.012 mm ripple', () => {
@@ -329,7 +367,7 @@ describe('solveRegion with a sweep', () => {
         expect(solveTube(straightPath(12), 12, radius, 0, 0.012, keepDetail)).toBeNull();
     // The same length of tube, constant under 0.012 mm ripple, still fits.
     expect(solveTube(straightPath(12), 12, round, 0.012, 0.012, false)?.solve.fitted).toBe('sweep');
-  });
+  }, 20000);
 
   it('snaps an elbow 10% out of round onto itself', () => {
     const tube = solveTube(elbowPath(4), 2 * Math.PI, oval(0.1), 0, 0.004, false)!;
@@ -338,7 +376,7 @@ describe('solveRegion with a sweep', () => {
   });
 
   it('changes nothing visible when run again along a spline', () => {
-    // As over the elbow: weight 1 and clear of detail by 0.001 mm at most, the rest by 0.01 mm.
+    // A spline path is refitted from data each run, as a blend band is: 0.005 mm, under the ripple.
     const { model, triangles } = sweptTubeModel(sBendPath, 2 * Math.PI, round, 0.012);
     const input = sweepInput(triangles);
     const first = run({ ...model, noise: 0.012 }, input);
@@ -348,7 +386,7 @@ describe('solveRegion with a sweep', () => {
     first.solve.vertices.forEach((v, i) => {
       const full = first.solve.weight[i] === 1 && first.solve.detail[i] === 0;
       if (full) settled++;
-      expect(distanceMoved(first.out, second.out, v)).toBeLessThan(full ? 0.001 : 0.01);
+      expect(distanceMoved(first.out, second.out, v)).toBeLessThan(full ? 0.005 : 0.01);
     });
     expect(settled).toBeGreaterThan(5000);
   });

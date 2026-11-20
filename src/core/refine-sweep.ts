@@ -69,8 +69,10 @@ const stretchShare = 0.75;
 const roundNoise = 3;
 /** The path runs on past the farthest point by this many stations at each end. */
 const pathMargin = 2;
-/** A spline through the stations' centres strays from them by this many noise widths in rms. */
-const splineNoise = 0.5;
+/** The tolerances, in noise widths, a centre line is tried at, loosest first. */
+const pathTolerances = [2, 1, 0.5];
+/** A stretch of centres bends away only when its mean offset exceeds this many noise widths. */
+const bendNoise = 0.25;
 /** A spline runs on along the circle through its end and points this many stations apart in. */
 const endReach = 4;
 
@@ -126,34 +128,61 @@ export function fitSweep(
 }
 
 /**
- * The centre line: through the slabs' cylinder axes, cut again along itself while it stops well
- * short of the points, then through stations fitted to the cross-section, refitted until it fits
- * no better. Null when fewer than three stations fit or the line folds back on itself.
+ * The centre line, as smooth as its stations allow: fitted at each of `pathTolerances` in turn,
+ * loosest first, and kept at the first whose settled stations no stretch of which sits off it
+ * together (see `bendsAway`). One out-of-round station pulling its own centre is scatter the line
+ * smooths over; a bend the line cuts is not, and is followed at a tighter tolerance. A tolerance at
+ * which no line fits is passed over. Null when no tolerance gives a line its stations support.
  */
 function centreLine(cloud: Cloud, noise: number, edge: number, thick: number) {
   const centres = slabCentres(cloud, noise, thick);
   if (!centres) return null;
-  let path = pathThrough(centres, noise, edge, null);
+  let arcs = true;
+  for (const tolerance of pathTolerances) {
+    const line = settled(cloud, centres, noise, edge, thick, tolerance, arcs);
+    if (!line) continue;
+    if (!bendsAway(line.curve, line.centres, 2 * line.radius, noise)) return line.best;
+    // An arc that cuts the stations' bend is not taken again at a tighter tolerance.
+    if (line.best.kind === 'arc') arcs = false;
+  }
+  return null;
+}
+
+/**
+ * The centre line at one `tolerance`: through the slabs' cylinder axes `centres`, cut again along
+ * itself while it stops well short of the points, then through stations fitted to the
+ * cross-section, refitted until it fits no better; an arc only where `arcs` allows. Null when
+ * fewer than three stations fit or the line folds back on itself.
+ */
+function settled(
+  cloud: Cloud,
+  centres: Float64Array,
+  noise: number,
+  edge: number,
+  thick: number,
+  tolerance: number,
+  arcs: boolean,
+) {
+  let path = pathThrough(centres, noise, edge, null, tolerance, arcs);
   let local = localOf(cloud, path, thick);
   // A chain that stops well short of the points, as across a helix, is found again along itself.
   for (let round = 0; round < regrowRounds && local.beyond > endReach * thick; round++) {
     const along = centresAlong(cloud, local, noise, thick);
     if (!along) break;
-    const next = pathThrough(along, noise, edge, null);
+    const next = pathThrough(along, noise, edge, null, tolerance, arcs);
     const nextLocal = localOf(cloud, next, thick);
     if (!(nextLocal.beyond < local.beyond)) break;
     path = next;
     local = nextLocal;
   }
-  const circles = refined(cloud, local, noise, edge, thick, false);
-  if (!circles || circles.best.round || circles.best.seen < freeCoverage)
-    return circles?.best ?? null;
+  const circles = refined(cloud, local, noise, edge, thick, false, tolerance, arcs);
+  if (!circles || circles.best.round || circles.best.seen < freeCoverage) return circles;
   // Circles sharing one radius slide toward one flank of an oval over the rounds, so the free
   // profile starts from the line their first round left.
-  const free = refined(cloud, circles.first, noise, edge, thick, true);
+  const free = refined(cloud, circles.first, noise, edge, thick, true, tolerance, arcs);
   // Stations fitted to the free profile shift with whatever detail the profile takes up, so they
   // are kept only when they fit clearly better than circles: as on an oval, by half.
-  return free && free.best.misfit < freeGain * circles.best.misfit ? free.best : circles.best;
+  return free && free.best.misfit < freeGain * circles.best.misfit ? free : circles;
 }
 
 interface Refined {
@@ -179,9 +208,12 @@ function refined(
   edge: number,
   thick: number,
   free: boolean,
-): { best: Refined; first: Local } | null {
+  tolerance: number,
+  arcs: boolean,
+) {
   let best: Refined | null = null,
     first = local;
+  let kept: { centres: Float64Array; radius: number; curve: EdgeCurve } | null = null;
   let profile = free ? profileOf(cloud, local, noise) : null;
   let idle = 0;
   for (let round = 0; round < mostRounds; round++) {
@@ -190,7 +222,8 @@ function refined(
       : polish(cloud, local, thick, noise);
     const flat = Float64Array.from(stations.flatMap((s) => s.centre));
     if (stations.length < 3 || folds(flat)) break;
-    const path = pathThrough(flat, noise, edge, median(stations.map((s) => s.radius)));
+    const radius = median(stations.map((s) => s.radius));
+    const path = pathThrough(flat, noise, edge, radius, tolerance, arcs);
     local = localOf(cloud, path, thick);
     if (round === 0) first = local;
     const built = profileOf(cloud, local, noise);
@@ -198,11 +231,13 @@ function refined(
     if (free) profile = built;
     const misfit = misfitOf(cloud, local, built.profile, noise);
     idle = !best || misfit < best.misfit * (1 - improvement) ? 0 : idle + 1;
-    if (!best || misfit < best.misfit)
+    if (!best || misfit < best.misfit) {
       best = { local, kind: path.kind, misfit, round: built.round, seen: built.seen };
+      kept = { centres: flat, radius, curve: path.curve };
+    }
     if (round >= polishRounds - 1 && idle >= 2) break;
   }
-  return best && { best, first };
+  return best && kept && { best, first, ...kept };
 }
 
 /**
@@ -585,18 +620,20 @@ interface PathFit {
 }
 
 /**
- * An arc through the centres when it stays within 2 * noise of them in rms, else the spline with
- * the fewest controls, from four up to one per half radius of length, that stays within half the
- * noise: each centre is the mean of a station's many points, so far steadier than one point.
+ * An arc through the centres when `arcs` allows one and it stays within 2 * noise of them in rms,
+ * else the spline with the fewest controls, from four up to one per half radius of length, that
+ * stays within `tolerance` noise widths of them in rms.
  */
 function pathThrough(
   centres: Float64Array,
   noise: number,
   step: number,
   radius: number | null,
+  tolerance: number,
+  arcs: boolean,
 ): PathFit {
   const arc = fitCurve('arc', centres, 0, step);
-  if (centreRms(arc, centres) <= 2 * noise) return { curve: arc, kind: 'arc' };
+  if (arcs && centreRms(arc, centres) <= 2 * noise) return { curve: arc, kind: 'arc' };
   const count = centres.length / 3;
   let length = 0;
   for (let i = 1; i < count; i++)
@@ -609,9 +646,43 @@ function pathThrough(
   let curve = arc;
   for (let controls = Math.min(4, most); controls <= most; controls++) {
     curve = fitCurve('spline', centres, controls, step);
-    if (centreRms(curve, centres) <= splineNoise * noise) break;
+    if (centreRms(curve, centres) <= tolerance * noise) break;
   }
   return { curve, kind: 'spline' };
+}
+
+/**
+ * Whether some stretch of centres `width` long, with at least three in it, sits off the curve
+ * together: the mean of their offsets from it is longer than their scatter, taken from the
+ * differences between neighbouring stations' offsets (a cut bend changes little from one station
+ * to the next, an out-of-round station jumps), and than `bendNoise` times the noise.
+ */
+function bendsAway(curve: EdgeCurve, centres: Float64Array, width: number, noise: number) {
+  const count = centres.length / 3;
+  const near = new Float64Array(3);
+  const along = new Float64Array(count),
+    offset = new Float64Array(count * 3);
+  for (let i = 0; i < count; i++) {
+    along[i] = closestOnCurve(curve, centres[i * 3], centres[i * 3 + 1], centres[i * 3 + 2], near);
+    for (let k = 0; k < 3; k++) offset[i * 3 + k] = centres[i * 3 + k] - near[k];
+  }
+  const order = Array.from(along.keys()).sort((x, y) => along[x] - along[y]);
+  for (let a = 0; a < count; a++) {
+    const members: number[] = [];
+    for (let b = a; b < count && along[order[b]] - along[order[a]] <= width; b++)
+      members.push(order[b]);
+    if (members.length < 3) continue;
+    const mean = [0, 1, 2].map(
+      (k) => members.reduce((sum, i) => sum + offset[i * 3 + k], 0) / members.length,
+    );
+    let jumps = 0;
+    for (let q = 1; q < members.length; q++)
+      for (let k = 0; k < 3; k++)
+        jumps += (offset[members[q] * 3 + k] - offset[members[q - 1] * 3 + k]) ** 2;
+    const scatter = Math.sqrt(jumps / (2 * (members.length - 1)));
+    if (Math.hypot(mean[0], mean[1], mean[2]) > Math.max(scatter, bendNoise * noise)) return true;
+  }
+  return false;
 }
 
 /** RMS distance of the centres from the curve. */
