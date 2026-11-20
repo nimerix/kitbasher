@@ -167,3 +167,74 @@ export function refineBoxEdgeOf(model: Model) {
 
 export const refineBoxEdge = () =>
   refineBoxEdgeOf(modelOf(softBox([2, 1.5, 1], 0.3), new Matrix4()));
+
+/**
+ * Per vertex of `solve`: its distance along the mesh's edges from the nearest vertex of kept detail
+ * (detail 1) or on a refined edge, by Dijkstra over the whole mesh.
+ */
+export function distanceFromDetail(model: Model, solve: RegionSolve) {
+  const { mesh, topology } = model;
+  const distance = new Float64Array(mesh.weldedCount).fill(Infinity);
+  const queue: [number, number][] = [];
+  const push = (d: number, v: number) => {
+    queue.push([d, v]);
+    for (let i = queue.length - 1; i > 0;) {
+      const parent = (i - 1) >> 1;
+      if (queue[parent][0] <= queue[i][0]) break;
+      [queue[parent], queue[i]] = [queue[i], queue[parent]];
+      i = parent;
+    }
+  };
+  const pop = () => {
+    const top = queue[0];
+    const last = queue.pop()!;
+    if (queue.length) {
+      queue[0] = last;
+      for (let i = 0; ;) {
+        let child = 2 * i + 1;
+        if (child >= queue.length) break;
+        if (child + 1 < queue.length && queue[child + 1][0] < queue[child][0]) child++;
+        if (queue[i][0] <= queue[child][0]) break;
+        [queue[child], queue[i]] = [queue[i], queue[child]];
+        i = child;
+      }
+    }
+    return top;
+  };
+  solve.vertices.forEach((v, i) => {
+    if (solve.detail[i] === 1) {
+      distance[v] = 0;
+      push(0, v);
+    }
+  });
+  for (let v = 0; v < mesh.weldedCount; v++)
+    if (mesh.crease[v]) {
+      distance[v] = 0;
+      push(0, v);
+    }
+  while (queue.length) {
+    const [d, v] = pop();
+    if (d > distance[v]) continue;
+    for (let j = topology.neighbourStart[v]; j < topology.neighbourStart[v + 1]; j++) {
+      const w = topology.neighbours[j];
+      const p = at(mesh, v),
+        q = at(mesh, w);
+      const next = d + Math.hypot(p[0] - q[0], p[1] - q[1], p[2] - q[2]);
+      if (next < distance[w]) {
+        distance[w] = next;
+        push(next, w);
+      }
+    }
+  }
+  return Array.from(solve.vertices, (v) => distance[v]);
+}
+
+/** RMS about their mean of `measure` over the given vertices, and that mean. */
+export function spread(mesh: RefineMesh, vertices: number[], measure: (p: number[]) => number) {
+  const values = vertices.map((v) => measure(at(mesh, v)));
+  const mean = values.reduce((a, b) => a + b, 0) / values.length;
+  return {
+    mean,
+    rms: Math.sqrt(values.reduce((a, x) => a + (x - mean) ** 2, 0) / values.length),
+  };
+}

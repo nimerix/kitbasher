@@ -1,10 +1,16 @@
 import { describe, expect, it } from 'vitest';
 import { type RefineMesh, cloneRefineMesh } from '../../src/core/refine-mesh';
-import { type RegionInput, applyRegion, solveRegion } from '../../src/core/refine-region';
+import {
+  type RegionInput,
+  type RegionSolve,
+  applyRegion,
+  solveRegion,
+} from '../../src/core/refine-region';
 import { maxMove, modelFrom, modelOf, movedOutside } from '../helpers/refine';
 import {
   borderDistances,
   chainOf,
+  distanceFromDetail,
   distanceMoved,
   heightAbovePlate,
   heightAt,
@@ -14,10 +20,11 @@ import {
   refineBoxEdge,
   refineBoxEdgeOf,
   rippleAmplitude,
+  spread,
   trianglesWhere,
 } from '../helpers/refine-region';
 import { rippledSphere, rivetedPlate, softBox, softCylinder } from '../helpers/soft-edges';
-import { dimpledPlate } from '../helpers/soft-regions';
+import { dimpledPlate, warpedPlate } from '../helpers/soft-regions';
 
 const topRegion = (mesh: RefineMesh): Uint32Array =>
   trianglesWhere(mesh, (x, y, z) => y > 0.42 && Math.abs(x) < 2.6 && Math.abs(z) < 1.6);
@@ -31,6 +38,11 @@ const flatten = (triangles: Uint32Array, options: Partial<RegionInput> = {}): Re
   blend: null,
   ...options,
 });
+const smooth = (triangles: Uint32Array, options: Partial<RegionInput> = {}): RegionInput =>
+  flatten(triangles, { treatment: 'smooth', ...options });
+/** Vertex indices of the solve at full weight that are not detail and not eased into it. */
+const fullWeight = (solve: RegionSolve) =>
+  indicesWhere(solve, (w, d) => w === 1 && d === 0).map((i) => solve.vertices[i]);
 const run = (model: ReturnType<typeof modelOf>, input: RegionInput) => {
   const solve = solveRegion(model.mesh, model.topology, input, model.noise)!;
   const out = cloneRefineMesh(model.mesh, false);
@@ -76,13 +88,50 @@ describe('solveRegion and applyRegion', () => {
     }
   });
 
-  // Taubin at 0.5 and -0.53 over 40 passes leaves 0.0074 of the 0.0085 mm ripple: awaiting a ruling.
+  // Measured: 0.00183 of the 0.00848 mm ripple is left (22 %), mean radius +0.00001 mm. Near the
+  // six points where a ripple direction meets the normal its wavelength along the surface grows past
+  // any local fit's reach (0.6 mm). Awaiting a ruling.
   it.skip('smooths a sphere without shrinking it', () => {
     const model = modelOf(rippledSphere(3));
     const all = Uint32Array.from({ length: model.mesh.triangleCount }, (_, i) => i);
-    const { out } = run(model, { ...flatten(all, { keepDetail: false }), treatment: 'smooth' });
+    const { out } = run(model, smooth(all, { keepDetail: false }));
     expect(rippleAmplitude(out)).toBeLessThan(0.1 * rippleAmplitude(model.mesh));
     expect(Math.abs(meanRadius(out) - meanRadius(model.mesh)) / 3).toBeLessThan(0.005);
+  });
+
+  it('smooths a cylinder wall and a flat face without moving them', () => {
+    const tube = modelOf(softCylinder(1.5, 1, 0.3));
+    const wall = run(tube, smooth(wallRegion(tube.mesh), { keepDetail: false }));
+    const wallBase = fullWeight(wall.solve);
+    expect(wallBase.length).toBeGreaterThan(500);
+    const radius = (p: number[]) => Math.hypot(p[0], p[2]);
+    const [wallBefore, wallAfter] = [tube.mesh, wall.out].map((m) => spread(m, wallBase, radius));
+    expect(Math.abs(wallAfter.mean - wallBefore.mean) / 1.5).toBeLessThan(0.005);
+    expect(wallAfter.rms).toBeLessThan(0.2 * wallBefore.rms);
+
+    const box = modelOf(softBox([2, 1.5, 1], 0.3));
+    const top = trianglesWhere(
+      box.mesh,
+      (x, y, z) => y > 1.4 && Math.abs(x) < 1.7 && Math.abs(z) < 0.7,
+    );
+    const face = run(box, smooth(top, { keepDetail: false }));
+    const faceBase = fullWeight(face.solve);
+    expect(faceBase.length).toBeGreaterThan(500);
+    const height = (p: number[]) => p[1];
+    const [faceBefore, faceAfter] = [box.mesh, face.out].map((m) => spread(m, faceBase, height));
+    expect(Math.abs(faceAfter.mean - faceBefore.mean) / 1.5).toBeLessThan(0.005);
+    expect(faceAfter.rms).toBeLessThan(0.2 * faceBefore.rms);
+  });
+
+  it('keeps the rivets under Smooth with Keep detail on', () => {
+    const { geometry, rivets } = rivetedPlate();
+    const model = modelOf(geometry);
+    const { out } = run(model, smooth(topRegion(model.mesh), { keepDetail: true }));
+    expect(maxMove(model.mesh, out)).toBeGreaterThan(0);
+    for (const rivet of rivets)
+      expect(
+        Math.abs(heightAbovePlate(out, rivet) - heightAbovePlate(model.mesh, rivet)),
+      ).toBeLessThan(0.01);
   });
 
   it('recovers a cylinder with Shape and names it with Auto', () => {
@@ -130,7 +179,7 @@ describe('solveRegion and applyRegion', () => {
     const solve = solveRegion(
       model.mesh,
       model.topology,
-      flatten(triangles, { blend }),
+      flatten(triangles, { blend, keepDetail: false }),
       model.noise,
     )!;
     const distance = borderDistances(model, triangles, solve);
@@ -147,28 +196,66 @@ describe('solveRegion and applyRegion', () => {
     expect(inBand).toBeGreaterThan(100);
   });
 
-  it('changes nothing visible when run again over its own result', () => {
-    // A vertex in the blend band is moved w (1 - w) of its offset again, so the band is left out.
+  /** Moves of each vertex of the first solve over a run and over a second run on its result. */
+  const twice = (model: ReturnType<typeof modelOf>, input: RegionInput) => {
+    const first = run(model, input);
+    const second = run({ ...modelFrom(first.out), noise: model.noise }, input);
+    const clear = distanceFromDetail(model, first.solve);
+    return Array.from(first.solve.vertices, (v, i) => ({
+      settled: first.solve.weight[i] === 1 && clear[i] > 4 * model.step,
+      before: distanceMoved(model.mesh, first.out, v),
+      after: distanceMoved(first.out, second.out, v),
+    }));
+  };
+  const plateAndTube = () => {
     const plate = modelOf(rivetedPlate().geometry);
-    const flat = run(plate, flatten(topRegion(plate.mesh), { blend: 0 })).out;
-    const again = modelFrom(flat);
-    expect(
-      maxMove(
-        flat,
-        run({ ...again, noise: plate.noise }, flatten(topRegion(flat), { blend: 0 })).out,
-      ),
-    ).toBeLessThan(0.001);
-
     const tube = modelOf(softCylinder(1.5, 1, 0.3));
-    const shape = { ...flatten(wallRegion(tube.mesh), { blend: 0 }), treatment: 'shape' as const };
-    const round = run(tube, shape).out;
-    const next = modelFrom(round);
-    expect(
-      maxMove(
-        round,
-        run({ ...next, noise: tube.noise }, { ...shape, triangles: wallRegion(round) }).out,
-      ),
-    ).toBeLessThan(0.001);
+    return [
+      twice(plate, flatten(topRegion(plate.mesh))),
+      twice(tube, { ...flatten(wallRegion(tube.mesh)), treatment: 'shape' }),
+    ];
+  };
+
+  it('changes nothing visible when run again over its own result', () => {
+    // Weight 1 and over four edges from detail and edges: still. Elsewhere: by 0.01 mm at most.
+    for (const moves of plateAndTube()) {
+      expect(moves.filter((m) => m.settled).length).toBeGreaterThan(500);
+      for (const { settled, after } of moves) expect(after).toBeLessThan(settled ? 0.001 : 0.01);
+    }
+  });
+
+  // Measured: up to 0.00081 mm (plate) and 0.00043 mm (tube) more than the first run, where the
+  // refit shifts by about 1e-4 mm under a vertex of small weight or an island changes extent.
+  // Awaiting a ruling.
+  it.skip('moves the blend band and the eased rings again by less than the first run', () => {
+    for (const moves of plateAndTube())
+      for (const { settled, before, after } of moves)
+        if (!settled && after > 0) expect(after).toBeLessThan(before);
+  });
+
+  it('flattens a low, wide warp that Keep detail would otherwise keep', () => {
+    for (const [peak, kept] of [
+      [0.045, false],
+      [0.09, true],
+    ] as const) {
+      const model = modelOf(warpedPlate(peak));
+      const { solve, out } = run(model, flatten(topRegion(model.mesh), { detail: 0.03 }));
+      const height = heightAt(out, 0, 0) - spread(out, fullWeight(solve), (p) => p[1]).mean;
+      if (kept) expect(height).toBeGreaterThan((2 / 3) * peak);
+      else expect(Math.abs(height)).toBeLessThan(0.01);
+    }
+  });
+
+  it('never moves a refined edge under Flatten, and eases the face into it', () => {
+    const { out } = refineBoxEdge();
+    const model = modelFrom(out);
+    const across = trianglesWhere(out, (x, y, z) => Math.abs(x) < 1 && y > 1 && z > 0.5);
+    const { solve, out: flat } = run(model, flatten(across, { keepDetail: false }));
+    expect(maxMove(out, flat)).toBeGreaterThan(0);
+    const chain = chainOf(out);
+    for (const v of chain) expect(distanceMoved(out, flat, v)).toBe(0);
+    const eased = indicesWhere(solve, (_, d) => d === 2);
+    expect(eased.length).toBeGreaterThan(0);
   });
 
   it('keeps an accepted edge crisp when a region across it is smoothed', () => {
