@@ -5,13 +5,20 @@ import {
   type GuidePoint,
   buildBand,
   estimateWidth,
-  minBandAngle,
 } from '../../src/core/refine-band';
 import { type RefineMesh, weldedCorner } from '../../src/core/refine-mesh';
 import type { Vec3 } from '../../src/core/types';
-import { countWhere, maxZoneDistance, modelOf, pointOn, zoneCount } from '../helpers/refine';
+import {
+  countWhere,
+  maxZoneDistance,
+  modelOf,
+  pointOn,
+  polylineGap,
+  zoneCount,
+} from '../helpers/refine';
 import {
   bulgedBox,
+  extrudedProfile,
   foldedStrip,
   softBox,
   softCylinder,
@@ -26,13 +33,16 @@ const edgeGuide = (mesh: RefineMesh, x0: number, x1: number) => {
   return [pointOn(mesh, [x0, 1.5 - crest, 1 - crest]), pointOn(mesh, [x1, 1.5 - crest, 1 - crest])];
 };
 /**
- * Flanks reach a 0.3 mm fillet where it lies within 3 * noise of its face, 0.3 (1 - cos a) = 3 * noise,
- * and where its normals turn no more than 2 * minBandAngle from the face's, so the soft half-width is
- * 0.3 sin(45 deg - a) with a the smaller of the two angles.
+ * Flanks reach a 0.3 mm fillet where it lies within 3 * local of its face, 0.3 (1 - cos a) = 3 * local,
+ * so the soft half-width from the solved edge's crest is 0.3 sin(45 deg - a). Local is the flank fit's
+ * robust residual scale, measured at 1.0 to 1.11 * noise on these fixtures, so it is taken as noise.
  */
-const filletSoft = (noise: number) =>
-  0.3 *
-  Math.sin(Math.PI / 4 - Math.min(Math.acos(1 - noise / 0.1), (2 * minBandAngle * Math.PI) / 180));
+const filletSoft = (noise: number) => 0.3 * Math.sin(Math.PI / 4 - Math.acos(1 - noise / 0.1));
+/**
+ * Flank vertices lie within 3 * local of their fit, at most 3 * 1.11 * noise = 0.029 mm on these
+ * fixtures, and the fit lies within about 0.006 of the true face.
+ */
+const flankBound = 0.036;
 /** Guide on the box's fillet, `offset` mm along the arc from the crest toward the face z = 1. */
 const arcGuide = (mesh: RefineMesh, ends: number[], offset = 0) =>
   ends.map((x) => {
@@ -80,18 +90,18 @@ describe('buildBand', () => {
   it('finds the softened zone and both flanks of a box edge', () => {
     const { mesh, topology, noise } = modelOf(softBox([2, 1.5, 1], 0.3));
     const band = buildBand(mesh, topology, 'line', edgeGuide(mesh, -1.2, 1.2), 0.6, noise)!;
-    // Flanks fit within 3 * 0.0086 of each face, 0.3 (1 - cos a) = 0.026 at a = 23.9 deg, and face
-    // within 20 deg of it, so a = 20 deg and the soft half-width is 0.3 sin(45 - 20 deg) = 0.127, +-1/3.
-    expect(band.soft).toBeGreaterThan(0.085);
-    expect(band.soft).toBeLessThan(0.169);
+    // Flanks fit within 3 * local = 3 * 0.0086 of each face, 0.3 (1 - cos a) = 0.026 at a = 23.9 deg,
+    // so the soft half-width is 0.3 sin(45 - 23.9 deg) = 0.108, +-1/3.
+    expect(band.soft).toBeGreaterThan(0.072);
+    expect(band.soft).toBeLessThan(0.144);
     expect(zoneCount(band, BandZone.Left)).toBeGreaterThan(50);
     expect(zoneCount(band, BandZone.Right)).toBeGreaterThan(50);
     // Drawn along +x, Left (normal x tangent) is the face y = 1.5 and Right the face z = 1.
     expect(maxZoneDistance(mesh, band, BandZone.Left, (p) => Math.abs(p[1] - 1.5))).toBeLessThan(
-      0.03,
+      flankBound,
     );
     expect(maxZoneDistance(mesh, band, BandZone.Right, (p) => Math.abs(p[2] - 1))).toBeLessThan(
-      0.03,
+      flankBound,
     );
   });
 
@@ -191,8 +201,12 @@ describe('buildBand', () => {
     expect(band.soft).toBeGreaterThan((filletSoft(noise) * 2) / 3);
     expect(band.soft).toBeLessThan((filletSoft(noise) * 4) / 3);
     // Drawn along +z with the normal toward (1, 1, 0): Left is the floor y = 0, Right the wall x = 0.
-    expect(maxZoneDistance(mesh, band, BandZone.Left, (p) => Math.abs(p[1]))).toBeLessThan(0.03);
-    expect(maxZoneDistance(mesh, band, BandZone.Right, (p) => Math.abs(p[0]))).toBeLessThan(0.03);
+    expect(maxZoneDistance(mesh, band, BandZone.Left, (p) => Math.abs(p[1]))).toBeLessThan(
+      flankBound,
+    );
+    expect(maxZoneDistance(mesh, band, BandZone.Right, (p) => Math.abs(p[0]))).toBeLessThan(
+      flankBound,
+    );
   });
 
   it('reads a cylinder rim under an arc guide', () => {
@@ -211,9 +225,9 @@ describe('buildBand', () => {
     expect(band.soft).toBeLessThan((filletSoft(noise) * 4) / 3);
     // Drawn with increasing angle about +y: Left is the side wall r = 1.5, Right the cap y = 1.
     const wall = (p: Vec3) => Math.abs(Math.hypot(p[0], p[2]) - 1.5);
-    expect(maxZoneDistance(mesh, band, BandZone.Left, wall)).toBeLessThan(0.03);
+    expect(maxZoneDistance(mesh, band, BandZone.Left, wall)).toBeLessThan(flankBound);
     expect(maxZoneDistance(mesh, band, BandZone.Right, (p) => Math.abs(p[1] - 1))).toBeLessThan(
-      0.03,
+      flankBound,
     );
   });
 
@@ -229,11 +243,10 @@ describe('buildBand', () => {
     expect(band.fits).toEqual(['profile', 'plane']);
     expect(zoneCount(band, BandZone.Left)).toBeGreaterThan(50);
     const top = (p: Vec3) => Math.abs(p[1] - 1.5 - lift(p[0], 1.5));
-    // Within 3 * noise (0.026) of the per-slice lines, which themselves sit off the bump by up to
-    // about 0.005, so 0.035 rather than the 0.03 a single plane meets.
-    expect(maxZoneDistance(mesh, band, BandZone.Left, top)).toBeLessThan(0.035);
+    // The per-slice lines themselves sit off the bump by up to about 0.005 more than a plane does.
+    expect(maxZoneDistance(mesh, band, BandZone.Left, top)).toBeLessThan(flankBound + 0.005);
     expect(maxZoneDistance(mesh, band, BandZone.Right, (p) => Math.abs(p[2] - 1))).toBeLessThan(
-      0.03,
+      flankBound,
     );
     const clean = (p: Vec3) =>
       (top(p) < 0.02 && p[2] < 0.7) || (Math.abs(p[2] - 1) < 0.02 && p[1] < 1.2);
@@ -307,9 +320,9 @@ describe('estimateWidth', () => {
   it('estimates a width from the softened zone', () => {
     const { mesh, topology, noise } = modelOf(softBox([2, 1.5, 1], 0.3));
     const w = estimateWidth(mesh, topology, 'line', edgeGuide(mesh, -1.2, 1.2), noise);
-    // soft + max(2 soft, 6 edges): 0.127 + max(0.254, 6 * 0.066 mm edge) = 0.52, +-1/3.
-    expect(w).toBeGreaterThan(0.35);
-    expect(w).toBeLessThan(0.7);
+    // soft + max(2 soft, 6 edges): 0.108 + max(0.216, 6 * 0.066 mm edge) = 0.50, +-1/3.
+    expect(w).toBeGreaterThan(0.33);
+    expect(w).toBeLessThan(0.67);
   });
 
   it('finds no edge under a guide on a flat face', () => {
@@ -388,7 +401,7 @@ describe('estimateWidth', () => {
         const width = estimateWidth(mesh, topology, kind, points, noise);
         expect(width).toBeGreaterThan(0);
         const edge = clickedEdge(mesh, topology, points);
-        // The estimate reads `soft` from one band at max(24 edges, 1.5 mm).
+        // The classification does not depend on the width, so a generous band reads the same soft.
         const generous = buildBand(mesh, topology, kind, points, Math.max(24 * edge, 1.5), noise)!;
         expect(generous).not.toBeNull();
         const band = buildBand(mesh, topology, kind, points, width, noise)!;
@@ -470,4 +483,149 @@ describe('cost', () => {
     expect(built).toBeLessThan(1000);
     expect(estimated).toBeLessThan(2000);
   }, 120000);
+});
+
+describe('an edge where two flank surfaces meet', () => {
+  /** Faces 15 deg either side of level meeting along z at the origin, rounded with radius 0.6. */
+  const ridge = () => {
+    const slope = Math.tan((15 * Math.PI) / 180);
+    const model = modelOf(
+      extrudedProfile(
+        [
+          [-1.5, -1.5 * slope],
+          [0, 0],
+          [1.5, -1.5 * slope],
+        ],
+        [0.6],
+        3,
+      ),
+    );
+    // A point on the fillet `offset` mm along it from its crest.
+    const guide = (offset = 0) =>
+      [-1.2, 1.2].map((z) => {
+        const angle = offset / 0.6;
+        const crest = -0.6 * (1 / Math.cos((15 * Math.PI) / 180) - 1);
+        return pointOn(model.mesh, [0.6 * Math.sin(angle), crest - 0.6 * (1 - Math.cos(angle)), z]);
+      });
+    return { ...model, guide };
+  };
+  /** A strip 0.6 wide and 0.4 high on a floor, its two top edges rounded with radius 0.15. */
+  const strip = () => {
+    const model = modelOf(
+      extrudedProfile(
+        [
+          [-1.5, 0],
+          [-0.3, 0],
+          [-0.3, 0.4],
+          [0.3, 0.4],
+          [0.3, 0],
+          [1.5, 0],
+        ],
+        [0, 0.15, 0.15, 0],
+        3,
+      ),
+    );
+    const crest: Vec3 = [0.15 + 0.15 / Math.SQRT2, 0.25 + 0.15 / Math.SQRT2, 0];
+    const guide = [-1.2, 1.2].map((z) => pointOn(model.mesh, [crest[0], crest[1], z]));
+    return { ...model, guide, crest };
+  };
+  const box = modelOf(softBox([2, 1.5, 1], 0.3));
+  const boxGuide = (offset: number) => arcGuide(box.mesh, [-1.2, 1.2], offset);
+
+  it('finds a shallow softened edge between faces 30 degrees apart', () => {
+    const { mesh, topology, noise, guide } = ridge();
+    const band = buildBand(mesh, topology, 'line', guide(), 0.6, noise)!;
+    expect(band).not.toBeNull();
+    expect(band.angle).toBeGreaterThan(25);
+    expect(band.angle).toBeLessThan(35);
+    expect(zoneCount(band, BandZone.Left)).toBeGreaterThan(50);
+    expect(zoneCount(band, BandZone.Right)).toBeGreaterThan(50);
+    // The true edge is the line x = y = 0 along z.
+    for (let k = 0; k < band.edge.length; k += 3)
+      expect(Math.hypot(band.edge[k], band.edge[k + 1])).toBeLessThan(0.02);
+  });
+
+  it('refuses a rounded rib 0.6 mm wide with no flat top', () => {
+    const { mesh, topology, noise } = modelOf(
+      extrudedProfile(
+        [
+          [-1.5, 0],
+          [-0.3, 0],
+          [-0.3, 0.6],
+          [0.3, 0.6],
+          [0.3, 0],
+          [1.5, 0],
+        ],
+        [0, 0.3, 0.3, 0],
+        3,
+      ),
+    );
+    const top = [-1.2, 1.2].map((z) => pointOn(mesh, [0, 0.6, z]));
+    expect(estimateWidth(mesh, topology, 'line', top, noise)).toBe(0);
+    for (const width of [0.4, 0.6, 1])
+      expect(buildBand(mesh, topology, 'line', top, width, noise)).toBeNull();
+  });
+
+  it('keeps the band for one edge of a raised strip short of the other edge', () => {
+    const { mesh, topology, noise, guide, crest } = strip();
+    const estimate = estimateWidth(mesh, topology, 'line', guide, noise);
+    for (const width of [estimate, 0.6, 0.9]) {
+      const band = buildBand(mesh, topology, 'line', guide, width, noise)!;
+      expect(band).not.toBeNull();
+      // The other edge's crest lies at x = -crest[0].
+      expect(countWhere(mesh, band, softZones, ([x]) => x <= -crest[0])).toBe(0);
+    }
+  });
+
+  it('solves the same edge from a guide 0.15 mm off the crest', () => {
+    const shallow = ridge();
+    for (const [model, guide] of [
+      [shallow, shallow.guide],
+      [box, boxGuide],
+    ] as const) {
+      const { mesh, topology, noise } = model;
+      const centred = buildBand(mesh, topology, 'line', guide(0), 0.6, noise)!;
+      expect(centred).not.toBeNull();
+      for (const offset of [-0.15, 0.15]) {
+        const shifted = buildBand(mesh, topology, 'line', guide(offset), 0.6, noise)!;
+        expect(shifted).not.toBeNull();
+        expect(polylineGap(centred.edge, shifted.edge)).toBeLessThan(0.02);
+      }
+    }
+  });
+
+  it.each([
+    {
+      name: 'shallow edge',
+      model: () => ridge(),
+      guide: (m: ReturnType<typeof ridge>) => m.guide(),
+    },
+    { name: 'raised strip', model: () => strip(), guide: (m: ReturnType<typeof strip>) => m.guide },
+    {
+      name: 'shallow edge 0.15 mm off its crest',
+      model: () => ridge(),
+      guide: (m: ReturnType<typeof ridge>) => m.guide(0.15),
+    },
+    {
+      name: 'box edge 0.15 mm off its crest',
+      model: () => ({ ...box }),
+      guide: () => boxGuide(0.15),
+    },
+  ] as {
+    name: string;
+    model: () => ReturnType<typeof modelOf>;
+    guide: (m: never) => GuidePoint[];
+  }[])('rebuilds the band it estimates on the $name', ({ model, guide }) => {
+    const m = model();
+    const points = guide(m as never);
+    const width = estimateWidth(m.mesh, m.topology, 'line', points, m.noise);
+    expect(width).toBeGreaterThan(0);
+    expect(width).toBeLessThanOrEqual(1);
+    const band = buildBand(m.mesh, m.topology, 'line', points, width, m.noise)!;
+    expect(band).not.toBeNull();
+    // Up to reach + 8 edges (0.83 mm here) the width only caps the band, so the band at 0.6 is the
+    // classification the estimate read.
+    const read = buildBand(m.mesh, m.topology, 'line', points, 0.6, m.noise)!;
+    expect(Math.abs(band.soft - read.soft)).toBeLessThanOrEqual(0.03);
+  });
 });

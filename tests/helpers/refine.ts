@@ -1328,3 +1328,22 @@ export function countWhere(
   });
   return count;
 }
+
+/** Farthest a point of polyline `b` (xyz triples) lies from polyline `a`. */
+export function polylineGap(a: ArrayLike<number>, b: ArrayLike<number>) {
+  let worst = 0;
+  for (let k = 0; k < b.length; k += 3) {
+    let best = Infinity;
+    for (let j = 0; j + 3 < a.length || j === 0; j += 3) {
+      const d = [0, 1, 2].map((m) => (j + 3 < a.length ? a[j + 3 + m] - a[j + m] : 0));
+      const w = [0, 1, 2].map((m) => b[k + m] - a[j + m]);
+      const dd = d[0] * d[0] + d[1] * d[1] + d[2] * d[2];
+      const t =
+        dd > 0 ? Math.min(1, Math.max(0, (w[0] * d[0] + w[1] * d[1] + w[2] * d[2]) / dd)) : 0;
+      best = Math.min(best, Math.hypot(w[0] - t * d[0], w[1] - t * d[1], w[2] - t * d[2]));
+      if (j + 3 >= a.length) break;
+    }
+    worst = Math.max(worst, best);
+  }
+  return worst;
+}

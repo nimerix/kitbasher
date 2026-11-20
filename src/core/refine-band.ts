@@ -32,45 +32,49 @@ export interface EdgeBand {
   cross: Float32Array;
   zone: Uint8Array;
   drawn: EdgeCurve;
-  /** Half-width of the softened zone, mm. */
+  /** Half-width of the softened zone, mm: the larger distance from the solved edge to a flank's start. */
   soft: number;
   /** The Left and Right flank fits. */
   fits: [BandFit, BandFit];
+  /** The edge where the two flank surfaces meet, xyz per slice of the guide, in order along it. */
+  edge: Float64Array;
+  /** Median angle between the two flank surfaces' normals along `edge`, degrees. */
+  angle: number;
 }
 
-/** Fewest degrees between the two flanks' normals near the guide for the band to show an edge. */
+/** Fewest degrees between the two flanks' normals at the solved edge for the band to show an edge. */
 export const minBandAngle = 10;
 
-/** Degrees a vertex normal may turn from a flank's and still fit it, unless the flank's own normals spread wider. */
-const facingAngle = 2 * minBandAngle;
 /** Fewest edge lengths a flank must run outward from where it starts, in half of the slices. */
 const flankRun = 3;
-/** Fewest of the soft vertices whose normals must lie between the two flanks' normals. */
-const softBetween = 0.75;
 /** Fewest vertices a flank may have. */
 const minimumFlank = 12;
-/** Stations per slice of the frame normals, the zone boundaries and the profile fallback. */
+/** Stations per slice of the frame normals, the solved edge and the zone boundaries. */
 const sliceSteps = 4;
-/** Rounds of refitting each flank from its first boundary outward. */
+/** Rounds of reseeding both flanks from the solved edge. */
 const rounds = 3;
-/** Edge lengths of face each refit reads. */
-const refitEdges = 3;
-/** Degrees the normals may turn across a run of offsets that seeds a flank. */
-const flatTurn = 5;
-/** Offset bins that a flat run must span when the band allows it. */
+/** Seeds run outward from this many edge lengths past the edge, over `seedEdges` edge lengths. */
+const seedStart = 2;
+const seedEdges = 6;
+/** Shortest seed, mm, so that on a fine mesh a seed spans more than the turn of a fillet. */
+const seedSpan = 0.3;
+/** The solved edge lies within this many mm of the guide, or `reachEdges` edge lengths if more. */
+const reachWidth = 0.35;
+const reachEdges = 6;
+/** Most degrees the measured normals may turn across a flank's first seed. */
+const flatTurn = 15;
+/** Fewest bins, each a sixth of a seed, over which the normals stop turning to start a first seed. */
 const flatBins = 3;
-/** Narrowest offset bin of the flat run, mm, so that a fine mesh still sees a fillet turn across a bin. */
-const flatBinWidth = 0.05;
 /** Penalty, in vertices, for each change of zone along a slice. */
 const switchCost = 1;
-/** Weight of a vertex farther than 3 * noise from the flank its run claims it for. */
+/** Weight of a vertex off its side's surface that its run counts as flank. */
 const farCost = 2;
-/** How a vertex fits a flank: off it, within the noise but facing another way, or on it. */
-const nearFlank = 1,
-  onFlank = 2;
-/** The generous width `estimateWidth` classifies at: this many edge lengths, and at least `generousWidth` mm. */
-const generousEdges = 24;
-const generousWidth = 1.5;
+/** Most vertices a flank fit reads. */
+const fitPoints = 1024;
+/** Robust scale of a residual per unit of median absolute residual. */
+const madScale = 1.4826;
+/** Widest width `estimateWidth` returns, mm. */
+const widestEstimate = 1;
 const unset = -1;
 
 /** Min-heap of (distance, index) pairs on typed arrays that grow as needed. */
@@ -263,6 +267,20 @@ class CurveWalker {
     this.segment = best;
     this.station = this.curve.lengths[best] + span * bestF;
     return Math.sqrt(bestD);
+  }
+
+  /** The point at a distance along the curve. */
+  pointAt(station: number) {
+    const i = this.segmentAt(station);
+    const j = (i + 1) % this.count;
+    const { p } = this;
+    const span = this.curve.lengths[i + 1] ?? this.curve.lengths[i];
+    const f =
+      span > this.curve.lengths[i]
+        ? (station - this.curve.lengths[i]) / (span - this.curve.lengths[i])
+        : 0;
+    const w = Math.min(1, Math.max(0, f));
+    return [0, 1, 2].map((a) => p[i * 3 + a] + (p[j * 3 + a] - p[i * 3 + a]) * w);
   }
 
   /** The segment holding a distance along the curve. */
@@ -475,6 +493,10 @@ interface Frame {
   slice: Int32Array;
   blend: Float64Array;
   slices: number;
+  /** Per slice centre: the curve point, and the frame's normal and offset direction, 3 each. */
+  centre: Float64Array;
+  centreNormal: Float64Array;
+  centreAcross: Float64Array;
 }
 
 function frameOf(
@@ -524,23 +546,42 @@ function frameOf(
     slice,
     blend,
     slices,
+    centre: new Float64Array(slices * 3),
+    centreNormal: new Float64Array(slices * 3),
+    centreAcross: new Float64Array(slices * 3),
   };
   const t = new Float64Array(3);
-  for (let i = 0; i < count; i++) {
-    curveTangent(drawn, station[i], t);
-    const s0 = slice[i] * 3,
-      s1 = upper(i) * 3;
-    const m = [0, 1, 2].map(
-      (a) => sliceNormal[s0 + a] * (1 - blend[i]) + sliceNormal[s1 + a] * blend[i],
-    );
+  // The frame at a station from the slice normals either side of it: normal and normal x tangent.
+  const frameAt = (k0: number, w: number, station: number, m: number[], b: number[]) => {
+    curveTangent(drawn, station, t);
+    const k1 = Math.min(slices - 1, k0 + 1);
+    for (let a = 0; a < 3; a++)
+      m[a] = sliceNormal[k0 * 3 + a] * (1 - w) + sliceNormal[k1 * 3 + a] * w;
     const along = m[0] * t[0] + m[1] * t[1] + m[2] * t[2];
     for (let a = 0; a < 3; a++) m[a] -= along * t[a];
     const mLength = Math.hypot(m[0], m[1], m[2]) || 1;
     for (let a = 0; a < 3; a++) m[a] /= mLength;
     // normal x tangent points left of travel, seen from outside the surface.
-    const b = [m[1] * t[2] - m[2] * t[1], m[2] * t[0] - m[0] * t[2], m[0] * t[1] - m[1] * t[0]];
+    b[0] = m[1] * t[2] - m[2] * t[1];
+    b[1] = m[2] * t[0] - m[0] * t[2];
+    b[2] = m[0] * t[1] - m[1] * t[0];
     const bLength = Math.hypot(b[0], b[1], b[2]) || 1;
     for (let a = 0; a < 3; a++) b[a] /= bLength;
+  };
+  const walker = new CurveWalker(drawn);
+  for (let k = 0; k < slices; k++) {
+    const station = total / 2 + ((k - (slices - 1) / 2) * total) / slices;
+    const m = [0, 0, 0],
+      b = [0, 0, 0];
+    frameAt(k, 0, station, m, b);
+    frame.centreNormal.set(m, k * 3);
+    frame.centreAcross.set(b, k * 3);
+    frame.centre.set(walker.pointAt(station), k * 3);
+  }
+  const m = [0, 0, 0],
+    b = [0, 0, 0];
+  for (let i = 0; i < count; i++) {
+    frameAt(slice[i], blend[i], station[i], m, b);
     frame.normal.set(m, i * 3);
     frame.across.set(b, i * 3);
     let c = 0,
@@ -583,34 +624,71 @@ function signedOffsets(band: Band, frame: Frame) {
   return u;
 }
 
-/** A flank's fitted surface, read at band vertices. */
+/** A flank's fitted surface, read at band vertices and at points of a slice's cross-section. */
 interface FlankFit {
   kind: BandFit;
+  /** Signed distance of a point in slice k from the fit. */
+  distanceAt(p: ArrayLike<number>, k: number): number;
+  /** Unit normal of the fit at a point in slice k. */
+  normalAt(p: ArrayLike<number>, k: number): number[];
   /** Signed distance of a band vertex from the fit. */
   distance(i: number): number;
   /** Unit normal of the fit at a band vertex. */
   normal(i: number): number[];
-  /** Cosine of the largest angle a fitting vertex's normal may make with the fit's normal. */
-  agree?: number;
+  /** Robust scale of the seeds' distances from the fit, within [noise / 2, 2 * noise]. */
+  local: number;
 }
 
-function shapeFit(shape: Shape, position: Float64Array, vertices: Uint32Array): FlankFit {
-  const at = (i: number, a: number) => position[vertices[i] * 3 + a];
-  const step = 1e-4;
+type Surface = Omit<FlankFit, 'local'>;
+
+function shapeSurface(shape: Shape, position: Float64Array, vertices: Uint32Array): Surface {
+  const distanceAt = (p: ArrayLike<number>) => shapeDistance(shape, p[0], p[1], p[2]);
+  const planeNormal = shape.kind === 'plane' ? Array.from(shape.normal) : [];
+  const unit = (v: number[]) => {
+    const length = Math.hypot(v[0], v[1], v[2]) || 1;
+    return v.map((x) => x / length);
+  };
+  // The gradient of the signed distance, in closed form where it has one.
+  const normalAt = (p: ArrayLike<number>): number[] => {
+    switch (shape.kind) {
+      case 'plane':
+        return planeNormal;
+      case 'sphere': {
+        const c = shape.center,
+          sign = Math.sign(shape.radius);
+        return unit([(p[0] - c[0]) * sign, (p[1] - c[1]) * sign, (p[2] - c[2]) * sign]);
+      }
+      case 'cylinder': {
+        const { point: q, axis: a } = shape;
+        const w = [p[0] - q[0], p[1] - q[1], p[2] - q[2]];
+        const h = w[0] * a[0] + w[1] * a[1] + w[2] * a[2],
+          sign = Math.sign(shape.radius);
+        return unit(w.map((v, k) => (v - h * a[k]) * sign));
+      }
+      default: {
+        const step = 1e-4;
+        return unit(
+          [0, 1, 2].map((a) => {
+            const q = [p[0], p[1], p[2]];
+            q[a] += step;
+            const forward = distanceAt(q);
+            q[a] -= 2 * step;
+            return forward - distanceAt(q);
+          }),
+        );
+      }
+    }
+  };
+  const at = (i: number) => position.subarray(vertices[i] * 3, vertices[i] * 3 + 3);
   return {
     kind: shape.kind,
-    distance: (i) => shapeDistance(shape, at(i, 0), at(i, 1), at(i, 2)),
-    normal: (i) => {
-      const n = [0, 1, 2].map((a) => {
-        const p = [at(i, 0), at(i, 1), at(i, 2)];
-        p[a] += step;
-        const forward = shapeDistance(shape, p[0], p[1], p[2]);
-        p[a] -= 2 * step;
-        return forward - shapeDistance(shape, p[0], p[1], p[2]);
-      });
-      const length = Math.hypot(n[0], n[1], n[2]) || 1;
-      return n.map((v) => v / length);
+    distanceAt,
+    normalAt,
+    distance: (i) => {
+      const v = vertices[i] * 3;
+      return shapeDistance(shape, position[v], position[v + 1], position[v + 2]);
     },
+    normal: (i) => (shape.kind === 'plane' ? planeNormal : normalAt(at(i))),
   };
 }
 
@@ -619,7 +697,7 @@ function shapeFit(shape: Shape, position: Float64Array, vertices: Uint32Array): 
  * along the frame normal, both in space), from at most two slices either side when a slice has too
  * few points. Points beyond 3 * noise are dropped and the lines refitted.
  */
-function profileFit(members: number[], frame: Frame, noise: number): FlankFit | null {
+function profileSurface(members: number[], frame: Frame, noise: number): Surface | null {
   const { slices, slice, blend, cross, height } = frame;
   const upper = (i: number) => Math.min(slices - 1, slice[i] + 1);
   // Per slice: offset, height and unit normal of its line, or NaN when it has none.
@@ -688,20 +766,68 @@ function profileFit(members: number[], frame: Frame, noise: number): FlankFit | 
     if (!any) return null;
     if (round < 3) active = members.filter((i) => Math.abs(distance(i)) <= 3 * noise);
   }
+  // A slice without a line reads the nearest slice that has one.
+  const nearest = (k: number) => {
+    for (let r = 0; r < slices; r++)
+      for (const j of [k - r, k + r])
+        if (j >= 0 && j < slices && !Number.isNaN(line[j * 4])) return j;
+    return k;
+  };
+  const local = (p: ArrayLike<number>, k: number) => {
+    const j = nearest(k);
+    let c = 0,
+      h = 0;
+    for (let a = 0; a < 3; a++) {
+      const d = p[a] - frame.centre[k * 3 + a];
+      c += d * frame.centreAcross[k * 3 + a];
+      h += d * frame.centreNormal[k * 3 + a];
+    }
+    return { j, c, h };
+  };
+  const inPlane = (
+    nx: number,
+    ny: number,
+    across: Float64Array,
+    normal: Float64Array,
+    o: number,
+  ) => {
+    const v = [0, 1, 2].map((a) => nx * across[o + a] + ny * normal[o + a]);
+    const length = Math.hypot(v[0], v[1], v[2]) || 1;
+    return v.map((x) => x / length);
+  };
   return {
     kind: 'profile',
-    distance,
-    normal: (i) => {
-      const nx = mix(i, (k) => line[k * 4 + 2]),
-        ny = mix(i, (k) => line[k * 4 + 3]);
-      const v = [0, 1, 2].map((a) => nx * frame.across[i * 3 + a] + ny * frame.normal[i * 3 + a]);
-      const length = Math.hypot(v[0], v[1], v[2]) || 1;
-      return v.map((x) => x / length);
+    distanceAt: (p, k) => {
+      const { j, c, h } = local(p, k);
+      return (c - line[j * 4]) * line[j * 4 + 2] + (h - line[j * 4 + 1]) * line[j * 4 + 3];
     },
+    normalAt: (_, k) => {
+      const j = nearest(k);
+      return inPlane(
+        line[j * 4 + 2],
+        line[j * 4 + 3],
+        frame.centreAcross,
+        frame.centreNormal,
+        k * 3,
+      );
+    },
+    distance,
+    normal: (i) =>
+      inPlane(
+        mix(i, (k) => line[k * 4 + 2]),
+        mix(i, (k) => line[k * 4 + 3]),
+        frame.across,
+        frame.normal,
+        i * 3,
+      ),
   };
 }
 
-/** `fitAuto` over the members when it is within the noise, else the straight-profile fallback. */
+/**
+ * `fitAuto` over the members when it is within the noise, else the straight-profile fallback when
+ * at least half of the members lie within 3 * noise of it. The local scale is the robust scale of
+ * the members' distances, floored at half the noise and capped at twice it.
+ */
 function flankFit(
   members: number[],
   position: Float64Array,
@@ -710,148 +836,102 @@ function flankFit(
   noise: number,
 ): FlankFit | null {
   if (members.length < minimumFlank) return null;
-  const p = new Float32Array(members.length * 3),
-    n = new Float32Array(members.length * 3);
-  members.forEach((i, k) => {
+  // An even sample of a large flank fits it as well, in a bounded time.
+  const stride = Math.max(1, members.length / fitPoints);
+  const sample = Array.from(
+    { length: Math.min(members.length, fitPoints) },
+    (_, k) => members[Math.floor(k * stride)],
+  );
+  const p = new Float32Array(sample.length * 3),
+    n = new Float32Array(sample.length * 3);
+  sample.forEach((i, k) => {
     p.set(position.subarray(band.vertices[i] * 3, band.vertices[i] * 3 + 3), k * 3);
     n.set(frame.vertexNormals.subarray(i * 3, i * 3 + 3), k * 3);
   });
-  let fit: FlankFit | null = null;
+  let surface: Surface | null = null;
   try {
     const shape = fitAuto(p, n, noise);
-    if (shape.within) fit = shapeFit(shape.shape, position, band.vertices);
+    if (shape.within) surface = shapeSurface(shape.shape, position, band.vertices);
   } catch {
     // No single shape fits the members; the per-slice profile below may.
   }
-  fit ??= profileFit(members, frame, noise);
-  if (!fit) return null;
-  // Normals agree within facingAngle, or three times their spread on the fitted members.
-  let spread = 0,
-    inliers = 0;
-  for (const i of members) {
-    if (!(Math.abs(fit.distance(i)) <= 3 * noise)) continue;
-    const f = fit.normal(i);
-    const v = frame.vertexNormals;
-    const cosine = v[i * 3] * f[0] + v[i * 3 + 1] * f[1] + v[i * 3 + 2] * f[2];
-    spread += Math.acos(Math.min(1, Math.max(-1, cosine))) ** 2;
-    inliers++;
+  surface ??= profileSurface(members, frame, noise);
+  if (!surface) return null;
+  const residual = members.map((i) => Math.abs(surface.distance(i)));
+  if (surface.kind === 'profile') {
+    const near = residual.filter((d) => d <= 3 * noise).length;
+    if (near < members.length / 2) return null;
   }
-  const angle = Math.max((facingAngle * Math.PI) / 180, 3 * Math.sqrt(spread / (inliers || 1)));
-  fit.agree = Math.cos(Math.min(Math.PI / 2, angle));
-  return fit;
-}
-
-/** Band vertices on one side, in order of offset. */
-function sideOrder(u: Float64Array, sign: number) {
-  const side: number[] = [];
-  for (let i = 0; i < u.length; i++) if (sign * u[i] > 0) side.push(i);
-  return side.sort((a, b) => sign * u[a] - sign * u[b] || a - b);
+  const local = Math.min(2 * noise, Math.max(noise / 2, madScale * median(residual)));
+  return { ...surface, local };
 }
 
 /**
- * The first guess of a flank on one side: the nearest run of offsets, `flatBins` edge lengths long
- * (or to the band's edge, if at least two), over which the median normal turn stays within
- * `flatTurn` degrees. Returns the vertices of six edge lengths from the start of that run.
+ * Splits one side of one slice, its vertices ordered outward from the solved edge, into three runs:
+ * soft, the side's flank and beyond. The split minimises the weight of vertices whose fit disagrees
+ * with their run, plus `switchCost` per change. Without a flank run the side has no flank there.
  */
-function firstGuess(u: Float64Array, frame: Frame, sign: number, edge: number) {
-  const side = sideOrder(u, sign);
-  if (!side.length) return [];
-  const bin = Math.max(edge, flatBinWidth);
-  const bins = Math.floor((sign * u[side[side.length - 1]]) / bin) + 1;
-  const start = new Int32Array(bins + 1);
-  for (const i of side) start[Math.floor((sign * u[i]) / bin) + 1]++;
-  for (let b = 0; b < bins; b++) start[b + 1] += start[b];
-  const turns = side.map((i) => frame.turn[i]);
-  const middle = Array.from({ length: bins }, (_, b) =>
-    start[b + 1] > start[b] ? median(turns.slice(start[b], start[b + 1])) : NaN,
-  );
-  const limit = (flatTurn * Math.PI) / 180;
-  for (let b = 0; b < bins; b++) {
-    if (Number.isNaN(middle[b])) continue;
-    const span = Math.min(flatBins, bins - b);
-    if (span < 2) break;
-    let flat = true;
-    for (let k = b + 1; k < b + span && flat; k++)
-      flat = !Number.isNaN(middle[k]) && Math.abs(middle[k] - middle[b]) <= limit;
-    if (!flat) continue;
-    const from = start[b];
-    let to = from;
-    while (to < side.length && sign * u[side[to]] < b * bin + 6 * edge) to++;
-    return side.slice(from, to).sort((x, y) => x - y);
-  }
-  return [];
-}
-
-/**
- * Splits one side of one slice, its vertices ordered outward, into four runs: the other flank, soft,
- * the side's own flank and beyond. The split minimises the weight of vertices whose fit disagrees
- * with their run, plus `switchCost` per change.
- */
-function segment(
-  entries: number[],
-  weights: number[],
-  u: Float64Array,
-  ownFits: Uint8Array,
-  otherFits: Uint8Array,
-  limit: number,
-) {
+function runs(entries: number[], weights: number[], offset: Float64Array, fits: Uint8Array) {
   const n = entries.length;
-  const back = new Uint8Array(n * 4);
-  let cost = [0, 0, 0, 0];
+  // The best cost of each run ending at the current vertex, and the run each one came from.
+  const back = new Uint8Array(n * 3);
+  let inSoft = 0,
+    inFlank = 0,
+    inBeyond = 0;
   for (let j = 0; j < n; j++) {
-    const i = entries[j],
-      w = weights[j];
-    const own = ownFits[i] === onFlank,
-      otherOnly = otherFits[i] === onFlank && !own;
-    // A vertex off a flank by more than the noise would move by more than the noise if it joined
-    // that flank, so it weighs more than one that only faces another way.
-    const misfit = (flag: number) => (flag === onFlank ? 0 : flag === nearFlank ? w : farCost * w);
-    const local = [
-      otherOnly ? 0 : misfit(otherFits[i]),
-      own || otherOnly ? w : 0,
-      misfit(ownFits[i]),
-      own ? w : 0,
-    ];
-    const next = [0, 0, 0, 0];
-    for (let s = 0; s < 4; s++) {
-      let best = Infinity,
-        from = 0;
-      for (let r = 0; r <= s; r++) {
-        const c = cost[r] + (r === s || j === 0 ? 0 : switchCost);
-        if (c < best) {
-          best = c;
-          from = r;
-        }
-      }
-      next[s] = best + local[s];
-      back[j * 4 + s] = from;
+    const w = weights[j],
+      fit = fits[entries[j]] === 1;
+    const change = j === 0 ? 0 : switchCost;
+    // Ties go to the earlier run.
+    let toFlank = inSoft + change,
+      fromFlank = 0;
+    if (inFlank < toFlank) {
+      toFlank = inFlank;
+      fromFlank = 1;
     }
-    cost = next;
+    let toBeyond = inSoft + change,
+      fromBeyond = 0;
+    if (inFlank + change < toBeyond) {
+      toBeyond = inFlank + change;
+      fromBeyond = 1;
+    }
+    if (inBeyond < toBeyond) {
+      toBeyond = inBeyond;
+      fromBeyond = 2;
+    }
+    back[j * 3 + 1] = fromFlank;
+    back[j * 3 + 2] = fromBeyond;
+    inSoft += fit ? w : 0;
+    inFlank = toFlank + (fit ? 0 : farCost * w);
+    inBeyond = toBeyond + (fit ? w : 0);
   }
+  const cost = [inSoft, inFlank, inBeyond];
   const state = new Uint8Array(n);
   let s = 0;
-  for (let r = 1; r < 4; r++) if (cost[r] < cost[s]) s = r;
+  for (let r = 1; r < 3; r++) if (cost[r] < cost[s]) s = r;
   for (let j = n - 1; j >= 0; j--) {
     state[j] = s;
-    s = back[j * 4 + s];
+    s = back[j * 3 + s];
   }
-  const offset = (j: number) => Math.abs(u[entries[j]]);
+  const at = (j: number) => Math.abs(offset[entries[j]]);
   const boundary = (s: number) => {
     let j = 0;
     while (j < n && state[j] < s) j++;
-    if (j === n) return { at: limit, from: n };
-    return { at: j === 0 ? 0 : (offset(j - 1) + offset(j)) / 2, from: j };
+    if (j === n) return Infinity;
+    return j === 0 ? 0 : (at(j - 1) + at(j)) / 2;
   };
-  return { boundary, extent: n ? offset(n - 1) : 0 };
+  const start = boundary(1),
+    end = boundary(2);
+  const flank = start < end;
+  return {
+    start: flank ? start : 0,
+    end: flank ? end : 0,
+    extent: n ? at(n - 1) : 0,
+  };
 }
 
-/** Median of each value with its neighbours in slice order, so one odd slice cannot punch a hole. */
-function smooth(values: Float64Array) {
-  const n = values.length;
-  return values.map((_, k) =>
-    median([values[Math.max(0, k - 1)], values[k], values[Math.min(n - 1, k + 1)]]),
-  );
-}
+const dot3 = (p: ArrayLike<number>, q: ArrayLike<number>) =>
+  p[0] * q[0] + p[1] * q[1] + p[2] * q[2];
 
 /** The classified band and its soft half-width, or null when no edge lies under the guide. */
 function classify(
@@ -859,7 +939,7 @@ function classify(
   topology: RefineTopology,
   kind: GuideKind,
   points: GuidePoint[],
-  widthFor: (edge: number) => number,
+  width: number | null,
   noise: number,
 ) {
   const clicked = localEdge(mesh, topology, points);
@@ -871,237 +951,391 @@ function classify(
   );
   const total = drawn.lengths[drawn.lengths.length - 1];
   if (!(total > 0)) return null;
-  const band = gather(mesh, topology, drawn, total, points, widthFor, noise);
-  const { vertices, edge, width } = band;
+  const reachOf = (edge: number) => Math.max(reachWidth, reachEdges * edge);
+  const spanOf = (edge: number) => Math.max(seedEdges * edge, seedSpan);
+  // Every vertex the classification reads lies within reach of the guide plus a seed, so a width
+  // only caps the band it returns and the classification is the same at every width up to that.
+  const band = gather(
+    mesh,
+    topology,
+    drawn,
+    total,
+    points,
+    (edge) => Math.max(width ?? 0, reachOf(edge) + seedStart * edge + spanOf(edge)),
+    noise,
+  );
+  const { vertices, edge } = band;
   const count = vertices.length;
-  if (!(width > 0) || !(edge > 0) || count < 2 * minimumFlank) return null;
-  const frame = frameOf(mesh, topology, band, drawn, total, width, edge);
+  if (!(band.width > 0) || !(edge > 0) || count < 2 * minimumFlank) return null;
+  const frame = frameOf(mesh, topology, band, drawn, total, band.width, edge);
   const u = signedOffsets(band, frame);
   const { position } = mesh;
-  const tolerance = 3 * noise;
-  const { slices, slice, blend } = frame;
-  const limit = width + edge;
-
-  // Each side of each slice, ordered outward, with every vertex weighted toward its two slices.
-  const lists = Array.from({ length: slices * 2 }, () => ({
-    entries: [] as number[],
-    weights: [] as number[],
-  }));
-  for (const sign of [1, -1])
-    for (const i of sideOrder(u, sign)) {
-      const s = sign > 0 ? 0 : 1;
-      const k0 = slice[i],
-        k1 = Math.min(slices - 1, k0 + 1);
-      if (1 - blend[i] > 0) {
-        lists[k0 * 2 + s].entries.push(i);
-        lists[k0 * 2 + s].weights.push(1 - blend[i]);
-      }
-      if (blend[i] > 0) {
-        lists[k1 * 2 + s].entries.push(i);
-        lists[k1 * 2 + s].weights.push(blend[i]);
-      }
-    }
-
-  const fits: (FlankFit | null)[] = [1, -1].map((sign) =>
-    flankFit(firstGuess(u, frame, sign, edge), position, band, frame, noise),
+  // A vertex whose normal lies mostly along the guide is on a surface that crosses the guide, such
+  // as an end face; it is never on a flank and does not interrupt one.
+  const crossing = new Uint8Array(count);
+  for (let i = 0; i < count; i++) {
+    const n = frame.vertexNormals.subarray(i * 3, i * 3 + 3);
+    const inPlane = Math.hypot(
+      dot3(n, frame.normal.subarray(i * 3)),
+      dot3(n, frame.across.subarray(i * 3)),
+    );
+    crossing[i] = +(inPlane < Math.SQRT1_2);
+  }
+  // Band vertices in order of offset, so that each slice's order outward is nearly sorted already.
+  const byOffset = Uint32Array.from({ length: count }, (_, i) => i).sort(
+    (a, b) => u[a] - u[b] || a - b,
   );
-  if (!fits[0] || !fits[1]) return null;
-  const flank = fits as FlankFit[];
-  // A vertex fits a flank when it lies within 3 * noise of it and faces the same way: within the
-  // noise alone, a small fillet's crest fits both faces and could not be told from a sharp crease.
-  const v = frame.vertexNormals;
-  const facing = (fit: FlankFit, i: number) => {
-    const f = fit.normal(i);
-    return v[i * 3] * f[0] + v[i * 3 + 1] * f[1] + v[i * 3 + 2] * f[2];
-  };
-  const fitFlags = (fit: FlankFit) => {
-    const flags = new Uint8Array(count);
-    for (let i = 0; i < count; i++)
-      if (Math.abs(fit.distance(i)) <= tolerance)
-        flags[i] = facing(fit, i) >= fit.agree! ? onFlank : nearFlank;
-    return flags;
-  };
-  const turned = Math.cos((2 * minBandAngle * Math.PI) / 180);
+  const { slices, slice, blend, vertexNormals } = frame;
+  const reach = reachOf(edge),
+    span = spanOf(edge),
+    from = seedStart * edge;
+  const analysis = reach + from + span;
+  const upper = (i: number) => Math.min(slices - 1, slice[i] + 1);
+  const nearestSlice = (i: number) => (blend[i] < 0.5 ? slice[i] : upper(i));
+  const bySlice: number[][] = Array.from({ length: slices }, () => []);
+  for (let i = 0; i < count; i++) bySlice[nearestSlice(i)].push(i);
 
-  // Per side, per slice: other, start, stop and end, smoothed over neighbouring slices.
-  const split = () => {
-    const flags = flank.map(fitFlags);
-    return [0, 1].map((s) => {
+  // First seeds: per side, in bins a sixth of a seed wide from the guide outward, the runs that
+  // start within reach of it over which the measured normals stop turning, until they turn again.
+  // The nearest pair of runs whose normals differ by minBandAngle seeds the two flanks: a guide off
+  // the crest sees the face it lies on from both sides, and a rounded rib turns all the way over.
+  const limit = (flatTurn * Math.PI) / 180;
+  const bin = span / seedEdges;
+  const candidates = [1, -1].map((sign) => {
+    const bins = Math.ceil((reach + span) / bin);
+    const turns = Array.from({ length: bins }, () => [] as number[]);
+    const members = Array.from({ length: bins }, () => [] as number[]);
+    for (let i = 0; i < count; i++) {
+      const b = Math.floor((sign * u[i]) / bin);
+      if (b < 0 || b >= bins || crossing[i]) continue;
+      turns[b].push(frame.turn[i]);
+      members[b].push(i);
+    }
+    const turn = turns.map((t) => (t.length ? median(t) : NaN));
+    const stretches: { seed: number[]; turn: number }[] = [];
+    for (let b = 0; b * bin <= reach; b++) {
+      let end = b;
+      while (
+        end + 1 < bins &&
+        end + 1 - b < seedEdges &&
+        Math.abs(turn[end + 1] - turn[b]) <= limit
+      )
+        end++;
+      if (end - b < flatBins - 1) continue;
+      stretches.push({
+        seed: members.slice(b, end + 1).flat(),
+        turn: median(turn.slice(b, end + 1)),
+      });
+      b = end;
+    }
+    return stretches;
+  });
+  const pairs: [number, number][] = [];
+  candidates[0].forEach((left, i) =>
+    candidates[1].forEach((right, j) => {
+      if (Math.abs(left.turn - right.turn) >= (minBandAngle * Math.PI) / 180) pairs.push([i, j]);
+    }),
+  );
+  pairs.sort((p, q) => p[0] + p[1] - q[0] - q[1] || Math.abs(p[0] - p[1]) - Math.abs(q[0] - q[1]));
+  let first: FlankFit[] | null = null;
+  for (const [i, j] of pairs) {
+    const pair = [candidates[0][i], candidates[1][j]].map((run) =>
+      flankFit(
+        [...run.seed].sort((x, y) => x - y),
+        position,
+        band,
+        frame,
+        noise,
+      ),
+    );
+    if (pair[0] && pair[1]) {
+      first = pair as FlankFit[];
+      break;
+    }
+  }
+  if (!first) return null;
+  let fits = first;
+
+  // The edge per slice: the point of the slice's cross-section where both flank surfaces meet, and
+  // its offset along the surface from the guide, read at the band vertex nearest it.
+  const solve = (pair: FlankFit[]) => {
+    const point = new Float64Array(slices * 3),
+      angle = new Float64Array(slices),
+      offset = new Float64Array(slices),
+      ok = new Uint8Array(slices);
+    const { centre, centreAcross: b, centreNormal: m } = frame;
+    const p = [0, 0, 0];
+    for (let k = 0; k < slices; k++) {
+      let x = 0,
+        y = 0,
+        solved = false;
+      for (let iteration = 0; iteration < 40; iteration++) {
+        for (let a = 0; a < 3; a++) p[a] = centre[k * 3 + a] + x * b[k * 3 + a] + y * m[k * 3 + a];
+        const n1 = pair[0].normalAt(p, k),
+          n2 = pair[1].normalAt(p, k);
+        const f1 = pair[0].distanceAt(p, k),
+          f2 = pair[1].distanceAt(p, k);
+        const a11 = dot3(n1, b.subarray(k * 3)),
+          a12 = dot3(n1, m.subarray(k * 3)),
+          a21 = dot3(n2, b.subarray(k * 3)),
+          a22 = dot3(n2, m.subarray(k * 3));
+        const det = a11 * a22 - a12 * a21;
+        if (!(Math.abs(det) > 1e-6)) break;
+        const dx = (f1 * a22 - f2 * a12) / det,
+          dy = (a11 * f2 - a21 * f1) / det;
+        x -= dx;
+        y -= dy;
+        if (!(Math.hypot(x, y) < 10 * band.width)) break;
+        if (Math.hypot(dx, dy) < 1e-9) {
+          solved = true;
+          break;
+        }
+      }
+      if (!solved || !bySlice[k].length) continue;
+      for (let a = 0; a < 3; a++) p[a] = centre[k * 3 + a] + x * b[k * 3 + a] + y * m[k * 3 + a];
+      ok[k] = 1;
+      point.set(p, k * 3);
+      angle[k] = Math.acos(
+        Math.min(1, Math.max(-1, dot3(pair[0].normalAt(p, k), pair[1].normalAt(p, k)))),
+      );
+      let nearest = bySlice[k][0],
+        best = Infinity;
+      for (const i of bySlice[k]) {
+        const v = vertices[i] * 3;
+        const d = Math.hypot(position[v] - p[0], position[v + 1] - p[1], position[v + 2] - p[2]);
+        if (d < best || (d === best && vertices[i] < vertices[nearest])) {
+          best = d;
+          nearest = i;
+        }
+      }
+      let along = 0;
+      for (let a = 0; a < 3; a++)
+        along += (p[a] - position[vertices[nearest] * 3 + a]) * frame.across[nearest * 3 + a];
+      offset[k] = u[nearest] + along;
+    }
+    const solvedSlices: number[] = [];
+    for (let k = 0; k < slices; k++) if (ok[k]) solvedSlices.push(k);
+    if (!solvedSlices.length) return null;
+    // A slice without a solution takes the offset of the nearest solved slice.
+    for (let k = 0; k < slices; k++) {
+      if (ok[k]) continue;
+      let near = solvedSlices[0];
+      for (const j of solvedSlices) if (Math.abs(j - k) < Math.abs(near - k)) near = j;
+      offset[k] = offset[near];
+    }
+    return { point, angle, offset, ok, solvedSlices };
+  };
+
+  const own = [BandZone.Left, BandZone.Right];
+  const touching = (values: Float64Array, i: number, pick: (a: number, b: number) => number) => {
+    if (blend[i] === 0) return values[slice[i]];
+    if (blend[i] === 1) return values[upper(i)];
+    return pick(values[slice[i]], values[upper(i)]);
+  };
+  // Zones outward from the solved edge, per side and slice: soft, then the first sustained run that
+  // fits the side's surface, then beyond from the first sustained run that does not.
+  const split = (pair: FlankFit[], solved: NonNullable<ReturnType<typeof solve>>) => {
+    const o = new Float64Array(count);
+    for (let i = 0; i < count; i++)
+      o[i] = u[i] - (solved.offset[slice[i]] * (1 - blend[i]) + solved.offset[upper(i)] * blend[i]);
+    const sides = [0, 1].map((s) => {
+      const fit = pair[s],
+        sign = s === 0 ? 1 : -1;
+      const flags = new Uint8Array(count);
+      for (let i = 0; i < count; i++) {
+        if (sign * o[i] <= 0 || !(Math.abs(fit.distance(i)) <= 3 * fit.local)) continue;
+        const f = fit.normal(i);
+        const n = i * 3;
+        if (vertexNormals[n] * f[0] + vertexNormals[n + 1] * f[1] + vertexNormals[n + 2] * f[2] > 0)
+          flags[i] = 1;
+      }
+      // Each slice's vertices outward from the edge: in order of u they are nearly in order of o,
+      // so an insertion sort finishes them in about linear time.
+      const lists = Array.from({ length: slices }, () => ({
+        entries: [] as number[],
+        weights: [] as number[],
+      }));
+      const push = (k: number, i: number, w: number) => {
+        const { entries, weights } = lists[k];
+        const key = sign * o[i];
+        let j = entries.length;
+        entries.push(i);
+        weights.push(w);
+        while (j > 0) {
+          const before = sign * o[entries[j - 1]];
+          if (before < key || (before === key && entries[j - 1] < i)) break;
+          entries[j] = entries[j - 1];
+          weights[j] = weights[j - 1];
+          j--;
+        }
+        entries[j] = i;
+        weights[j] = w;
+      };
+      for (let q = 0; q < count; q++) {
+        const i = byOffset[sign > 0 ? q : count - 1 - q];
+        if (sign * o[i] <= 0 || crossing[i]) continue;
+        if (1 - blend[i] > 0) push(slice[i], i, 1 - blend[i]);
+        if (blend[i] > 0) push(upper(i), i, blend[i]);
+      }
       const fields = {
-        other: new Float64Array(slices),
         start: new Float64Array(slices),
-        stop: new Float64Array(slices),
         end: new Float64Array(slices),
         extent: new Float64Array(slices),
       };
       for (let k = 0; k < slices; k++) {
-        const { entries, weights } = lists[k * 2 + s];
-        const run = segment(entries, weights, u, flags[s], flags[1 - s], limit);
-        const other = run.boundary(1).at,
-          start = run.boundary(2).at,
-          beyond = run.boundary(3);
-        let end = limit;
-        if (beyond.from < entries.length && start < limit) {
-          // A second transition is evidenced when the mean normal just past it turns away from the
-          // flank's by more than 2 * minBandAngle: the mean, so that noise and ripple cancel, and
-          // just past it, so that layers beyond a fold cannot cancel the fold.
-          const mean = [0, 0, 0],
-            fitted = [0, 0, 0];
-          const near = beyond.at + flankRun * edge;
-          for (let j = beyond.from; j < entries.length && Math.abs(u[entries[j]]) <= near; j++) {
-            const i = entries[j],
-              f = flank[s].normal(i);
-            for (let a = 0; a < 3; a++) {
-              mean[a] += weights[j] * v[i * 3 + a];
-              fitted[a] += weights[j] * f[a];
-            }
-          }
-          const cosine =
-            (mean[0] * fitted[0] + mean[1] * fitted[1] + mean[2] * fitted[2]) /
-            (Math.hypot(mean[0], mean[1], mean[2]) * Math.hypot(fitted[0], fitted[1], fitted[2]) ||
-              1);
-          if (cosine < turned) end = (start + beyond.at) / 2;
-        }
-        fields.other[k] = other;
-        fields.start[k] = start;
-        fields.stop[k] = beyond.at;
-        fields.end[k] = end;
+        const run = runs(lists[k].entries, lists[k].weights, o, flags);
+        // A flank that starts farther from the edge than reach, or runs less than flankRun edges,
+        // is no flank: soft would then reach across most of the band.
+        const flank =
+          run.start <= reach && Math.min(run.end, run.extent) - run.start >= flankRun * edge;
+        fields.start[k] = flank ? run.start : 0;
+        fields.end[k] = flank ? run.end : 0;
         fields.extent[k] = run.extent;
       }
-      return {
-        other: smooth(fields.other).map((v, k) => Math.min(v, fields.other[k])),
-        // Smoothing may hold a flank back but never lets a vertex that does not fit into it.
-        start: smooth(fields.start).map((v, k) => Math.max(v, fields.start[k])),
-        rawStart: fields.start,
-        stop: smooth(fields.stop),
-        end: smooth(fields.end),
-        extent: fields.extent,
-      };
+      return fields;
     });
-  };
-  const at = (values: Float64Array, i: number) =>
-    values[slice[i]] * (1 - blend[i]) + values[Math.min(slices - 1, slice[i] + 1)] * blend[i];
-  const touching = (values: Float64Array, i: number, pick: (a: number, b: number) => number) => {
-    const k1 = Math.min(slices - 1, slice[i] + 1);
-    if (blend[i] === 0) return values[slice[i]];
-    if (blend[i] === 1) return values[k1];
-    return pick(values[slice[i]], values[k1]);
+    const zone = new Uint8Array(count).fill(BandZone.Beyond);
+    for (let i = 0; i < count; i++) {
+      const s = o[i] > 0 ? 0 : 1;
+      const offset = Math.abs(o[i]);
+      // Of the vertex's two slices, the later start and the earlier end, so a vertex is flank or
+      // soft only where both slices make it so.
+      const a = touching(sides[s].start, i, Math.max),
+        b = touching(sides[s].end, i, Math.min);
+      if (!band.open[i] || crossing[i] || !(a < b)) continue;
+      if (offset < a) zone[i] = BandZone.Soft;
+      else if (offset < b) zone[i] = own[s];
+    }
+    return { o, sides, zone };
   };
 
-  // Refit each flank from one edge past where it starts, over `refitEdges` edge lengths and never
-  // past where it stops fitting, until the starts move by less than an edge. A flank starts across
-  // the guide when the guide lies on it, where the other side's run of it ends. The window is short
-  // enough to lie inside the band, so guides off the crest refit the same strip of face.
-  let sides = split();
-  for (let round = 1; round < rounds; round++) {
-    let moved = false;
-    for (const s of [0, 1]) {
+  let solved = solve(fits);
+  if (!solved) return null;
+  let classified = split(fits, solved);
+  // Reseed each flank from 2 to 8 edge lengths past the solved edge and solve again, until the edge
+  // stays. A seed starts past the soft zone by an edge and by its own width, so that a wide fillet's
+  // shoulder cannot pull the fit toward it, and stops at a second transition.
+  const facing = Math.cos((flatTurn * Math.PI) / 180);
+  for (let round = 0; round < rounds; round++) {
+    const { o, sides } = classified;
+    const next = [0, 1].map((s) => {
       const sign = s === 0 ? 1 : -1;
+      const { start, end } = sides[s];
+      const found: number[] = [];
+      for (let k = 0; k < slices; k++) if (end[k] > start[k]) found.push(start[k]);
+      // A fit that finds a flank in under half of the slices does not describe the side: refit the
+      // plain window. Otherwise a slice without a flank seeds from the side's typical start, so a fit
+      // too simple for the surface still sees the part it misses.
+      const plain = found.length < slices / 2;
+      const typical = found.length ? median(found) : 0;
+      const startOf = Float64Array.from(start, (v, k) => (end[k] > v ? v : typical));
+      const endOf = Float64Array.from(end, (v, k) => (v > start[k] ? v : Infinity));
       const members: number[] = [];
       for (let i = 0; i < count; i++) {
-        const start = at(sides[s].start, i);
-        const from = (start > 0 ? start : -at(sides[1 - s].other, i)) + edge;
-        const offset = sign * u[i];
-        if (offset >= from && offset <= Math.min(from + refitEdges * edge, at(sides[s].stop, i)))
-          members.push(i);
+        if (crossing[i] || !band.open[i]) continue;
+        const offset = sign * o[i];
+        if (plain) {
+          if (offset >= from && offset <= from + span) members.push(i);
+          continue;
+        }
+        const first = touching(startOf, i, Math.max);
+        const a = Math.max(from, first + edge, 2 * first);
+        if (offset < a || offset > a + span || offset >= touching(endOf, i, Math.min)) continue;
+        if (dot3(vertexNormals.subarray(i * 3, i * 3 + 3), fits[s].normal(i)) < facing) continue;
+        members.push(i);
       }
-      const refit = flankFit(members, position, band, frame, noise);
-      if (refit) {
-        flank[s] = refit;
-        moved = true;
-      }
-    }
-    if (!moved) break;
-    const next = split();
-    let shift = 0;
-    for (const s of [0, 1])
-      for (let k = 0; k < slices; k++)
-        shift = Math.max(shift, Math.abs(next[s].start[k] - sides[s].start[k]));
-    sides = next;
-    if (shift < edge) break;
-  }
-
-  const zone = new Uint8Array(count).fill(BandZone.Beyond);
-  const own = [BandZone.Left, BandZone.Right];
-  const nearest = [unset, unset];
-  for (let i = 0; i < count; i++) {
-    const s = u[i] > 0 ? 0 : 1;
-    const offset = Math.abs(u[i]);
-    const { other, start, end } = sides[s];
-    // Of the vertex's two slices, the later start and the earlier ends, so a vertex is flank only
-    // where both slices make it so.
-    const a = touching(start, i, Math.max);
-    if (offset < Math.min(touching(other, i, Math.min), a)) zone[i] = own[1 - s];
-    else if (offset < a) zone[i] = BandZone.Soft;
-    else if (offset < touching(end, i, Math.min)) zone[i] = own[s];
-    if (!band.open[i]) zone[i] = BandZone.Beyond;
-    if (zone[i] === BandZone.Left || zone[i] === BandZone.Right) {
-      const f = zone[i] - 1;
-      if (nearest[f] === unset || band.g[i] < band.g[nearest[f]]) nearest[f] = i;
-    }
-  }
-
-  // Evidence of an edge: long enough flanks on both sides in half the slices, a soft zone near the
-  // guide, a turn between the flanks next to the guide, and a soft zone that makes that turn.
-  const half = slices / 2;
-  for (const s of [0, 1]) {
-    let long = 0;
-    const { start, stop, extent } = sides[s];
+      return flankFit(members, position, band, frame, noise) ?? fits[s];
+    });
+    const again = solve(next);
+    if (!again) break;
+    const moves: number[] = [];
     for (let k = 0; k < slices; k++)
-      if (Math.min(stop[k], extent[k]) - start[k] >= flankRun * edge) long++;
-    if (long < half) return null;
+      if (solved.ok[k] && again.ok[k])
+        moves.push(
+          Math.hypot(
+            again.point[k * 3] - solved.point[k * 3],
+            again.point[k * 3 + 1] - solved.point[k * 3 + 1],
+            again.point[k * 3 + 2] - solved.point[k * 3 + 2],
+          ),
+        );
+    fits = next;
+    solved = again;
+    classified = split(fits, solved);
+    if (moves.length && median(moves) < edge / 2) break;
   }
-  // The soft zone must be wider than an edge, and the guide inside it or within half its width.
-  let softSlices = 0,
-    onEdge = 0;
-  const larger = new Float64Array(slices);
-  for (let k = 0; k < slices; k++) {
-    const [left, right] = sides;
-    const softWidth = left.start[k] - left.other[k] + right.start[k] - right.other[k];
-    if (softWidth > edge) softSlices++;
-    if (Math.max(left.other[k], right.other[k]) <= softWidth / 2) onEdge++;
-    larger[k] = Math.max(left.rawStart[k], right.rawStart[k]);
+
+  // The flank surfaces, refitted on every flank vertex the classification reads, so that a face
+  // with ripple is not judged by a plane through a narrow strip of it.
+  {
+    const whole = [0, 1].map((s) => {
+      const members: number[] = [];
+      for (let i = 0; i < count; i++)
+        if (classified.zone[i] === own[s] && band.g[i] <= analysis) members.push(i);
+      return flankFit(members, position, band, frame, noise) ?? fits[s];
+    });
+    const again = solve(whole);
+    if (again) {
+      fits = whole;
+      solved = again;
+      classified = split(fits, solved);
+    }
   }
-  if (softSlices < half || onEdge < half) return null;
+  // Evidence of an edge: a flank of enough vertices running far enough on each side in half the
+  // slices, flank surfaces apart at the solved edge, and that edge within reach of the guide.
+  const { zone, sides } = classified;
+  const half = slices / 2;
   const counts = [0, 0];
   for (let i = 0; i < count; i++)
     if (zone[i] === BandZone.Left || zone[i] === BandZone.Right) counts[zone[i] - 1]++;
   if (counts[0] < minimumFlank || counts[1] < minimumFlank) return null;
-  const angle = (p: ArrayLike<number>, q: ArrayLike<number>) =>
-    Math.acos(Math.min(1, Math.max(-1, p[0] * q[0] + p[1] * q[1] + p[2] * q[2])));
-  if (
-    (angle(flank[0].normal(nearest[0]), flank[1].normal(nearest[1])) * 180) / Math.PI <
-    minBandAngle
-  )
-    return null;
-  // A softened edge turns from one flank to the other, so its normals lie between theirs. A soft
-  // run that turns back, such as a short face and a fold before a lower layer, is no edge.
-  const allowance = 2 * Math.max(...flank.map((f) => Math.acos(f.agree!)));
-  let softCount = 0,
-    between = 0;
-  for (let i = 0; i < count; i++) {
-    if (zone[i] !== BandZone.Soft) continue;
-    const n = v.subarray(i * 3, i * 3 + 3),
-      left = flank[0].normal(i),
-      right = flank[1].normal(i);
-    softCount++;
-    if (angle(n, left) + angle(n, right) - angle(left, right) <= allowance) between++;
+  for (const { start, end, extent } of sides) {
+    let long = 0;
+    for (let k = 0; k < slices; k++)
+      if (end[k] > start[k] && Math.min(end[k], extent[k]) - start[k] >= flankRun * edge) long++;
+    if (long < half) return null;
   }
-  if (between < softBetween * softCount) return null;
+  let near = 0;
+  for (const k of solved.solvedSlices) if (Math.abs(solved.offset[k]) <= reach) near++;
+  if (near < half) return null;
+  const angles = solved.solvedSlices.map((k) => solved.angle[k]);
+  const angle = (median(angles) * 180) / Math.PI;
+  if (angle < minBandAngle) return null;
 
+  // A flank that ends at a second transition stops short of it: positions within the tolerance
+  // reach into the next fillet before they leave the flank's surface.
+  for (let i = 0; i < count; i++) {
+    if (zone[i] !== BandZone.Left && zone[i] !== BandZone.Right) continue;
+    const end = touching(sides[zone[i] - 1].end, i, Math.min);
+    if (Number.isFinite(end) && Math.abs(classified.o[i]) >= end - flankRun * edge)
+      zone[i] = BandZone.Beyond;
+  }
+  const larger: number[] = [];
+  for (let k = 0; k < slices; k++)
+    if (sides.every((side) => side.end[k] > side.start[k]))
+      larger.push(Math.max(sides[0].start[k], sides[1].start[k]));
+  const soft = larger.length ? median(larger) : 0;
+  const cap = width ?? band.width;
+  const keep: number[] = [];
+  for (let i = 0; i < count; i++) if (band.g[i] <= cap) keep.push(i);
+  const edgePoints = new Float64Array(solved.solvedSlices.length * 3);
+  solved.solvedSlices.forEach((k, j) =>
+    edgePoints.set(solved.point.subarray(k * 3, k * 3 + 3), j * 3),
+  );
   const result: EdgeBand = {
-    vertices,
-    station: Float32Array.from(band.station),
-    cross: Float32Array.from(u),
-    zone,
+    vertices: Uint32Array.from(keep, (i) => vertices[i]),
+    station: Float32Array.from(keep, (i) => band.station[i]),
+    cross: Float32Array.from(keep, (i) => u[i]),
+    zone: Uint8Array.from(keep, (i) => zone[i]),
     drawn,
-    soft: median(larger),
-    fits: [flank[0].kind, flank[1].kind],
+    soft,
+    fits: [fits[0].kind, fits[1].kind],
+    edge: edgePoints,
+    angle,
   };
   return { band: result, edge };
 }
 
-/** Null when no softened zone lies under the guide. */
+/** Null when no edge lies under the guide: two flank surfaces meeting within reach of it. */
 export function buildBand(
   mesh: RefineMesh,
   topology: RefineTopology,
@@ -1110,12 +1344,12 @@ export function buildBand(
   width: number,
   noise: number,
 ): EdgeBand | null {
-  return classify(mesh, topology, kind, points, () => width, noise)?.band ?? null;
+  return classify(mesh, topology, kind, points, width, noise)?.band ?? null;
 }
 
 /**
- * A width that leaves flank on both sides: soft + max(2 * soft, 6 * the local edge length), read from
- * one band at a generous width. 0 when that band shows no edge.
+ * A width that leaves flank on both sides: soft + max(2 * soft, 6 * the local edge length), at most
+ * 1 mm, from the same classification `buildBand` makes. 0 when it shows no edge.
  */
 export function estimateWidth(
   mesh: RefineMesh,
@@ -1124,15 +1358,8 @@ export function estimateWidth(
   points: GuidePoint[],
   noise: number,
 ): number {
-  const found = classify(
-    mesh,
-    topology,
-    kind,
-    points,
-    (edge) => Math.max(generousEdges * edge, generousWidth),
-    noise,
-  );
+  const found = classify(mesh, topology, kind, points, null, noise);
   if (!found) return 0;
   const { soft } = found.band;
-  return soft + Math.max(2 * soft, 6 * found.edge);
+  return Math.min(widestEstimate, soft + Math.max(2 * soft, 6 * found.edge));
 }
