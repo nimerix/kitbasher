@@ -1,7 +1,8 @@
 import {
   BufferAttribute,
   BufferGeometry,
-  type InterleavedBufferAttribute,
+  InterleavedBuffer,
+  InterleavedBufferAttribute,
   type Matrix4,
   type TypedArray,
 } from 'three';
@@ -71,7 +72,7 @@ export function buildRefineMesh(geometry: BufferGeometry, matrixWorld: Matrix4):
   if (source) {
     color = new Float32Array(vertexCount * colorSize);
     for (let v = 0; v < vertexCount; v++)
-      for (let k = 0; k < colorSize; k++) color[v * colorSize + k] = source.getComponent(v, k);
+      for (let k = 0; k < colorSize; k++) color[v * colorSize + k] = decoded(source, v, k);
   }
   return {
     position: world,
@@ -331,24 +332,78 @@ function fansAround(mesh: RefineMesh, welded: number, triangles: Uint32Array, ow
 }
 
 type Attribute = BufferAttribute | InterleavedBufferAttribute;
+type ArrayType = new (length: number) => TypedArray;
 
-/** An empty attribute of `count` items in the same array type, item size and normalization. */
-function blankLike(attribute: Attribute, count: number) {
-  const Array = attribute.array.constructor as new (length: number) => TypedArray;
-  return new BufferAttribute(
-    new Array(count * attribute.itemSize),
-    attribute.itemSize,
-    attribute.normalized,
-  );
+const isInterleaved = (attribute: Attribute): attribute is InterleavedBufferAttribute =>
+  'isInterleavedBufferAttribute' in attribute;
+
+const getters = ['getX', 'getY', 'getZ', 'getW'] as const;
+const setters = ['setX', 'setY', 'setZ', 'setW'] as const;
+
+/** Component `k` of item `i`, decoded from normalized integers or half floats. */
+function decoded(attribute: Attribute, i: number, k: number): number {
+  return k < 4 ? attribute[getters[k]](i) : attribute.getComponent(i, k);
 }
 
-/** Copies item `from` of `source` into item `to` of `target` without converting it. */
-function copyItem(source: Attribute, from: number, target: BufferAttribute, to: number) {
-  const size = target.itemSize;
-  const interleaved = 'isInterleavedBufferAttribute' in source;
-  const array = interleaved ? source.data.array : source.array;
-  const base = interleaved ? from * source.data.stride + source.offset : from * size;
-  for (let k = 0; k < size; k++) target.array[to * size + k] = array[base + k];
+/** Encodes `value` into component `k` of item `i` through the attribute's setters. */
+function encode(attribute: Attribute, i: number, k: number, value: number) {
+  if (k < 4) attribute[setters[k]](i, value);
+  else attribute.setComponent(i, k, value);
+}
+
+/** Component `k` of item `i` exactly as stored. */
+function stored(attribute: Attribute, i: number, k: number): number {
+  return isInterleaved(attribute)
+    ? attribute.data.array[i * attribute.data.stride + attribute.offset + k]
+    : attribute.array[i * attribute.itemSize + k];
+}
+
+/**
+ * Output for a position or normal attribute. A plain Float32 or Float64 attribute keeps its array
+ * type and copies stored bits; any other is written as Float32 holding the decoded values.
+ */
+function vertexOutput(attribute: Attribute, count: number) {
+  const plain =
+    !isInterleaved(attribute) &&
+    !('isFloat16BufferAttribute' in attribute) &&
+    (attribute.array instanceof Float32Array || attribute.array instanceof Float64Array);
+  const size = attribute.itemSize;
+  const Array = plain ? (attribute.array.constructor as ArrayType) : Float32Array;
+  const target = new BufferAttribute(new Array(count * size), size, plain && attribute.normalized);
+  const read = plain ? stored : decoded;
+  const copy = (from: number, to: number) => {
+    for (let k = 0; k < size; k++) target.array[to * size + k] = read(attribute, from, k);
+  };
+  return { target, copy };
+}
+
+/** An empty attribute of `count` items with the class, array type, item size and normalization. */
+function blankLike(attribute: Attribute, count: number): Attribute {
+  const size = attribute.itemSize;
+  const array = new (attribute.array.constructor as ArrayType)(count * size);
+  if (isInterleaved(attribute))
+    return new InterleavedBufferAttribute(
+      new InterleavedBuffer(array, size),
+      size,
+      0,
+      attribute.normalized,
+    );
+  const Class = attribute.constructor as new (
+    array: TypedArray,
+    itemSize: number,
+    normalized: boolean,
+  ) => BufferAttribute;
+  return new Class(array, size, attribute.normalized);
+}
+
+/** True when nothing was moved, created or rewired, so the source can be returned as it is. */
+function unchanged(mesh: RefineMesh) {
+  if (mesh.vertexCount !== mesh.sourceVertexCount) return false;
+  if (mesh.triangleCount !== mesh.sourceTriangleCount) return false;
+  for (let v = 0; v < mesh.weldedCount; v++) if (mesh.touched[v]) return false;
+  if (!mesh.indexed)
+    for (let c = 0; c < mesh.triangleCount * 3; c++) if (mesh.corners[c] !== c) return false;
+  return true;
 }
 
 export function writeRefinedGeometry(
@@ -358,9 +413,28 @@ export function writeRefinedGeometry(
 ): BufferGeometry {
   const sourcePosition = source.getAttribute('position');
   const sourceNormal = source.getAttribute('normal');
+  const sourceColor = mesh.color ? source.getAttribute('color') : undefined;
   const { weldOf, corners, touched, triangleCount, vertexCount, weldedCount } = mesh;
   const sourceVertexCount = mesh.sourceVertexCount;
   const cornerCount = triangleCount * 3;
+  const result = new BufferGeometry();
+  const index: Uint32Array | null = mesh.indexed ? corners.slice(0, cornerCount) : null;
+  const finish = () => {
+    if (index) result.setIndex(new BufferAttribute(index, 1));
+    result.computeBoundingBox();
+    result.computeBoundingSphere();
+    return result;
+  };
+  if (unchanged(mesh)) {
+    // Shared so attributes interleaved in one buffer stay together in the clone.
+    const data = {};
+    const clone = (attribute: Attribute) =>
+      isInterleaved(attribute) ? attribute.clone(data) : attribute.clone();
+    result.setAttribute('position', clone(sourcePosition));
+    result.setAttribute('normal', clone(sourceNormal));
+    if (sourceColor) result.setAttribute('color', clone(sourceColor));
+    return finish();
+  }
 
   // The source vertex whose position and normal each geometry vertex copies, or unused when moved.
   const representative = new Uint32Array(weldedCount).fill(unused);
@@ -389,46 +463,27 @@ export function writeRefinedGeometry(
     local[v * 3 + 2] = inverse[2] * x + inverse[6] * y + inverse[10] * z + inverse[14];
   }
 
-  const written = (g: number, axis: number) =>
-    copies[g] === unused
-      ? local[weldOf[g] * 3 + axis]
-      : sourcePosition.getComponent(copies[g], axis);
-
-  // Normal of each corner at a moved vertex: area-weighted over its fan of faces as written.
-  const cornerNormal = new Float32Array(cornerCount * 3);
-  const cornerFan = new Int32Array(cornerCount).fill(-1);
+  // Fan of each triangle around a moved vertex, aligned with `trianglesOf`, and of each corner.
   const { triangleStart, trianglesOf } = trianglesAround(mesh);
+  const triangleFan = new Int32Array(trianglesOf.length);
+  const cornerFan = new Int32Array(cornerCount).fill(-1);
   const owner = new Int32Array(weldedCount).fill(-1);
-  const cross = (t: number, out: Float64Array, offset: number) => {
-    const [a, b, c] = [0, 1, 2].map((k) => corners[t * 3 + k]);
-    const u = [0, 1, 2].map((axis) => written(b, axis) - written(a, axis)),
-      w = [0, 1, 2].map((axis) => written(c, axis) - written(a, axis));
-    out[offset] += u[1] * w[2] - u[2] * w[1];
-    out[offset + 1] += u[2] * w[0] - u[0] * w[2];
-    out[offset + 2] += u[0] * w[1] - u[1] * w[0];
-  };
   for (let v = 0; v < weldedCount; v++) {
     if (!touched[v]) continue;
     const triangles = trianglesOf.subarray(triangleStart[v], triangleStart[v + 1]);
     const fan = fansAround(mesh, v, triangles, owner);
-    const sum = new Float64Array(triangles.length * 3);
-    for (let i = 0; i < triangles.length; i++) cross(triangles[i], sum, fan[i] * 3);
+    triangleFan.set(fan, triangleStart[v]);
     for (let i = 0; i < triangles.length; i++)
       for (const k of [0, 1, 2] as const) {
         const c = triangles[i] * 3 + k;
-        if (weldOf[corners[c]] !== v) continue;
-        cornerFan[c] = fan[i];
-        const f = fan[i] * 3;
-        normalizeInto(sum[f], sum[f + 1], sum[f + 2], cornerNormal.subarray(c * 3, c * 3 + 3));
+        if (weldOf[corners[c]] === v) cornerFan[c] = fan[i];
       }
   }
 
   // Output vertex of each corner, and the geometry vertex and corner each output vertex copies.
-  let index: Uint32Array | null = null,
-    from: Uint32Array,
-    normalFrom: Int32Array;
-  if (mesh.indexed) {
-    const vertexOf = (index = corners.slice(0, cornerCount));
+  let from: Uint32Array, normalFrom: Int32Array;
+  if (index) {
+    const vertexOf = index;
     normalFrom = new Int32Array(vertexCount).fill(-1);
     const claimed = new Int32Array(vertexCount).fill(-1);
     const appended = new Map<number, number>();
@@ -467,36 +522,72 @@ export function writeRefinedGeometry(
   }
 
   const count = from.length;
-  const outPosition = blankLike(sourcePosition, count);
-  const outNormal = blankLike(sourceNormal, count);
+  const position = vertexOutput(sourcePosition, count);
+  const outPosition = position.target;
   for (let i = 0; i < count; i++) {
     const g = from[i];
-    const copy = copies[g];
-    if (copy !== unused) copyItem(sourcePosition, copy, outPosition, i);
-    else outPosition.setXYZ(i, written(g, 0), written(g, 1), written(g, 2));
-    const c = normalFrom[i];
-    const normalSource = copy !== unused ? copy : g < sourceVertexCount ? g : unused;
-    if (c >= 0)
-      outNormal.setXYZ(i, cornerNormal[c * 3], cornerNormal[c * 3 + 1], cornerNormal[c * 3 + 2]);
-    else if (normalSource !== unused) copyItem(sourceNormal, normalSource, outNormal, i);
+    if (copies[g] !== unused) position.copy(copies[g], i);
+    else {
+      const v = weldOf[g] * 3;
+      outPosition.setXYZ(i, local[v], local[v + 1], local[v + 2]);
+    }
   }
 
-  const result = new BufferGeometry();
+  // Normal of each corner at a moved vertex: area-weighted over its fan, from positions as written.
+  const stride = outPosition.itemSize;
+  const at = (c: number, axis: number) =>
+    outPosition.array[(index ? index[c] : c) * stride + axis] as number;
+  const cross = (t: number, out: Float64Array, offset: number) => {
+    const a = t * 3;
+    const u = [0, 1, 2].map((axis) => at(a + 1, axis) - at(a, axis)),
+      w = [0, 1, 2].map((axis) => at(a + 2, axis) - at(a, axis));
+    out[offset] += u[1] * w[2] - u[2] * w[1];
+    out[offset + 1] += u[2] * w[0] - u[0] * w[2];
+    out[offset + 2] += u[0] * w[1] - u[1] * w[0];
+  };
+  const cornerNormal = new Float32Array(cornerCount * 3);
+  for (let v = 0; v < weldedCount; v++) {
+    if (!touched[v]) continue;
+    const begin = triangleStart[v],
+      end = triangleStart[v + 1];
+    const sum = new Float64Array((end - begin) * 3);
+    for (let i = begin; i < end; i++) cross(trianglesOf[i], sum, triangleFan[i] * 3);
+    for (let i = begin; i < end; i++)
+      for (const k of [0, 1, 2] as const) {
+        const c = trianglesOf[i] * 3 + k;
+        if (weldOf[corners[c]] !== v) continue;
+        const f = triangleFan[i] * 3;
+        normalizeInto(sum[f], sum[f + 1], sum[f + 2], cornerNormal.subarray(c * 3, c * 3 + 3));
+      }
+  }
+
+  const normal = vertexOutput(sourceNormal, count);
+  for (let i = 0; i < count; i++) {
+    const g = from[i];
+    const c = normalFrom[i];
+    const normalSource = copies[g] !== unused ? copies[g] : g < sourceVertexCount ? g : unused;
+    if (c >= 0)
+      normal.target.setXYZ(
+        i,
+        cornerNormal[c * 3],
+        cornerNormal[c * 3 + 1],
+        cornerNormal[c * 3 + 2],
+      );
+    else if (normalSource !== unused) normal.copy(normalSource, i);
+  }
+
   result.setAttribute('position', outPosition);
-  result.setAttribute('normal', outNormal);
-  const sourceColor = source.getAttribute('color');
+  result.setAttribute('normal', normal.target);
   if (mesh.color && sourceColor) {
     const size = mesh.colorSize;
     const color = blankLike(sourceColor, count);
     for (let i = 0; i < count; i++) {
       const g = from[i];
-      if (g < sourceVertexCount) copyItem(sourceColor, g, color, i);
-      else for (let k = 0; k < size; k++) color.setComponent(i, k, mesh.color[g * size + k]);
+      if (g < sourceVertexCount)
+        for (let k = 0; k < size; k++) color.array[i * size + k] = stored(sourceColor, g, k);
+      else for (let k = 0; k < size; k++) encode(color, i, k, mesh.color[g * size + k]);
     }
     result.setAttribute('color', color);
   }
-  if (index) result.setIndex(new BufferAttribute(index, 1));
-  result.computeBoundingBox();
-  result.computeBoundingSphere();
-  return result;
+  return finish();
 }

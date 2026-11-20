@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { Box3, BufferAttribute, Matrix4, Quaternion, Vector3 } from 'three';
+import { Box3, BufferAttribute, Float16BufferAttribute, Matrix4, Quaternion, Vector3 } from 'three';
 import {
   buildRefineMesh,
   cloneRefineMesh,
@@ -12,16 +12,23 @@ import {
   changedTriangles,
   changedVertices,
   closed,
+  colorMismatches,
+  cornerTetrahedron,
+  decodedComponent,
   duplicatesAgree,
   extent,
   fanNormalError,
+  farFan,
+  halfFloats,
   hasNaN,
   modelOf,
   nearWeldSeam,
   outwardFraction,
   splitEdge,
   tetrahedron,
+  untouchedMismatches,
   wideFan,
+  writtenVertexOf,
 } from '../helpers/refine';
 import { softBox } from '../helpers/soft-edges';
 
@@ -284,4 +291,139 @@ it('places unmoved vertices at their translated world position', () => {
     const world = new Vector3().fromArray(mesh.position, mesh.weldOf[g] * 3);
     expect(world.distanceTo(expected)).toBeLessThan(1e-5);
   }
+});
+
+describe.each(cases)('storage that cannot hold new values, %s', (_, options) => {
+  const indexed = 'indexed' in options;
+  const moved = (source: ReturnType<typeof cornerTetrahedron>) => {
+    const mesh = buildRefineMesh(source, new Matrix4());
+    const v = mesh.weldOf[3];
+    moveVertex(mesh, v, 0.1, 0.2, 0.7);
+    return { mesh, out: writeRefinedGeometry(source, new Matrix4(), mesh) };
+  };
+  const sameStorage = (a: BufferAttribute, b: BufferAttribute) => {
+    expect(b.constructor).toBe(a.constructor);
+    expect(b.array.constructor).toBe(a.array.constructor);
+    expect(b.normalized).toBe(a.normalized);
+    expect(b.itemSize).toBe(a.itemSize);
+    expect(b.array).toEqual(a.array);
+  };
+
+  it('writes a split edge of an Int16 tetrahedron closed at its true midpoint', () => {
+    const source = cornerTetrahedron(
+      indexed,
+      (points) => new BufferAttribute(new Int16Array(points), 3),
+    );
+    const mesh = buildRefineMesh(source, new Matrix4());
+    const { middle } = splitEdge(mesh, 0);
+    const out = writeRefinedGeometry(source, new Matrix4(), mesh);
+    expect(closed(out)).toBe(true);
+    const position = out.getAttribute('position');
+    expect(position.array).toBeInstanceOf(Float32Array);
+    expect(position.normalized).toBe(false);
+    const vertex = writtenVertexOf(out, mesh, middle);
+    expect([0, 1, 2].map((k) => decodedComponent(position, vertex, k))).toEqual([0, 0.5, 0]);
+    expect(untouchedMismatches(source, out, mesh, 'position')).toBe(0);
+    expect(untouchedMismatches(source, out, mesh, 'normal')).toBe(0);
+  });
+
+  it('keeps normalized Int16 positions and Int8 normals untouched, and decodes them when moved', () => {
+    const source = cornerTetrahedron(
+      indexed,
+      (points) =>
+        new BufferAttribute(
+          Int16Array.from(points, (v) => Math.round(v * 0.9 * 32767)),
+          3,
+          true,
+        ),
+    );
+    const normals = source.getAttribute('normal').array;
+    source.setAttribute(
+      'normal',
+      new BufferAttribute(
+        Int8Array.from(normals, (v) => Math.round(v * 127)),
+        3,
+        true,
+      ),
+    );
+    const mesh = buildRefineMesh(source, new Matrix4());
+    const untouched = writeRefinedGeometry(source, new Matrix4(), mesh);
+    for (const name of ['position', 'normal'])
+      sameStorage(
+        source.getAttribute(name) as BufferAttribute,
+        untouched.getAttribute(name) as BufferAttribute,
+      );
+
+    const { mesh: after, out } = moved(source);
+    for (const name of ['position', 'normal']) {
+      expect(out.getAttribute(name).array).toBeInstanceOf(Float32Array);
+      expect(untouchedMismatches(source, out, after, name)).toBe(0);
+    }
+  });
+
+  it('keeps half-float positions untouched, and decodes them when moved', () => {
+    const source = cornerTetrahedron(indexed, (points) => halfFloats(points, 3));
+    const untouched = writeRefinedGeometry(
+      source,
+      new Matrix4(),
+      buildRefineMesh(source, new Matrix4()),
+    );
+    const position = untouched.getAttribute('position') as BufferAttribute;
+    sameStorage(source.getAttribute('position') as BufferAttribute, position);
+    expect(position).toBeInstanceOf(Float16BufferAttribute);
+    const one = indexed ? 1 : 2;
+    expect(position.getX(one)).toBe(1);
+
+    const { mesh, out } = moved(source);
+    expect(out.getAttribute('position').array).toBeInstanceOf(Float32Array);
+    expect(untouchedMismatches(source, out, mesh, 'position')).toBe(0);
+    expect(decodedComponent(out.getAttribute('position'), one, 0)).toBe(1);
+  });
+
+  const colors = [
+    ['half-float', (values: number[]) => halfFloats(values, 3), 1e-3],
+    [
+      'normalized Uint8',
+      (values: number[]) =>
+        new BufferAttribute(
+          Uint8Array.from(values, (v) => Math.round(v * 255)),
+          3,
+          true,
+        ),
+      1 / 255,
+    ],
+  ] as const;
+  it.each(colors)('carries %s colour through a cut', (_, store, resolution) => {
+    const source = cornerTetrahedron(indexed);
+    const count = source.getAttribute('position').count;
+    const sourceColor = store(Array.from({ length: count * 3 }, (_, i) => ((i * 37) % 101) / 100));
+    source.setAttribute('color', sourceColor);
+    const mesh = buildRefineMesh(source, new Matrix4());
+    const ends = [0, 1].map((k) => mesh.corners[k]);
+    const { middle } = splitEdge(mesh, 0);
+    const color = writeRefinedGeometry(source, new Matrix4(), mesh);
+    const written = color.getAttribute('color');
+    expect(written.constructor).toBe(sourceColor.constructor);
+    expect(written.array.constructor).toBe(sourceColor.array.constructor);
+    expect(written.normalized).toBe(sourceColor.normalized);
+    expect(colorMismatches(source, color, mesh)).toBe(0);
+    const vertex = writtenVertexOf(color, mesh, middle);
+    for (let k = 0; k < 3; k++) {
+      const expected =
+        (decodedComponent(sourceColor, ends[0], k) + decodedComponent(sourceColor, ends[1], k)) / 2;
+      expect(Math.abs(decodedComponent(written, vertex, k) - expected)).toBeLessThanOrEqual(
+        resolution,
+      );
+    }
+  });
+
+  it('writes normals from the positions as rounded into storage', () => {
+    const source = farFan(indexed);
+    const matrix = new Matrix4().makeTranslation(-1e5 + 0.3, 0, 0);
+    const mesh = buildRefineMesh(source, matrix);
+    const centre = mesh.weldOf[0];
+    moveVertex(mesh, centre, 0.3035, 0, 0.004);
+    const out = writeRefinedGeometry(source, matrix, mesh);
+    expect(fanNormalError(out, mesh, centre)).toBeLessThan(0.5);
+  });
 });

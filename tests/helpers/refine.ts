@@ -1,4 +1,12 @@
-import { BufferAttribute, BufferGeometry, Matrix4, Vector3 } from 'three';
+import {
+  BufferAttribute,
+  BufferGeometry,
+  DataUtils,
+  Float16BufferAttribute,
+  type InterleavedBufferAttribute,
+  Matrix4,
+  Vector3,
+} from 'three';
 import { hasClosedEdges, weldedPositionIndex } from '../../src/core/mesh-topology';
 import {
   type RefineMesh,
@@ -205,11 +213,18 @@ export function splitEdge(mesh: RefineMesh, triangle: number) {
   const p = (v: number) => [0, 1, 2].map((axis) => mesh.position[v * 3 + axis]);
   const [pa, pb] = [p(a), p(b)];
   const middle = addWeldedVertex(mesh, ...(pa.map((v, axis) => (v + pb[axis]) / 2) as Vec3));
+  const size = mesh.colorSize;
+  const color = (g: number) => mesh.color?.slice(g * size, g * size + size);
   const split = (t: number, first: number) => {
     const g = [0, 1, 2].map((i) => mesh.corners[t * 3 + ((first + i) % 3)]);
-    const m = addGeometryVertex(mesh, middle);
+    const [ca, cb] = [color(g[0]), color(g[1])];
+    const m = addGeometryVertex(
+      mesh,
+      middle,
+      ca?.map((value, k) => (value + cb![k]) / 2),
+    );
     // The new triangle names fresh duplicates of its untouched corners, as an unindexed cut would.
-    const [b, c] = [g[1], g[2]].map((v) => addGeometryVertex(mesh, mesh.weldOf[v]));
+    const [b, c] = [g[1], g[2]].map((v) => addGeometryVertex(mesh, mesh.weldOf[v], color(v)));
     setTriangle(mesh, t, g[0], m, g[2]);
     addTriangle(mesh, m, b, c);
   };
@@ -311,4 +326,111 @@ export function wideFan(count: number) {
   geometry.setIndex(faces);
   geometry.computeVertexNormals();
   return geometry;
+}
+
+/**
+ * Closed tetrahedron on the corners of the unit cube at the origin, with outward winding. Its
+ * position attribute is built by `store` from the flat coordinates.
+ */
+export function cornerTetrahedron(
+  indexed: boolean,
+  store: (points: number[]) => BufferAttribute = (points) =>
+    new BufferAttribute(new Float32Array(points), 3),
+) {
+  const geometry = new BufferGeometry();
+  const points = new Float32Array([0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1]);
+  geometry.setAttribute('position', new BufferAttribute(points, 3));
+  geometry.setIndex([0, 2, 1, 0, 1, 3, 0, 3, 2, 1, 2, 3]);
+  const result = indexed ? geometry : geometry.toNonIndexed();
+  result.setAttribute('position', store(Array.from(result.getAttribute('position').array)));
+  result.computeVertexNormals();
+  return result;
+}
+
+/** A half-float attribute holding `values`, encoded. */
+export function halfFloats(values: number[], itemSize: number) {
+  return new Float16BufferAttribute(Uint16Array.from(values, DataUtils.toHalfFloat), itemSize);
+}
+
+type Attribute = BufferAttribute | InterleavedBufferAttribute;
+const getters = ['getX', 'getY', 'getZ', 'getW'] as const;
+
+/** Component `k` of item `i`, decoded by the attribute's own accessors. */
+export const decodedComponent = (attribute: Attribute, i: number, k: number) =>
+  attribute[getters[k]](i);
+
+/** Output vertex of the first corner of `welded`. */
+export function writtenVertexOf(written: BufferGeometry, mesh: RefineMesh, welded: number) {
+  for (let c = 0; c < mesh.triangleCount * 3; c++)
+    if (mesh.weldOf[mesh.corners[c]] === welded)
+      return outputVertex(written, Math.floor(c / 3), c % 3);
+  return -1;
+}
+
+/** Pairs of output vertex and the source geometry vertex it was written from. */
+function writtenFromSource(written: BufferGeometry, mesh: RefineMesh) {
+  const pairs: [number, number][] = [];
+  if (written.index) for (let g = 0; g < mesh.sourceVertexCount; g++) pairs.push([g, g]);
+  else
+    for (let c = 0; c < mesh.triangleCount * 3; c++)
+      if (mesh.corners[c] < mesh.sourceVertexCount) pairs.push([c, mesh.corners[c]]);
+  return pairs;
+}
+
+/**
+ * Components of untouched source vertices whose written value decodes differently from the source.
+ * A Float32 output is held to the Float32 rounding of the decoded source value.
+ */
+export function untouchedMismatches(
+  source: BufferGeometry,
+  written: BufferGeometry,
+  mesh: RefineMesh,
+  name: string,
+) {
+  const before = source.getAttribute(name),
+    after = written.getAttribute(name);
+  const round = after.array instanceof Float32Array ? Math.fround : (v: number) => v;
+  let mismatches = 0;
+  for (const [i, g] of writtenFromSource(written, mesh)) {
+    if (mesh.touched[mesh.weldOf[g]]) continue;
+    for (let k = 0; k < before.itemSize; k++)
+      if (decodedComponent(after, i, k) !== round(decodedComponent(before, g, k))) mismatches++;
+  }
+  return mismatches;
+}
+
+/** Stored components of source vertices whose written colour differs from the source in any bit. */
+export function colorMismatches(source: BufferGeometry, written: BufferGeometry, mesh: RefineMesh) {
+  const before = source.getAttribute('color'),
+    after = written.getAttribute('color');
+  const size = before.itemSize;
+  let mismatches = 0;
+  for (const [i, g] of writtenFromSource(written, mesh))
+    for (let k = 0; k < size; k++)
+      if (!Object.is(after.array[i * size + k], before.array[g * size + k])) mismatches++;
+  return mismatches;
+}
+
+/**
+ * An open, uneven fan of five triangles, 0.02 mm in radius, around a centre at x = 1e5 where
+ * Float32 steps by 0.0078: its edges span a few rounding steps. Open, so its normal follows the centre.
+ */
+export function farFan(indexed: boolean) {
+  const heights = [0.01, 0, -0.01, 0.005, 0, 0.002];
+  const ring = heights.map((z, i) => [
+    1e5 + 0.02 * Math.cos((i * Math.PI) / 3),
+    0.02 * Math.sin((i * Math.PI) / 3),
+    z,
+  ]);
+  const faces: number[] = [];
+  for (let i = 0; i < 5; i++) faces.push(0, 1 + i, 1 + ((i + 1) % 6));
+  const geometry = new BufferGeometry();
+  geometry.setAttribute(
+    'position',
+    new BufferAttribute(new Float32Array([1e5, 0, 0, ...ring.flat()]), 3),
+  );
+  geometry.setIndex(faces);
+  const result = indexed ? geometry : geometry.toNonIndexed();
+  result.computeVertexNormals();
+  return result;
 }
