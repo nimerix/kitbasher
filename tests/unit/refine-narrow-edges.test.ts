@@ -282,6 +282,7 @@ describe('a guide that strays from its edge', () => {
 
 describe('automatic width on a coarse mesh', () => {
   it('keeps six edge lengths of flank past a wide rounding, over 1 mm', () => {
+    // One cylinder or sphere fits this band 6.20 times worse than the limit allows (measured).
     // The e2e cylinder: radius 3, rims rounded 0.6, edges about 0.23 mm. An Arc on the rim crest.
     const model = modelOf(softCylinder(3, 1.5, 0.6, { step: 0.2, ripple: 0.04, noise: 0.008 }));
     const inset = 0.6 - 0.6 / Math.SQRT2;
@@ -544,6 +545,9 @@ describe('a narrow flank', () => {
     line(model, [0, -0.02, -2.5], [0, -0.02, 2.5], width, strength);
 
   it('solves a groove wall of 0.20 to 0.30 mm straight run', () => {
+    // One smooth surface does not explain these bands: at runs of 0.20 and 0.22 on both plates no
+    // single cylinder or sphere fits at all, and over every run the nearest is 4.18 times the limit
+    // (measured).
     for (const plate of [[-2, 0] as [number, number], [-2, -0.8] as [number, number]])
       for (const run of [0.2, 0.22, 0.24, 0.26, 0.28, 0.3]) {
         const model = border(plate, run);
@@ -591,6 +595,7 @@ describe('a narrow flank', () => {
   };
 
   it('cuts in one piece past two rivets beside the edge and leaves them alone', () => {
+    // No single cylinder or sphere fits this band (measured), so the one-surface check passes it.
     const { model, guide } = rivets();
     const r = outcome(model, guide);
     expect(r.solved && [r.pieces, r.skipped, r.folded]).toEqual([1, 0, 0]);
@@ -648,6 +653,7 @@ describe('a narrow flank', () => {
   };
 
   it('cuts in one piece along a wall that narrows in two places, and in four', () => {
+    // No single cylinder or sphere fits either band (measured).
     // Dips to 0.06 mm of straight run at z = -1.0 and 0.9, and at z = -1.5, -0.5, 0.5 and 1.5.
     for (const dips of [
       [-1.0, 0.9],
@@ -872,6 +878,7 @@ function straightness(result: ReturnType<typeof outcome>, axis: number) {
 
 describe('a line over an edge that curves', () => {
   it('follows the rim of a cylinder of radius 5', () => {
+    // No single cylinder or sphere fits this band (measured).
     const model = modelOf(softCylinder(5, 1, 0.15, scan));
     // Two points on the rim's crest 3.4 mm apart: the chord sags 0.29 mm inside the rim.
     const inset = 0.15 - 0.15 / Math.SQRT2;
@@ -1133,6 +1140,8 @@ describe('a line over an edge that curves', () => {
   });
 
   it('stays a line on a straight edge of a rippled, noisy box', () => {
+    // One cylinder or sphere fits these bands 3.66 to 3.96 times worse than the limit allows
+    // (measured).
     const c = 0.3 - 0.3 / Math.SQRT2;
     for (const seed of [1, 2, 3, 4]) {
       const model = modelOf(
@@ -1256,6 +1265,7 @@ describe('a wide rounding', () => {
   };
 
   it('finds a fin edge across a 0.27 mm round', () => {
+    // One cylinder or sphere fits this band 2.30 times worse than the limit allows (measured).
     const model = fin();
     // This guide already solved before flank seeds could start past the reach.
     // The guide lies where the round leaves the flat face, 0.295 mm before the ideal corner.
@@ -1268,6 +1278,7 @@ describe('a wide rounding', () => {
   });
 
   it('finds a fin edge from 0.4 mm onto the flat face, its far flank past the reach', () => {
+    // No single cylinder or sphere fits this band (measured).
     const model = fin();
     // The edge face starts past the reach of a guide 0.4 mm before the ideal corner: its seed must
     // start farther out than the reach for the guide to find the edge.
@@ -1402,14 +1413,12 @@ describe('a guide on one smooth surface', () => {
       }
   }, 120_000);
 
-  // Known fault, not fixed: a Line laid slanting across a cylinder wall of radius 0.7 is taken as
-  // an edge. Seed 1 from (angle 1.1, y -1) to (1.5, 1), and seed 2 slanting the other way, each at
+  // Before, seed 1 from (angle 1.1, y -1) to (1.5, 1), and seed 2 slanting the other way, each at
   // Width 0.5 and automatic width, fit two planes 52.5 and 61.5 degrees apart and cut the wall in
-  // one piece, moving it up to 0.064 and 0.097 (measured). Every other seed, and slants of 0.1 and
-  // 0.3, are refused, as are walls of radius 1 to 2. The run test of slices filled from their
-  // neighbours (seed 1) and seeds past the reach (seed 2) admit it: each flank's run is 3.6 to 4
-  // edge lengths, as long as a narrow wall's, and its flatness 2.5 to 2.7 passes 2.2.
-  it.skip('refuses a line slanting across a cylinder wall of radius 0.7', () => {
+  // one piece, moving it up to 0.064 and 0.097 (measured). Each flank's run, 3.6 to 4 edge
+  // lengths, is as long as a narrow wall's, and its flatness, 2.5 to 2.7, passes 2.2. One cylinder
+  // explains the band there: its residual scale is 0.59 and 0.71 of the flanks' (measured).
+  it('refuses a line slanting across a cylinder wall of radius 0.7', () => {
     for (const seed of [1, 2, 3, 4]) {
       const model = modelOf(softCylinder(0.7, 2, 0.1, { ...scan, seed }));
       const at = (a: number, y: number): Vec3 => [0.7 * Math.cos(a), y, 0.7 * Math.sin(a)];

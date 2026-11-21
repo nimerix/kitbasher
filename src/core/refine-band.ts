@@ -79,6 +79,13 @@ export const minBandAngle = 10;
  * every edge of 50 degrees and over at least 2.46.
  */
 export const minFlankFlatness = 2.2;
+/**
+ * Largest ratio of the residual scale of one cylinder or sphere fitted to the whole band, its soft
+ * zone and both flanks, to the flanks' larger tolerance, at which the band is one smooth surface and
+ * not an edge. A Line slanting across a cylinder wall of radius 0.7 scores 0.59 and 0.71 (measured);
+ * no single cylinder or sphere fits the narrow groove wall's band at all.
+ */
+const oneSurfaceRatio = 1;
 
 /** Degrees added to the flanks' own turn, so that noise on two flat flanks cannot score unbounded. */
 const flatNoise = 4;
@@ -1043,6 +1050,46 @@ function standsOff(pair: FlankFit[], fitting: Uint8Array[]) {
   return (s: number, i: number) => toward[s] * pair[s].distance(i) < -3 * pair[s].local;
 }
 
+/**
+ * The robust residual scale, mm, over `members` of the one cylinder or sphere that fits them best,
+ * or Infinity when neither fits. It stops at the first that reaches `enough`. A plane is not tried:
+ * on a narrow groove wall's band, where the plate holds most of the vertices, a plane through the
+ * plate scores 0.87 to 0.90 of the flanks' tolerance (measured), and two flanks 10 degrees apart
+ * are never one plane.
+ */
+function oneSurface(
+  members: number[],
+  position: Float64Array,
+  vertices: Uint32Array,
+  normals: Float32Array,
+  noise: number,
+  enough: number,
+) {
+  const stride = Math.max(1, members.length / fitPoints);
+  const sample = Array.from(
+    { length: Math.min(members.length, fitPoints) },
+    (_, k) => members[Math.floor(k * stride)],
+  );
+  const p = new Float32Array(sample.length * 3),
+    n = new Float32Array(sample.length * 3);
+  sample.forEach((i, k) => {
+    p.set(position.subarray(vertices[i] * 3, vertices[i] * 3 + 3), k * 3);
+    n.set(normals.subarray(i * 3, i * 3 + 3), k * 3);
+  });
+  let best = Infinity;
+  for (const kind of ['cylinder', 'sphere'] as const) {
+    const fit = fitShape(p, n, kind, noise);
+    if (!fit) continue;
+    const residual = members.map((i) => {
+      const v = vertices[i] * 3;
+      return Math.abs(shapeDistance(fit.shape, position[v], position[v + 1], position[v + 2]));
+    });
+    best = Math.min(best, madScale * median(residual));
+    if (best <= enough) break;
+  }
+  return best;
+}
+
 const dot3 = (p: ArrayLike<number>, q: ArrayLike<number>) =>
   p[0] * q[0] + p[1] * q[1] + p[2] * q[2];
 
@@ -1636,6 +1683,20 @@ function classifyOriented(
     angle,
   );
   if (flatness < minFlankFlatness) return null;
+  // Last of the checks that do not depend on the width, as it costs most, and before the slices
+  // are filled: one cylinder or sphere that explains the soft zone and both flanks as well as the
+  // flanks explain themselves shows one smooth surface, such as a narrow cylinder wall, whose two
+  // flanks are only parts of it. It reads the zones the slices found.
+  {
+    const members: number[] = [];
+    for (let i = 0; i < count; i++)
+      if (runZone[i] !== BandZone.Beyond && band.g[i] <= analysis && !crossing[i] && band.open[i])
+        members.push(i);
+    const tolerance = Math.max(fits[0].local, fits[1].local);
+    const limit = oneSurfaceRatio * tolerance;
+    if (oneSurface(members, position, vertices, frame.vertexNormals, noise, limit) <= limit)
+      return null;
+  }
   const { zone } = finish(split(fits, solved, true));
 
   const larger: number[] = [];
