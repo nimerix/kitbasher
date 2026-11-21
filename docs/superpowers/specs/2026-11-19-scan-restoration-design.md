@@ -660,14 +660,27 @@ approved by the product owner.
   strength each pass moves the surface part of the way again, so a move over 0.005 there is
   expected and is not counted as falling short. Run again at their own strength, every one
   of those guides that solves again moves more than 0.005 away from the ends, except the
-  barrel ring, as expected. What is a fault at any strength:
+  barrel ring, as expected. The plate border, for one, moves 0.0785 (0.0788 after Flatten).
+  What is a fault at any strength:
   - The outlet arc's second pass is refused. Before these rules it solved in 3 pieces with
     28 triangles skipped.
-  - The plate border is cut in 2 pieces, and moves 0.0785 (0.0788 after Flatten).
+  - The plate border is cut in 2 pieces.
   - The buckle lip is cut in 2 pieces.
 
-  The synthetic fixtures show none of this: on them a second pass moves only a few cut-line
-  vertices near a guide's free ends, by about 0.01.
+  The synthetic fixtures show the same faults. Measured on eight seeds, both passes at full
+  strength, the guide placed again on the first result:
+  - A Line guide along the rim of a cylinder of radius 5, fitted as an arc: at Width 0.52
+    and 0.45 the second pass is cut in 2 pieces with 6 triangles skipped on one seed, and at
+    0.52 in 3 pieces with 8 triangles folded on another. On three seeds it moves 0.0092 to
+    0.0200 away from the ends.
+  - An Arc guide on the same rim stays in one piece, but on one seed moves 0.0134 away from
+    the ends.
+  - On the narrow wall at Width 0.45 the second pass is refused on four seeds and moves
+    0.0076 away from the ends on another. The unit test of that re-run passes because it
+    uses a seed where neither happens.
+
+  Elsewhere a second pass moves a few cut-line vertices near a guide's free ends by about
+  0.01, and on the rim by up to 0.023.
 
 - **Performance.** A preview update takes 92 to 106 ms for a strap lip guide on part 45
   and 139 to 165 ms for the valve rim on part 57 (80 to 96 ms and 150 to 163 ms before the

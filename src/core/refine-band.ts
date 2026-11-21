@@ -1109,10 +1109,13 @@ function classifyOriented(
   if (!(total > 0)) return null;
   const reachOf = (edge: number) => Math.max(reachWidth, reachEdges * edge);
   const spanOf = (edge: number) => Math.max(seedEdges * edge, seedSpan);
-  // Every vertex the classification reads lies within reach of the guide plus a seed, so a width
-  // only caps the band it returns and the classification is the same at every width up to that.
-  // The width is measured from the solved edge, which lies within reach of the guide in at least
-  // half of the slices, or `away` from it where an earlier classification found it further.
+  // The band is gathered out to the width past reach of the guide, or past `away`, and at least to
+  // reach plus a seed. How far it is gathered changes the classification: each slice's frame
+  // normal is weighted over every gathered vertex, a flank's run can read out to the gather's edge,
+  // and the edge's solve is bounded by the gather's width. So a classification read for one width
+  // can differ from one read for another. The width is measured from the solved edge, which lies
+  // within reach of the guide in at least half of the slices, or `away` from it where an earlier
+  // classification found it further.
   const band = gather(
     mesh,
     topology,
