@@ -97,6 +97,28 @@ function chainOff(result: ReturnType<typeof outcome>, at: [number, number], half
   return seen ? +worst.toFixed(4) : NaN;
 }
 
+/**
+ * The guide solved and applied at full strength, then placed again on that result and solved and
+ * applied over it: the second pass's outcome, and its largest move over the vertices whose
+ * positions `inner` admits. Null when the first pass is refused.
+ */
+function rerun(model: Model, input: (model: Model) => EdgeInput, inner: (p: number[]) => boolean) {
+  const first = outcome(model, input(model));
+  if (!first.solved) return null;
+  const again = modelFrom(first.out);
+  const second = outcome(again, input(again));
+  if (!second.solved) return { second, inner: NaN };
+  const p = again.mesh.position,
+    q = second.out.position;
+  let most = 0;
+  for (let v = 0; v < again.mesh.weldedCount; v++) {
+    const at = [p[v * 3], p[v * 3 + 1], p[v * 3 + 2]];
+    if (!inner(at)) continue;
+    most = Math.max(most, Math.hypot(q[v * 3] - at[0], q[v * 3 + 1] - at[1], q[v * 3 + 2] - at[2]));
+  }
+  return { second, inner: most };
+}
+
 /** The 90 degree edge along z at the origin, the top face at y = 0, rounded 0.08 mm. */
 const corner = (seed = 1) =>
   modelOf(
@@ -465,7 +487,7 @@ describe('a narrow flank', () => {
    * falling at -50 degrees, fillet 0.08; a rise at 20 degrees for 0.35 mm, fillet 0.12; a fall at
    * -60 degrees for 1.2 mm. Length 6. `run` is the wall's straight length between its two fillets.
    */
-  const border = (plate: [number, number], run: number) => {
+  const border = (plate: [number, number], run: number, seed = 1) => {
     const tilt = (Math.atan2(-plate[1], -plate[0]) * 180) / Math.PI;
     const tangents = 0.1 * Math.tan(deg((50 + tilt) / 2)) + 0.08 * Math.tan(deg(35));
     const groove = step([0, 0], -50, run + tangents);
@@ -475,7 +497,7 @@ describe('a narrow flank', () => {
         [plate, [0, 0], groove, second, step(second, -60, 1.2)],
         [0.1, 0.08, 0.12],
         6,
-        scan,
+        { ...scan, seed },
       ),
     );
   };
@@ -627,6 +649,46 @@ describe('a narrow flank', () => {
         );
     expect(inner).toBeLessThan(0.005);
     expect(second.max).toBeLessThan(0.02);
+  });
+
+  it('solves again over a narrow wall at a set Width, on every seed', () => {
+    // Before, the second pass at Width 0.45 was refused on seeds 2, 3, 4 and 8: on the wall's side
+    // no vertex of full weight was left to move, as the first pass had put them on the edge. Now
+    // every second pass is one piece with nothing skipped or folded, and moves at most 0.0106
+    // anywhere (measured, seed 1).
+    for (const seed of [1, 2, 3, 4, 5, 6, 7, 8]) {
+      const model = border([-2, 0], 0.24, seed);
+      const r = rerun(
+        model,
+        (m) => crestGuide(m, 0.45, 1),
+        () => false,
+      );
+      const label = `seed ${seed}`;
+      expect(r, label).not.toBeNull();
+      const { second } = r!;
+      expect(second.solved && [second.pieces, second.skipped, second.folded], label).toEqual([
+        1, 0, 0,
+      ]);
+      expect(second.solved && second.max, label).toBeLessThan(0.02);
+    }
+  }, 60_000);
+
+  // Known fault, not fixed: on seed 7 the second pass moves 0.0076 away from the guide's ends at
+  // Width 0.45, and 0.0074 at automatic width (measured). The first pass fits the wall 46.0
+  // degrees from the plate, where the wall is at 50; the second refits it at 47.4 and moves the
+  // whole crease. Suspected cause: a plane fitted on a run this short is not stable between passes.
+  // Every other seed moves under 0.0036 (measured).
+  it.skip('changes nothing visible away from the ends when run again over a narrow wall', () => {
+    for (const seed of [1, 2, 3, 4, 5, 6, 7, 8])
+      for (const width of [0.45, null]) {
+        const model = border([-2, 0], 0.24, seed);
+        const r = rerun(
+          model,
+          (m) => crestGuide(m, width, 1),
+          (p) => Math.abs(p[2]) <= 2,
+        );
+        expect(r?.inner, `seed ${seed}, width ${width ?? 'auto'}`).toBeLessThan(0.005);
+      }
   });
 
   it('fits, orients and decides its ends from the zones its slices found', () => {
@@ -973,6 +1035,62 @@ describe('a line over an edge that curves', () => {
     for (const v of bridging) expect(gap(v)).toBeLessThanOrEqual(2 * edge);
     // It reaches no farther past the tie than the band's width: measured 0.507 at width 0.52.
     expect(Math.max(...past.map(fromTie))).toBeLessThanOrEqual(solve!.bands[0].width);
+  });
+
+  // Known faults, not fixed. Run again over its own result at full strength, at Width 0.52 and
+  // 0.45, a Line along the rim (fitted as an arc) is cut in 2 pieces with 6 triangles skipped on
+  // seed 2, and at 0.52 in 3 pieces with 8 triangles folded on seed 5. It moves 0.0186 to 0.0200
+  // away from the ends on seed 4 and 0.0099 to 0.0135 on seed 7, and near the ends up to 0.023:
+  // 0.02 or more on seeds 1, 2, 4, 5 and 6 (measured). The broken cuts follow the second pass
+  // being a Line whatever the first pass was, need a cut made before (a Line on a rim rounded only
+  // 0.02 or 0.04 cuts in one piece on every seed), and lie in the last 0.5 mm of the guide, where
+  // the cut tapers. Seed 4's move follows a first pass that was a Line: it leaves creased vertices
+  // about 0.03 from the rim's corner, which the second pass moves onto it. Causes not found
+  // further.
+  it.skip('changes nothing visible when a Line along the rim is run again', () => {
+    const model = (seed: number) => modelOf(softCylinder(5, 1, 0.15, { ...scan, seed }));
+    const half = Math.asin(1.7 / 5);
+    const inner = (p: number[]) => Math.abs(Math.atan2(p[2], p[0])) <= half - 0.1;
+    for (const seed of [1, 2, 3, 4, 5, 6, 7, 8])
+      for (const width of [0.52, 0.45]) {
+        const r = rerun(
+          model(seed),
+          (m) => line(m, rimPoint(m.mesh, -half).position, rimPoint(m.mesh, half).position, width),
+          inner,
+        );
+        const label = `seed ${seed}, width ${width}`;
+        const second = r!.second;
+        expect(second.solved && [second.pieces, second.skipped, second.folded], label).toEqual([
+          1, 0, 0,
+        ]);
+        expect(r!.inner, label).toBeLessThan(0.005);
+        expect(second.solved && second.max, label).toBeLessThan(0.02);
+      }
+  });
+
+  // Known fault, not fixed: an Arc along the same rim stays one piece on every seed, but moves
+  // 0.0134 away from the ends on seed 7, as a Line does there, and near the ends up to 0.0229, 0.02
+  // or more on seeds 1, 2, 4 and 5 (measured).
+  it.skip('changes nothing visible when an Arc along the rim is run again', () => {
+    const half = Math.asin(1.7 / 5);
+    const inner = (p: number[]) => Math.abs(Math.atan2(p[2], p[0])) <= half - 0.1;
+    for (const seed of [1, 2, 3, 4, 5, 6, 7, 8]) {
+      const r = rerun(
+        modelOf(softCylinder(5, 1, 0.15, { ...scan, seed })),
+        (m) => ({
+          segments: [{ kind: 'arc', points: [-half, 0, half].map((a) => rimPoint(m.mesh, a)) }],
+          joints: [],
+          closed: false,
+          width: 0.52,
+          strength: 1,
+        }),
+        inner,
+      );
+      const second = r!.second;
+      expect(second.solved && [second.pieces, second.skipped, second.folded]).toEqual([1, 0, 0]);
+      expect(r!.inner, `seed ${seed}`).toBeLessThan(0.005);
+      expect(second.solved && second.max, `seed ${seed}`).toBeLessThan(0.02);
+    }
   });
 
   it('stays a line on a straight edge of a rippled, noisy box', () => {

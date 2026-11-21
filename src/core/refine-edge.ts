@@ -1519,6 +1519,7 @@ function usableCore(
   const { position } = mesh;
   const { edge } = frame;
   const near = Math.max(Math.max(...solve.bands.map((band) => band.soft)), 2 * edge);
+  const tolerance = 3 * Math.max(...solve.bands.flatMap((band) => band.flanks.map((f) => f.local)));
   const sides = [false, false];
   const stations: number[] = [];
   const at = new Float64Array(3);
@@ -1526,7 +1527,14 @@ function usableCore(
     if (weights[k] < 1) return;
     const zone = frame.zone[k];
     const p = [position[v * 3], position[v * 3 + 1], position[v * 3 + 2]];
-    sides[sideOf(zone, surfaces(p[0], p[1], p[2]), p)] = true;
+    const surface = surfaces(p[0], p[1], p[2]);
+    sides[sideOf(zone, surface, p)] = true;
+    // A vertex on both corrected surfaces already, as on an edge refined before, is on each side.
+    if (
+      surface.distance(0, p[0], p[1], p[2]) <= tolerance &&
+      surface.distance(1, p[0], p[1], p[2]) <= tolerance
+    )
+      sides[0] = sides[1] = true;
     const station = onCurve(
       solve.curve,
       position[v * 3],

@@ -531,7 +531,9 @@ pieces, for five measured reasons:
    moves, and beside a concave edge none moves where filling used to move it.
    The edge is found, fitted and oriented, and its free ends decided, from the slices' own
    zones. Filled zones only decide what moves and what is cut. The check that a sharp core
-   remains in what will be moved reads the filled zones, because it checks that move.
+   remains in what will be moved reads the filled zones, because it checks that move. It
+   needs a vertex of full weight on each side; one already on both corrected surfaces, as
+   on an edge refined before, counts for both.
 4. **A flank may start past the reach.** A flank's seed may start anywhere in the seed
    window: the reach plus one seed span, which is up to twice the reach. Pairs of flanks
    whose seeds both start within the reach are tried first, so a guide whose flanks start
@@ -641,13 +643,13 @@ approved by the product owner.
   ("Verification", "Changes made while building"). On the reference scans this does not
   hold. Measured with both passes at full strength, against 0.005 away from the guide's
   ends (the last 0.5 at each end) and 0.02 anywhere, these guides fail:
-  - The plate border, as a line before and after Flatten, moves 0.05 and is cut in 4
-    pieces.
+  - The plate border, as a line before and after Flatten, moves 0.051 and is cut in 4
+    pieces (3 after Flatten).
   - The belt edge moves 0.11 and is cut in 2 pieces with 8 triangles skipped.
   - The buckle lip moves 0.0114 away from the ends.
-  - The valve rim moves 0.0221 away from the ends and 0.0229 anywhere, and is cut in 3
-    pieces with 9 triangles skipped.
-  - The outlet arc moves 0.044 and is cut in 6 pieces with 27 triangles skipped.
+  - The valve rim moves 0.0221 away from the ends and 0.0249 anywhere, and is cut in 3
+    pieces with 10 triangles skipped.
+  - The outlet arc moves 0.0398 and is cut in 4 pieces with 6 triangles skipped.
   - Detect's buckle guide moves 0.0159 away from the ends and 0.0223 anywhere, about as
     before these rules.
   - The kept frame rail moves 0.0054 away from the ends, where it moved 0.0036 before.
@@ -660,11 +662,10 @@ approved by the product owner.
   strength each pass moves the surface part of the way again, so a move over 0.005 there is
   expected and is not counted as falling short. Run again at their own strength, every one
   of those guides that solves again moves more than 0.005 away from the ends, except the
-  barrel ring, as expected. The plate border, for one, moves 0.0785 (0.0788 after Flatten).
+  barrel ring, as expected. The plate border, for one, moves 0.0711 (0.0714 after Flatten).
   What is a fault at any strength:
   - The outlet arc's second pass is refused. Before these rules it solved in 3 pieces with
     28 triangles skipped.
-  - The plate border is cut in 2 pieces.
   - The buckle lip is cut in 2 pieces.
 
   The synthetic fixtures show the same faults. Measured on eight seeds, both passes at full
@@ -672,12 +673,14 @@ approved by the product owner.
   - A Line guide along the rim of a cylinder of radius 5, fitted as an arc: at Width 0.52
     and 0.45 the second pass is cut in 2 pieces with 6 triangles skipped on one seed, and at
     0.52 in 3 pieces with 8 triangles folded on another. On three seeds it moves 0.0092 to
-    0.0200 away from the ends.
+    0.0200 away from the ends. The broken cuts come with the second pass being a Line,
+    whatever the first pass was, need a cut made before, and lie in the last 0.5 of the
+    guide, where the cut tapers. Their cause was not found.
   - An Arc guide on the same rim stays in one piece, but on one seed moves 0.0134 away from
     the ends.
-  - On the narrow wall at Width 0.45 the second pass is refused on four seeds and moves
-    0.0076 away from the ends on another. The unit test of that re-run passes because it
-    uses a seed where neither happens.
+  - On the narrow wall at Width 0.45 the second pass solves in one piece on every seed, but
+    on one seed moves 0.0076 away from the ends. The first pass fits the wall 46 degrees
+    from the plate, where it is at 50, and the second refits it at 47.4.
 
   Elsewhere a second pass moves a few cut-line vertices near a guide's free ends by about
   0.01, and on the rim by up to 0.023.
