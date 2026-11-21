@@ -591,6 +591,84 @@ describe('refine guides', () => {
     expect(editor().scene.parts[0].geometry).toBe(before.parts[0].geometry);
   });
 
+  it('keeps a zero-strength guide pending without a new working model or Apply', async () => {
+    const part = boxPart();
+    setup([part], ['box']);
+    await ready();
+    const id = crestGuide();
+    editor().setRefineEdge({ strength: 0 });
+    const { model, undo } = session();
+    const oldPositions = Buffer.from(Buffer.from(model!.mesh.position.buffer));
+    const oldPreview = fresh();
+    editor().acceptRefine();
+    expect(session().features[0]).toMatchObject({ id, state: 'pending' });
+    expect(session().selected).toEqual([id]);
+    expect(session().model).toBe(model);
+    expect(session().undo).toBe(undo);
+    expect(Buffer.from(session().model!.mesh.position.buffer).equals(oldPositions)).toBe(true);
+    expect(differingAttributes(session().preview!, oldPreview)).toEqual([]);
+    expect(refineEdited(session())).toBe(false);
+    expect(editor().applyRefine()).toBe(false);
+    expect(editor().scene.parts[0].geometry).toBe(part.geometry);
+    expect(toast()).toBe('This changes nothing at 0 % strength.');
+  });
+
+  it('leaves a positive-strength edge pending if its cut writes no position or topology bits', async () => {
+    setup([boxPart()], ['box']);
+    await ready();
+    const id = crestGuide();
+    const before = session().model!;
+    const applyEdge = edgeCode.applyEdge;
+    const apply = vi.spyOn(edgeCode, 'applyEdge').mockImplementation((...args) =>
+      args[4]
+        ? {
+            changed: Uint32Array.of(0),
+            cut: {
+              chain: Uint32Array.of(0),
+              children: new Map(),
+              edges: new Uint32Array(),
+              skipped: new Uint32Array(),
+            },
+            folded: new Uint32Array(),
+            skipped: new Uint32Array(),
+            stationary: new Uint32Array(),
+            pieces: 0,
+          }
+        : applyEdge(...args),
+    );
+    try {
+      editor().acceptRefine();
+      expect(session().features[0]).toMatchObject({ id, state: 'pending' });
+      expect(session().model).toBe(before);
+      expect(refineEdited(session())).toBe(false);
+      expect(toast()).toBe(
+        'This feature did not change the surface. Adjust its settings and try again.',
+      );
+    } finally {
+      apply.mockRestore();
+    }
+  });
+
+  it('accepts only changing features in a batch and keeps the zero-strength guide selected', async () => {
+    setup([boxPart()], ['box']);
+    await ready();
+    const zero = crestGuide(-1.3, 1.3);
+    editor().setRefineEdge({ strength: 0 });
+    const edge = crestGuide();
+    editor().setRefineMode('detect');
+    editor().selectRefine([zero, edge]);
+    const undo = session().undo.length;
+    editor().acceptRefine();
+    expect(session().features.map((f) => [f.id, f.state])).toEqual([
+      [zero, 'pending'],
+      [edge, 'accepted'],
+    ]);
+    expect(session().selected).toEqual([zero]);
+    expect(session().undo).toHaveLength(undo + 1);
+    expect(refineEdited(session())).toBe(true);
+    expect(toast()).toBe('This changes nothing at 0 % strength.');
+  });
+
   it('reports an overlong spline once for the guide and leaves it pending', async () => {
     setup([boxPart()], ['box']);
     await ready();

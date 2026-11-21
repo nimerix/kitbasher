@@ -5943,6 +5943,18 @@ function solvePass(session: string, pass: { id: string; notice: string | null }[
   }
 }
 
+/** A solver can report a touched vertex even when its position bits stayed the same. */
+function wrotePositions(before: RefineMesh, after: RefineMesh, changed: Uint32Array) {
+  return changed.some((v) => {
+    const i = v * 3;
+    return (
+      !Object.is(before.position[i], after.position[i]) ||
+      !Object.is(before.position[i + 1], after.position[i + 1]) ||
+      !Object.is(before.position[i + 2], after.position[i + 2])
+    );
+  });
+}
+
 /**
  * Bakes `targets`, pending features of `features`, into the working surface in list order as one
  * step. A feature that does not solve stays as it was and is reported. Changes nothing when none
@@ -5960,18 +5972,47 @@ function acceptFeatures(
     skipped = noFolds;
   const byId = new Map(features.map((f) => [f.id, f]));
   const pass: { id: string; notice: string | null }[] = [];
+  const unchanged = new Set<string>();
   let accepted = false;
   let brokenPieces = 0;
   for (const target of targets) {
     const feature = byId.get(target.id)!;
     const proposal = feature.feature;
+    const noChange = (notice: string) => {
+      unchanged.add(feature.id);
+      pass.push({ id: feature.id, notice });
+    };
+    if (proposal.input.strength === 0) {
+      noChange(zeroStrengthNotice);
+      continue;
+    }
     if (proposal.type === 'edge') {
       const solve = solvable(proposal.input) ? solveProposal(model, model.mesh, proposal) : null;
-      pass.push({ id: feature.id, notice: solve ? null : edgeFailure(proposal.input) });
-      if (!solve) continue;
+      if (!solve) {
+        pass.push({ id: feature.id, notice: edgeFailure(proposal.input) });
+        continue;
+      }
       const mesh = cloneRefineMesh(model.mesh, true);
       const result = edge.applyEdge(mesh, model.topology, solve, proposal.input.strength, true);
       const children = result.cut?.children;
+      const base = model.mesh;
+      const topologyChanged =
+        mesh.weldedCount !== base.weldedCount ||
+        mesh.vertexCount !== base.vertexCount ||
+        mesh.triangleCount !== base.triangleCount ||
+        (children &&
+          [...children.keys()].some((t) => {
+            const i = t * 3;
+            return (
+              mesh.corners[i] !== base.corners[i] ||
+              mesh.corners[i + 1] !== base.corners[i + 1] ||
+              mesh.corners[i + 2] !== base.corners[i + 2]
+            );
+          }));
+      if (!topologyChanged && !wrotePositions(base, mesh, result.changed)) {
+        noChange(noChangeNotice);
+        continue;
+      }
       const cutDisplay = result.cut
         ? edge.cutEdgeDisplay(mesh.position, result.cut.edges, solve, model.step)
         : undefined;
@@ -6006,25 +6047,36 @@ function acceptFeatures(
       });
     } else {
       const solve = solveProposal(model, model.mesh, proposal);
-      pass.push({ id: feature.id, notice: solve ? null : smallRegionNotice });
-      if (!solve) continue;
+      if (!solve) {
+        pass.push({ id: feature.id, notice: smallRegionNotice });
+        continue;
+      }
       const mesh = cloneRefineMesh(model.mesh, false);
       const changed = region.applyRegion(mesh, solve);
+      if (!wrotePositions(model.mesh, mesh, changed)) {
+        noChange(noChangeNotice);
+        continue;
+      }
       folds = union(folds, foldedTriangles(mesh, model.topology, model.mesh.position, changed));
       model = { ...model, mesh };
       byId.set(feature.id, { ...feature, state: 'accepted' });
     }
+    pass.push({ id: feature.id, notice: null });
     accepted = true;
   }
   const { notify } = useEditor.getState();
   // One notice per press, with failures ahead of pieces and pieces ahead of skipped or folded triangles.
   solvePass(refine.id, pass, true);
   const failed = pass.some((p) => p.notice !== null);
-  if (!accepted) return;
+  if (!accepted) {
+    if (features !== refine.features && unchanged.size)
+      commitRefine({ features, selected: [...unchanged], drawing: false });
+    return;
+  }
   commitRefine({
     model,
     features: features.map((f) => byId.get(f.id)!),
-    selected: [],
+    selected: refine.selected.filter((id) => unchanged.has(id)),
     draft: null,
     triangles: [...triangles],
     folds,
@@ -6396,6 +6448,9 @@ const noEdgeNotice =
   'No edge found under this guide. Move it onto the rounded edge or change Width.';
 const longGuideNotice = 'This guide is too long for this mesh. Try a shorter guide.';
 const smallRegionNotice = 'This area is too small to fit a surface. Paint more of it.';
+const zeroStrengthNotice = 'This changes nothing at 0 % strength.';
+const noChangeNotice =
+  'This feature did not change the surface. Adjust its settings and try again.';
 const wideCreaseNotice = 'The edge is wider than the brush. Check the preview, then accept it.';
 export const piecesWarning = (pieces: number) =>
   `The edge was cut in ${pieces} pieces. Undo to adjust the guide, or keep it.`;
