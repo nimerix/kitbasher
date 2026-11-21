@@ -291,10 +291,10 @@ describe('the automatic width and the classification it hands on', () => {
 });
 
 describe('a path whose bands hold different widths', () => {
-  it('solves each segment at its own band width, the path at the width asked for', () => {
-    // A spline along the top front crest of a 16 mm box to its right end, then along the right
-    // crest: the front band, past the slices at the box's end, covers only 0.267 of the 0.6 asked
-    // for (measured); the right one covers all of it. Before, the whole path was solved at 0.267.
+  // A spline along the top front crest of a 16 mm box to its right end, then along the right crest,
+  // a sharp joint between them: the front band, past the slices at the box's end, covers only 0.267
+  // of the 0.6 asked for (measured); the right one covers all of it.
+  const path = () => {
     const model = modelOf(softBox([8, 2, 2], 0.3, { step: 0.04 }));
     const inset = 0.3 - 0.3 / Math.SQRT2;
     const front = [-8, -4, 0, 4, 8 - inset].map((x) =>
@@ -313,11 +313,38 @@ describe('a path whose bands hold different widths', () => {
       width: 0.6,
       strength: 1,
     };
-    const solve = solveEdge(model.mesh, model.topology, input, model.noise)!;
+    return { model, solve: solveEdge(model.mesh, model.topology, input, model.noise)! };
+  };
+
+  it('solves each segment at its own band width, the path at the width asked for', () => {
+    // Before, the whole path was solved at 0.267.
+    const { solve } = path();
     expect(solve).not.toBeNull();
     expect(solve.bands[0].width).toBeLessThan(0.5);
     expect(solve.bands[1].width).toBe(0.6);
     expect(solve.width).toBe(0.6);
+  }, 60_000);
+
+  it('edits nothing outside both bands past the narrower band width from the joint', () => {
+    // The joint takes in vertices no band holds out to the narrower of the two bands' widths. Before,
+    // it reached the 0.6 asked for, and edited 5 such vertices from 0.27 to 0.49 mm from the joint
+    // (measured; now the farthest is 0.20).
+    const { model, solve } = path();
+    const out = cloneRefineMesh(model.mesh, true);
+    const { changed } = applyEdge(out, model.topology, solve, 1, true);
+    const held = new Set(solve.bands.flatMap((band) => [...band.vertices]));
+    // The joint, where the right crest's guide starts.
+    const joint = solve.bands[1].drawn.points;
+    const p = model.mesh.position;
+    const narrower = Math.min(...solve.bands.map((band) => band.width));
+    const outside = [...changed].filter(
+      (v) =>
+        v < model.mesh.weldedCount &&
+        !held.has(v) &&
+        Math.hypot(p[v * 3] - joint[0], p[v * 3 + 1] - joint[1], p[v * 3 + 2] - joint[2]) >
+          narrower,
+    );
+    expect(outside).toEqual([]);
   }, 60_000);
 });
 

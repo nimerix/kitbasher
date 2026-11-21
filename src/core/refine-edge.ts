@@ -1297,15 +1297,17 @@ function frameOf(mesh: RefineMesh, topology: RefineTopology, solve: EdgeSolve): 
     }),
   );
   // A joint takes in the vertices around it, out to the band's width, that no band may move: no band
-  // reaches past its guide's end, and a band's own end, or a corner's rounding, may be Beyond.
+  // reaches past its guide's end, and a band's own end, or a corner's rounding, may be Beyond. The
+  // width is the narrower of the two bands' own, so that neither band's patch reaches past it.
   const patch: number[] = places.map(() => -1);
   all.forEach((joint, c) => {
+    const reach = Math.min(bands[joint.from].width, bands[joint.to].width);
     const near = (v: number) =>
       Math.hypot(
         position[v * 3] - joint.point[0],
         position[v * 3 + 1] - joint.point[1],
         position[v * 3 + 2] - joint.point[2],
-      ) <= solve.width;
+      ) <= reach;
     const queue = [...index.keys()].filter(near);
     for (let head = 0; head < queue.length; head++) {
       const v = queue[head];
@@ -1338,7 +1340,7 @@ function frameOf(mesh: RefineMesh, topology: RefineTopology, solve: EdgeSolve): 
           position[v * 3] - end[0],
           position[v * 3 + 1] - end[1],
           position[v * 3 + 2] - end[2],
-        ) <= solve.width;
+        ) <= band.width;
       const mark = (v: number, state: number) => {
         let k = index.get(v);
         if (k === undefined) {
@@ -2169,7 +2171,8 @@ export function applyEdge(
     const p = [position[v * 3], position[v * 3 + 1], position[v * 3 + 2]];
     const station = closestOnCurve(solve.curve, p[0], p[1], p[2], along);
     if (!solve.curve.closed && !(station > 0 && station < span)) return;
-    if (Math.hypot(p[0] - along[0], p[1] - along[1], p[2] - along[2]) > solve.width / 2) return;
+    const reach = solve.bands[frame.owner[k]].width / 2;
+    if (Math.hypot(p[0] - along[0], p[1] - along[1], p[2] - along[2]) > reach) return;
     const surface = surfaces(p[0], p[1], p[2]);
     const d = [0, 1].map((side) => surface.distance(side, p[0], p[1], p[2]));
     const side = d[1] < d[0] ? 1 : 0;
