@@ -1641,18 +1641,10 @@ function classify(
   const oriented = backward ? [...points].reverse() : points;
   let found = classifyOriented(mesh, topology, kind, oriented, width, noise);
   // Where the solved edge strays past reach of the guide, a band reaching `width` from it there is
-  // gathered once more, an edge length further than the edge strayed, for the edge to stray a
-  // little further on that reading.
+  // gathered once more, as far as the edge strayed. Should it stray further on that reading, the
+  // band holds to what this gather covers.
   if (found && width !== null && width > found.gathered)
-    found = classifyOriented(
-      mesh,
-      topology,
-      kind,
-      oriented,
-      width,
-      noise,
-      found.strayed + found.edge,
-    );
+    found = classifyOriented(mesh, topology, kind, oriented, width, noise, found.strayed);
   if (!found || !backward) return found;
   return {
     ...found,
