@@ -1003,6 +1003,7 @@ interface Blocks {
   size: number;
   centres: Float64Array;
   radii: Float64Array;
+  bounds: Float64Array;
 }
 const blockCache = new WeakMap<EdgeCurve, Blocks>();
 
@@ -1057,7 +1058,7 @@ function blocksOf(curve: EdgeCurve) {
     for (let a = 0; a < 3; a++) centres[b * 3 + a] = (low[a] + high[a]) / 2;
     radii[b] = Math.hypot(high[0] - low[0], high[1] - low[1], high[2] - low[2]) / 2;
   }
-  const result = { fingerprint, size, centres, radii };
+  const result = { fingerprint, size, centres, radii, bounds: new Float64Array(blocks) };
   blockCache.set(curve, result);
   return result;
 }
@@ -1077,7 +1078,7 @@ export function closestOnCurve(
     return 0;
   }
   const segments = segmentCount(curve);
-  const { size, centres, radii } = blocksOf(curve);
+  const { size, centres, radii, bounds } = blocksOf(curve);
   const blocks = radii.length;
   let best = Infinity,
     bestSegment = 0,
@@ -1105,9 +1106,15 @@ export function closestOnCurve(
       Math.hypot(centres[b * 3] - x, centres[b * 3 + 1] - y, centres[b * 3 + 2] - z) - radii[b],
     );
   let nearest = 0;
-  for (let b = 1; b < blocks; b++) if (bound(b) < bound(nearest)) nearest = b;
+  if (blocks > 1) {
+    bounds[0] = bound(0);
+    for (let b = 1; b < blocks; b++) {
+      bounds[b] = bound(b);
+      if (bounds[b] < bounds[nearest]) nearest = b;
+    }
+  }
   scan(nearest);
-  for (let b = 0; b < blocks; b++) if (b !== nearest && bound(b) ** 2 < best) scan(b);
+  for (let b = 0; b < blocks; b++) if (b !== nearest && bounds[b] ** 2 < best) scan(b);
   const j = (bestSegment + 1) % count;
   for (let a = 0; a < 3; a++)
     out[a] = p[bestSegment * 3 + a] + (p[j * 3 + a] - p[bestSegment * 3 + a]) * bestF;

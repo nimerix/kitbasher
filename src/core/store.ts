@@ -6291,7 +6291,11 @@ function rebuildRefineDraft(draftStatus: RefineSession['draftStatus'] = null) {
     return;
   }
   const { edge, region } = refineCode!;
-  const mesh = cloneRefineMesh(model.mesh, false);
+  const mesh = {
+    ...model.mesh,
+    position: model.mesh.position.slice(),
+    touched: model.mesh.touched.slice(),
+  };
   const moved: Uint32Array[] = [];
   const curves = new Map<string, EdgeCurve | undefined>();
   const pass: { id: string; notice: string | null }[] = [];

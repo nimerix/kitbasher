@@ -150,6 +150,7 @@ const representatives = new WeakMap<
   Uint32Array,
   { vertexCount: number; weldedCount: number; first: Uint32Array }
 >();
+const fanOwners = new WeakMap<BufferGeometry, Int32Array>();
 
 /** The lowest source vertex of each welded vertex, which a written vertex copies its bits from. */
 function representativeOf(mesh: RefineMesh) {
@@ -286,14 +287,17 @@ function writeChanges(
   const tree = preview.boundsTree as MeshBVH | undefined;
   if (tree?.indirect) leavesOf(tree);
 
-  const owner = new Int32Array(weldedCount).fill(-1);
+  const owner = fanOwners.get(preview);
+  // Each fan resets the entries it uses.
+  const owners = owner?.length === weldedCount ? owner : new Int32Array(weldedCount).fill(-1);
+  if (owner !== owners) fanOwners.set(preview, owners);
   const index = preview.index?.array as Uint32Array | undefined;
   const output = (c: number) => (index ? index[c] : c);
   const around = (v: number) => trianglesOf.subarray(triangleStart[v], triangleStart[v + 1]);
   // The written vertex of each corner at `v` follows its source vertex and, once moved, its fan.
   const grouping = (mesh: RefineMesh, v: number) => {
     const triangles = around(v);
-    const fan = mesh.touched[v] ? fansAround(mesh, v, triangles, owner) : null;
+    const fan = mesh.touched[v] ? fansAround(mesh, v, triangles, owners) : null;
     const base = triangles.length + 1;
     const first = new Map<number, number>();
     const groups: number[] = [];
@@ -393,7 +397,7 @@ function writeChanges(
       continue;
     }
     const triangles = around(v);
-    const fan = fansAround(next, v, triangles, owner);
+    const fan = fansAround(next, v, triangles, owners);
     const sum = new Float64Array(triangles.length * 3);
     for (let i = 0; i < triangles.length; i++) {
       const a = triangles[i] * 3,

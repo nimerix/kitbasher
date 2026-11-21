@@ -236,7 +236,7 @@ function bandEdgeLength(mesh: RefineMesh, topology: RefineTopology, band: EdgeBa
       );
     }
   }
-  return lengths.length ? median(lengths) : 0;
+  return lengths.sort((a, b) => a - b)[lengths.length >> 1] ?? 0;
 }
 
 /**
@@ -1226,6 +1226,7 @@ interface Frame {
   /** Per vertex: the segment whose stretch of the curve is nearest, and its zone in that band. */
   owner: Int32Array;
   zone: Uint8Array;
+  editable: Map<number, number>;
   /** Per vertex: 1 where a corner holds it still, and 1 where it is cut but not moved. */
   held: Uint8Array;
   pinned: Uint8Array;
@@ -1413,11 +1414,15 @@ function frameOf(mesh: RefineMesh, topology: RefineTopology, solve: EdgeSolve): 
     return off <= cornerClear * joint.soft ? BandZone.Soft : BandZone.Beyond;
   });
   const edge = median(bands.map((band) => bandEdgeLength(mesh, topology, band)));
+  const editable = new Map<number, number>();
+  for (let i = 0; i < vertices.length; i++)
+    if (zone[i] !== BandZone.Beyond) editable.set(vertices[i], i);
   return {
     vertices,
     index,
     owner,
     zone,
+    editable,
     held,
     pinned,
     edge,
@@ -1494,11 +1499,8 @@ function frameWeights(
 ) {
   const { curve, bands } = solve;
   const { position } = mesh;
-  const { vertices, edge } = frame;
+  const { vertices, edge, editable: indexOf } = frame;
   const count = vertices.length;
-  const indexOf = new Map<number, number>();
-  for (let i = 0; i < count; i++)
-    if (frame.zone[i] !== BandZone.Beyond) indexOf.set(vertices[i], i);
   const length = (v: number, w: number) =>
     Math.hypot(
       position[v * 3] - position[w * 3],
@@ -1708,7 +1710,6 @@ function correctedSurfaces(
     },
     /** Distance from (x, y, z) to side s's corrected surface, unsigned. */
     distance(s: number, x: number, y: number, z: number) {
-      const p = [x, y, z];
       flanks[s].project(x, y, z, q);
       // A fixed point of the offset, at most four steps, stopped once it settles.
       for (let iteration = 0; iteration < 4; iteration++) {
@@ -1716,9 +1717,9 @@ function correctedSurfaces(
         offset(s, d);
         if (iteration && Math.abs(d[0] - dx) + Math.abs(d[1] - dy) + Math.abs(d[2] - dz) < 1e-9)
           break;
-        flanks[s].project(p[0] - d[0], p[1] - d[1], p[2] - d[2], q);
+        flanks[s].project(x - d[0], y - d[1], z - d[2], q);
       }
-      return flanks[s].distance(p[0] - d[0], p[1] - d[1], p[2] - d[2]);
+      return flanks[s].distance(x - d[0], y - d[1], z - d[2]);
     },
   };
 }
@@ -1970,11 +1971,8 @@ export function applyEdge(
     };
   const { position } = mesh;
   const frame = frameOf(mesh, topology, solve);
-  const { edge } = frame;
+  const { edge, editable: indexOf } = frame;
   const count = frame.vertices.length;
-  const indexOf = new Map<number, number>();
-  for (let i = 0; i < count; i++)
-    if (frame.zone[i] !== BandZone.Beyond) indexOf.set(frame.vertices[i], i);
   const surfaces = surfacesOf(mesh, topology, solve, frame);
   const weights = frameWeights(mesh, topology, solve, frame, surfaces);
 
@@ -1986,12 +1984,13 @@ export function applyEdge(
   // Per vertex, the cut's field where it ends: how much nearer it lies to side 1's corrected surface
   // than to side 0's.
   const apartAt = new Float64Array(count);
+  const p = [0, 0, 0];
   const target = [0, 0, 0];
   const end = [0, 0, 0];
   for (const [v, i] of indexOf) {
-    const p = [position[v * 3], position[v * 3 + 1], position[v * 3 + 2]];
     const weight = strength * weights[i];
     if (!(weight > 0)) continue;
+    for (let a = 0; a < 3; a++) p[a] = position[v * 3 + a];
     const owner = frame.owner[i];
     const surface = surfaces(p[0], p[1], p[2]);
     if (frame.pinned[i]) {
@@ -2342,7 +2341,9 @@ function trianglesAround(
     if (v >= welded) continue;
     for (let j = topology.triangleStart[v]; j < topology.triangleStart[v + 1]; j++) {
       const t = topology.trianglesOf[j];
-      for (const child of children?.get(t) ?? [t]) found.add(child);
+      const split = children?.get(t);
+      if (split) for (const child of split) found.add(child);
+      else found.add(t);
     }
   }
   return found;
@@ -2362,13 +2363,25 @@ function foldedAgainst(
 ) {
   const { position } = mesh;
   const expected = new Float64Array(3);
+  const corners = [0, 0, 0];
+  const u = [0, 0, 0];
+  const w = [0, 0, 0];
+  const normal = [0, 0, 0];
   const folded: number[] = [];
   for (const t of triangles) {
-    const corners = [0, 1, 2].map((k) => weldedCorner(mesh, t, k as 0 | 1 | 2));
-    const [a, b, c] = corners.map((v) => v * 3);
-    const u = [0, 1, 2].map((k) => position[b + k] - position[a + k]);
-    const w = [0, 1, 2].map((k) => position[c + k] - position[a + k]);
-    const normal = crossOf(u, w);
+    corners[0] = weldedCorner(mesh, t, 0);
+    corners[1] = weldedCorner(mesh, t, 1);
+    corners[2] = weldedCorner(mesh, t, 2);
+    const a = corners[0] * 3,
+      b = corners[1] * 3,
+      c = corners[2] * 3;
+    for (let k = 0; k < 3; k++) {
+      u[k] = position[b + k] - position[a + k];
+      w[k] = position[c + k] - position[a + k];
+    }
+    normal[0] = u[1] * w[2] - u[2] * w[1];
+    normal[1] = u[2] * w[0] - u[0] * w[2];
+    normal[2] = u[0] * w[1] - u[1] * w[0];
     // The side its corners off the chain share, 0 when they differ or all lie on the chain.
     let side = 0;
     for (const v of corners) {
