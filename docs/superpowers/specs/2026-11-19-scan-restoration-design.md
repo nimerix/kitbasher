@@ -481,6 +481,77 @@ None of these came from the product owner. Each can be overruled.
 - **Re-run tolerances are fixture figures.** On a real hose a second Sweep over its own
   result moved the surface by up to 0.037 mm, so the guide says to apply a Sweep once.
 
+## Narrow flanks and guides laid beside the edge
+
+Added 2026-11-20, after the build. It changes how an edge is read, steps 1 to 3 of "How an
+edge is rebuilt". It comes from replaying the hand study's refused and damaged guides on the
+two reference scans and prototyping each change against them. The product owner approved the
+work, not yet these rules.
+
+**What was wrong.** A guide on a narrow lip, rim or border was refused, or solved and cut in
+pieces, for five measured reasons:
+
+- Width was measured from the drawn guide. A guide laid 0.3 mm to one side of the edge left
+  the far flank almost none of the band.
+- A flank accepted at 3 edge lengths between its zone boundaries was measured again from its
+  outermost vertices, which loses 1 to 1.5 edge lengths, and failed the same 3.
+- One slice across the guide without a long enough flank left a hole in the band, and the
+  cut broke there.
+- A flank was looked for only within reach of the guide, 0.35 mm, even where the rounding
+  itself is wider than that.
+- A Line guide over an edge that curves dragged the edge onto its chord.
+
+**The rules.** Lengths are in mm. An edge length is the mesh's local edge length.
+
+1. **Width is measured from the solved edge.** The band keeps the vertices whose distance
+   across the surface from the solved edge is at most Width. The guide stays what points at
+   the edge: the solved edge must lie within reach of it, the larger of 0.35 and 6 edge
+   lengths, in at least half of the slices. Automatic width is soft + max(2 x soft, 6 edge
+   lengths), at most 1, where soft is the width of the rounding. It no longer adds the
+   guide's distance from the edge.
+2. **A flank's run is read between its zone boundaries.** In each slice the run is from
+   where the flank starts to the nearest of where it ends, how far the slice reaches, and
+   Width. Each side needs a run of 3 edge lengths in at least half of the slices, as before.
+3. **A slice without a run is filled from its neighbours.** Once the edge is solved, a slice
+   that has no flank on one side takes that flank's start and end interpolated from the
+   nearest slices that have one, before and after it along the guide. This happens only when
+   at least half of the slices on that side have a flank of their own, and never before the
+   first or after the last slice that has one. Every vertex is still tested against the
+   flank's fitted surface, so a rivet or other detail standing off it stays where it is.
+   Filling changes what is moved and cut, never whether an edge is found: every check reads
+   the slices as they were before filling.
+4. **A flank may start up to twice the reach from the guide.** The solved edge must still lie
+   within reach.
+5. **A Line guide follows an edge that curves.** When the points where the flanks meet leave
+   the fitted line by more than one edge length, clear of the fading ends, they are fitted
+   as an arc, and the arc is kept only when it at least halves that gap.
+
+**What still refuses.** A guide on a flat face 0.5 mm or more from any edge. A guide on one
+smooth surface, such as a cylinder wall. Flanks less than 10 degrees apart, and flanks that
+turn too much themselves (flatness under 2.2). These checks are unchanged.
+
+**What changes for a guide beside an edge.** A guide on a clean face 0.3 mm from a rounded
+edge used to be refused. It now finds that edge. On a coarse mesh the reach is 6 edge
+lengths, so on a box with 0.23 mm edges a guide in the middle of a face finds an edge 1 mm
+away.
+
+**Measured on the reference scans with the prototype.** 8 of the 17 refused or damaged edge
+guides solve in one piece with nothing skipped or folded. Judged by eye, the upper plate
+border and the fin edge on part 45 and the belt's lower edge and the valve rim on part 57
+become one clean line; the buckle lip gains a crisp line without reading as the flat frame in
+the photo; one outlet arc solves with nothing to show. The two edges the study kept solve as
+before.
+
+**Not covered by these rules.**
+
+- A closed path still fails whole when one span fails, so the plate border is restored one
+  span at a time and only where the guide lies within reach.
+- A rib rounded right over (the left strap lip, the collars) has no top face to fit. It
+  needs a solve with three surfaces and a decision on the wanted shape.
+- A shallow bend of about 30 degrees with no rounding still passes as an edge and adds a
+  line or changes nothing (the outlet flange, Detect's seam inside the buckle).
+- A refusal still does not say which check failed or on which span.
+
 ## Where the build falls short of this spec
 
 Measured on the branch on 2026-11-20. None of this was approved by the product owner.
