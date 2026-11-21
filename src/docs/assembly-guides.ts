@@ -355,12 +355,12 @@ export const assemblyGuides: DocArticle[] = [
           'In Edge mode, choose Line, Arc, or Spline under Guide.',
           'Click points on the rounded edge. A line takes two points and an arc three. For a spline, place at least two points, then press Enter to finish it.',
           'Review the preview while the guide is selected. The solved edge is dashed, and the area the guide affects is tinted.',
-          'Press Enter or choose Accept to keep the edge, or choose Dismiss to discard it. Accept keeps the change in this session, and the edge is then drawn as a solid line.',
+          'Press Enter or choose Accept to keep the edge, or choose Dismiss to discard it. Accept keeps the change in this session, and the edge is then drawn along the mesh edges that were cut. The preview shows the fit, not the cut. If the edge was cut in more than one piece, the breaks are marked and the panel says so, for example The edge was cut in 3 pieces. Undo to adjust the guide, or keep it.',
           'Choose Apply to save the accepted changes to the part.',
         ],
         note: {
           title: 'When no edge is found',
-          text: 'The tool shows No edge found under this guide. Move it onto the rounded edge or change Width. The guide stays in the session so you can move its points or change Width. If the panel warns that triangles fold over, undo the last step or reduce Width.',
+          text: 'The tool shows No edge found under this guide. Move it onto the rounded edge or change Width. The guide stays in the session so you can move its points or change Width. If the panel warns that triangles fold over, undo the last step or reduce Width. A very long spline on a fine mesh is refused with This guide is too long for this mesh. Try a shorter guide. Accept leaves a guide or region pending when it would change nothing, for example at 0 % strength, and says so.',
         },
       },
       {
@@ -369,7 +369,7 @@ export const assemblyGuides: DocArticle[] = [
         paragraphs: [
           'With one open pending guide selected, finish its current segment, pressing Enter for a spline. Click farther along the edge to start the next segment. Guide and Joints set how the next segment is drawn. The panel shows Applies to the next segment. Joints sets whether each new joint is Sharp, a corner, or Smooth.',
           'Click the first handle of the selected open guide to close it. A single line cannot close. A three-point arc can close directly, and a spline you are still drawing can close after three points. On a multi-segment path, the starting point can finish the segment you are still drawing. If Refine needs to add a closing segment to a finished path, choose Line or Spline under Guide. Press Esc while placing an unfinished guide to discard it.',
-          'Drag the points of a selected guide along the surface to adjust it; the preview follows. Each completed drag that moves a handle is one undo step. Automatic width lets the tool estimate how far to either side of the guide it reads and rebuilds the surface. Turn it off to set Width yourself. Strength sets how loosely the edge follows the guide’s line, arc or spline, from no change to fully on it.',
+          'Drag the points of a selected guide along the surface to adjust it. The preview updates when the pointer rests and when you let go, and Accept waits for it. Each completed drag that moves a handle is one undo step. Click a point of a selected guide to choose it; the chosen point is highlighted. Remove point, Delete, or Backspace removes it when the guide stays complete, as one undo step. Esc clears the choice first. With no point chosen, Delete dismisses the guide. Automatic width lets the tool estimate how far to either side of the guide it reads and rebuilds the surface. Turn it off to set Width yourself. Strength sets how loosely the edge follows the guide’s line, arc or spline, from no change to fully on it.',
           'Ends sets Start and End separately for an open guide; the larger point marks the start. Choose Hold when Auto fades an edge that should run sharp into a corner, and Fade when Auto holds one that should die away.',
         ],
         table: {
@@ -471,7 +471,7 @@ export const assemblyGuides: DocArticle[] = [
         bullets: [
           'Restore edges before smoothing or flattening across them. Smoothing or flattening across an edge that has not been rebuilt can soften it further; rebuilt edges are held.',
           'On a plate with rivets, use a painted region with Flatten and Keep detail rather than the Flatten brush. The brush can flatten rivets, and clipping one can leave a step at its rim.',
-          'A guide needs surface on both sides to work with. Lay it along the rounded edge itself. If the tool says no edge was found, move the guide onto the rounding or change Width.',
+          'A guide needs surface on both sides to work with. Lay it along the rounded edge itself. If the tool says no edge was found, move the guide onto the rounding or change Width. Narrow lips and rims often have too little surface on one side, and the tool then finds no edge there.',
           'Where three faces meet, in a pocket or at a box corner, guide the edges separately if a path through the corner leaves a mark there.',
           'Treat proposals as a starting point. Check them before accepting many at once. Where Detect proposes a guide on a smooth tube or across a scan dent, dismiss it.',
           'Small hardware such as clips, flanges, and buckle lips is often shorter than Minimum length. Lower it to pick those up, and expect more short guides to check.',
