@@ -61,7 +61,8 @@ export interface EdgeBand {
   /**
    * Per slice, in order along the guide: the solved edge's signed offset from the guide along the
    * surface, positive on the Left. In a slice that did not find the edge on both sides it is held
-   * within the furthest of those that did. The band holds the vertices within `width` of it.
+   * within the furthest of those that did. The band holds the vertices within `width` of it. Only
+   * tests read it.
    */
   offset: Float64Array;
   /** Median angle between the two flank surfaces' normals along `edge`, degrees. */
@@ -1617,9 +1618,8 @@ function classifyOriented(
   };
   // Every piece of evidence below, and `supported` above, reads the classification as each slice
   // made it, and so does the band's `foundZone`. The band's `zone` alone comes from the
-  // classification with its slices filled.
+  // classification with its slices filled, made only once the evidence shows an edge.
   const { zone: foundZone, runZone } = finish(classified);
-  const { zone } = finish(split(fits, solved, true));
 
   // Evidence of an edge that does not depend on the width: the solved edge within reach of the
   // guide, the flank surfaces apart there, and flanks that turn far less than the edge does.
@@ -1635,6 +1635,7 @@ function classifyOriented(
     angle,
   );
   if (flatness < minFlankFlatness) return null;
+  const { zone } = finish(split(fits, solved, true));
 
   const larger: number[] = [];
   for (let k = 0; k < slices; k++)
