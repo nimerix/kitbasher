@@ -6,7 +6,10 @@ import {
   draftMoved,
   gestureBinding,
   handleClickHolds,
-  LatestNear,
+  OrderedSamples,
+  PressTrack,
+  boundsEntry,
+  trianglePlaneHit,
   longestRun,
   pressGesture,
   rayCrossesBounds,
@@ -269,16 +272,93 @@ describe('a handle press kept as a click while the surface has no index', () => 
   });
 });
 
-describe('the latest of a frame’s samples near an unindexed part', () => {
-  it('keeps only the latest, and only while it was near', () => {
-    const latest = new LatestNear<number>();
-    latest.record(1, true);
-    latest.record(2, true);
-    expect(latest.take()).toBe(2);
-    expect(latest.take()).toBeNull();
-    latest.record(3, true);
-    latest.record(4, false);
-    expect(latest.take()).toBeNull();
+describe("a gesture's samples near a part with no index", () => {
+  it('handles a sample at once while none waits before it', () => {
+    const samples = new OrderedSamples<number>();
+    expect(samples.behind()).toBe(false);
+  });
+
+  it('keeps every waiting sample, in order, with later ones behind them', () => {
+    const samples = new OrderedSamples<number>();
+    samples.hold(1);
+    expect(samples.behind()).toBe(true);
+    samples.hold(2);
+    samples.hold(3);
+    const handled: number[] = [];
+    // A budget that allows two this frame leaves the third for the next, not dropped.
+    let allowed = 2;
+    expect(
+      samples.drain(
+        (n) => handled.push(n),
+        () => allowed-- > 0,
+      ),
+    ).toBe(true);
+    expect(handled).toEqual([1, 2]);
+    expect(
+      samples.drain(
+        (n) => handled.push(n),
+        () => true,
+      ),
+    ).toBe(false);
+    expect(handled).toEqual([1, 2, 3]);
+  });
+
+  it('drops what waits when the gesture ends', () => {
+    const samples = new OrderedSamples<number>();
+    samples.hold(1);
+    samples.clear();
+    expect(samples.waiting).toBe(false);
+  });
+});
+
+describe('a refused press kept as a click', () => {
+  it('stays a click while every sample stays within the slop', () => {
+    const press = new PressTrack(100, 100, 5);
+    press.see(103, 102);
+    press.see(100, 100);
+    expect(press.moved).toBe(false);
+  });
+
+  it('is no click once any sample left the slop, though it came back', () => {
+    const press = new PressTrack(100, 100, 5);
+    for (const [x, y] of [
+      [144, 100],
+      [100, 100],
+    ])
+      press.see(x, y);
+    expect(press.moved).toBe(true);
+    press.see(100, 100);
+    expect(press.moved).toBe(true);
+  });
+});
+
+describe("where a ray enters a part's bounds", () => {
+  it('measures along the ray in world space, 0 from inside', () => {
+    const part = new Mesh(new BoxGeometry(2, 2, 2));
+    part.position.set(0, 0, -5);
+    part.updateMatrixWorld();
+    const down = new Ray(new Vector3(0, 0, 10), new Vector3(0, 0, -1));
+    expect(boundsEntry(down, part)).toBeCloseTo(14);
+    expect(boundsEntry(new Ray(new Vector3(0, 0, -5), new Vector3(0, 0, -1)), part)).toBe(0);
+    expect(boundsEntry(new Ray(new Vector3(3, 0, 10), new Vector3(0, 0, -1)), part)).toBeNull();
+  });
+});
+
+describe('a dragged point on the model surface', () => {
+  const mesh = {
+    position: Float64Array.from([0, 0, 0, 1, 0, 0, 0, 1, 0]),
+    weldOf: Uint32Array.from([0, 1, 2]),
+    corners: Uint32Array.from([0, 1, 2]),
+  };
+  it("comes from the triangle's own positions alone, the same bits for the same ray", () => {
+    const ray = () => new Ray(new Vector3(0.25, 0.25, 3), new Vector3(0.1, 0.05, -1).normalize());
+    const a = trianglePlaneHit(mesh, 0, ray())!,
+      b = trianglePlaneHit(mesh, 0, ray())!;
+    expect(a.z).toBeCloseTo(0, 12);
+    expect(a.toArray()).toEqual(b.toArray());
+    expect(
+      trianglePlaneHit(mesh, 0, new Ray(new Vector3(0, 0, 1), new Vector3(1, 0, 0))),
+    ).toBeNull();
   });
 });
 

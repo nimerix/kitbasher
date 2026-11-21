@@ -38,6 +38,8 @@ export const handlePick = 8;
 export const proposalPick = 6;
 /** A handle press that travels this many pixels is a drag. */
 const dragStart = 3;
+/** A press that travels more than this many pixels is no click, as the part's own clicks count it. */
+const clickSlop = 5;
 /** The most a handle or curve on the surface may lie off the surface in front of it and be seen, mm. */
 const maxAllowance = 0.15;
 
@@ -184,28 +186,62 @@ const bounds = new Sphere(),
 // Set when a move's ray passed close to a part that has no index, so its answer is not known.
 let nearUnindexed = false;
 
-/** Whether a world ray passes through a mesh's bounding box, in the mesh's own space. */
-export function rayCrossesBounds(ray: Ray, mesh: Mesh) {
+const entry = new Vector3();
+
+/**
+ * Where a world ray enters a mesh's bounding box, as a distance along the ray (0 from inside it),
+ * or null when it misses the box.
+ */
+export function boundsEntry(ray: Ray, mesh: Mesh) {
   const geometry = mesh.geometry;
   if (!geometry.boundingBox) geometry.computeBoundingBox();
   box.copy(geometry.boundingBox!);
   localRay.copy(ray).applyMatrix4(inverse.copy(mesh.matrixWorld).invert());
-  return localRay.intersectsBox(box);
+  if (box.containsPoint(localRay.origin)) return 0;
+  if (!localRay.intersectBox(box, entry)) return null;
+  return entry.applyMatrix4(mesh.matrixWorld).distanceTo(ray.origin);
 }
 
+/** Whether a world ray passes through a mesh's bounding box, in the mesh's own space. */
+export const rayCrossesBounds = (ray: Ray, mesh: Mesh) => boundsEntry(ray, mesh) !== null;
+
 /**
- * The latest of a frame's samples, kept for an exact answer once the frame's events are handled,
- * while it lay close to a part that has no index; a later sample that did not makes it moot.
+ * A gesture's samples in their order: one is handled at once while none waits before it and it
+ * needs no exact answer from a part with no index; otherwise it waits, and those waiting are
+ * handled in order, each with its own exact answer, as time allows.
  */
-export class LatestNear<T> {
-  private latest: T | null = null;
-  record(sample: T, near: boolean) {
-    this.latest = near ? sample : null;
+export class OrderedSamples<T> {
+  private queue: T[] = [];
+  get waiting() {
+    return this.queue.length > 0;
   }
-  take() {
-    const sample = this.latest;
-    this.latest = null;
-    return sample;
+  /** Whether a sample must wait: one already does. */
+  behind() {
+    return this.waiting;
+  }
+  hold(sample: T) {
+    this.queue.push(sample);
+  }
+  /** Handles waiting samples in order while `more()` allows; true when some still wait. */
+  drain(handle: (sample: T) => void, more: () => boolean) {
+    while (this.queue.length && more()) handle(this.queue.shift()!);
+    return this.waiting;
+  }
+  clear() {
+    this.queue.length = 0;
+  }
+}
+
+/** Whether a press stays a click: no sample of it, coalesced ones included, left the slop. */
+export class PressTrack {
+  moved = false;
+  constructor(
+    readonly x: number,
+    readonly y: number,
+    private readonly slop: number,
+  ) {}
+  see(x: number, y: number) {
+    if (Math.hypot(x - this.x, y - this.y) > this.slop) this.moved = true;
   }
 }
 
@@ -218,6 +254,12 @@ export class LatestNear<T> {
 export function occludingRaycast(pick: Mesh['raycast']): Mesh['raycast'] {
   return function (this: Mesh, raycaster, intersects) {
     if (!occlusionTest || !unindexed(this.geometry)) return pick.call(this, raycaster, intersects);
+    // With the edited surface's own hit as the ray's far end, a part whose bounds begin beyond it
+    // cannot cover it.
+    if (raycaster.far < Infinity) {
+      const enters = boundsEntry(raycaster.ray, this);
+      if (enters === null || enters > raycaster.far) return;
+    }
     if (!pointerMoving) return exactNearest(this, raycaster, intersects);
     if (!rayCrossesBounds(raycaster.ray, this)) return;
     nearUnindexed = true;
@@ -280,6 +322,8 @@ export function refineHandles(refine: Pick<RefineSession, 'features' | 'selected
 }
 
 interface GestureBase {
+  /** Set once released while samples still wait for exact answers. */
+  waiting?: boolean;
   pointer: number;
   partId: string;
   binding: GestureBinding;
@@ -306,7 +350,8 @@ interface Refused extends GestureBase {
   kind: 'refused';
   x: number;
   y: number;
-  moved: boolean;
+  /** Every sample of the press, from down to release; once one leaves the slop it is no click. */
+  track: PressTrack;
   /** For a press on a handle, the click that may still close its path. */
   click: HandleClick | null;
 }
@@ -424,6 +469,26 @@ export interface SurfaceCrossing {
   distance: number;
   point: Vector3;
   normal: Vector3;
+  /** The model triangle crossed, when the crossing is on the session's own model surface. */
+  triangle?: number;
+}
+
+/** Where a world ray meets the plane of triangle `t` of a mesh, from its own positions. */
+export function trianglePlaneHit(
+  mesh: Pick<RefineMesh, 'position' | 'weldOf' | 'corners'>,
+  t: number,
+  ray: Ray,
+): Vector3 | null {
+  const { position, weldOf, corners } = mesh;
+  const corner = (k: number) => {
+    const o = weldOf[corners[t * 3 + k]] * 3;
+    return new Vector3(position[o], position[o + 1], position[o + 2]);
+  };
+  const a = corner(0);
+  const n = corner(1).sub(a).cross(corner(2).sub(a));
+  const facing = n.dot(ray.direction);
+  if (Math.abs(facing) < 1e-18) return null;
+  return ray.at(a.sub(ray.origin).dot(n) / facing, new Vector3());
 }
 
 /** The nearest crossing beyond `near` of a world ray with the listed triangles of a mesh, either side. */
@@ -474,7 +539,7 @@ export function trianglesHit(
   const corner = (o: number) => new Vector3(position[o], position[o + 1], position[o + 2]);
   const [pa, pb, pc] = [corner(a), corner(b), corner(c)];
   const normal = pb.sub(pa).cross(pc.sub(pa)).normalize();
-  return { distance: best, point: ray.at(best, new Vector3()), normal };
+  return { distance: best, point: ray.at(best, new Vector3()), normal, triangle: bestT };
 }
 
 /** Whether a press on a handle in the index gap may still close its path as a click. */
@@ -542,16 +607,36 @@ export function RefinePointerController({ pressed }: { pressed: () => boolean })
       return nearest;
     };
 
+    /** Points the raycaster through a client position. */
+    const aimAt = (x: number, y: number) => {
+      const rect = canvas().getBoundingClientRect();
+      ndc.set(((x - rect.left) / rect.width) * 2 - 1, -((y - rect.top) / rect.height) * 2 + 1);
+      raycaster.setFromCamera(ndc, get().camera);
+    };
+
+    /**
+     * The first hit of the other parts along the ray, up to `far`: what lies beyond the part's own
+     * hit cannot cover it, so a part with no index there is not tested at all.
+     */
+    const firstHitBefore = (own: Mesh, far: number) => {
+      raycaster.far = far;
+      try {
+        return firstHit(own);
+      } finally {
+        raycaster.far = Infinity;
+      }
+    };
+
     /** The hit under a client position on the part, or null off it or behind another part. */
     const intersectionAt = (partId: string, x: number, y: number) => {
       const own = partMeshes.get(partId);
       if (!own) return null;
-      const rect = canvas().getBoundingClientRect();
-      ndc.set(((x - rect.left) / rect.width) * 2 - 1, -((y - rect.top) / rect.height) * 2 + 1);
-      raycaster.setFromCamera(ndc, get().camera);
-      const nearest = firstHit();
-      if (!nearest || nearest.object !== own || nearest.faceIndex == null) return null;
-      return nearest;
+      aimAt(x, y);
+      const hits = raycaster.intersectObject(own, false);
+      const mine = hits[0]?.faceIndex != null ? hits[0] : null;
+      if (!mine) return null;
+      const other = firstHitBefore(own, mine.distance);
+      return other && other.distance <= mine.distance ? null : mine;
     };
     const hitAt = (partId: string, x: number, y: number): GuidePoint | null => {
       const hit = intersectionAt(partId, x, y);
@@ -609,20 +694,39 @@ export function RefinePointerController({ pressed }: { pressed: () => boolean })
      * the draft it shows: other parts as they are; the part's triangles the draft left unchanged
      * from the preview's own picking; the triangles it changed from the model's positions.
      */
-    const modelFront = (refine: RefineSession, own: Mesh) => {
-      let front = crossing(firstHit(own));
+    const modelFront = (refine: RefineSession, own: Mesh, bounded = false) => {
       const model = refine.model?.mesh;
-      if (!model) return front;
+      if (!model) return crossing(firstHit(own));
       raycaster.firstHitOnly = false;
       const hits = raycaster.intersectObject(own, false);
       raycaster.firstHitOnly = true;
       const kept = hits.find((h) => h.faceIndex != null && sameAsModel(refine, h.faceIndex));
-      for (const candidate of [
-        crossing(kept),
-        trianglesHit(model, changedModelTriangles(refine), raycaster.ray, raycaster.near),
-      ])
-        if (candidate && (!front || candidate.distance < front.distance)) front = candidate;
-      return front;
+      let mine: SurfaceCrossing | null = kept
+        ? { ...crossing(kept)!, triangle: kept.faceIndex! }
+        : null;
+      const changed = trianglesHit(model, changedModelTriangles(refine), raycaster.ray);
+      if (changed && (!mine || changed.distance < mine.distance)) mine = changed;
+      const other = crossing(
+        bounded ? firstHitBefore(own, mine ? mine.distance : Infinity) : firstHit(own),
+      );
+      return other && (!mine || other.distance <= mine.distance) ? other : mine;
+    };
+
+    /**
+     * The spot under a client position on the session's model surface, the working surface without
+     * the draft, or null off it or behind another part. Its position comes from the model triangle
+     * alone, so a draft rebuilt sooner or later cannot move where a dragged point lands.
+     */
+    const modelHitAt = (partId: string, x: number, y: number): GuidePoint | null => {
+      const refine = useEditor.getState().refine;
+      const own = partMeshes.get(partId);
+      const model = refine?.model?.mesh;
+      if (!refine || !own || !model) return null;
+      aimAt(x, y);
+      const front = modelFront(refine, own, true);
+      if (front?.triangle === undefined) return null;
+      const point = trianglePlaneHit(model, front.triangle, raycaster.ray);
+      return point && { triangle: front.triangle, position: point.toArray() };
     };
     const allowance = (refine: RefineSession) => surfaceAllowance(refine.model?.step ?? Infinity);
 
@@ -694,22 +798,107 @@ export function RefinePointerController({ pressed }: { pressed: () => boolean })
       return chooseCandidate(near, allowance(refine));
     };
 
-    /** One stroke sample at a client position: a dab, or a point of the crease's current run. */
-    const sampleAt = (d: Stroke, x: number, y: number) => {
-      const [point, near] = nearPick(() => hitAt(d.partId, x, y));
-      noteSample(d, x, y, false, near);
-      if (near) {
-        d.x = x;
-        d.y = y;
-        return;
+    /** A position of a gesture's path, or, last, its release. */
+    type Sample = { gesture: Gesture; x: number; y: number; erase: boolean; release?: boolean };
+    // Samples that need an exact answer from a part with no index wait here, in order, with every
+    // later sample of their gesture behind them; each is answered exactly, never from another ray.
+    const samples = new OrderedSamples<Sample>();
+    let drainFrame = 0;
+    /** Time a frame may spend answering waiting samples exactly, in ms. */
+    const drainBudget = 8;
+    const scheduleDrain = () => {
+      if (drainFrame) return;
+      drainFrame = requestAnimationFrame(() => {
+        drainFrame = 0;
+        const start = performance.now();
+        const state = useEditor.getState();
+        // Paint answered after its release still belongs to the stroke its press began.
+        const repaint = !state.painting;
+        if (repaint) useEditor.setState({ painting: true });
+        let answered = 0;
+        try {
+          // At least one each frame, so a slow exact answer cannot stall the queue.
+          const more = samples.drain(
+            handleSample,
+            () => !answered++ || performance.now() - start < drainBudget,
+          );
+          if (more) scheduleDrain();
+        } finally {
+          if (repaint) useEditor.getState().endPaintStroke();
+        }
+      });
+    };
+    // Time this frame has spent on exact answers inside pointer moves, in ms.
+    let spent = 0,
+      spentFrame = 0;
+    const charge = (ms: number) => {
+      spent += ms;
+      if (!spentFrame)
+        spentFrame = requestAnimationFrame(() => {
+          spent = 0;
+          spentFrame = 0;
+        });
+    };
+    /**
+     * Handles one sample now: at once when it needs no exact answer; with its own exact answer
+     * while this frame's budget lasts; else it waits, as does every sample after one that waits.
+     */
+    const offer = (sample: Sample, act: (live: boolean) => boolean) => {
+      if (!samples.behind()) {
+        if (act(true)) return;
+        if (spent < drainBudget) {
+          const start = performance.now();
+          const moving = pointerMoving;
+          // Picks made outside a move test a part with no index exactly, for this ray alone.
+          pointerMoving = false;
+          try {
+            act(false);
+          } finally {
+            pointerMoving = moving;
+            charge(performance.now() - start);
+          }
+          return;
+        }
       }
+      samples.hold(sample);
+      scheduleDrain();
+    };
+    const handleSample = (sample: Sample) => {
+      const d = sample.gesture;
+      if (gesture !== d) return;
+      if (sample.release) return finish(d);
+      if (d.kind === 'stroke') strokeSample(d, sample.x, sample.y, false);
+      else if (d.kind === 'paint') paintSample(d, sample.x, sample.y, sample.erase, false);
+      else if (d.kind === 'handle') dragSample(d, sample.x, sample.y, false);
+    };
+
+    /** Runs one sample's pick, and whether it lay near an unindexed part, so it must wait. */
+    const nearPick = <T,>(pick: () => T): [T, boolean] => {
+      nearUnindexed = false;
+      const value = pick();
+      const near = nearUnindexed && pointerMoving;
+      nearUnindexed = false;
+      return [value, near];
+    };
+
+    /**
+     * One stroke sample: a dab, or a point of the crease's current run. With `live`, false is
+     * returned without acting when the sample needs an exact answer.
+     */
+    const strokeSample = (d: Stroke, x: number, y: number, live: boolean) => {
+      const [point, near] = nearPick(() => hitAt(d.partId, x, y));
+      if (near && live) return false;
       if (point && d.runs) {
         if (!d.onPart) d.runs.push([]);
         d.runs.at(-1)!.push(point);
       } else if (point) useEditor.getState().moveRefineStroke(point);
       d.onPart = !!point;
+      return true;
+    };
+    const sampleAt = (d: Stroke, x: number, y: number) => {
       d.x = x;
       d.y = y;
+      offer({ gesture: d, x, y, erase: false }, () => strokeSample(d, x, y, true));
     };
     /** Samples the path to (x, y) every few pixels; on release, at (x, y) itself too. */
     const sampleStroke = (d: Stroke, x: number, y: number, release = false) => {
@@ -726,9 +915,27 @@ export function RefinePointerController({ pressed }: { pressed: () => boolean })
     };
 
     /** Paints where (x, y) falls on the part, when the part is the first thing there. */
-    const paintAt = (d: Paint, x: number, y: number, erase: boolean, begin = false) => {
+    const paintSample = (d: Paint, x: number, y: number, erase: boolean, live: boolean) => {
       const [hit, near] = nearPick(() => intersectionAt(d.partId, x, y));
-      noteSample(d, x, y, erase, near);
+      if (near && live) return false;
+      if (!hit) return true;
+      const { object, point, face, faceIndex } = hit;
+      useEditor.getState().paintRefineRegion(
+        {
+          partId: d.partId,
+          point: object.worldToLocal(point.clone()).toArray(),
+          normal: face?.normal.toArray() ?? [0, 1, 0],
+        },
+        faceIndex!,
+        erase,
+      );
+      return true;
+    };
+    const paintAt = (d: Paint, x: number, y: number, erase: boolean) =>
+      offer({ gesture: d, x, y, erase }, () => paintSample(d, x, y, erase, true));
+    /** The press of a paint stroke: answered exactly, as every press is. */
+    const paintPress = (d: Paint, x: number, y: number, erase: boolean) => {
+      const hit = intersectionAt(d.partId, x, y);
       if (!hit) return false;
       const { object, point, face, faceIndex } = hit;
       return useEditor.getState().paintRefineRegion(
@@ -739,16 +946,15 @@ export function RefinePointerController({ pressed }: { pressed: () => boolean })
         },
         faceIndex!,
         erase,
-        begin,
+        true,
       );
     };
 
-    const dragHandle = (d: HandleDrag, x: number, y: number) => {
-      if (!d.moved && Math.hypot(x - d.x, y - d.y) < dragStart) return;
-      d.moved = true;
-      const [point, near] = nearPick(() => hitAt(d.partId, x, y));
-      noteSample(d, x, y, false, near);
-      if (!point) return;
+    /** Moves the dragged point to the model surface under (x, y). */
+    const dragSample = (d: HandleDrag, x: number, y: number, live: boolean) => {
+      const [point, near] = nearPick(() => modelHitAt(d.partId, x, y));
+      if (near && live) return false;
+      if (!point) return true;
       const { handle } = d;
       // The first move of a drag starts its own undo step.
       useEditor
@@ -756,38 +962,30 @@ export function RefinePointerController({ pressed }: { pressed: () => boolean })
         .moveRefinePoint(handle.feature, handle.segment, handle.index, point, !d.began);
       d.began = true;
       d.current = point;
+      return true;
+    };
+    const dragHandle = (d: HandleDrag, x: number, y: number) => {
+      if (!d.moved && Math.hypot(x - d.x, y - d.y) < dragStart) return;
+      d.moved = true;
+      offer({ gesture: d, x, y, erase: false }, () => dragSample(d, x, y, true));
     };
 
-    // A frame's latest sample that lay near an unindexed part, answered exactly after the frame's
-    // events; earlier such samples of the frame are skipped, never guessed.
-    const nearSamples = new LatestNear<{
-      gesture: Gesture;
-      x: number;
-      y: number;
-      erase: boolean;
-    }>();
-    let nearFrame = 0;
-    /** Runs one sample's pick, and whether it lay near an unindexed part, so it is skipped. */
-    const nearPick = <T,>(pick: () => T): [T, boolean] => {
-      nearUnindexed = false;
-      const value = pick();
-      const near = nearUnindexed && pointerMoving;
-      nearUnindexed = false;
-      return [value, near];
-    };
-    const noteSample = (d: Gesture, x: number, y: number, erase: boolean, near: boolean) => {
-      nearSamples.record({ gesture: d, x, y, erase }, near);
-      if (!near || nearFrame) return;
-      nearFrame = requestAnimationFrame(() => {
-        nearFrame = 0;
-        const latest = nearSamples.take();
-        if (!latest || gesture !== latest.gesture) return;
-        // Outside an event, the part with no index is tested exactly for this one ray.
-        const { gesture: g, x: px, y: py, erase: e } = latest;
-        if (g.kind === 'handle') dragHandle(g, px, py);
-        else if (g.kind === 'paint') paintAt(g, px, py, e);
-        else if (g.kind === 'stroke') sampleAt(g, px, py);
-      });
+    /** Completes a released gesture once every sample of it is handled. */
+    const finish = (d: Gesture) => {
+      if (gesture !== d) return;
+      end();
+      const state = useEditor.getState();
+      if (d.kind === 'paint' || d.kind === 'refused') return;
+      if (d.kind === 'stroke' && d.runs) {
+        // A crease is one line: of a stroke that left the part and came back, the longest run.
+        const [first, ...rest] = longestRun(d.runs);
+        if (first) state.beginRefineStroke(first);
+        for (const point of rest) state.moveRefineStroke(point);
+      }
+      if (d.kind === 'stroke') return state.endRefineStroke();
+      state.endRefineDrag();
+      // A click on the open path's first handle closes it.
+      if (!d.moved && d.handle.first) state.addRefinePoint(d.handle.point, true);
     };
 
     // The release of a press whose gesture was cancelled does nothing.
@@ -822,6 +1020,7 @@ export function RefinePointerController({ pressed }: { pressed: () => boolean })
       const d = gesture;
       if (!d) return null;
       gesture = null;
+      samples.clear();
       letGo(d);
       window.removeEventListener('keydown', key, true);
       unsubscribe?.();
@@ -833,7 +1032,7 @@ export function RefinePointerController({ pressed }: { pressed: () => boolean })
     const discard = () => {
       const d = end();
       if (!d) return;
-      cancelledPointer = d.pointer;
+      if (!d.waiting) cancelledPointer = d.pointer;
       const state = useEditor.getState();
       if (d.kind === 'handle') {
         // A drag that moved the point puts the session back as it found it, history included.
@@ -845,11 +1044,12 @@ export function RefinePointerController({ pressed }: { pressed: () => boolean })
 
     const move = (event: PointerEvent) => {
       const d = gesture;
-      if (!d || event.pointerId !== d.pointer) return;
+      if (!d || d.waiting || event.pointerId !== d.pointer) return;
       if (pressed()) return discard();
       if (d.kind === 'refused') {
-        // Moving past the drag threshold ends what was a click.
-        if (Math.hypot(event.clientX - d.x, event.clientY - d.y) >= dragStart) d.moved = true;
+        // Every sample counts, coalesced ones included: once one leaves the slop it is no click.
+        const events = event.getCoalescedEvents?.() ?? [];
+        for (const e of [...events, event]) d.track.see(e.clientX, e.clientY);
         return;
       }
       if (d.kind === 'handle') return dragHandle(d, event.clientX, event.clientY);
@@ -859,43 +1059,38 @@ export function RefinePointerController({ pressed }: { pressed: () => boolean })
     };
     const up = (event: PointerEvent) => {
       const d = gesture;
-      if (!d || event.pointerId !== d.pointer) return;
+      if (!d || d.waiting || event.pointerId !== d.pointer) return;
+      if (d.kind === 'refused') d.track.see(event.clientX, event.clientY);
       // In Detect, a paint click, even one refused for want of an index, still reaches the part to
-      // select a pending region under it by its exact pick.
-      const click = Math.hypot(event.clientX - d.x, event.clientY - d.y) <= 5;
-      const paintClick = (d.kind === 'paint' || (d.kind === 'refused' && !d.click)) && click;
-      if (!(paintClick && d.binding.mode === 'detect')) swallowRelease();
+      // select a pending region under it by its exact pick; a refused press only if it stayed still.
+      const click =
+        d.kind === 'refused'
+          ? !d.click && !d.track.moved
+          : d.kind === 'paint' && Math.hypot(event.clientX - d.x, event.clientY - d.y) <= clickSlop;
+      if (!(click && d.binding.mode === 'detect')) swallowRelease();
       if (pressed()) return discard();
       if (d.kind === 'refused') {
         end();
         const refine = useEditor.getState().refine;
         // A click on the open path's first handle closes it, if it is still that handle's.
-        if (d.click && !d.moved && d.click.handle.first && handleClickHolds(d.click, refine))
+        if (d.click && !d.track.moved && d.click.handle.first && handleClickHolds(d.click, refine))
           useEditor.getState().addRefinePoint(d.click.handle.point, true);
         return;
       }
       if (d.kind === 'handle') dragHandle(d, event.clientX, event.clientY);
       else if (d.kind === 'paint') paintAt(d, event.clientX, event.clientY, event.altKey);
       else sampleStroke(d, event.clientX, event.clientY, true);
-      end();
-      const state = useEditor.getState();
-      if (d.kind === 'paint') return;
-      if (d.kind === 'stroke' && d.runs) {
-        // A crease is one line: of a stroke that left the part and came back, the longest run.
-        const [first, ...rest] = longestRun(d.runs);
-        if (first) state.beginRefineStroke(first);
-        for (const point of rest) state.moveRefineStroke(point);
-      }
-      if (d.kind === 'stroke') return state.endRefineStroke();
-      state.endRefineDrag();
-      // A click on the open path's first handle closes it.
-      if (!d.moved && d.handle.first) state.addRefinePoint(d.handle.point, true);
+      if (!samples.waiting) return finish(d);
+      // Samples still wait for exact answers: the pointer is let go, and the gesture ends after them.
+      samples.hold({ gesture: d, x: event.clientX, y: event.clientY, erase: false, release: true });
+      d.waiting = true;
+      letGo(d);
     };
     const cancel = (event: PointerEvent) => {
-      if (gesture && event.pointerId === gesture.pointer) discard();
+      if (gesture && !gesture.waiting && event.pointerId === gesture.pointer) discard();
     };
     const lost = (event: PointerEvent) => {
-      if (gesture && event.pointerId === gesture.pointer) discard();
+      if (gesture && !gesture.waiting && event.pointerId === gesture.pointer) discard();
     };
     const key = (event: KeyboardEvent) => {
       if (!gesture || event.key !== 'Escape') return;
@@ -925,7 +1120,7 @@ export function RefinePointerController({ pressed }: { pressed: () => boolean })
       // Anything that takes the pointer, the session, its part, mode or brush away ends it at once.
       unsubscribe = useEditor.subscribe((s) => {
         if (gesture !== d) return;
-        if (bindingBroken(d.binding, s) || blocked(s)) return discard();
+        if (bindingBroken(d.binding, s) || (!d.waiting && blocked(s))) return discard();
         // A refused handle press is a click on that handle of that selected guide, or nothing.
         if (d.kind === 'refused' && d.click && !handleClickHolds(d.click, s.refine)) d.click = null;
       });
@@ -974,7 +1169,8 @@ export function RefinePointerController({ pressed }: { pressed: () => boolean })
           kind: 'refused',
           x: event.clientX,
           y: event.clientY,
-          moved: false,
+          // A handle's click ends where its drag would begin; a Detect click where the part's does.
+          track: new PressTrack(event.clientX, event.clientY, click ? dragStart : clickSlop),
           click,
         },
         event.pointerId,
@@ -1025,7 +1221,7 @@ export function RefinePointerController({ pressed }: { pressed: () => boolean })
       const { clientX: x, clientY: y } = event.nativeEvent;
       const d: Paint = { ...base(event.nativeEvent, partId, binding), kind: 'paint', x, y };
       // As a brush stroke, only where the part is the first thing under the pointer.
-      if (!paintAt(d, x, y, event.altKey, true)) return false;
+      if (!paintPress(d, x, y, event.altKey)) return false;
       own(d, event.pointerId);
       return true;
     };

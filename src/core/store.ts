@@ -3757,6 +3757,8 @@ export const useEditor = create<EditorState>((set, get) => ({
     const refine = readyRefine();
     // Only while nothing else has happened since the drag began.
     if (!drag || refine?.id !== drag.session || drag.step !== refine.undo.at(-1)) return;
+    // A rebuild the drag queued would overwrite the draft put back.
+    cancelRefineDraft();
     builtDraft = drag.built;
     set({ refine: showRefine({ ...refine, ...drag.before }) });
   },
