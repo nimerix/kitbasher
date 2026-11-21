@@ -2388,6 +2388,41 @@ describe('refine session integrity', { timeout: 20_000 }, () => {
     expect(session()).toBe(moved);
   });
 
+  it('cancels only the drag when detection replaces a selected proposal during it', async () => {
+    setup([boxPart()], ['box']);
+    await ready();
+    const id = crestGuide(-1.4, 1.2);
+    const region: RefineProposal = {
+      type: 'region',
+      input: { ...session().region, triangles: Uint32Array.of(10, 11, 12) },
+    };
+    editor().setRefineMode('detect');
+    const { finish } = holdDetect();
+    const initialDetection = editor().detectRefine();
+    finish([region]);
+    await initialDetection;
+    const previous = session().features.find((f) => f.origin === 'detected')!;
+    editor().selectRefine([id, previous.id]);
+    const beforeDrag = session();
+    const detection = editor().detectRefine();
+    editor().beginRefineDrag();
+    editor().moveRefinePoint(id, 0, 1, crest(1.4), true);
+    finish([region]);
+    await detection;
+    const published = session().features.find((f) => f.origin === 'detected')!;
+    expect(published.id).not.toBe(previous.id);
+    expect(session().selected).toEqual([id, published.id]);
+
+    editor().cancelRefineDrag();
+    expect(session().features[0].feature).toBe(beforeDrag.features[0].feature);
+    expect(session().features.find((f) => f.origin === 'detected')).toBe(published);
+    expect(session().selected).toEqual([id, published.id]);
+    expect(session().undo).toBe(beforeDrag.undo);
+    expect(session().redo).toBe(beforeDrag.redo);
+    expect(session().draggingHandle).toBe(false);
+    expect(differingAttributes(session().preview!, freshShown())).toEqual([]);
+  });
+
   it('can still cancel a handle drag after the mode changes under it', async () => {
     setup([boxPart()], ['box']);
     await ready();

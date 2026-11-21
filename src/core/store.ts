@@ -3551,20 +3551,28 @@ export const useEditor = create<EditorState>((set, get) => ({
     if (!begin && refineDrag?.key === key && refineDrag.step === refine.undo.at(-1))
       set({ refine: { ...refine, features } });
     else {
-      const { selected, undo, redo, drawing, draft, draftSkipped, draftStatus } = refine;
+      const { selected, undo, redo, mode, draft, draftSkipped, draftStatus } = refine;
       const before = {
         features: refine.features,
         selected,
         undo,
         redo,
-        drawing,
+        mode,
         draft,
         draftSkipped,
         draftStatus,
       };
       const built = builtDraft;
       commitRefine({ features });
-      refineDrag = { key, step: get().refine?.undo.at(-1), session: refine.id, before, built };
+      refineDrag = {
+        id,
+        feature,
+        key,
+        step: get().refine?.undo.at(-1),
+        session: refine.id,
+        before,
+        built,
+      };
     }
     restRefineDraft();
   },
@@ -3788,11 +3796,33 @@ export const useEditor = create<EditorState>((set, get) => ({
       if (refine?.draggingHandle) set({ refine: { ...refine, draggingHandle: false } });
       return;
     }
-    // A rebuild the drag queued would overwrite the draft put back.
     cancelRefineDraft();
-    builtDraft = drag.built;
-    set({ refine: showRefine({ ...refine, ...drag.before, draggingHandle: false }) });
-    if (drag.before.draftStatus === 'building') scheduleRefineDraft();
+    const { before } = drag;
+    const features = refine.features.map((f) => (f.id === drag.id ? drag.feature : f));
+    const restored =
+      features.length === before.features.length &&
+      features.every((f, i) => f === before.features[i])
+        ? before.features
+        : features;
+    const current = { ...refine, features: restored };
+    const wasDrafted = drafted({ ...refine, ...before });
+    const nowDrafted = drafted(current);
+    const reuse =
+      wasDrafted.length === nowDrafted.length &&
+      nowDrafted.every((f, i) => f.feature === wasDrafted[i].feature);
+    builtDraft = reuse ? drag.built : null;
+    set({
+      refine: showRefine({
+        ...current,
+        undo: before.undo,
+        redo: before.redo,
+        draft: reuse ? before.draft : null,
+        draftSkipped: reuse && before.draftSkipped,
+        draftStatus: reuse ? before.draftStatus : null,
+        draggingHandle: false,
+      }),
+    });
+    if (!reuse || before.draftStatus === 'building') scheduleRefineDraft();
   },
   endRefineDrag: () => {
     refineDrag = null;
@@ -5629,13 +5659,15 @@ let refineDetect: AbortController | null = null;
 
 /** The point last dragged and the step its drag recorded, so a drag is one step. */
 let refineDrag: {
+  id: string;
+  feature: RefineFeature;
   key: string;
   step: RefineStep | undefined;
   session: string;
   /** The session as the drag found it, and the draft record then, which a cancel puts back. */
   before: Pick<
     RefineSession,
-    'features' | 'selected' | 'undo' | 'redo' | 'drawing' | 'draft' | 'draftSkipped' | 'draftStatus'
+    'features' | 'selected' | 'undo' | 'redo' | 'mode' | 'draft' | 'draftSkipped' | 'draftStatus'
   >;
   built: typeof builtDraft;
 } | null = null;
