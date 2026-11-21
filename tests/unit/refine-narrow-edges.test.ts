@@ -229,6 +229,42 @@ describe('a guide laid beside the edge', () => {
   });
 });
 
+describe('a guide between two edges', () => {
+  it('takes the nearer edge from anywhere across a belt but its middle', () => {
+    // The belt of 'takes the nearer of two edges 0.5 mm apart', the guide from 0.05 to 0.45 mm in
+    // from the edge at x = 0 in steps of 0.025. Within half an edge length (0.03) of the middle,
+    // at x = -0.225, -0.25 and -0.275, either edge may be taken: seed 1 takes the farther one at
+    // -0.225 and -0.275, as it did before guides could be laid beside the edge, at automatic width
+    // (measured at fc2d452, which refused Width 0.4 there). Everywhere else every seed takes the
+    // nearer edge in one piece, its chain within 0.0181 of it (measured).
+    for (const seed of [1, 2, 3, 4]) {
+      const model = modelOf(
+        extrudedProfile(
+          [
+            [-0.5, -2],
+            [-0.5, 0],
+            [0, 0],
+            [0, -2],
+          ],
+          [0.08, 0.08],
+          4,
+          { ...scan, seed },
+        ),
+      );
+      for (const width of [0.4, null])
+        for (let k = 0; k <= 16; k++) {
+          const x = -0.05 - 0.025 * k;
+          if (Math.abs(x + 0.25) < 0.03) continue;
+          const nearer = x > -0.25 ? 0 : -0.5;
+          const r = outcome(model, line(model, [x, 0, -1.4], [x, 0, 1.4], width, 0.65));
+          const label = `seed ${seed}, width ${width ?? 'auto'}, x ${x.toFixed(3)}`;
+          expect(r.solved && [r.pieces, r.skipped, r.folded], label).toEqual([1, 0, 0]);
+          expect(chainOff(r, [nearer, 0], 0.7), label).toBeLessThan(0.03);
+        }
+    }
+  }, 120_000);
+});
+
 describe('a guide that strays from its edge', () => {
   it('keeps every vertex within Width of the solved edge where the edge lies past reach', () => {
     // The guide runs from 0.05 mm onto the top face at one end to 0.6 mm at the other. The solved
