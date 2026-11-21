@@ -1477,27 +1477,34 @@ function classifyOriented(
     if (settled) ({ fits, solved, classified } = state);
   }
   const { zone, sides, o } = classified;
-  // A slice that did not find the edge on both sides carries its solved edge over from other slices
-  // or reads it where the gather stops, so that it can move out as the gather grows. Its offset is
-  // held within the furthest the slices that found the edge on both sides lie from the guide, so
-  // that no offset the band's membership reads lies further out than its coverage allows for.
+  // Two sets of edge offsets per slice, and of offsets from the edge per vertex. `solved.offset`, and
+  // `o` read from it, are where each slice solved the edge: the classification's geometry reads
+  // them (the zones, `reaches`, the flanks' flatness and runs). `heldOffset`, and `heldO` read from
+  // it, are what the band's coverage (`strayed`, `gathered`) and membership (which vertices `result`
+  // keeps) read: a slice that did not find the edge on both sides carries its edge over from other
+  // slices or reads it where the gather stops, so that it can move out as the gather grows, and its
+  // offset is held within the furthest the slices that found the edge on both sides lie from the
+  // guide. No offset membership reads then lies further out than coverage allows for.
   const supported = Array.from({ length: slices }, (_, k) =>
     sides.every((side) => side.end[k] > side.start[k]),
   );
+  const heldOffset = solved.offset.slice();
+  let heldO = o;
   if (supported.some(Boolean)) {
     let held = 0;
     for (let k = 0; k < slices; k++)
-      if (supported[k]) held = Math.max(held, Math.abs(solved.offset[k]));
+      if (supported[k]) held = Math.max(held, Math.abs(heldOffset[k]));
     let clamped = false;
     for (let k = 0; k < slices; k++)
-      if (!supported[k] && Math.abs(solved.offset[k]) > held) {
-        solved.offset[k] = Math.sign(solved.offset[k]) * held;
+      if (!supported[k] && Math.abs(heldOffset[k]) > held) {
+        heldOffset[k] = Math.sign(heldOffset[k]) * held;
         clamped = true;
       }
     if (clamped)
-      for (let i = 0; i < count; i++)
-        o[i] =
-          u[i] - (solved.offset[slice[i]] * (1 - blend[i]) + solved.offset[upper(i)] * blend[i]);
+      heldO = Float64Array.from(
+        u,
+        (x, i) => x - (heldOffset[slice[i]] * (1 - blend[i]) + heldOffset[upper(i)] * blend[i]),
+      );
   }
   // A flank that ends at a second transition stops short of it: positions within the tolerance
   // reach into the next fillet before they leave the flank's surface. The zones are final from here.
@@ -1557,7 +1564,7 @@ function classifyOriented(
 
   // The band holds every vertex within `gathered` of the solved edge, as membership reads it, in
   // every slice: the furthest that edge lies from the guide is `strayed`.
-  const strayed = Math.max(...Array.from(solved.offset, Math.abs));
+  const strayed = Math.max(...Array.from(heldOffset, Math.abs));
   const gathered = band.width - strayed;
   // The band capped to a width measured from the solved edge, so that a guide laid to one side of
   // the edge does not starve the far flank, or null when its flanks there show no edge: on each
@@ -1570,7 +1577,7 @@ function classifyOriented(
     const inner = new Float64Array(slices * 2).fill(Infinity),
       outer = new Float64Array(slices * 2).fill(-Infinity);
     for (let i = 0; i < count; i++) {
-      if (Math.abs(o[i]) > width) continue;
+      if (Math.abs(heldO[i]) > width) continue;
       keep.push(i);
       if (runZone[i] !== BandZone.Left && runZone[i] !== BandZone.Right) continue;
       const s = runZone[i] - 1,
@@ -1597,7 +1604,7 @@ function classifyOriented(
       fits: [fits[0].kind, fits[1].kind],
       flanks,
       edge: solved.point.slice(),
-      offset: solved.offset.slice(),
+      offset: heldOffset.slice(),
       angle,
       width,
     };
