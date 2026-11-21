@@ -88,7 +88,6 @@ import type { RefineProposal } from './refine-detect';
 import type { EdgeEnd, EdgeInput, EdgeSegment, EdgeSolve } from './refine-edge';
 import {
   type RefineMesh,
-  type RefineTopology,
   cloneRefineMesh,
   foldedTriangles,
   trimRefineMesh,
@@ -5929,8 +5928,7 @@ function acceptFeatures(
         : { ...model, mesh };
       if (children?.size) {
         const remap = (t: Uint32Array) => cut.remapTriangles(t, children);
-        const painted = (t: Uint32Array) => closePinholes(model.mesh, model.topology, remap(t));
-        triangles = painted(triangles);
+        triangles = remap(triangles);
         folds = remap(folds);
         skipped = remap(skipped);
         // Accepted regions follow too, so a later Detect can tell what they already cover.
@@ -5940,7 +5938,7 @@ function acceptFeatures(
               ...f,
               feature: {
                 type: 'region',
-                input: { ...f.feature.input, triangles: painted(f.feature.input.triangles) },
+                input: { ...f.feature.input, triangles: remap(f.feature.input.triangles) },
               },
             });
       }
@@ -5981,50 +5979,6 @@ function acceptFeatures(
     drawing: false,
   });
   if (!failed && (skipped.length || folds.length)) notify(cutNotice, 'info');
-}
-
-/**
- * `set` with every triangle added whose three edge-neighbours are all in it. One pass is enough:
- * a triangle that joins has no neighbour outside, so it can enclose no other.
- */
-function closePinholes(mesh: RefineMesh, topology: RefineTopology, set: Uint32Array) {
-  const { weldOf, corners } = mesh;
-  const { triangleStart, trianglesOf } = topology;
-  const inside = new Uint8Array(mesh.triangleCount);
-  for (const t of set) inside[t] = 1;
-  const welded = (t: number, k: number) => weldOf[corners[t * 3 + k]];
-  /** The triangles across each edge of `t`, into `out`; false when an edge has none. */
-  const across = (t: number, out: number[]) => {
-    out.length = 0;
-    let every = true;
-    for (let k = 0; k < 3; k++) {
-      const a = welded(t, k),
-        b = welded(t, (k + 1) % 3);
-      let found = false;
-      for (let i = triangleStart[a]; i < triangleStart[a + 1]; i++) {
-        const u = trianglesOf[i];
-        if (u !== t && (welded(u, 0) === b || welded(u, 1) === b || welded(u, 2) === b)) {
-          out.push(u);
-          found = true;
-        }
-      }
-      every &&= found;
-    }
-    return every;
-  };
-  const around: number[] = [],
-    outside: number[] = [],
-    added: number[] = [];
-  for (const t of set) {
-    across(t, around);
-    for (const u of around) if (!inside[u]) outside.push(u);
-  }
-  for (const u of outside) {
-    if (inside[u] || !across(u, around) || around.some((w) => !inside[w])) continue;
-    inside[u] = 1;
-    added.push(u);
-  }
-  return added.length ? Uint32Array.from([...set, ...added]).sort() : set;
 }
 
 /** solveEdge takes a closed path of one spline as two splines joined smoothly. */

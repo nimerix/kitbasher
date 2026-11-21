@@ -19,17 +19,11 @@ import { dismissNotification, requestTaskCancellation, useActivity } from '../..
 import { editorCommands, undoTarget } from '../../src/core/commands';
 import { partMatrix, triangleCount } from '../../src/core/geometry';
 import { detectDefaults } from '../../src/core/refine-detect';
-import {
-  type RefineMesh,
-  type RefineTopology,
-  weldedCorner,
-  writeRefinedGeometry,
-} from '../../src/core/refine-mesh';
+import { writeRefinedGeometry } from '../../src/core/refine-mesh';
 import { fitCurve, type EdgeCurve } from '../../src/core/refine-curve';
 import type { GuidePoint } from '../../src/core/refine-band';
 import type { RefineProposal } from '../../src/core/refine-detect';
 import type { RegionInput } from '../../src/core/refine-region';
-import * as cutCode from '../../src/core/refine-cut';
 import * as edgeCode from '../../src/core/refine-edge';
 import { patchRefinedGeometry } from '../../src/core/refine-preview';
 import { solveEdge } from '../../src/core/refine-edge';
@@ -53,7 +47,7 @@ import {
 } from '../../src/core/store';
 import { useXR } from '../../src/core/xr-session';
 import type { Joint, Part } from '../../src/core/types';
-import { changedVertices, closed, modelOf, splitEdge } from '../helpers/refine';
+import { changedVertices, closed, edgeNeighbours, modelOf, splitEdge } from '../helpers/refine';
 import {
   boxPart,
   differingAttributes,
@@ -2393,44 +2387,27 @@ describe('refine session integrity', { timeout: 20_000 }, () => {
     ]);
   });
 
-  it('closes a pinhole a cut leaves in the paint and in a pending region', async () => {
-    setup([canPart()], ['can']);
+  it('keeps triangle 10 erased from paint and a pending region through an unrelated cut', async () => {
+    setup([boxPart()], ['box']);
     await ready();
-    editor().setRefineMode('region');
-    editor().setRefineBrushRadius(1);
-    paint([[1.45, 0.4, 0]]);
-    editor().makeRefineRegion();
-    paint([[1.45, 0.4, 0]]);
+    const edge = crestGuide(-1.4, 1.2);
     const { mesh, topology } = session().model!;
-    const painted = new Set(session().triangles);
-    // A painted triangle well away from the rim, whose neighbours the cut will not split.
-    const hole = session().triangles.find((t) => {
-      const centre = triangleCentre(mesh, t);
-      return (
-        centre[1] < 0.3 &&
-        edgeNeighbours(mesh, topology, t).every((u) => painted.has(u)) &&
-        centre[1] > -0.2
-      );
-    })!;
-    expect(hole).toBeDefined();
-    const remap = cutCode.remapTriangles;
-    vi.spyOn(cutCode, 'remapTriangles').mockImplementation((set, children) =>
-      remap(set, children).filter((t) => t !== hole),
-    );
-    editor().setRefineMode('edge');
-    editor().setRefineEdge({ kind: 'arc', width: 0.6 });
-    editor().selectRefine([]);
-    for (const angle of [-0.6, 0, 0.6]) editor().addRefinePoint(rim(angle));
-    const before = session().model!.mesh.triangleCount;
+    const hole = 10;
+    const ring = edgeNeighbours(mesh, topology, hole);
+    expect(ring).toHaveLength(3);
+    editor().setRefineMode('region');
+    useEditor.setState({ refine: { ...session(), triangles: ring } });
+    editor().makeRefineRegion();
+    useEditor.setState({ refine: { ...session(), triangles: ring } });
+    const regionId = session().features.find((f) => f.feature.type === 'region')!.id;
+    editor().setRefineMode('detect');
+    editor().selectRefine([edge]);
     editor().acceptRefine();
-    const after = session().model!;
-    expect(after.mesh.triangleCount).toBeGreaterThan(before);
-    expect(cutCode.remapTriangles).toHaveBeenCalled();
-    const region = session().features[0].feature;
+    expect(session().model!.mesh.triangleCount).toBeGreaterThan(mesh.triangleCount);
+    const region = session().features.find((f) => f.id === regionId)!.feature;
     if (region.type !== 'region') throw new Error('not a region');
     for (const set of [session().triangles, [...region.input.triangles]]) {
-      expect(set).toContain(hole);
-      expect(enclosed(after.mesh, after.topology, set)).toEqual([]);
+      expect([...set].sort((a, b) => a - b)).toEqual([...ring].sort((a, b) => a - b));
     }
   });
 
@@ -2476,41 +2453,6 @@ function nearestOnCurve(curve: EdgeCurve, p: [number, number, number]) {
     nearest = Math.min(nearest, closest.distanceTo(point));
   }
   return nearest;
-}
-
-function triangleCentre(mesh: RefineMesh, t: number) {
-  const centre = [0, 0, 0];
-  for (const k of [0, 1, 2] as const)
-    for (let axis = 0; axis < 3; axis++)
-      centre[axis] += mesh.position[weldedCorner(mesh, t, k) * 3 + axis] / 3;
-  return centre;
-}
-
-/** The triangles across the edges of triangle `t`. */
-function edgeNeighbours(mesh: RefineMesh, topology: RefineTopology, t: number) {
-  const corners = ([0, 1, 2] as const).map((k) => weldedCorner(mesh, t, k));
-  const found: number[] = [];
-  for (let k = 0; k < 3; k++) {
-    const [a, b] = [corners[k], corners[(k + 1) % 3]];
-    for (let i = topology.triangleStart[a]; i < topology.triangleStart[a + 1]; i++) {
-      const u = topology.trianglesOf[i];
-      if (u !== t && ([0, 1, 2] as const).some((j) => weldedCorner(mesh, u, j) === b))
-        found.push(u);
-    }
-  }
-  return found;
-}
-
-/** Triangles outside `set` whose three edge-neighbours are all in it. */
-function enclosed(mesh: RefineMesh, topology: RefineTopology, set: ArrayLike<number>) {
-  const inside = new Set(Array.from(set));
-  const found = new Set<number>();
-  for (const t of inside)
-    for (const u of edgeNeighbours(mesh, topology, t)) {
-      const around = edgeNeighbours(mesh, topology, u);
-      if (!inside.has(u) && around.length >= 3 && around.every((w) => inside.has(w))) found.add(u);
-    }
-  return [...found];
 }
 
 /** Whether two proposals have the same input, value for value. */

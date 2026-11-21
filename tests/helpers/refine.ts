@@ -1790,3 +1790,18 @@ export function cutLineage(before: RefineMesh, after: RefineMesh, children: Map<
   }
   return { shared, childless, farthest };
 }
+
+/** The triangles across the edges of triangle `t`. */
+export function edgeNeighbours(mesh: RefineMesh, topology: RefineTopology, t: number) {
+  const corners = ([0, 1, 2] as const).map((k) => weldedCorner(mesh, t, k));
+  const found: number[] = [];
+  for (let k = 0; k < 3; k++) {
+    const [a, b] = [corners[k], corners[(k + 1) % 3]];
+    for (let i = topology.triangleStart[a]; i < topology.triangleStart[a + 1]; i++) {
+      const u = topology.trianglesOf[i];
+      if (u !== t && ([0, 1, 2] as const).some((j) => weldedCorner(mesh, u, j) === b))
+        found.push(u);
+    }
+  }
+  return found;
+}
