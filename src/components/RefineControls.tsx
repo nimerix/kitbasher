@@ -685,16 +685,23 @@ function EdgeControls({ view, targets, owned }: ModeProps) {
           </div>
         </div>
       )}
-      <button
-        type="button"
-        className="button secondary full-width"
-        disabled={!refinePointRemovable(view)}
-        onClick={() => editor().removeChosenRefinePoint()}
-      >
-        Remove point
-      </button>
+      <RemovePoint view={view} />
       <FeatureActions targets={targets} />
     </>
+  );
+}
+
+/** Removes the chosen guide point, when the guide stays complete without it. */
+function RemovePoint({ view }: Pick<ModeProps, 'view'>) {
+  return (
+    <button
+      type="button"
+      className="button secondary full-width"
+      disabled={!refinePointRemovable(view)}
+      onClick={() => editor().removeChosenRefinePoint()}
+    >
+      Remove point
+    </button>
   );
 }
 
@@ -1046,6 +1053,7 @@ function DetectControls({ view, targets, owned }: ModeProps) {
             Select all proposed
           </button>
           <PreviewOffHint />
+          {view.chosenPoint ? <RemovePoint view={view} /> : null}
           <div className="warp-gap-row">
             <button
               className="button secondary"

@@ -1059,6 +1059,15 @@ test('chooses a guide point and removes it with the key or panel button', async 
   await remove.click();
   await expect.poll(points).toBe(2);
   await expect(page.getByText('0 accepted · 1 proposed')).toBeVisible();
+  // Detect shows the button only while a point is chosen.
+  await undo(page);
+  await expect.poll(points).toBe(3);
+  await page.getByRole('radio', { name: 'Detect', exact: true }).click();
+  await expect(remove).toHaveCount(0);
+  await clickSurface(page, crest(0));
+  await expect(remove).toBeEnabled();
+  await remove.click();
+  await expect.poll(points).toBe(2);
 });
 
 test('drags the middle handle of a guide on an exterior edge', async ({ page }) => {
