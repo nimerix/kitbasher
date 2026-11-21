@@ -40,7 +40,7 @@ export interface EdgeBand {
    * guide along the surface, positive on the Left), and zone. `zone` is what moves and what is cut:
    * a slice without a flank of its own takes its zones from the slices with one either side of it.
    * `foundZone` is each vertex's zone as its own slices found it, without that filling: everything
-   * that fits, orients or decides reads it.
+   * that fits, orients or decides where a free end goes reads it.
    */
   station: Float32Array;
   cross: Float32Array;
@@ -1150,8 +1150,8 @@ function classifyOriented(
   const limit = (flatTurn * Math.PI) / 180;
   const bin = span / seedEdges;
   const candidates = [1, -1].map((sign) => {
-    // The window seeds are read from: a seed may start anywhere in it, the reach plus one seed span,
-    // so at most about one and a half reaches from the guide.
+    // The window seeds are read from: a seed may start anywhere in it, the reach plus one seed span.
+    // A seed span is never longer than the reach, so that is up to twice the reach from the guide.
     const bins = Math.ceil((reach + span) / bin);
     const turns = Array.from({ length: bins }, () => [] as number[]);
     const members = Array.from({ length: bins }, () => [] as number[]);
