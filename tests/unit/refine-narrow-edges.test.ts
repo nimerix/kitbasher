@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildBand, estimateWidth } from '../../src/core/refine-band';
+import { buildBand, estimateBand, estimateWidth } from '../../src/core/refine-band';
 import { type EdgeInput, applyEdge, solveEdge } from '../../src/core/refine-edge';
 import { cloneRefineMesh } from '../../src/core/refine-mesh';
 import type { Vec3 } from '../../src/core/types';
@@ -190,5 +190,64 @@ describe('automatic width on a coarse mesh', () => {
     };
     const r = outcome(model, input);
     expect(r.solved && [r.pieces, r.skipped, r.folded]).toEqual([1, 0, 0]);
+  });
+});
+
+describe('the automatic width and the classification it hands on', () => {
+  it('judges the width on a classification that covers it', () => {
+    const corner = (seed: number, radius = 0.08) =>
+      modelOf(
+        extrudedProfile(
+          [
+            [-2, 0],
+            [0, 0],
+            [0, -2],
+          ],
+          [radius],
+          4,
+          { ...scan, seed },
+        ),
+      );
+    const cylinder = modelOf(softCylinder(3, 1.5, 0.6, { step: 0.2, ripple: 0.04, noise: 0.008 }));
+    const inset = 0.6 - 0.6 / Math.SQRT2;
+    const cases: { model: Model; kind: 'line' | 'arc'; points: Vec3[] }[] = [
+      ...[1, 2, 3].flatMap((seed) =>
+        [-0.02, -0.2].map((x) => ({
+          model: corner(seed),
+          kind: 'line' as const,
+          points: [
+            [x, 0, -1.4],
+            [x, 0, 1.4],
+          ] as Vec3[],
+        })),
+      ),
+      // A rounding 0.45 mm in radius, the guide 0.15 mm off its crest: the width wanted, 0.79 mm,
+      // lies past the 0.78 mm a classification read without a width covers (measured).
+      {
+        model: corner(1, 0.45),
+        kind: 'line',
+        points: [
+          [-0.45 + 0.45 / Math.SQRT2 - 0.15, -0.45 + 0.45 / Math.SQRT2, -1.4],
+          [-0.45 + 0.45 / Math.SQRT2 - 0.15, -0.45 + 0.45 / Math.SQRT2, 1.4],
+        ],
+      },
+      {
+        model: cylinder,
+        kind: 'arc',
+        points: [-0.9, 0, 0.9].map((a): Vec3 => [
+          (3 - inset) * Math.cos(a),
+          1.5 - inset,
+          (3 - inset) * Math.sin(a),
+        ]),
+      },
+    ];
+    for (const { model, kind, points } of cases) {
+      const guide = points.map((p) => pointOn(model.mesh, p));
+      const { width, found } = estimateBand(model.mesh, model.topology, kind, guide, model.noise);
+      expect(width).toBeGreaterThan(0);
+      // `buildBand` reuses this classification for the solve, so the solve reads what was judged.
+      expect(found!.gathered).toBeGreaterThanOrEqual(width);
+      expect(found!.result(width)).not.toBeNull();
+    }
   });
 });

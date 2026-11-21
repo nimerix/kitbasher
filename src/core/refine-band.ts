@@ -1682,7 +1682,7 @@ export function estimateWidth(
   return estimateBand(mesh, topology, kind, points, noise).width;
 }
 
-/** `estimateWidth` with the classification it read, for `buildBand` to reuse. */
+/** `estimateWidth` with a classification that covers the width, for `buildBand` to reuse. */
 export function estimateBand(
   mesh: RefineMesh,
   topology: RefineTopology,
@@ -1693,7 +1693,15 @@ export function estimateBand(
   const found = classify(mesh, topology, kind, points, null, noise);
   if (!found) return { width: 0, found };
   const wanted = found.soft + Math.max(2 * found.soft, 6 * found.edge);
+  // Each width is judged on a classification that covers it, which `buildBand` then reuses.
+  const judged = (width: number) => {
+    const covering =
+      width <= found.gathered ? found : classify(mesh, topology, kind, points, width, noise);
+    return covering?.result(width) ? covering : null;
+  };
   const limited = Math.min(widestEstimate, wanted);
-  if (found.result(limited)) return { width: limited, found };
-  return { width: wanted > limited && found.result(wanted) ? wanted : 0, found };
+  const held = judged(limited);
+  if (held) return { width: limited, found: held };
+  const wide = wanted > limited ? judged(wanted) : null;
+  return wide ? { width: wanted, found: wide } : { width: 0, found };
 }
