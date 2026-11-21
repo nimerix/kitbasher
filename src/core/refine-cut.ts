@@ -1051,8 +1051,11 @@ export function cutAlongField(
   const g = [0, 0, 0];
   const vertexOf = (ref: number) => (ref < 3 ? g[ref] : splitVertex(g[ref - 3], g[(ref - 2) % 3]));
   const distance = (p: number, q: number) => {
-    const a = mesh.weldOf[vertexOf(p)] * 3,
-      b = mesh.weldOf[vertexOf(q)] * 3;
+    // Resolving a split vertex can grow the weld map.
+    const vp = vertexOf(p),
+      vq = vertexOf(q);
+    const a = mesh.weldOf[vp] * 3,
+      b = mesh.weldOf[vq] * 3;
     return Math.hypot(
       mesh.position[a] - mesh.position[b],
       mesh.position[a + 1] - mesh.position[b + 1],

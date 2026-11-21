@@ -28,9 +28,17 @@ const cases = [
 ] as const;
 
 // Cut the box by the plane x = 0.013: an awkward offset so snaps and splits both occur.
-const cutBox = (options: SoftOptions, geometry = softBox([2, 1.5, 1], 0.3, options)) => {
+const cutBox = (
+  options: SoftOptions,
+  geometry = softBox([2, 1.5, 1], 0.3, options),
+  spareWeldCapacity = 0,
+) => {
   const { mesh, topology } = modelOf(geometry);
   const cut = cloneRefineMesh(mesh, true);
+  if (spareWeldCapacity) {
+    cut.weldOf = new Uint32Array(mesh.vertexCount + spareWeldCapacity);
+    cut.weldOf.set(mesh.weldOf);
+  }
   const ids = Uint32Array.from({ length: cut.weldedCount }, (_, i) => i);
   const field = Float32Array.from(ids, (i) => cut.position[i * 3] - 0.013);
   const result = cutAlongField(cut, topology, ids, field, (_x, y, z, out) =>
@@ -38,6 +46,20 @@ const cutBox = (options: SoftOptions, geometry = softBox([2, 1.5, 1], 0.3, optio
   );
   return { mesh, cut, result };
 };
+
+it('chooses the same quad diagonals when the weld map grows during a cut', () => {
+  const geometry = softBox([2, 1.5, 1], 0.3);
+  const roomy = cutBox({}, geometry, geometry.getAttribute('position').count);
+  const growing = cutBox({}, geometry, 2);
+  expect(growing.cut.weldOf.length).toBeGreaterThan(growing.mesh.weldOf.length + 2);
+  expect(roomy.cut.weldOf.length).toBe(roomy.mesh.vertexCount * 2);
+  expect(growing.cut.triangleCount).toBe(roomy.cut.triangleCount);
+  const end = roomy.cut.triangleCount * 3;
+  const mismatch = growing.cut.corners
+    .subarray(0, end)
+    .findIndex((v, i) => v !== roomy.cut.corners[i]);
+  expect(mismatch).toBe(-1);
+});
 
 describe.each(cases)('cutAlongField, %s', (_, options) => {
   const run = () => cutBox(options);
