@@ -349,7 +349,7 @@ export const assemblyGuides: DocArticle[] = [
         id: 'guide-an-edge',
         title: 'Guide an edge',
         paragraphs: [
-          'A guide marks a softened edge for the tool to rebuild. Lay it along the rounding itself.',
+          'A guide marks a softened edge for the tool to rebuild. Lay it along the rounding itself or close beside it.',
         ],
         steps: [
           'In Edge mode, choose Line, Arc, or Spline under Guide.',
@@ -369,7 +369,7 @@ export const assemblyGuides: DocArticle[] = [
         paragraphs: [
           'With one open pending guide selected, finish its current segment, pressing Enter for a spline. Click farther along the edge to start the next segment. Guide and Joints set how the next segment is drawn. The panel shows Applies to the next segment. Joints sets whether each new joint is Sharp, a corner, or Smooth.',
           'Click the first handle of the selected open guide to close it. A single line cannot close. A three-point arc can close directly, and a spline you are still drawing can close after three points. On a multi-segment path, the starting point can finish the segment you are still drawing. If Refine needs to add a closing segment to a finished path, choose Line or Spline under Guide. Press Esc while placing an unfinished guide to discard it.',
-          'Drag the points of a selected guide along the surface to adjust it. The preview updates when the pointer rests and when you let go, and Accept waits for it. Each completed drag that moves a handle is one undo step. Click a point of a selected guide to choose it; the chosen point is highlighted. Clicking the first point of an open guide that can close closes it instead. Remove point, Delete, or Backspace removes the chosen point when the guide stays complete, as one undo step. Remove point is in the Edge panel, and in Detect while a point is chosen. Choosing a point needs the pointer. Esc clears the choice first. With no point chosen, Delete dismisses the guide. Automatic width lets the tool estimate how far to either side of the guide it reads and rebuilds the surface. Turn it off to set Width yourself. Strength sets how loosely the edge follows the guide’s line, arc or spline, from no change to fully on it.',
+          'Drag the points of a selected guide along the surface to adjust it. The preview updates when the pointer rests and when you let go, and Accept waits for it. Each completed drag that moves a handle is one undo step. Click a point of a selected guide to choose it; the chosen point is highlighted. Clicking the first point of an open guide that can close closes it instead. Remove point, Delete, or Backspace removes the chosen point when the guide stays complete, as one undo step. Remove point is in the Edge panel, and in Detect while a point is chosen. Choosing a point needs the pointer. Esc clears the choice first. With no point chosen, Delete dismisses the guide. Width is measured from the edge the tool finds, not from the guide. Automatic width lets the tool estimate how far to either side of that edge it reads and rebuilds the surface, up to 1 mm unless the edge cannot be read within 1 mm. Turn it off to set Width yourself. Strength sets how loosely the edge follows the guide’s line, arc or spline, from no change to fully on it.',
           'Ends sets Start and End separately for an open guide; the larger point marks the start. Choose Hold when Auto fades an edge that should run sharp into a corner, and Fade when Auto holds one that should die away.',
         ],
         table: {
@@ -471,7 +471,7 @@ export const assemblyGuides: DocArticle[] = [
         bullets: [
           'Restore edges before smoothing or flattening across them. Smoothing or flattening across an edge that has not been rebuilt can soften it further; rebuilt edges are held.',
           'On a plate with rivets, use a painted region with Flatten and Keep detail rather than the Flatten brush. The brush can flatten rivets, and clipping one can leave a step at its rim.',
-          'A guide needs surface on both sides to work with. Lay it along the rounded edge itself. If the tool says no edge was found, move the guide onto the rounding or change Width. Narrow lips and rims often have too little surface on one side, and the tool then finds no edge there.',
+          'A guide needs surface on both sides to work with. Lay it along the rounded edge itself or close beside it. A line laid along an edge that curves follows the curve. If the tool says no edge was found, move the guide onto the rounding or change Width. A lip or rib rounded right over, with no flat top left, has no edge for the tool to find.',
           'Where three faces meet, in a pocket or at a box corner, guide the edges separately if a path through the corner leaves a mark there.',
           'Treat proposals as a starting point. Check them before accepting many at once. Where Detect proposes a guide on a smooth tube or across a scan dent, dismiss it.',
           'Small hardware such as clips, flanges, and buckle lips is often shorter than Minimum length. Lower it to pick those up, and expect more short guides to check.',

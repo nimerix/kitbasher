@@ -485,8 +485,7 @@ None of these came from the product owner. Each can be overruled.
 
 Added 2026-11-20, after the build. It changes how an edge is read, steps 1 to 3 of "How an
 edge is rebuilt". It comes from replaying the hand study's refused and damaged guides on the
-two reference scans and prototyping each change against them. The product owner approved the
-work, not yet these rules.
+two reference scans and prototyping each change against them.
 
 **What was wrong.** A guide on a narrow lip, rim or border was refused, or solved and cut in
 pieces, for five measured reasons:
@@ -506,9 +505,12 @@ pieces, for five measured reasons:
 1. **Width is measured from the solved edge.** The band keeps the vertices whose distance
    across the surface from the solved edge is at most Width. The guide stays what points at
    the edge: the solved edge must lie within reach of it, the larger of 0.35 and 6 edge
-   lengths, in at least half of the slices. Automatic width is soft + max(2 x soft, 6 edge
-   lengths), where soft is the width of the rounding, held to 1 unless the edge cannot be
-   read within 1. It no longer adds the guide's distance from the edge.
+   lengths, in at least half of the slices. A band is built at the requested Width or at what
+   it read, whichever is smaller. In a slice where the edge was not found on both sides, its
+   position is held within the range of positions seen where it was. Automatic width is
+   soft + max(2 x soft, 6 edge lengths), where soft is the width of the rounding. It is held
+   to 1 unless the edge cannot be read within 1. It no longer adds the guide's distance from
+   the edge.
 2. **A flank's run is read between its zone boundaries.** In each slice the run is from
    where the flank starts to the nearest of where it ends, how far the slice reaches, and
    Width. Each side needs a run of 3 edge lengths in at least half of the slices, as before.
@@ -518,13 +520,18 @@ pieces, for five measured reasons:
    at least half of the slices on that side have a flank of their own, and never before the
    first or after the last slice that has one. Every vertex is still tested against the
    flank's fitted surface, so a rivet or other detail standing off it stays where it is.
-   Filling changes what is moved and cut, never whether an edge is found: every check reads
-   the slices as they were before filling.
-4. **A flank may start up to twice the reach from the guide.** The solved edge must still lie
-   within reach.
+   The edge is found, fitted and oriented, and its free ends decided, from the slices' own
+   zones. Filled zones only decide what moves and what is cut. The check that a sharp core
+   remains in what will be moved reads the filled zones, because it checks that move.
+4. **A flank may start past the reach.** A flank's seed may start anywhere in the seed
+   window: the reach plus one seed span, which is up to twice the reach. Pairs of flanks
+   whose seeds both start within the reach are tried first, so a guide that solved before
+   keeps its result. The solved edge must still lie within reach.
 5. **A Line guide follows an edge that curves.** When the points where the flanks meet leave
    the fitted line by more than one edge length, clear of the fading ends, they are fitted
-   as an arc, and the arc is kept only when it at least halves that gap.
+   as an arc, and the arc is kept only when it at least halves that gap. The choice is made
+   again at each refit, including at joints, from the kind as drawn. The guide as stored and
+   shown stays a line.
 
 **What still refuses.** A guide on a flat face 0.5 mm or more from any edge. A guide on one
 smooth surface, such as a cylinder wall. Flanks less than 10 degrees apart, and flanks that
@@ -535,12 +542,22 @@ edge used to be refused. It now finds that edge. On a coarse mesh the reach is 6
 lengths, so on a box with 0.23 mm edges a guide in the middle of a face finds an edge 1 mm
 away.
 
-**Measured on the reference scans with the prototype.** 8 of the 17 refused or damaged edge
-guides solve in one piece with nothing skipped or folded. Judged by eye, the upper plate
-border and the fin edge on part 45 and the belt's lower edge and the valve rim on part 57
-become one clean line; the buckle lip gains a crisp line without reading as the flat frame in
-the photo; one outlet arc solves with nothing to show. The two edges the study kept solve as
-before.
+**Measured on the reference scans with the build.** Measured 2026-11-21, replaying the hand
+study's 20 edge guides. 13 solve, against 6 before these rules. 12 solve in one piece with
+nothing skipped or folded: newly, the upper plate border (as a line, before and after
+Flatten), the fin edge, the buckle lip (two widths), the belt's lower edge and the lighter
+outlet arc; the valve rim, cut in 3 pieces before, is now one piece. The two edges the study
+kept solve as before and look the same, and the barrel ring and Detect's buckle guide solve
+as before. Still refused: the closed plate border (two widths), the cross strap line, the
+neck collar arc (two widths), the cable support spline and the pocket wall. Still damaged: the outlet arc, cut in 3 pieces with 31 triangles skipped (21
+before). Judged by eye against the photos, the plate border, fin edge, belt edge and valve
+rim each become one cleaner line; the buckle lip gains a crisp line with a small step where
+the guide starts, and does not read as the flat frame in the photo; the lighter outlet arc
+shows nothing; the outlet arc's hard line now tilts across the collar with a bump at each
+end, which looks slightly worse than before. At whole-part scale neither part looks closer
+to its photos. Every guide that solves leaves a closed mesh after Apply with no zero-area
+triangle, and scene Undo and Redo restore the exact geometries. The total solve time of the
+20 guides went from 1254 ms to 1738 ms (median of three runs).
 
 **Not covered by these rules.**
 
@@ -551,26 +568,42 @@ before.
 - A shallow bend of about 30 degrees with no rounding still passes as an edge and adds a
   line or changes nothing (the outlet flange, Detect's seam inside the buckle).
 - A refusal still does not say which check failed or on which span.
+- A tied end's cut runs along the existing crease for up to the band's width, as it did
+  before these rules.
+- Which slices find the edge can depend on how far the band is read, so a band is not
+  identical across widths at a guide's ends.
 
 ## Where the build falls short of this spec
 
-Measured on the branch on 2026-11-20. None of this was approved by the product owner.
+Measured on the branch on 2026-11-20; the edge results and the preview update measured again
+on 2026-11-21, after "Narrow flanks and guides laid beside the edge". None of this was
+approved by the product owner.
 
 - **The acceptance test is not met.** Both reference scans were refined by hand, feature by
   feature, keeping only what looked better. 6 of 35 attempts were kept. Part 45's riveted
   plate face is flatter with its fasteners kept, and one strap lip and one frame rail are
-  straighter. Part 57's two tank domes are less blotchy and one hose span is smoother. The
-  plate border, barrel rings and fin on 45, and the buckle, belt, flanges and pocket on 57,
-  were not restored. At whole-part scale the before and after renders are hard to tell
-  apart.
-- **Why.** An edge guide is refused unless it finds enough surface on both sides of the
-  edge, and narrow lips and rims give too little. Some guides that pass their checks are
-  cut in several pieces or leave a seam. Keep detail cannot tell molded relief from scan
-  roughness. Sweep refused the cable and both elbows.
-- **Performance.** A preview update takes 74 to 87 ms on the reference scans and 640 ms on
-  a 3 million triangle part. A smooth dab takes about 20 ms on part 45. Detect takes about
-  24 s on each scan and Accept about 0.35 to 0.4 s, followed by a pause of about 0.4 s
-  while picking is rebuilt. The tool is not usable for live preview at 3 million triangles.
+  straighter. Part 57's two tank domes are less blotchy and one hose span is smoother. On
+  replaying the study's edge guides with the narrow-edge rules, one span of the plate border
+  and the fin edge on 45, and the buckle lip, belt edge and valve rim on 57, each gain one
+  cleaner line. The rest of the plate border, the barrel rings and collars on 45, and the
+  outlet flange and pocket on 57, were not restored. At whole-part scale the renders, with
+  or without those lines, are hard to tell apart.
+- **Why.** 7 of the study's 20 edge guides are still refused: the closed plate border, the
+  cross strap line, the neck collar arcs, the cable support spline and the pocket wall.
+  Where a guide now solves, the gain is one line along one edge, rebuilt within 0.38 to
+  0.64 of it, which does not show at whole-part scale. The outlet arc is still cut in
+  pieces with triangles skipped. Keep detail cannot tell molded relief from scan roughness.
+  Sweep refused the cable and both elbows.
+- **Running a guide again.** Over its own result, both times at full strength, a guide moves
+  the surface by up to 0.05 on the plate border and 0.11 on the belt edge, away from the
+  guide's ends, and cuts the border in 4 pieces and the belt edge in 2 with 8 triangles
+  skipped. On the two kept edges and the barrel ring it moves under 0.006 away from the
+  ends.
+- **Performance.** A preview update takes 92 to 106 ms for a strap lip guide on part 45
+  and 139 to 165 ms for the valve rim on part 57 (80 to 96 ms and 150 to 163 ms before the
+  narrow-edge rules), and 640 ms on a 3 million triangle part. A smooth dab takes about
+  20 ms on part 45. Detect takes about 24 s on each scan and Accept about 0.35 to 0.4 s,
+  followed by a pause of about 0.4 s while picking is rebuilt. The tool is not usable for live preview at 3 million triangles.
 
 ## Out of scope (deferred)
 
