@@ -155,6 +155,13 @@ const refitVertices = 12;
 const refitRun = 3;
 /** Most vertices a flank refit reads. */
 const refitPoints = 1024;
+/**
+ * A Line guide's meet of at least `curvedPoints` points that leaves its fitted line by more than an
+ * edge length, clear of the tapers, is fitted as an arc too. The arc is kept only when its own
+ * largest gap is under the line's divided by `curvedGain`.
+ */
+const curvedPoints = 9;
+const curvedGain = 2;
 const empty = new Uint32Array(0);
 
 const dot = (a: ArrayLike<number>, b: ArrayLike<number>) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
@@ -661,7 +668,22 @@ function unbiasedFlanks(
   const meetWith = (flanks: [Flank, Flank], read: (FlankSample | null)[]) => {
     const meet = meetFlanks(band, flanks);
     if (meet.angles.length < 2) return null;
-    return { flanks, meet, curve: fitCurve(kind, meet.points, controls, edge), samples: read };
+    let fitted = kind;
+    let curve = fitCurve(kind, meet.points, controls, edge);
+    // A Line guide laid along an edge that curves, as round a rim, would pull the edge onto its
+    // chord: where the meet leaves the line, it is fitted as the arc it follows. Each step decides
+    // again from the guide's own kind. An arc that closes on itself is no edge of an open line.
+    if (kind === 'line' && meet.points.length >= curvedPoints * 3) {
+      const gap = largestGap(curve, band.drawn, meet.points, edge);
+      if (gap > edge) {
+        const arc = fitCurve('arc', meet.points, 3, edge);
+        if (!arc.closed && largestGap(arc, band.drawn, meet.points, edge) < gap / curvedGain) {
+          curve = arc;
+          fitted = 'arc';
+        }
+      }
+    }
+    return { flanks, meet, curve, samples: read, kind: fitted };
   };
   // The band's own flanks seed the first step; once two steps agree, the nearer one is kept. With
   // both flanks kept as profiles no step changes them, so the seed is the answer.
@@ -683,6 +705,7 @@ function unbiasedFlanks(
 
 /** One segment of a path, solved on its own as a single edge. */
 interface Part {
+  /** The kind its edge was fitted as, not the guide's as drawn: a Line guide's may be an arc. */
   kind: GuideKind;
   band: EdgeBand;
   edge: number;
@@ -724,7 +747,9 @@ function solvePart(
   const edge = bandEdgeLength(mesh, topology, band);
   const solved = unbiasedFlanks(mesh, topology, band, kind, points.length, noise, edge);
   if (!solved) return null;
-  const { flanks, meet, curve, samples } = solved;
+  // The band is built about the guide as drawn; from here on the segment is the kind its edge was
+  // fitted as, an arc where a Line guide lies along an edge that curves.
+  const { flanks, meet, curve, samples, kind: fitted } = solved;
   if (median(meet.angles) < minBandAngle) return null;
   // An edge that lies farther from the surface than half the band's width, as at a fin whose faces
   // nearly meet, cannot be reached by moving the band's vertices.
@@ -734,7 +759,7 @@ function solvePart(
   for (let k = 0; k < meet.points.length; k += 3)
     depths.push(find(meet.points[k], meet.points[k + 1], meet.points[k + 2]).distance);
   if (median(depths) > deepestEdge * band.width) return null;
-  return { kind, band, edge, flanks, meet, curve, samples, controls: points.length };
+  return { kind: fitted, band, edge, flanks, meet, curve, samples, controls: points.length };
 }
 
 /** True when `sample` lies within tolerance of `flank`: `sameShare` within 3 local, mean within local. */

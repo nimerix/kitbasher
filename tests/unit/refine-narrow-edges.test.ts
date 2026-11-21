@@ -600,3 +600,106 @@ describe('a narrow flank', () => {
     }
   });
 });
+
+describe('a line over an edge that curves', () => {
+  it('follows the rim of a cylinder of radius 5', () => {
+    const model = modelOf(softCylinder(5, 1, 0.15, scan));
+    // Two points on the rim's crest 3.4 mm apart: the chord sags 0.29 mm inside the rim.
+    const inset = 0.15 - 0.15 / Math.SQRT2;
+    const half = Math.asin(1.7 / 5);
+    const at = (angle: number): Vec3 => [
+      (5 - inset) * Math.cos(angle),
+      1 - inset,
+      (5 - inset) * Math.sin(angle),
+    ];
+    const r = outcome(model, line(model, at(-half), at(half), 0.52, 0.65));
+    expect(r.solved && [r.pieces, r.skipped, r.folded]).toEqual([1, 0, 0]);
+    if (!r.solved) return;
+    expect(r.deviation).toBeLessThan(0.01); // measured 0.0001
+    // Every chain vertex over the middle half of the guide lies on the rim.
+    let seen = 0,
+      worst = 0;
+    for (const v of r.chain) {
+      const [x, , z] = [0, 1, 2].map((a) => r.out.position[v * 3 + a]);
+      if (Math.abs(Math.atan2(z, x)) > half / 2) continue;
+      seen++;
+      worst = Math.max(worst, Math.abs(Math.hypot(x, z) - 5));
+    }
+    expect(seen).toBeGreaterThan(0);
+    expect(worst).toBeLessThan(0.03); // measured 0.023
+  });
+
+  it('follows the rim along a path of two lines, at a smooth joint and a sharp one', () => {
+    // Each line follows the rim as an arc through the refits at its joint and the join itself: with
+    // either left a line, the chain lies 0.08 from the rim and, at the sharp joint, folds.
+    const model = modelOf(softCylinder(5, 1, 0.15, scan));
+    const inset = 0.15 - 0.15 / Math.SQRT2;
+    const half = Math.asin(1.7 / 5);
+    const [a, b, c] = [-1.5 * half, 0.25 * half, 2 * half].map((angle) =>
+      pointOn(model.mesh, [
+        (5 - inset) * Math.cos(angle),
+        1 - inset,
+        (5 - inset) * Math.sin(angle),
+      ]),
+    );
+    for (const joint of ['smooth', 'sharp'] as const) {
+      const r = outcome(model, {
+        segments: [
+          { kind: 'line', points: [a, b] },
+          { kind: 'line', points: [b, c] },
+        ],
+        joints: [joint],
+        closed: false,
+        width: 0.52,
+        strength: 0.65,
+      });
+      expect(r.solved && [r.pieces, r.skipped, r.folded], joint).toEqual([1, 0, 0]);
+      if (!r.solved) continue;
+      expect(r.deviation, joint).toBeLessThan(0.01); // measured 0.0001
+      // Every chain vertex clear of the path's free ends lies on the rim.
+      let seen = 0,
+        worst = 0;
+      for (const v of r.chain) {
+        const [x, , z] = [0, 1, 2].map((k) => r.out.position[v * 3 + k]);
+        const angle = Math.atan2(z, x);
+        if (angle < -0.9 * half || angle > 1.4 * half) continue;
+        seen++;
+        worst = Math.max(worst, Math.abs(Math.hypot(x, z) - 5));
+      }
+      expect(seen, joint).toBeGreaterThan(0);
+      expect(worst, joint).toBeLessThan(0.04); // measured 0.032 smooth, 0.031 sharp
+    }
+  });
+
+  it('stays a line on a straight edge of a rippled, noisy box', () => {
+    const c = 0.3 - 0.3 / Math.SQRT2;
+    for (const seed of [1, 2, 3, 4]) {
+      const model = modelOf(
+        softBox([2, 1.5, 1], 0.3, { step: 0.06, ripple: 0.02, noise: 0.01, seed }),
+      );
+      const r = outcome(model, line(model, [-1.6, 1.5 - c, 1 - c], [1.6, 1.5 - c, 1 - c], null));
+      expect(r.solved, `seed ${seed}`).toBe(true);
+      if (!r.solved) continue;
+      // The chain over the middle half of the guide, in its own order, and the largest distance of
+      // any of it from the line through its two end vertices.
+      const middle = r.chain
+        .map((v) => [0, 1, 2].map((a) => r.out.position[v * 3 + a]))
+        .filter(([x]) => Math.abs(x) <= 0.8);
+      expect(middle.length, `seed ${seed}`).toBeGreaterThan(2);
+      const [a, b] = [middle[0], middle[middle.length - 1]];
+      const d = [0, 1, 2].map((k) => b[k] - a[k]);
+      const length = Math.hypot(...d);
+      let worst = 0;
+      for (const p of middle) {
+        const e = [0, 1, 2].map((k) => p[k] - a[k]);
+        const along = (e[0] * d[0] + e[1] * d[1] + e[2] * d[2]) / length;
+        worst = Math.max(
+          worst,
+          Math.sqrt(Math.max(0, e[0] ** 2 + e[1] ** 2 + e[2] ** 2 - along ** 2)),
+        );
+      }
+      // Measured under 0.0001 on every seed: the flanks fit as planes, which meet in a line.
+      expect(worst, `seed ${seed}`).toBeLessThan(0.02);
+    }
+  });
+});
