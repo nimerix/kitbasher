@@ -113,9 +113,9 @@ const reachWidth = 0.35;
 const reachEdges = 6;
 /**
  * A flank's first seed may start up to this many times the reach from the guide, so that across a
- * rounding wider than the reach the far flank is still tried. Seeds are still read only within the
- * reach and a seed span of the guide, so a seed ends there. The solved edge must still lie within the
- * reach itself (`reaches`).
+ * rounding wider than the reach the far flank is still tried. In practice seeds are read only within
+ * the reach and one seed span of the guide, inside the gather, which bounds a seed's start at about
+ * one and a half reaches. The solved edge must still lie within the reach itself (`reaches`).
  */
 const seedReach = 2;
 /** Most degrees the measured normals may turn across a flank's first seed. */

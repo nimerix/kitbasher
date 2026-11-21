@@ -962,6 +962,7 @@ describe('a wide rounding', () => {
 
   it('finds a fin edge across a 0.27 mm round', () => {
     const model = fin();
+    // This guide already solved before flank seeds could start past the reach.
     // The guide lies where the round leaves the flat face, 0.295 mm before the ideal corner.
     const r = outcome(model, line(model, [-0.295, 0, -1.1], [-0.295, 0, 1.1], 0.48, 0.65));
     expect(r.solved && [r.pieces, r.skipped, r.folded]).toEqual([1, 0, 0]);
@@ -969,6 +970,18 @@ describe('a wide rounding', () => {
     expect(r.angle).toBeGreaterThan(90);
     expect(r.angle).toBeLessThan(99); // measured 94.5
     expect(chainOff(r, [0, 0], 0.5)).toBeLessThan(0.07); // measured 0.05
+  });
+
+  it('finds a fin edge from 0.4 mm onto the flat face, its far flank past the reach', () => {
+    const model = fin();
+    // The edge face starts past the reach of a guide 0.4 mm before the ideal corner: its seed must
+    // start farther out than the reach for the guide to find the edge.
+    const r = outcome(model, line(model, [-0.4, 0, -1.1], [-0.4, 0, 1.1], 0.48, 0.65));
+    expect(r.solved && [r.pieces, r.skipped, r.folded]).toEqual([1, 0, 0]);
+    if (!r.solved) return;
+    expect(r.angle).toBeGreaterThan(90);
+    expect(r.angle).toBeLessThan(99); // measured 94.8
+    expect(chainOff(r, [0, 0], 0.5)).toBeLessThan(0.07); // measured 0.0517
   });
 
   it('still refuses 1.2 mm onto the flat face', () => {
