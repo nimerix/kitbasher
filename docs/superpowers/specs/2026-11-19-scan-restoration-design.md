@@ -520,8 +520,15 @@ pieces, for five measured reasons:
    that has no flank on one side takes that flank's start and end interpolated from the
    nearest slices that have one, before and after it along the guide. This happens only when
    at least half of the slices on that side have a flank of their own, and never before the
-   first or after the last slice that has one. Every vertex is still tested against the
-   flank's fitted surface, so a rivet or other detail standing off it stays where it is.
+   first or after the last slice that has one. In a filled slice the rounding is taken to
+   lie no farther from the edge than where that side's own flanks typically start, plus one
+   edge length. A vertex farther out that is off the flank's fitted surface by more than the
+   flank's tolerance is neither soft nor flank, so filling leaves a rivet or other detail
+   there where it is. In every slice, a vertex standing off its flank's surface on the side
+   away from the other flank, as a rivet beside a convex edge does, is never soft. Measured
+   on a 90 degree edge rounded 0.08 with domes 0.05 and 0.1 high, their feet 0.005 to 0.06
+   from the corner: beside a convex edge no dome vertex standing 0.03 or more off the face
+   moves, and beside a concave edge none moves where filling used to move it.
    The edge is found, fitted and oriented, and its free ends decided, from the slices' own
    zones. Filled zones only decide what moves and what is cut. The check that a sharp core
    remains in what will be moved reads the filled zones, because it checks that move.
@@ -586,6 +593,10 @@ total solve time of the 20 guides went from 1254 ms to 1738 ms (median of three 
   before these rules.
 - Which slices find the edge can depend on how far the band is read, so a band is not
   identical across widths at a guide's ends.
+- Beside a concave edge, a rivet whose foot reaches into the rounding can still be moved by
+  a slice's own reading, as before these rules: the rounding and the rivet both stand off
+  the flank toward the other flank. Measured with domes 0.02 from the corner: 0.053 to
+  0.064 for domes 0.05 high, and 0.0082 on one of four seeds for domes 0.1 high.
 
 ## Where the build falls short of this spec
 

@@ -608,6 +608,102 @@ describe('a narrow flank', () => {
   });
 });
 
+describe('a rivet close to the edge', () => {
+  /**
+   * A 90 degree edge along z, fillet 0.08, with domes of radius 0.25 mm and height `height` on one
+   * face centred at z = -0.9 and 0.9, their feet `foot` mm from the ideal corner. Convex: the top
+   * face at y = 0 and a side face falling from it, the domes on the top. Concave: a floor at y = 0
+   * and a wall rising from it, the domes on the floor. A Line guide 3.4 mm long on the fillet's
+   * crest, Width 0.5, full strength.
+   */
+  const rivets = (seed: number, foot: number, height: number, concave = false) => {
+    const centre = -(0.25 + foot);
+    const lift = (x: number, y: number, z: number) => {
+      if (concave ? y > 1e-6 : y < -1e-6) return 0;
+      return Math.max(
+        ...[-0.9, 0.9].map((c) => {
+          const d = Math.hypot(x - centre, z - c) / 0.25;
+          return d >= 1 ? 0 : height * (1 - d * d) ** 2;
+        }),
+      );
+    };
+    const fall = concave ? 2 : -2;
+    const model = modelOf(
+      variedProfile(
+        () => [
+          [-2, 0],
+          [0, 0],
+          [0, fall],
+        ],
+        [0.08],
+        4,
+        { ...scan, seed },
+        0,
+        lift,
+      ),
+    );
+    const c = 0.08 - 0.08 / Math.SQRT2;
+    const y = concave ? c : -c;
+    return { model, guide: line(model, [-c, y, -1.7], [-c, y, 1.7], 0.5, 1) };
+  };
+  /**
+   * The largest move of a vertex standing 0.03 mm or more off the face the domes are on: above
+   * y = 0.03, and on a concave edge more than 0.09 mm out from the wall, past the fillet.
+   */
+  const rivetMove = (model: Model, r: ReturnType<typeof outcome>, concave = false) => {
+    if (!r.solved) return NaN;
+    const p = model.mesh.position;
+    let worst = 0;
+    for (let v = 0; v < model.mesh.weldedCount; v++) {
+      if (!(p[v * 3 + 1] >= 0.03) || (concave && !(p[v * 3] < -0.09))) continue;
+      worst = Math.max(
+        worst,
+        Math.hypot(
+          r.out.position[v * 3] - p[v * 3],
+          r.out.position[v * 3 + 1] - p[v * 3 + 1],
+          r.out.position[v * 3 + 2] - p[v * 3 + 2],
+        ),
+      );
+    }
+    return worst;
+  };
+
+  it('leaves rivets beside a convex edge where they stand', () => {
+    // Before, filled slices moved rivets up to 0.103 (foot 0.02, height 0.1) and a slice's own
+    // classification moved them up to 0.064 (foot 0.02, height 0.05), as it did before slices were
+    // filled. Now every rivet vertex standing 0.03 mm or more off the face stays exactly where it
+    // stood, and every cut is in 1 piece with nothing skipped or folded (measured). Feet 0.005 are
+    // the two-rivet fixture with its domes centred 0.255 mm from the corner.
+    const cases = [0.02, 0.04, 0.06].flatMap((foot) => [0.05, 0.1].map((height) => [foot, height]));
+    for (const seed of [1, 2, 3, 4])
+      for (const [foot, height] of [...cases, [0.005, 0.1]]) {
+        const { model, guide } = rivets(seed, foot, height);
+        const r = outcome(model, guide);
+        const label = `seed ${seed}, foot ${foot}, height ${height}`;
+        expect(r.solved && [r.skipped, r.folded], label).toEqual([0, 0]);
+        expect(rivetMove(model, r), label).toBe(0);
+      }
+  }, 60_000);
+
+  it('leaves rivets beside a concave edge where filling would have moved them', () => {
+    // Before, filled slices moved rivets with feet 0.02 mm from the corner by up to 0.103, and with
+    // feet 0.06 by up to 0.053. Now every cut is in 1 piece with nothing skipped or folded, and no
+    // rivet vertex standing 0.03 mm or more off the floor moves, except on seed 3 at foot 0.02: its
+    // own slices find the rivet's edge as rounding and move it 0.0082, as before slices were filled
+    // (measured on both).
+    for (const seed of [1, 2, 3, 4])
+      for (const foot of [0.02, 0.06, 0.1, 0.2])
+        for (const height of foot === 0.02 ? [0.1] : [0.05, 0.1]) {
+          const { model, guide } = rivets(seed, foot, height, true);
+          const r = outcome(model, guide);
+          const label = `seed ${seed}, foot ${foot}, height ${height}`;
+          expect(r.solved && [r.skipped, r.folded], label).toEqual([0, 0]);
+          if (foot === 0.02) expect(rivetMove(model, r, true), label).toBeLessThan(0.01);
+          else expect(rivetMove(model, r, true), label).toBe(0);
+        }
+  }, 60_000);
+});
+
 /**
  * The largest distance of the chain over the middle half of a guide along `axis` from -1.6 to 1.6,
  * in the chain's own order, from the line through its two end vertices. NaN when fewer than three

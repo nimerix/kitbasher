@@ -1025,6 +1025,22 @@ function flankFlatness(
   return angle / own;
 }
 
+/**
+ * Whether band vertex i stands off side s's surface away from the other flank by more than three
+ * times the surface's tolerance. From each flank's surface the rounding between the two flanks lies
+ * toward the other flank, or within the tolerance; a rivet beside a convex edge stands off it the
+ * other way. Beside a concave edge a rivet and the rounding both lie toward the other flank, so this
+ * does not tell them apart there. `fitting` is, per side, the vertices on that side's surface.
+ */
+function standsOff(pair: FlankFit[], fitting: Uint8Array[]) {
+  const toward = [0, 1].map((s) => {
+    const distances: number[] = [];
+    fitting[1 - s].forEach((f, i) => f && distances.push(pair[s].distance(i)));
+    return distances.length ? Math.sign(median(distances)) : 0;
+  });
+  return (s: number, i: number) => toward[s] * pair[s].distance(i) < -3 * pair[s].local;
+}
+
 const dot3 = (p: ArrayLike<number>, q: ArrayLike<number>) =>
   p[0] * q[0] + p[1] * q[1] + p[2] * q[2];
 
@@ -1370,6 +1386,8 @@ function classifyOriented(
         start: new Float64Array(slices),
         end: new Float64Array(slices),
         extent: new Float64Array(slices),
+        filled: new Float64Array(slices),
+        typical: NaN,
       };
       for (let k = 0; k < slices; k++) {
         const run = runs(lists[k].entries, lists[k].weights, o, fitting[s]);
@@ -1383,9 +1401,10 @@ function classifyOriented(
       }
       // Only where at least half of the side's slices have a flank of their own, and only between
       // two of them: before the first and past the last, a path's corner or the guide's end is where
-      // the flank really stops. Each vertex is still tested against the flank's surface before it
-      // is moved.
+      // the flank really stops. A vertex a filled slice reaches past the rounding is still tested
+      // against the flank's surface (`standing` below).
       const has = Array.from({ length: slices }, (_, k) => fields.end[k] > fields.start[k]);
+      if (has.some(Boolean)) fields.typical = median(fields.start.filter((_, k) => has[k]));
       if (fill && has.filter(Boolean).length >= slices / 2) {
         const start = fields.start.slice(),
           end = fields.end.slice();
@@ -1402,12 +1421,25 @@ function classifyOriented(
             Number.isFinite(v[lo]) && Number.isFinite(v[hi])
               ? v[lo] * (1 - w) + v[hi] * w
               : Math.min(v[lo], v[hi]);
+          fields.filled[k] = 1;
           fields.start[k] = lerp(start);
           fields.end[k] = Math.min(lerp(end), Math.max(fields.extent[k], fields.start[k]));
         }
       }
       return fields;
     });
+    // In a filled slice the rounding is what lies within the side's typical start, as the slices
+    // with a flank of their own found it, and the shoulder past it. A vertex there further out and
+    // off the side's surface is detail standing off it, such as a rivet: filling makes it neither
+    // Soft nor flank, and the band leaves it in place. And in any slice, a vertex that stands off
+    // its side's surface away from the other flank is not part of the rounding between them.
+    const away = standsOff(pair, fitting);
+    const rounding = sides.map((side) => side.typical + shoulderEdges * edge);
+    const standing = (s: number, i: number) =>
+      away(s, i) ||
+      (touching(sides[s].filled, i, Math.max) > 0 &&
+        Math.abs(o[i]) >= rounding[s] &&
+        !(Math.abs(pair[s].distance(i)) <= 3 * pair[s].local));
     const zone = new Uint8Array(count).fill(BandZone.Beyond);
     for (let i = 0; i < count; i++) {
       const s = o[i] > 0 ? 0 : 1;
@@ -1418,10 +1450,12 @@ function classifyOriented(
         b = touching(sides[s].end, i, Math.min);
       if (!band.open[i] || crossing[i] || !(a < b)) continue;
       // A vertex that fits both surfaces lies on its own side's flank, not between them.
-      if (offset < a) zone[i] = fitting[s][i] && onSurface[1 - s][i] ? own[s] : BandZone.Soft;
-      else if (offset < b) zone[i] = own[s];
+      if (offset < a) {
+        if (fitting[s][i] && onSurface[1 - s][i]) zone[i] = own[s];
+        else if (!standing(s, i)) zone[i] = BandZone.Soft;
+      } else if (offset < b) zone[i] = own[s];
     }
-    return { o, sides, zone };
+    return { o, sides, zone, standing };
   };
 
   const half = slices / 2;
@@ -1557,7 +1591,7 @@ function classifyOriented(
   // moved by more than it: on the rounding's shoulder it is Soft, further out Beyond. `runZone`
   // keeps the runs as they were.
   const finish = (from: ReturnType<typeof split>) => {
-    const { zone, sides, o } = from;
+    const { zone, sides, o, standing } = from;
     const stops = sides.map((side) =>
       Float64Array.from(side.end, (end, k) => {
         const run = Math.min(end, side.extent[k]) - side.start[k];
@@ -1574,7 +1608,7 @@ function classifyOriented(
       const s = zone[i] - 1;
       if (Math.abs(fits[s].distance(i)) <= 3 * fits[s].local) continue;
       const shoulder = touching(sides[s].start, i, Math.max) + shoulderEdges * edge;
-      zone[i] = Math.abs(o[i]) < shoulder ? BandZone.Soft : BandZone.Beyond;
+      zone[i] = Math.abs(o[i]) < shoulder && !standing(s, i) ? BandZone.Soft : BandZone.Beyond;
     }
     return { zone, runZone };
   };
