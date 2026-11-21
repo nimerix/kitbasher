@@ -721,6 +721,8 @@ function solvePart(
 ): Part | null {
   const band = buildBand(mesh, topology, kind, points, width, noise, known);
   if (!band) return null;
+  // The band's own width, held to what its gather covers, is the one every reading below takes.
+  width = band.width;
   const edge = bandEdgeLength(mesh, topology, band);
   const solved = unbiasedFlanks(mesh, topology, band, kind, points.length, width, noise, edge);
   if (!solved) return null;
@@ -1117,6 +1119,8 @@ export function solveEdge(
     if (!part) return null;
     parts.push(part);
   }
+  // A band whose gather covers less than the width holds the solve to what it covers.
+  width = Math.min(width, ...parts.map((part) => part.band.width));
   const n = parts.length;
   if (n > 1 && !clearCorners(parts, joints, width, noise)) return null;
   if (n > 1 && !shareFlanks(parts, closed, width, noise)) return null;

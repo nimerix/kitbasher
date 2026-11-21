@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildBand, estimateBand, estimateWidth } from '../../src/core/refine-band';
+import { type EdgeBand, buildBand, estimateBand, estimateWidth } from '../../src/core/refine-band';
 import { type EdgeInput, applyEdge, solveEdge } from '../../src/core/refine-edge';
 import { cloneRefineMesh } from '../../src/core/refine-mesh';
 import type { Vec3 } from '../../src/core/types';
@@ -62,6 +62,43 @@ function chainOff(result: ReturnType<typeof outcome>, at: [number, number], half
     worst = Math.max(worst, Math.hypot(x - at[0], y - at[1]));
   }
   return seen ? +worst.toFixed(4) : NaN;
+}
+
+/** The 90 degree edge along z at the origin, the top face at y = 0, rounded 0.08 mm. */
+const corner = (seed = 1) =>
+  modelOf(
+    extrudedProfile(
+      [
+        [-2, 0],
+        [0, 0],
+        [0, -2],
+      ],
+      [0.08],
+      4,
+      { ...scan, seed },
+    ),
+  );
+
+/** A guide on `corner`'s top face from 0.05 mm off the edge at z = -1.4 to 0.6 mm off at 1.4. */
+const straying = (model: Model) => [
+  pointOn(model.mesh, [-0.05, 0, -1.4]),
+  pointOn(model.mesh, [-0.6, 0, 1.4]),
+];
+
+/**
+ * Vertices of `corner`'s side face within the band's own width of the solved edge, along the
+ * guide, that the band leaves out, and how many there are to leave out. Within means at most the
+ * width less 0.05 mm below the corner: the rounding makes the way round it shorter than to the
+ * corner and back.
+ */
+function sideLeftOut(model: Model, band: EdgeBand) {
+  const kept = new Set(band.vertices);
+  const p = model.mesh.position;
+  const near: number[] = [];
+  for (let v = 0; v < model.mesh.weldedCount; v++)
+    if (p[v * 3] > -0.02 && p[v * 3 + 1] < -0.1 && p[v * 3 + 1] >= 0.05 - band.width)
+      if (Math.abs(p[v * 3 + 2]) <= 1.3) near.push(v);
+  return { near: near.length, left: near.filter((v) => !kept.has(v)) };
 }
 
 describe('a guide laid beside the edge', () => {
@@ -142,32 +179,12 @@ describe('a guide that strays from its edge', () => {
     // The guide runs from 0.05 mm onto the top face at one end to 0.6 mm at the other. The solved
     // edge is within reach of it (0.41 mm, 6 edge lengths) in over half of the slices, and up to
     // 0.60 mm from it at the far end (measured): there the band reaches further from the guide.
-    const m = modelOf(
-      extrudedProfile(
-        [
-          [-2, 0],
-          [0, 0],
-          [0, -2],
-        ],
-        [0.08],
-        4,
-        scan,
-      ),
-    );
-    const width = 0.55;
-    const points = [pointOn(m.mesh, [-0.05, 0, -1.4]), pointOn(m.mesh, [-0.6, 0, 1.4])];
-    const band = buildBand(m.mesh, m.topology, 'line', points, width, m.noise);
+    const m = corner();
+    const band = buildBand(m.mesh, m.topology, 'line', straying(m), 0.55, m.noise);
     expect(band).not.toBeNull();
-    const kept = new Set(band!.vertices);
-    // Vertices on the side face at most Width less 0.05 mm below the corner, along the guide: the
-    // 0.08 mm rounding makes the way round it shorter than to the corner and back.
-    const p = m.mesh.position;
-    const near: number[] = [];
-    for (let v = 0; v < m.mesh.weldedCount; v++)
-      if (p[v * 3] > -0.02 && p[v * 3 + 1] < -0.1 && p[v * 3 + 1] >= 0.05 - width)
-        if (Math.abs(p[v * 3 + 2]) <= 1.3) near.push(v);
-    expect(near.length).toBeGreaterThan(100);
-    expect(near.filter((v) => !kept.has(v))).toEqual([]);
+    const { near, left } = sideLeftOut(m, band!);
+    expect(near).toBeGreaterThan(100);
+    expect(left).toEqual([]);
   });
 });
 
@@ -248,6 +265,27 @@ describe('the automatic width and the classification it hands on', () => {
       // `buildBand` reuses this classification for the solve, so the solve reads what was judged.
       expect(found!.gathered).toBeGreaterThanOrEqual(width);
       expect(found!.result(width)).not.toBeNull();
+    }
+  });
+
+  it('holds a band asked past what its classification covers to that coverage', () => {
+    // Past `gathered` the band could leave out vertices within the width of the solved edge, which
+    // no gather reached: it comes back at the width it covers, and holds every vertex within that.
+    for (const seed of [1, 2, 3]) {
+      const model = corner(seed);
+      const { found } = estimateBand(
+        model.mesh,
+        model.topology,
+        'line',
+        straying(model),
+        model.noise,
+      );
+      const band = found!.result(found!.gathered + 0.3);
+      expect(band).not.toBeNull();
+      expect(band!.width).toBe(found!.gathered);
+      const { near, left } = sideLeftOut(model, band!);
+      expect(near).toBeGreaterThan(20);
+      expect(left).toEqual([]);
     }
   });
 });

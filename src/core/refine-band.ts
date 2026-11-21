@@ -33,7 +33,7 @@ export interface BandFlank {
   normal(x: number, y: number, z: number, out: Float32Array | Float64Array): void;
 }
 export interface EdgeBand {
-  /** Welded vertices within `width` of the drawn guide, connected over the surface to the clicked triangles. */
+  /** Welded vertices within `width` of the solved edge, connected over the surface to the clicked triangles. */
   vertices: Uint32Array;
   /**
    * Per band vertex: distance along the drawn guide, signed offset across it (the distance from the
@@ -56,6 +56,8 @@ export interface EdgeBand {
   edge: Float64Array;
   /** Median angle between the two flank surfaces' normals along `edge`, degrees. */
   angle: number;
+  /** The width the band holds, mm: the one asked for, or what its gather covers if that is less. */
+  width: number;
 }
 
 /** Fewest degrees between the two flanks' normals at the solved edge for the band to show an edge. */
@@ -1508,10 +1510,14 @@ function classifyOriented(
   );
   if (flatness < minFlankFlatness) return null;
 
-  const larger: number[] = [];
+  // Slices that found the edge themselves, with a flank of their own on both sides.
+  const larger: number[] = [],
+    found: number[] = [];
   for (let k = 0; k < slices; k++)
-    if (sides.every((side) => side.end[k] > side.start[k]))
+    if (sides.every((side) => side.end[k] > side.start[k])) {
       larger.push(Math.max(sides[0].start[k], sides[1].start[k]));
+      found.push(Math.abs(solved.offset[k]));
+    }
   const soft = larger.length ? median(larger) : 0;
   const at = new Float64Array(3);
   const locate = (p: number[]): [number, number, number] => {
@@ -1526,16 +1532,24 @@ function classifyOriented(
   };
   const flanks: [BandFlank, BandFlank] = [bandFlank(fits[0], locate), bandFlank(fits[1], locate)];
 
+  // The band holds every vertex within `gathered` of the solved edge in every slice that found the
+  // edge on both sides, the furthest of which lies `strayed` from the guide. Elsewhere the solved
+  // edge is carried over from other slices or read where the gather stops, and moves out as the
+  // gather grows, so a width about it there means nothing. With no such slice, every slice counts.
+  const strayed = Math.max(...(found.length ? found : Array.from(solved.offset, Math.abs)));
+  const gathered = band.width - strayed;
   // The band capped to a width measured from the solved edge, so that a guide laid to one side of
   // the edge does not starve the far flank, or null when its flanks there show no edge: on each
-  // side enough vertices, running far enough outward in half of the slices.
+  // side enough vertices, running far enough outward in half of the slices. A cap past `gathered`
+  // is held to it, since vertices within the cap of the solved edge may lie outside the gather.
   const result = (cap: number): EdgeBand | null => {
+    const width = Math.min(cap, gathered);
     const keep: number[] = [];
     const counts = [0, 0];
     const inner = new Float64Array(slices * 2).fill(Infinity),
       outer = new Float64Array(slices * 2).fill(-Infinity);
     for (let i = 0; i < count; i++) {
-      if (Math.abs(o[i]) > cap) continue;
+      if (Math.abs(o[i]) > width) continue;
       keep.push(i);
       if (runZone[i] !== BandZone.Left && runZone[i] !== BandZone.Right) continue;
       const s = runZone[i] - 1,
@@ -1563,12 +1577,10 @@ function classifyOriented(
       flanks,
       edge: solved.point.slice(),
       angle,
+      width,
     };
   };
-  // The band holds every vertex within `gathered` of the solved edge in every slice, the furthest
-  // of which lies `strayed` from the guide.
-  const strayed = Math.max(...Array.from(solved.offset, Math.abs));
-  return { result, soft, edge, strayed, gathered: band.width - strayed };
+  return { result, soft, edge, strayed, gathered };
 }
 
 /** True when the guide's last point comes before its first, in x, then y, then z, then triangle. */
@@ -1608,6 +1620,7 @@ function mirrored(band: EdgeBand): EdgeBand {
     flanks: [band.flanks[1], band.flanks[0]],
     edge: reversed(band.edge),
     angle: band.angle,
+    width: band.width,
   };
 }
 
@@ -1628,9 +1641,18 @@ function classify(
   const oriented = backward ? [...points].reverse() : points;
   let found = classifyOriented(mesh, topology, kind, oriented, width, noise);
   // Where the solved edge strays past reach of the guide, a band reaching `width` from it there is
-  // gathered once more, as far as the edge strayed.
+  // gathered once more, an edge length further than the edge strayed, for the edge to stray a
+  // little further on that reading.
   if (found && width !== null && width > found.gathered)
-    found = classifyOriented(mesh, topology, kind, oriented, width, noise, found.strayed);
+    found = classifyOriented(
+      mesh,
+      topology,
+      kind,
+      oriented,
+      width,
+      noise,
+      found.strayed + found.edge,
+    );
   if (!found || !backward) return found;
   return {
     ...found,
@@ -1649,8 +1671,9 @@ export type BandClassification = NonNullable<ReturnType<typeof classify>>;
 
 /**
  * The band of vertices within `width` of the solved edge, or null when no edge lies under the guide:
- * two flank surfaces meeting within reach of it. `known`, a classification of the same guide on the
- * same surface, is capped instead when it reaches `width`.
+ * two flank surfaces meeting within reach of it. The band's own width is `width` or what its gather
+ * covers, whichever is smaller. `known`, a classification of the same guide on the same surface, is
+ * capped instead when it reaches `width`.
  */
 export function buildBand(
   mesh: RefineMesh,
@@ -1693,15 +1716,17 @@ export function estimateBand(
   const found = classify(mesh, topology, kind, points, null, noise);
   if (!found) return { width: 0, found };
   const wanted = found.soft + Math.max(2 * found.soft, 6 * found.edge);
-  // Each width is judged on a classification that covers it, which `buildBand` then reuses.
+  // Each width is judged on a classification read for it, held to what that classification covers,
+  // so that `buildBand` reuses it at the width returned.
   const judged = (width: number) => {
     const covering =
       width <= found.gathered ? found : classify(mesh, topology, kind, points, width, noise);
-    return covering?.result(width) ? covering : null;
+    const band = covering?.result(width);
+    return band ? { width: band.width, found: covering } : null;
   };
   const limited = Math.min(widestEstimate, wanted);
   const held = judged(limited);
-  if (held) return { width: limited, found: held };
+  if (held) return held;
   const wide = wanted > limited ? judged(wanted) : null;
-  return wide ? { width: wanted, found: wide } : { width: 0, found };
+  return wide ?? { width: 0, found };
 }
