@@ -546,21 +546,28 @@ pieces, for five measured reasons:
    close on itself and its own largest gap is under half the line's. The choice is made
    again at each refit, including at joints, from the kind as drawn. The guide as stored and
    shown stays a line.
+6. **One smooth surface is not an edge.** Once the solved edge is within reach, the flanks
+   are 10 degrees apart and flat enough, one cylinder and one sphere are fitted to the band's
+   soft zone and both flanks as the slices found them. When the better one's residual scale
+   is at most the flanks' larger tolerance, the band is one smooth surface and the guide is
+   refused. Short flanks on a curved surface pass the run and flatness checks: on a cylinder
+   wall of radius 0.7 a slanting Line scores 0.59 and 0.71, where no single cylinder or sphere
+   fits a narrow groove wall's band at all. A plane is not tried, since it fits the plate of
+   a groove wall's band alone within the tolerance.
 
 **What still refuses.** A guide on a flat face with no edge within its reach (0.35, or 6
-edge lengths on a coarser mesh). A guide on one
-smooth surface, such as a cylinder wall, with one exception below. Flanks less than 10
-degrees apart, and flanks that turn too much themselves (flatness under 2.2). These checks
-are unchanged.
+edge lengths on a coarser mesh). Flanks less than 10 degrees apart, and flanks that turn too
+much themselves (flatness under 2.2). These checks are unchanged. A guide on one smooth
+surface, such as a cylinder wall. Measured on four seeds at Width 0.5 and automatic width,
+lines and arcs are refused on walls of radius 3 to 12 and on spheres of radius 2 and 3, and
+slanting lines on walls of radius 0.7 to 2. On a sphere of radius 1 an arc is accepted on
+one seed, as it was before these rules.
 
-**A false edge on a narrow cylinder.** A Line laid slanting across a cylinder wall of radius
-0.7 can be taken as an edge and creased. Measured on four seeds: on one seed a slant from
-angle 1.1 at the bottom to 1.5 at the top, and on another the opposite slant, fit two planes
-52.5 and 61.5 degrees apart and cut the wall in one piece, moving it up to 0.064 and 0.097.
-Every other seed and slant is refused, as are slanting lines on walls of radius 1 to 2, and
-lines and arcs on walls of radius 3 to 12, at Width 0.5 and automatic width. Rules 2 and 4 admit it: each flank's run is 3.6 to 4 edge
-lengths, as long as a narrow wall's, and its flatness of 2.5 to 2.7 passes. Before these
-rules both were refused.
+**A false edge on a narrow cylinder, now refused.** Rules 2 and 4 alone took a Line laid
+slanting across a cylinder wall of radius 0.7 as an edge: on two of four seeds they fitted
+two planes 52.5 and 61.5 degrees apart and cut the wall in one piece, moving it up to 0.064
+and 0.097. Each flank's run was 3.6 to 4 edge lengths, as long as a narrow wall's, and its
+flatness of 2.5 to 2.7 passed. Rule 6 refuses it.
 
 **What changes for a guide beside an edge.** A guide on a clean face 0.3 mm from a rounded
 edge used to be refused. It now finds that edge. On a coarse mesh the reach is 6 edge
@@ -591,7 +598,8 @@ Judged by eye against the photos:
 
 Every guide that solves leaves a closed mesh after Apply with no zero-area triangle. Scene
 Undo restores the part's vertex arrays element for element, and Redo the applied ones. The
-total solve time of the 20 guides went from 1254 ms to 1738 ms (median of three runs).
+total solve time of the 20 guides went from 1254 ms to 2014 ms (median of three runs; 1765 ms
+without rule 6).
 
 **Not covered by these rules.**
 
@@ -606,9 +614,11 @@ total solve time of the 20 guides went from 1254 ms to 1738 ms (median of three 
   before these rules.
 - Which slices find the edge can depend on how far the band is read, so a band is not
   identical across widths at a guide's ends.
-- A Line slanting across a cylinder wall of radius 0.7 can be creased, as described above.
-  Telling it from an edge needs a check of whether one curved surface explains the cross
-  section, which these rules do not make.
+- Rule 6 sits close to real edges. Measured as the ratio of the one-surface residual scale to
+  the flanks' tolerance, against a limit of 1: the radius 0.7 cylinder scores up to 0.71. Of
+  the edges that solve, the wider buckle lip on part 57 scores 1.17, the lighter outlet arc
+  1.24, the outlet arc 1.29 and Detect's buckle guide 1.31. Among the synthetic fixtures a 45
+  degree edge between flanks of radius 2 scores 1.35.
 - Beside a concave edge, a rivet whose foot reaches into the rounding can still be moved by
   a slice's own reading, as before these rules: the rounding and the rivet both stand off
   the flank toward the other flank. Measured with domes 0.02 from the corner: 0.053 to
@@ -689,7 +699,7 @@ approved by the product owner.
 - **Performance.** A preview update takes 92 to 106 ms for a strap lip guide on part 45
   and 139 to 165 ms for the valve rim on part 57 (80 to 96 ms and 150 to 163 ms before the
   narrow-edge rules), and 640 ms on a 3 million triangle part. Over the study's 20 edge
-  guides the total solve time rose 39 %, from 1254 ms to 1738 ms. A smooth dab takes about
+  guides the total solve time rose 61 %, from 1254 ms to 2014 ms; rule 6 adds 249 ms of it. A smooth dab takes about
   20 ms on part 45. Detect takes about 24 s on each scan and Accept about 0.35 to 0.4 s,
   followed by a pause of about 0.4 s while picking is rebuilt. In one run each, Detect's
   check that each edge proposal solves went from 13.8 s to 14.9 s on part 45 and from

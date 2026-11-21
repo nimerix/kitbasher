@@ -25,7 +25,7 @@ export const releases: Release[] = [
     changes: [
       {
         kind: 'new',
-        text: 'Refine rebuilds softened edges from a line, arc or spline laid along them, smooths, flattens or shape-snaps a painted area while keeping rivets and other detail, adds crease, flatten and smooth brushes, and can propose guides and regions for you to accept or adjust.',
+        text: 'Refine rebuilds softened edges from a line, arc or spline laid along them, smooths, flattens or shape-snaps a painted area while keeping rivets and other detail, adds crease, flatten and smooth brushes, and can propose guides and regions for you to accept or adjust. A guide may be laid beside the edge rather than on it, and narrow lips and rims are read.',
         guide: 'refine',
       },
     ],
