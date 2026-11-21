@@ -1,10 +1,23 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { type EdgeBand, buildBand, estimateBand, estimateWidth } from '../../src/core/refine-band';
 import { type EdgeInput, applyEdge, solveEdge } from '../../src/core/refine-edge';
 import { cloneRefineMesh } from '../../src/core/refine-mesh';
 import type { Vec3 } from '../../src/core/types';
 import { modelFrom, modelOf, pointOn } from '../helpers/refine';
 import { extrudedProfile, softBox, softCylinder, variedProfile } from '../helpers/soft-edges';
+
+/** When `zones` is set, every band the solver builds moves and cuts by the zones its slices found. */
+const found = vi.hoisted(() => ({ zones: false }));
+vi.mock('../../src/core/refine-band', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../src/core/refine-band')>();
+  return {
+    ...actual,
+    buildBand: (...args: Parameters<typeof actual.buildBand>) => {
+      const band = actual.buildBand(...args);
+      return band && found.zones ? { ...band, zone: band.foundZone } : band;
+    },
+  };
+});
 
 const scan = { step: 0.06, ripple: 0.01, noise: 0.006 };
 type Model = ReturnType<typeof modelOf>;
@@ -431,10 +444,12 @@ describe('a narrow flank', () => {
       }
   }, 60_000);
 
-  it('cuts in one piece past two rivets beside the edge and leaves them alone', () => {
-    // A 90 degree edge, fillet 0.08, with domes of radius 0.25 mm and height 0.10 mm on its top face
-    // centred 0.35 mm from the corner at z = -0.9 and 0.9: each dome's foot is 0.10 mm from the
-    // corner. A Line guide 3.4 mm long on the crest.
+  /**
+   * A 90 degree edge, fillet 0.08, with domes of radius 0.25 mm and height 0.10 mm on its top face
+   * centred 0.35 mm from the corner at z = -0.9 and 0.9: each dome's foot is 0.10 mm from the
+   * corner. A Line guide 3.4 mm long on the crest.
+   */
+  const rivets = () => {
     const lift = (x: number, y: number, z: number) => {
       if (y < -1e-6) return 0;
       return Math.max(
@@ -459,7 +474,12 @@ describe('a narrow flank', () => {
       ),
     );
     const c = 0.08 - 0.08 / Math.SQRT2;
-    const r = outcome(model, line(model, [-c, -c, -1.7], [-c, -c, 1.7], 0.5, 1));
+    return { model, lift, guide: line(model, [-c, -c, -1.7], [-c, -c, 1.7], 0.5, 1) };
+  };
+
+  it('cuts in one piece past two rivets beside the edge and leaves them alone', () => {
+    const { model, lift, guide } = rivets();
+    const r = outcome(model, guide);
     expect(r.solved && [r.pieces, r.skipped, r.folded]).toEqual([1, 0, 0]);
     expect(chainOff(r, [0, 0], 1)).toBeLessThan(0.02); // measured 0.007
     // Every vertex standing 0.03 mm or more above the top face on a rivet stays where it stood.
@@ -552,5 +572,25 @@ describe('a narrow flank', () => {
         );
     expect(inner).toBeLessThan(0.005);
     expect(second.max).toBeLessThan(0.02);
+  });
+
+  it('fits, orients and decides its ends from the zones its slices found', () => {
+    // Filling a slice changes only what is moved and cut: the solve is the one its bands would give
+    // with their filled zones replaced by the zones their slices found.
+    for (const { model, guide } of [rivets(), narrowing(0.06, [-1.0, 0.9])]) {
+      const { points } = guide.segments[0];
+      const band = buildBand(model.mesh, model.topology, 'line', points, guide.width!, model.noise);
+      expect(band!.zone.some((z, i) => z !== band!.foundZone[i])).toBe(true);
+      const filled = solveEdge(model.mesh, model.topology, guide, model.noise)!;
+      found.zones = true;
+      const unfilled = solveEdge(model.mesh, model.topology, guide, model.noise)!;
+      found.zones = false;
+      expect(filled).not.toBeNull();
+      expect(unfilled).not.toBeNull();
+      expect(Array.from(filled.curve.points)).toEqual(Array.from(unfilled.curve.points));
+      expect(filled.deviation).toBe(unfilled.deviation);
+      expect(Array.from(filled.sign)).toEqual(Array.from(unfilled.sign));
+      expect(filled.ends).toEqual(unfilled.ends);
+    }
   });
 });

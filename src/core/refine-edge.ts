@@ -356,7 +356,7 @@ function edgeSign(
 ) {
   const { position } = mesh;
   const soft: number[] = [];
-  band.zone.forEach((z, i) => z === BandZone.Soft && soft.push(i));
+  band.foundZone.forEach((z, i) => z === BandZone.Soft && soft.push(i));
   const find = nearestMember(mesh, band, soft, 4 * edgeLength);
   const normal = new Float32Array(3);
   let vote = 0;
@@ -373,7 +373,7 @@ function edgeSign(
   const centres = [BandZone.Left, BandZone.Right].map((zone) => {
     const c = [0, 0, 0];
     let n = 0;
-    band.zone.forEach((z, i) => {
+    band.foundZone.forEach((z, i) => {
       if (z !== zone) return;
       for (let a = 0; a < 3; a++) c[a] += position[band.vertices[i] * 3 + a];
       n++;
@@ -454,7 +454,7 @@ function flankStart(mesh: RefineMesh, band: EdgeBand, curve: EdgeCurve, edge: nu
   const at = new Float64Array(3);
   const nearest = [new Map<number, number>(), new Map<number, number>()];
   band.vertices.forEach((v, i) => {
-    const zone = band.zone[i];
+    const zone = band.foundZone[i];
     if (zone !== BandZone.Left && zone !== BandZone.Right) return;
     const station = onCurve(curve, position[v * 3], position[v * 3 + 1], position[v * 3 + 2], at);
     const d = Math.hypot(
@@ -613,7 +613,7 @@ function unbiasedFlanks(
   const normal = new Float32Array(3);
   const sides = [BandZone.Left, BandZone.Right].map((zone) => {
     const members: number[] = [];
-    band.zone.forEach((z, i) => z === zone && members.push(band.vertices[i]));
+    band.foundZone.forEach((z, i) => z === zone && members.push(band.vertices[i]));
     const normals = new Float32Array(members.length * 3);
     members.forEach((v, k) => {
       vertexNormal(mesh, topology, v, normal);
@@ -1372,6 +1372,8 @@ function frameOf(mesh: RefineMesh, topology: RefineTopology, solve: EdgeSolve): 
   );
   const held = new Uint8Array(vertices.length);
   const pinned = new Uint8Array(vertices.length);
+  // The frame reads the bands' zones as filled, which decide what moves and what is cut; the fits,
+  // the orientation and the ends read the zones the slices found.
   // A vertex takes its zone in its owner's band, or where that band leaves it Beyond or does not
   // reach it, its first zone elsewhere that is not Beyond. A joint's vertex that no band moves is
   // Soft: at a corner of three faces within the soft half-width of the face the segments share,
@@ -1642,7 +1644,7 @@ function correctedSurfaces(
   const starts = [BandZone.Left, BandZone.Right].map((zone, s) => {
     const nearest = new Map<number, number>();
     band.vertices.forEach((v, i) => {
-      if (band.zone[i] !== zone) return;
+      if (band.foundZone[i] !== zone) return;
       flanks[s].project(position[v * 3], position[v * 3 + 1], position[v * 3 + 2], q);
       const { station, r } = fromMeet(s, q[0], q[1], q[2]);
       const bin = Math.floor(station / (4 * edge));

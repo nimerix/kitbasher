@@ -37,11 +37,15 @@ export interface EdgeBand {
   vertices: Uint32Array;
   /**
    * Per band vertex: distance along the drawn guide, signed offset across it (the distance from the
-   * guide along the surface, positive on the Left), and zone.
+   * guide along the surface, positive on the Left), and zone. `zone` is what moves and what is cut:
+   * a slice without a flank of its own takes its zones from the slices with one either side of it.
+   * `foundZone` is each vertex's zone as its own slices found it, without that filling: everything
+   * that fits, orients or decides reads it.
    */
   station: Float32Array;
   cross: Float32Array;
   zone: Uint8Array;
+  foundZone: Uint8Array;
   drawn: EdgeCurve;
   /** Half-width of the softened zone, mm: the larger distance from the solved edge to a flank's start. */
   soft: number;
@@ -1561,9 +1565,9 @@ function classifyOriented(
     return { zone, runZone };
   };
   // Every piece of evidence below, and `supported` above, reads the classification as each slice
-  // made it. Only the zones the band returns, which decide what is moved and what is cut, come from
-  // the classification with its slices filled: filling never decides whether an edge is found.
-  const { runZone } = finish(classified);
+  // made it, and so does the band's `foundZone`. The band's `zone` alone comes from the
+  // classification with its slices filled.
+  const { zone: foundZone, runZone } = finish(classified);
   const { zone } = finish(split(fits, solved, true));
 
   // Evidence of an edge that does not depend on the width: the solved edge within reach of the
@@ -1630,6 +1634,7 @@ function classifyOriented(
       station: Float32Array.from(keep, (i) => band.station[i]),
       cross: Float32Array.from(keep, (i) => u[i]),
       zone: Uint8Array.from(keep, (i) => zone[i]),
+      foundZone: Uint8Array.from(keep, (i) => foundZone[i]),
       drawn,
       soft,
       fits: [fits[0].kind, fits[1].kind],
@@ -1669,6 +1674,7 @@ function mirrored(band: EdgeBand): EdgeBand {
     station: Float32Array.from(band.station, (s) => total - s),
     cross: Float32Array.from(band.cross, (c) => -c),
     zone: Uint8Array.from(band.zone, (z) => swap[z]),
+    foundZone: Uint8Array.from(band.foundZone, (z) => swap[z]),
     drawn: {
       points: reversed(drawn.points),
       lengths: Float64Array.from({ length: n }, (_, i) => total - drawn.lengths[n - 1 - i]),
