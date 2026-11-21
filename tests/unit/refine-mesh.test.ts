@@ -12,6 +12,7 @@ import {
 } from 'three';
 import {
   buildRefineMesh,
+  buildTopology,
   cloneRefineMesh,
   foldedTriangles,
   medianEdgeLength,
@@ -21,6 +22,7 @@ import {
   writeRefinedGeometry,
 } from '../../src/core/refine-mesh';
 import {
+  highValenceBipyramid,
   changedTriangles,
   changedVertices,
   closed,
@@ -47,6 +49,24 @@ import { softBox } from '../helpers/soft-edges';
 const median = (values: number[]) => values.sort((a, b) => a - b)[Math.floor(values.length / 2)];
 const degrees = (start: Uint32Array) =>
   Array.from({ length: start.length - 1 }, (_, v) => start[v + 1] - start[v]);
+
+it('builds sorted topology for a closed mesh with two 40,000-valence vertices', () => {
+  const count = 40_000;
+  const mesh = buildRefineMesh(highValenceBipyramid(count), new Matrix4());
+  const start = performance.now();
+  const topology = buildTopology(mesh);
+  const elapsed = performance.now() - start;
+  console.log(`buildTopology: ${mesh.triangleCount} triangles in ${elapsed.toFixed(1)} ms`);
+  expect(elapsed).toBeLessThan(400);
+  const valences = degrees(topology.neighbourStart);
+  expect(valences.filter((degree) => degree === count)).toHaveLength(2);
+  const pole = valences.findIndex((degree) => degree === count);
+  const row = topology.neighbours.subarray(
+    topology.neighbourStart[pole],
+    topology.neighbourStart[pole + 1],
+  );
+  expect(row.every((v, i) => i === 0 || v > row[i - 1])).toBe(true);
+});
 
 const cases = [
   ['unindexed', {}],

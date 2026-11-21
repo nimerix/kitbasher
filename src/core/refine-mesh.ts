@@ -215,13 +215,14 @@ export function buildTopology(mesh: RefineMesh): RefineTopology {
   for (let v = 0; v < weldedCount; v++) {
     const from = start[v],
       to = start[v + 1];
-    // Insertion sort in place: rows are a few entries long.
-    for (let i = from + 1; i < to; i++) {
-      const value = raw[i];
-      let j = i - 1;
-      for (; j >= from && raw[j] > value; j--) raw[j + 1] = raw[j];
-      raw[j + 1] = value;
-    }
+    if (to - from >= 24) raw.subarray(from, to).sort();
+    else
+      for (let i = from + 1; i < to; i++) {
+        const value = raw[i];
+        let j = i - 1;
+        for (; j >= from && raw[j] > value; j--) raw[j + 1] = raw[j];
+        raw[j + 1] = value;
+      }
     neighbourStart[v] = written;
     for (let i = from; i < to; i++)
       if (i === from || raw[i] !== raw[i - 1]) raw[written++] = raw[i];

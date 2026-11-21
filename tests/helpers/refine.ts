@@ -345,6 +345,22 @@ export function wideFan(count: number) {
   return geometry;
 }
 
+/** A closed bipyramid with descending neighbour IDs around its second pole. */
+export function highValenceBipyramid(count: number) {
+  const positions = [0, 0, 10, 0, 0, -10];
+  const faces: number[] = [];
+  for (let i = 0; i < count; i++) {
+    const angle = (i * 2 * Math.PI) / count;
+    positions.push(100 * Math.cos(angle), 100 * Math.sin(angle), 0);
+    faces.push(1, 2 + ((i + 1) % count), 2 + i);
+  }
+  for (let i = count - 1; i >= 0; i--) faces.push(0, 2 + i, 2 + ((i + 1) % count));
+  const geometry = new BufferGeometry();
+  geometry.setAttribute('position', new BufferAttribute(Float32Array.from(positions), 3));
+  geometry.setIndex(faces);
+  return geometry;
+}
+
 /**
  * Closed tetrahedron on the corners of the unit cube at the origin, with outward winding. Its
  * position attribute is built by `store` from the flat coordinates.
