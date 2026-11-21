@@ -1949,7 +1949,7 @@ describe('refine session integrity', { timeout: 20_000 }, () => {
 
   it('says one thing per Accept press when a batch both fails a guide and leaves a rough cut', async () => {
     setup(
-      [boxPart({ geometry: softBox([2, 1.5, 1], 0.3, { seed: 3, step: 0.2, noise: 0.012 }) })],
+      [boxPart({ geometry: softBox([2, 1.5, 1], 0.3, { seed: 8, step: 0.2, noise: 0.012 }) })],
       ['box'],
     );
     await ready();

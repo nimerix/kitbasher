@@ -2435,15 +2435,15 @@ function chainPieces(pairs: Uint32Array) {
  * of the triangles around it: a chain vertex moves; inside a chain edge the edge is split there, its
  * two triangles into four. Returns the cut with any new vertices.
  */
-function splitCorners(
+export function splitCorners(
   mesh: RefineMesh,
-  frame: Frame,
+  frame: { corners: readonly Pick<Joint, 'point' | 'soft'>[] },
   cut: CutResult,
   strength: number,
   stationary: Set<number>,
 ): CutResult {
   const { position } = mesh;
-  const at = (w: number) => [position[w * 3], position[w * 3 + 1], position[w * 3 + 2]];
+  const at = (w: number) => Array.from(mesh.position.subarray(w * 3, w * 3 + 3));
   const area = (p: number[][]) =>
     crossOf(
       [0, 1, 2].map((a) => p[1][a] - p[0][a]),
@@ -2451,7 +2451,8 @@ function splitCorners(
     );
   const pairs: number[][] = [];
   for (let k = 0; k < cut.edges.length; k += 2) pairs.push([cut.edges[k], cut.edges[k + 1]]);
-  const key = (a: number, b: number) => Math.min(a, b) * mesh.weldedCount + Math.max(a, b);
+  const stride = mesh.weldedCount;
+  const key = (a: number, b: number) => Math.min(a, b) * stride + Math.max(a, b);
   // Per corner, its chain points within reach: a vertex (t 0) or a point inside an edge.
   const options = frame.corners.map((corner) => {
     const found = new Map<string, { a: number; b: number; t: number; d: number }>();
@@ -2474,15 +2475,24 @@ function splitCorners(
     options.flatMap((list) => list.filter(({ b }) => b >= 0).map(({ a, b }) => key(a, b))),
   );
   if (!vertices.size) return cut;
-  const fans = new Map<number, number[]>();
-  const sides = new Map<number, number[]>();
-  for (let t = 0; t < mesh.triangleCount; t++)
+  const fans = new Map<number, Set<number>>([...vertices].map((v) => [v, new Set()]));
+  const sides = new Map<number, Map<number, number>>([...edges].map((edge) => [edge, new Map()]));
+  const trackFace = (f: number, add: boolean) => {
     for (let k = 0; k < 3; k++) {
-      const a = weldedCorner(mesh, t, k as 0 | 1 | 2),
-        b = weldedCorner(mesh, t, ((k + 1) % 3) as 0 | 1 | 2);
-      if (vertices.has(a)) fans.set(a, [...(fans.get(a) ?? []), t]);
-      if (edges.has(key(a, b))) sides.set(key(a, b), [...(sides.get(key(a, b)) ?? []), t, k]);
+      const a = weldedCorner(mesh, f, k as 0 | 1 | 2);
+      const b = weldedCorner(mesh, f, ((k + 1) % 3) as 0 | 1 | 2);
+      const fan = fans.get(a);
+      const side = a < stride && b < stride ? sides.get(key(a, b)) : undefined;
+      if (add) {
+        fan?.add(f);
+        side?.set(f, k);
+      } else {
+        fan?.delete(f);
+        side?.delete(f);
+      }
     }
+  };
+  for (let f = 0; f < mesh.triangleCount; f++) trackFace(f, true);
   const keeps = (was: number[], now: number[]) =>
     dot(was, now) > 0 && Math.hypot(now[0], now[1], now[2]) / 2 > 1e-12;
   const chain = [...cut.chain];
@@ -2492,11 +2502,11 @@ function splitCorners(
   const size = mesh.colorSize;
   frame.corners.forEach((corner, c) => {
     for (const { a, b, t } of options[c]) {
-      const on = b < 0 ? at(a) : at(a).map((x, k) => x * (1 - t) + position[b * 3 + k] * t);
+      const on = b < 0 ? at(a) : at(a).map((x, k) => x * (1 - t) + mesh.position[b * 3 + k] * t);
       // A joint has full weight (see `frameWeights`).
       const to = on.map((x, k) => x + strength * (corner.point[k] - x));
       if (b < 0) {
-        const fits = (fans.get(a) ?? []).every((f) => {
+        const fits = [...fans.get(a)!].every((f) => {
           const w = [0, 1, 2].map((k) => weldedCorner(mesh, f, k as 0 | 1 | 2));
           return keeps(area(w.map(at)), area(w.map((u) => (u === a ? to : at(u)))));
         });
@@ -2504,11 +2514,11 @@ function splitCorners(
         moveVertex(mesh, a, to[0], to[1], to[2]);
         return;
       }
-      const found = sides.get(key(a, b)) ?? [];
-      if (found.length !== 4) continue;
+      const found = sides.get(key(a, b));
+      if (found?.size !== 2) continue;
       // Each side's triangle splits in two at the new vertex, keeping its corners' order.
-      const plan = [0, 2].map((j) => ({ f: found[j], k: found[j + 1] }));
-      const fits = plan.every(({ f, k }) => {
+      const plan = [...found].sort(([f], [g]) => f - g);
+      const fits = plan.every(([f, k]) => {
         const w = [0, 1, 2].map((m) => weldedCorner(mesh, f, ((k + m) % 3) as 0 | 1 | 2));
         const was = area(w.map(at));
         return (
@@ -2519,7 +2529,7 @@ function splitCorners(
       const welded = addWeldedVertex(mesh, to[0], to[1], to[2]);
       mesh.crease[welded] = +(strength >= creaseWeight);
       chain.push(welded);
-      for (const { f, k } of plan) {
+      for (const [f, k] of plan) {
         const g = [0, 1, 2].map((m) => mesh.corners[f * 3 + ((k + m) % 3)]);
         // How far along this triangle's edge, from its corner g[0], the new vertex lies.
         const along = mesh.weldOf[g[0]] === a ? t : 1 - t;
@@ -2531,8 +2541,11 @@ function splitCorners(
         const vertex = addGeometryVertex(mesh, welded, color);
         const corners = [0, 1, 2].map((m) => mesh.corners[f * 3 + m]);
         corners[(k + 1) % 3] = vertex;
+        trackFace(f, false);
         setTriangle(mesh, f, corners[0], corners[1], corners[2]);
         const added = addTriangle(mesh, vertex, g[1], g[2]);
+        trackFace(f, true);
+        trackFace(added, true);
         const parent = parentOf.get(f) ?? f;
         children.set(parent, [...(children.get(parent) ?? [parent]), added]);
         parentOf.set(added, parent);

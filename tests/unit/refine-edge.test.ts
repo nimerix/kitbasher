@@ -1,4 +1,4 @@
-import { Matrix4 } from 'three';
+import { BufferGeometry, Float32BufferAttribute, Matrix4 } from 'three';
 import { describe, expect, it } from 'vitest';
 import {
   type EdgeInput,
@@ -7,8 +7,14 @@ import {
   correctedFlanks,
   moveWeights,
   solveEdge,
+  splitCorners,
 } from '../../src/core/refine-edge';
-import { type RefineMesh, cloneRefineMesh, vertexNormal } from '../../src/core/refine-mesh';
+import {
+  type RefineMesh,
+  buildRefineMesh,
+  cloneRefineMesh,
+  vertexNormal,
+} from '../../src/core/refine-mesh';
 import { BandZone, type GuidePoint, estimateWidth } from '../../src/core/refine-band';
 import { type GuideKind, closestOnCurve } from '../../src/core/refine-curve';
 import {
@@ -824,5 +830,58 @@ describe('a cut through a stretch the band leaves out', () => {
     for (const v of result.stationary)
       expect(Math.abs(model.mesh.position[v * 3 + 2])).toBeLessThan(1.6);
     expect(result.pieces).toBe(1);
+  });
+});
+
+describe('splitting sharp joints', () => {
+  it.each([
+    {
+      edges: [
+        [0, 1],
+        [2, 3],
+      ],
+      targets: [
+        [1, 0, 0],
+        [0, 1, 1],
+      ],
+    },
+    {
+      edges: [
+        [0, 1],
+        [1, 3],
+      ],
+      targets: [
+        [1, 0, 0],
+        [1, 0, 1],
+      ],
+    },
+  ])('splits both joints on edges $edges in either order', ({ edges, targets }) => {
+    const source = new BufferGeometry()
+      .setAttribute('position', new Float32BufferAttribute([0, 0, 0, 2, 0, 0, 0, 2, 0, 0, 0, 2], 3))
+      .setIndex([0, 1, 3, 0, 2, 1, 1, 2, 3, 2, 0, 3]);
+    const mesh = buildRefineMesh(source, new Matrix4());
+    const cut = {
+      chain: mesh.weldOf,
+      edges: Uint32Array.from(
+        edges.flatMap((e) => e.map((v) => mesh.weldOf[v]).sort((a, b) => a - b)),
+      ),
+      children: new Map(),
+      skipped: new Uint32Array(),
+    };
+    for (const order of [
+      [0, 1],
+      [1, 0],
+    ]) {
+      const out = cloneRefineMesh(mesh, true);
+      const corners = order.map((i) => ({ point: targets[i], soft: 0.25 }));
+      const split = splitCorners(out, { corners }, cut, 1, new Set());
+      expect(out.weldedCount).toBe(mesh.weldedCount + 2);
+      expect([...out.position.subarray(mesh.weldedCount * 3, out.weldedCount * 3)]).toEqual(
+        order.flatMap((i) => targets[i]),
+      );
+      expect(split.edges).toHaveLength(8);
+      expect(closedMesh(out)).toBe(true);
+      expect(meshMinTriangleArea(out)).toBeGreaterThan(0);
+    }
   });
 });
