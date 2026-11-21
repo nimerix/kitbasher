@@ -10,7 +10,7 @@ import {
 } from '../../src/core/refine-edge';
 import { cloneRefineMesh } from '../../src/core/refine-mesh';
 import type { Vec3 } from '../../src/core/types';
-import { modelFrom, modelOf, pointOn } from '../helpers/refine';
+import { chainPieces, modelFrom, modelOf, pointOn } from '../helpers/refine';
 import { extrudedProfile, softBox, softCylinder, variedProfile } from '../helpers/soft-edges';
 
 /** When `zones` is set, every band the solver builds moves and cuts by the zones its slices found. */
@@ -699,6 +699,102 @@ describe('a line over an edge that curves', () => {
       expect(seen, joint).toBeGreaterThan(0);
       expect(worst, joint).toBeLessThan(0.04); // measured 0.032 smooth, 0.031 sharp
     }
+  });
+
+  /** A point on the crest of softCylinder(5, 1, 0.15)'s top rim at `angle` radians about y. */
+  const rimPoint = (mesh: Model['mesh'], angle: number) => {
+    const inset = 0.15 - 0.15 / Math.SQRT2;
+    return pointOn(mesh, [(5 - inset) * Math.cos(angle), 1 - inset, (5 - inset) * Math.sin(angle)]);
+  };
+  /** Largest distance from radius 5 of the chain vertices from angle `from` to `to`, and how many. */
+  const offRim = (result: ReturnType<typeof outcome>, from: number, to: number) => {
+    if (!result.solved) return { worst: NaN, seen: 0 };
+    let worst = 0,
+      seen = 0;
+    for (const v of result.chain) {
+      const [x, , z] = [0, 1, 2].map((k) => result.out.position[v * 3 + k]);
+      const angle = Math.atan2(z, x);
+      if (angle < from || angle > to) continue;
+      seen++;
+      worst = Math.max(worst, Math.abs(Math.hypot(x, z) - 5));
+    }
+    return { worst, seen };
+  };
+
+  it('follows the rim along a line between two joints', () => {
+    // Three lines along the rim: the middle one, 3.4 mm, is fitted as an arc; the two beside it, 1.4
+    // and 1.7 mm, sag too little from the rim to be (measured).
+    const model = modelOf(softCylinder(5, 1, 0.15, scan));
+    const half = Math.asin(1.7 / 5);
+    const p = [-1.8 * half, -half, half, 2 * half].map((angle) => rimPoint(model.mesh, angle));
+    for (const joint of ['smooth', 'sharp'] as const) {
+      const r = outcome(model, {
+        segments: [0, 1, 2].map((i) => ({ kind: 'line' as const, points: [p[i], p[i + 1]] })),
+        joints: [joint, joint],
+        closed: false,
+        width: 0.52,
+        strength: 0.65,
+      });
+      expect(r.solved && [r.pieces, r.skipped, r.folded], joint).toEqual([1, 0, 0]);
+      if (!r.solved) continue;
+      expect(chainPieces(r.out, Uint32Array.from(r.chain)), joint).toEqual([
+        { size: r.chain.length, ends: 2 },
+      ]);
+      // Along the middle line and across both joints the chain lies on the rim: measured 0.023 along
+      // the middle, 0.027 and 0.028 across the joints, at either kind of joint.
+      for (const [from, to] of [
+        [-1.3 * half, -0.7 * half],
+        [-half, half],
+        [0.7 * half, 1.3 * half],
+      ]) {
+        const { worst, seen } = offRim(r, from, to);
+        expect(seen, `${joint} ${from}`).toBeGreaterThan(10);
+        expect(worst, `${joint} ${from}`).toBeLessThan(0.04);
+      }
+    }
+  });
+
+  it('ties a line along the rim to the edge restored before it', () => {
+    // An arc restored first along the rim, held at its start; then a line, fitted as an arc, drawn
+    // from the far side up to where that arc starts.
+    const model = modelOf(softCylinder(5, 1, 0.15, scan));
+    const half = Math.asin(1.7 / 5);
+    const earlier = outcome(model, {
+      segments: [{ kind: 'arc', points: [1, 1.8, 2.6].map((k) => rimPoint(model.mesh, k * half)) }],
+      joints: [],
+      closed: false,
+      width: 0.52,
+      strength: 1,
+      ends: ['hold', 'taper'],
+    });
+    expect(earlier.solved && [earlier.pieces, earlier.skipped, earlier.folded]).toEqual([1, 0, 0]);
+    if (!earlier.solved) return;
+    const after = modelFrom(earlier.out);
+    const creased: number[] = [];
+    for (let v = 0; v < after.mesh.weldedCount; v++) if (after.mesh.crease[v]) creased.push(v);
+    expect(creased.length).toBeGreaterThan(20);
+    const input: EdgeInput = {
+      segments: [
+        { kind: 'line', points: [rimPoint(after.mesh, -half), rimPoint(after.mesh, half)] },
+      ],
+      joints: [],
+      closed: false,
+      width: 0.52,
+      strength: 0.65,
+    };
+    const solve = solveEdge(after.mesh, after.topology, input, after.noise);
+    expect(solve?.ends).toEqual(['taper', 'hold']);
+    const r = outcome(after, input);
+    expect(r.solved && [r.pieces, r.skipped, r.folded]).toEqual([1, 0, 0]);
+    if (!r.solved) return;
+    // The new chain runs into the earlier one, which goes on from it without a branch or a second
+    // line beside it.
+    const both = Uint32Array.from(new Set([...r.chain, ...creased]));
+    expect(chainPieces(r.out, both)).toEqual([{ size: both.length, ends: 2 }]);
+    // Where they meet the chain lies on the rim: measured 0.031.
+    const { worst, seen } = offRim(r, 0.7 * half, 1.3 * half);
+    expect(seen).toBeGreaterThan(10);
+    expect(worst).toBeLessThan(0.04);
   });
 
   it('stays a line on a straight edge of a rippled, noisy box', () => {
