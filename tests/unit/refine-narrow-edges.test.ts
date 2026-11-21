@@ -608,6 +608,29 @@ describe('a narrow flank', () => {
   });
 });
 
+/**
+ * The largest distance of the chain over the middle half of a guide along `axis` from -1.6 to 1.6,
+ * in the chain's own order, from the line through its two end vertices. NaN when fewer than three
+ * chain vertices lie there.
+ */
+function straightness(result: ReturnType<typeof outcome>, axis: number) {
+  if (!result.solved) return NaN;
+  const middle = result.chain
+    .map((v) => [0, 1, 2].map((a) => result.out.position[v * 3 + a]))
+    .filter((p) => Math.abs(p[axis]) <= 0.8);
+  if (middle.length < 3) return NaN;
+  const [a, b] = [middle[0], middle[middle.length - 1]];
+  const d = [0, 1, 2].map((k) => b[k] - a[k]);
+  const length = Math.hypot(...d);
+  let worst = 0;
+  for (const p of middle) {
+    const e = [0, 1, 2].map((k) => p[k] - a[k]);
+    const along = (e[0] * d[0] + e[1] * d[1] + e[2] * d[2]) / length;
+    worst = Math.max(worst, Math.sqrt(Math.max(0, e[0] ** 2 + e[1] ** 2 + e[2] ** 2 - along ** 2)));
+  }
+  return worst;
+}
+
 describe('a line over an edge that curves', () => {
   it('follows the rim of a cylinder of radius 5', () => {
     const model = modelOf(softCylinder(5, 1, 0.15, scan));
@@ -687,26 +710,37 @@ describe('a line over an edge that curves', () => {
       const r = outcome(model, line(model, [-1.6, 1.5 - c, 1 - c], [1.6, 1.5 - c, 1 - c], null));
       expect(r.solved, `seed ${seed}`).toBe(true);
       if (!r.solved) continue;
-      // The chain over the middle half of the guide, in its own order, and the largest distance of
-      // any of it from the line through its two end vertices.
-      const middle = r.chain
-        .map((v) => [0, 1, 2].map((a) => r.out.position[v * 3 + a]))
-        .filter(([x]) => Math.abs(x) <= 0.8);
-      expect(middle.length, `seed ${seed}`).toBeGreaterThan(2);
-      const [a, b] = [middle[0], middle[middle.length - 1]];
-      const d = [0, 1, 2].map((k) => b[k] - a[k]);
-      const length = Math.hypot(...d);
-      let worst = 0;
-      for (const p of middle) {
-        const e = [0, 1, 2].map((k) => p[k] - a[k]);
-        const along = (e[0] * d[0] + e[1] * d[1] + e[2] * d[2]) / length;
-        worst = Math.max(
-          worst,
-          Math.sqrt(Math.max(0, e[0] ** 2 + e[1] ** 2 + e[2] ** 2 - along ** 2)),
-        );
-      }
       // Measured under 0.0001 on every seed: the flanks fit as planes, which meet in a line.
-      expect(worst, `seed ${seed}`).toBeLessThan(0.02);
+      expect(straightness(r, 0), `seed ${seed}`).toBeLessThan(0.02);
+    }
+  });
+  it('stays a line on a straight edge between two faces that twist along it', () => {
+    // A 90 degree edge along z, rounded 0.08, whose two faces tilt by up to 0.2 radians and back
+    // along it: neither is one shape, so each is fitted with a profile per slice, and where they
+    // meet scatters about the edge. The line misses that meet by 0.0097 to 0.0171 on these seeds
+    // (measured), against an edge length of 0.061.
+    for (const seed of [1, 2, 3, 4]) {
+      const model = modelOf(
+        variedProfile(
+          (z) => {
+            const t = Math.tan(0.2 * Math.sin((Math.PI * z) / 2));
+            return [
+              [-2, 2 * t],
+              [0, 0],
+              [2 * t, -2],
+            ];
+          },
+          [0.08],
+          4,
+          { step: 0.06, ripple: 0.02, noise: 0.01, seed },
+        ),
+      );
+      const r = outcome(model, line(model, [-0.02, -0.02, -1.6], [-0.02, -0.02, 1.6], null));
+      expect(r.solved && [r.pieces, r.skipped, r.folded], `seed ${seed}`).toEqual([1, 0, 0]);
+      if (!r.solved) continue;
+      expect(r.fits, `seed ${seed}`).toBe('profile/profile');
+      expect(r.deviation, `seed ${seed}`).toBeLessThan(0.03);
+      expect(straightness(r, 2), `seed ${seed}`).toBeLessThan(0.02); // measured under 0.0001
     }
   });
 });
