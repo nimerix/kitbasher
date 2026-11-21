@@ -1415,3 +1415,13 @@ test('the toolbar has a Refine button with its shortcut', async ({ page }) => {
   await expect(button).toHaveClass(/active/);
   await expect.poll(() => inStore(page, (s) => s.refine?.stage ?? null)).toBe('ready');
 });
+
+test('the Refine indexing status distinguishes the gestures that wait from clicks', async ({
+  page,
+}) => {
+  await openRefine(page);
+  await inEditor(page, (store) => store.useEditor.setState({ indexingMeshes: 1 }));
+  await expect(page.locator('.status-context')).toHaveText(
+    'Preparing a dense mesh. Strokes, paint and handle drags wait. Single clicks still work.',
+  );
+});

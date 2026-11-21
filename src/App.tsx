@@ -689,7 +689,9 @@ function StatusBar() {
           {freeMode
             ? 'Move pointer · X / Y / Z: axis · Enter / click: confirm · Esc / right-click: cancel'
             : indexing
-              ? 'Preparing a dense mesh · It can be clicked when this finishes'
+              ? refineMode && refineMode !== 'building'
+                ? 'Preparing a dense mesh. Strokes, paint and handle drags wait. Single clicks still work.'
+                : 'Preparing a dense mesh · It can be clicked when this finishes'
               : navigationMode
                 ? `${navigationMode === 'pan' ? 'Pan' : 'Orbit'} tool · Drag to navigate${cancel ? ` · ${cancel} to return` : ''}`
                 : pivotPicking
