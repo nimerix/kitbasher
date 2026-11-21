@@ -20,7 +20,7 @@ export interface Release {
 // Newest first. Each title must be unique: it names the release's link.
 export const releases: Release[] = [
   {
-    date: '2026-11-20',
+    date: '2026-11-21',
     title: 'Refine edges and surfaces on scans',
     changes: [
       {
