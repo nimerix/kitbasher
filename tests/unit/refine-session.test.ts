@@ -20,7 +20,7 @@ import { editorCommands, undoTarget } from '../../src/core/commands';
 import { partMatrix, triangleCount } from '../../src/core/geometry';
 import { detectDefaults } from '../../src/core/refine-detect';
 import { writeRefinedGeometry } from '../../src/core/refine-mesh';
-import { fitCurve, type EdgeCurve } from '../../src/core/refine-curve';
+import { fitCurve, GuideLengthError, type EdgeCurve } from '../../src/core/refine-curve';
 import type { GuidePoint } from '../../src/core/refine-band';
 import type { RefineProposal } from '../../src/core/refine-detect';
 import type { RegionInput } from '../../src/core/refine-region';
@@ -589,6 +589,28 @@ describe('refine guides', () => {
     editor().setTool('select');
     editor().undo();
     expect(editor().scene.parts[0].geometry).toBe(before.parts[0].geometry);
+  });
+
+  it('reports an overlong spline once for the guide and leaves it pending', async () => {
+    setup([boxPart()], ['box']);
+    await ready();
+    const solve = vi.spyOn(edgeCode, 'solveEdge').mockImplementation(() => {
+      throw new GuideLengthError();
+    });
+    try {
+      editor().setRefineEdge({ kind: 'spline' });
+      editor().addRefinePoint(crest(-1));
+      editor().addRefinePoint(crest(1));
+      const id = session().features[0].id;
+      expect(toast()).toBe('This guide is too long for this mesh. Try a shorter guide.');
+      for (const { id } of useActivity.getState().notifications) dismissNotification(id);
+      editor().setRefineEdge({ width: 0.3 });
+      editor().acceptRefine();
+      expect(session().features[0]).toMatchObject({ id, state: 'pending' });
+      expect(useActivity.getState().notifications).toHaveLength(1);
+    } finally {
+      solve.mockRestore();
+    }
   });
 
   it('keeps a guide that finds no edge, changes nothing, and says why', async () => {

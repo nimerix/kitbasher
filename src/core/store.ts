@@ -3676,7 +3676,7 @@ export const useEditor = create<EditorState>((set, get) => ({
     const kept = new Set(features.map((f) => f.id));
     if (failures.session === refine.id)
       failures = {
-        session: refine.id,
+        ...failures,
         known: new Map([...failures.known].filter(([id]) => kept.has(id))),
         banners: new Map([...failures.banners].filter(([id]) => kept.has(id))),
       };
@@ -5772,19 +5772,18 @@ function dabRefine(stroke: RefineStroke, point: GuidePoint) {
  * Solves already made against a model's surface: by a region's proposal, and by an edge's segments
  * with the other inputs that change its solve, so a new Strength reuses it.
  */
-const refineSolves = new WeakMap<
-  object,
-  { mesh: RefineMesh; input: unknown; solve: EdgeSolve | RegionSolve | null }
->();
+interface SolveAttempt {
+  input: unknown;
+  solve: EdgeSolve | RegionSolve | null;
+  tooLong: boolean;
+}
+const refineSolves = new WeakMap<object, SolveAttempt & { mesh: RefineMesh }>();
 
 /**
  * The latest solve of each proposal (same keys) and the model it was made over, on the model's
  * own surface or on a draft built from it: what the preview last showed, for display.
  */
-const latestSolves = new WeakMap<
-  object,
-  { model: RefineMesh; input: unknown; solve: EdgeSolve | RegionSolve | null }
->();
+const latestSolves = new WeakMap<object, SolveAttempt & { model: RefineMesh }>();
 
 const sameSolveInput = (a: unknown, b: unknown) => {
   if (a === b) return true;
@@ -5810,19 +5809,29 @@ function solveProposal<P extends RefineProposal>(
   const key = proposal.type === 'edge' ? proposal.input.segments : proposal;
   const cached = refineSolves.get(key);
   if (cached?.mesh === mesh && sameSolveInput(cached.input, proposal.input)) {
-    latestSolves.set(key, { model: model.mesh, input: proposal.input, solve: cached.solve });
+    latestSolves.set(key, { ...cached, model: model.mesh });
     return cached.solve as Solve;
   }
-  const { edge, region } = refineCode!;
-  const solve =
-    proposal.type === 'edge'
-      ? edge.solveEdge(mesh, model.topology, solvedForm(proposal.input), model.noise)
-      : region.solveRegion(mesh, model.topology, proposal.input, model.noise);
-  // Only a solve on a model's own surface can be asked for again.
-  if (mesh === model.mesh) refineSolves.set(key, { mesh, input: proposal.input, solve });
-  latestSolves.set(key, { model: model.mesh, input: proposal.input, solve });
+  const { edge, region, curve } = refineCode!;
+  let solve: EdgeSolve | RegionSolve | null = null;
+  let tooLong = false;
+  try {
+    solve =
+      proposal.type === 'edge'
+        ? edge.solveEdge(mesh, model.topology, solvedForm(proposal.input), model.noise)
+        : region.solveRegion(mesh, model.topology, proposal.input, model.noise);
+  } catch (error) {
+    if (proposal.type !== 'edge' || !(error instanceof curve.GuideLengthError)) throw error;
+    tooLong = true;
+  }
+  const attempt = { input: proposal.input, solve, tooLong };
+  if (mesh === model.mesh) refineSolves.set(key, { ...attempt, mesh });
+  latestSolves.set(key, { ...attempt, model: model.mesh });
   return solve as Solve;
 }
+
+const edgeFailure = (input: EdgeInput) =>
+  latestSolves.get(input.segments)?.tooLong ? longGuideNotice : noEdgeNotice;
 
 /**
  * Folds one solve pass into the failures already reported, one record per feature id: a feature
@@ -5852,7 +5861,8 @@ let failures: {
   session: string;
   known: ReadonlyMap<string, string>;
   banners: ReadonlyMap<string, string>;
-} = { session: '', known: new Map(), banners: new Map() };
+  lengthReported: Set<string>;
+} = { session: '', known: new Map(), banners: new Map(), lengthReported: new Set() };
 
 /** Whether the notification banner `id` is on screen: not dismissed, and among those shown. */
 const bannerShown = (id: string | undefined) =>
@@ -5885,13 +5895,19 @@ function solvePass(session: string, pass: { id: string; notice: string | null }[
   const { known } = reportFailures(before, pass);
   const banners = new Map(same ? failures.banners : []);
   for (const id of banners.keys()) if (!known.has(id)) banners.delete(id);
-  failures = { session, known, banners };
-  const due = pass.filter(
-    ({ id, notice }) =>
-      notice !== null && (before.get(id) !== notice || (press && !bannerShown(banners.get(id)))),
+  const lengthReported = same ? failures.lengthReported : new Set<string>();
+  failures = { session, known, banners, lengthReported };
+  const due = pass.filter(({ id, notice }) =>
+    notice === longGuideNotice
+      ? !lengthReported.has(id)
+      : notice !== null && (before.get(id) !== notice || (press && !bannerShown(banners.get(id)))),
   );
   const notices = [...new Set(due.map((p) => p.notice!))];
-  for (const notice of press ? notices.slice(0, 1) : notices) raiseFailure(notice, pass, banners);
+  for (const notice of press ? notices.slice(0, 1) : notices) {
+    raiseFailure(notice, pass, banners);
+    if (notice === longGuideNotice)
+      for (const entry of due) if (entry.notice === notice) lengthReported.add(entry.id);
+  }
 }
 
 /**
@@ -5917,7 +5933,7 @@ function acceptFeatures(
     const proposal = feature.feature;
     if (proposal.type === 'edge') {
       const solve = solvable(proposal.input) ? solveProposal(model, model.mesh, proposal) : null;
-      pass.push({ id: feature.id, notice: solve ? null : noEdgeNotice });
+      pass.push({ id: feature.id, notice: solve ? null : edgeFailure(proposal.input) });
       if (!solve) continue;
       const mesh = cloneRefineMesh(model.mesh, true);
       const result = edge.applyEdge(mesh, model.topology, solve, proposal.input.strength, true);
@@ -6267,7 +6283,7 @@ function rebuildRefineDraft(draftStatus: RefineSession['draftStatus'] = null) {
         moved.push(
           edge.applyEdge(mesh, model.topology, solve, proposal.input.strength, false).changed,
         );
-      pass.push({ id, notice: solve ? null : noEdgeNotice });
+      pass.push({ id, notice: solve ? null : edgeFailure(proposal.input) });
     } else {
       const solve = solveProposal(model, on, proposal);
       if (solve) moved.push(region.applyRegion(mesh, solve));
@@ -6339,6 +6355,7 @@ const unsteppedRefine = { draft: null, folds: noFolds, skipped: noFolds };
 
 const noEdgeNotice =
   'No edge found under this guide. Move it onto the rounded edge or change Width.';
+const longGuideNotice = 'This guide is too long for this mesh. Try a shorter guide.';
 const smallRegionNotice = 'This area is too small to fit a surface. Paint more of it.';
 const wideCreaseNotice = 'The edge is wider than the brush. Check the preview, then accept it.';
 const cutNotice = 'Some triangles along this edge could not be cut cleanly. Check the marked area.';

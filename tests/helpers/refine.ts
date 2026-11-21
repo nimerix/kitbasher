@@ -1805,3 +1805,36 @@ export function edgeNeighbours(mesh: RefineMesh, topology: RefineTopology, t: nu
   }
   return found;
 }
+
+/** Four disconnected tiny tetrahedra spaced far apart in world-space mesh units. */
+export function fineMeshSpline() {
+  const positions: number[] = [];
+  for (const z of [0, 1500, 3000, 4500]) {
+    const vertices = [
+      [0, 0, z],
+      [0.00012, 0, z],
+      [0, 0.00012, z],
+      [0, 0, z + 0.0008],
+    ];
+    for (const face of [
+      [0, 2, 1],
+      [0, 1, 3],
+      [1, 2, 3],
+      [2, 0, 3],
+    ])
+      for (const v of face) positions.push(...vertices[v]);
+  }
+  return new BufferGeometry().setAttribute(
+    'position',
+    new BufferAttribute(Float32Array.from(positions), 3),
+  );
+}
+
+export const fineMeshSplinePoints = (mesh: RefineMesh) =>
+  [0, 4, 8, 12].map((triangle): GuidePoint => {
+    const start = weldedCorner(mesh, triangle, 0) * 3;
+    return {
+      triangle,
+      position: [mesh.position[start], mesh.position[start + 1], mesh.position[start + 2]],
+    };
+  });

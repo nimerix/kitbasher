@@ -1,3 +1,6 @@
+import { Matrix4 } from 'three';
+import { solveEdge } from '../../src/core/refine-edge';
+import { buildRefineModel, refineModelInput } from '../../src/core/refine-model';
 import { describe, expect, it } from 'vitest';
 import {
   type EdgeCurve,
@@ -9,6 +12,8 @@ import {
 } from '../../src/core/refine-curve';
 import {
   cornersOf,
+  fineMeshSpline,
+  fineMeshSplinePoints,
   largestGap,
   maxDistance,
   nearestRectangleCorner,
@@ -536,4 +541,34 @@ describe('refine curves', () => {
       new RangeError('This guide is too long for its step.'),
     );
   }, 10000);
+});
+
+it('refuses a millimetre spline on a fine mesh before sampling it', () => {
+  const model = buildRefineModel(
+    refineModelInput(fineMeshSpline(), new Matrix4().makeScale(0.001, 0.001, 0.001)),
+  );
+  const points = fineMeshSplinePoints(model.mesh);
+  const start = performance.now();
+  expect(() =>
+    solveEdge(
+      model.mesh,
+      model.topology,
+      {
+        segments: [{ kind: 'spline', points }],
+        joints: [],
+        width: null,
+        closed: false,
+        strength: 1,
+      },
+      model.noise,
+    ),
+  ).toThrow('This guide is too long');
+  expect(performance.now() - start).toBeLessThan(5000);
+});
+
+it('caps a guide polyline at the display density even on a fine mesh', () => {
+  const curve = drawnCurve('spline', [0, 0, 0, 1, 0.3, 0, 2, -0.3, 0, 3, 0, 0], 0.0005, 512);
+  expect(curve.lengths.length).toBeLessThanOrEqual(513);
+  expect([...curve.points.slice(0, 3)]).toEqual([0, 0, 0]);
+  expect(curve.points.at(-3)).toBeCloseTo(3, 12);
 });

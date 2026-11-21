@@ -77,6 +77,7 @@ function curvePolyline(curve: EdgeCurve) {
   return line;
 }
 /** The guide as drawn through its points, every segment in turn. */
+const guideDisplaySegments = 512;
 function guidePolyline(segments: EdgeSegment[], step: number) {
   let line = polylines.get(segments);
   if (!line) {
@@ -86,6 +87,7 @@ function guidePolyline(segments: EdgeSegment[], step: number) {
           segment.kind,
           segment.points.flatMap((p) => p.position),
           step,
+          guideDisplaySegments,
         ).points,
     );
     line = new Float32Array(parts.reduce((sum, part) => sum + part.length, 0));

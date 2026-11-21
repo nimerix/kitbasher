@@ -41,10 +41,17 @@ const pointAt = (flat: ArrayLike<number>, i: number): V3 => [
 ];
 const clamp = (x: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, x));
 
+export class GuideLengthError extends RangeError {
+  constructor() {
+    super('This guide is too long for its step.');
+  }
+}
+
 /** Equal segments of at most `step` along a span of `length`. */
-function segmentsFor(length: number, step: number) {
+function segmentsFor(length: number, step: number, limit?: number) {
   const segments = Math.max(1, Math.ceil(length / step));
-  if (!(segments <= 5_000_000)) throw new RangeError('This guide is too long for its step.');
+  if (limit !== undefined) return Math.min(segments, limit);
+  if (!(segments <= 5_000_000)) throw new GuideLengthError();
   return segments;
 }
 
@@ -81,12 +88,12 @@ function cumulative(flat: ArrayLike<number>) {
 }
 
 /** An open polyline resampled at equal spacing of at most `step`, keeping both ends. */
-function resample(flat: ArrayLike<number>, step: number) {
+function resample(flat: ArrayLike<number>, step: number, limit?: number) {
   const lengths = cumulative(flat);
   const count = lengths.length;
   const total = lengths[count - 1];
   if (!(total > 0)) return Float64Array.of(flat[0], flat[1], flat[2]);
-  const segments = segmentsFor(total, step);
+  const segments = segmentsFor(total, step, limit);
   const result = new Float64Array((segments + 1) * 3);
   let j = 0;
   for (let i = 0; i <= segments; i++) {
@@ -144,8 +151,9 @@ function arcPoints(
   sweep: number,
   step: number,
   full: boolean,
+  limit?: number,
 ) {
-  const segments = segmentsFor(r * Math.abs(sweep), step);
+  const segments = segmentsFor(r * Math.abs(sweep), step, limit);
   const result: number[] = [];
   for (let i = 0; i < (full ? segments : segments + 1); i++) {
     const t = (sweep * i) / segments;
@@ -1168,10 +1176,22 @@ export function curveTangent(
 }
 
 /** Catmull-Rom (centripetal) through the points, densely sampled. */
-function catmullRom(points: ArrayLike<number>, step: number) {
+function catmullRom(points: ArrayLike<number>, step: number, displayLimit?: number) {
   const count = points.length / 3;
   const at = (i: number) => pointAt(points, Math.min(count - 1, Math.max(0, i)));
-  const flat: number[] = [];
+  const chords = Float64Array.from({ length: count - 1 }, (_, k) => distance(at(k + 1), at(k)));
+  const spacing =
+    displayLimit === undefined
+      ? step
+      : Math.max(step, chords.reduce((sum, length) => sum + length, 0) / displayLimit);
+  const piecesOf = (k: number) => Math.max(8, Math.ceil(chords[k] / spacing) * 4);
+  let samples = 1;
+  for (let k = 0; k < count - 1; k++) {
+    samples += piecesOf(k);
+    if (displayLimit === undefined && !(samples <= 262_144)) throw new GuideLengthError();
+  }
+  const flat = new Float64Array(samples * 3);
+  let offset = 0;
   for (let k = 0; k < count - 1; k++) {
     let [p0, p1, p2, p3] = [at(k - 1), at(k), at(k + 1), at(k + 2)];
     // Mirrored phantom points at the ends keep the end tangents along the end chords.
@@ -1181,7 +1201,7 @@ function catmullRom(points: ArrayLike<number>, step: number) {
     const t1 = knot(p0, p1),
       t2 = t1 + knot(p1, p2),
       t3 = t2 + knot(p2, p3);
-    const pieces = Math.max(8, Math.ceil(norm(sub(p2, p1)) / step) * 4);
+    const pieces = piecesOf(k);
     for (let i = k === 0 ? 0 : 1; i <= pieces; i++) {
       const t = t1 + ((t2 - t1) * i) / pieces;
       const mix = (a: V3, b: V3, ta: number, tb: number) =>
@@ -1191,14 +1211,20 @@ function catmullRom(points: ArrayLike<number>, step: number) {
         a3 = mix(p2, p3, t2, t3);
       const b1 = mix(a1, a2, 0, t2),
         b2 = mix(a2, a3, t1, t3);
-      flat.push(...mix(b1, b2, t1, t2));
+      flat.set(mix(b1, b2, t1, t2), offset);
+      offset += 3;
     }
   }
   return flat;
 }
 
 /** The guide the user drew, before any fitting: a chord, a circle through three points, or Catmull-Rom. */
-export function drawnCurve(kind: GuideKind, points: ArrayLike<number>, step: number): EdgeCurve {
+export function drawnCurve(
+  kind: GuideKind,
+  points: ArrayLike<number>,
+  step: number,
+  displayLimit?: number,
+): EdgeCurve {
   const count = points.length / 3;
   if (count < 2) return makeCurve(new Float64Array(points), false);
   let [first, last] = [pointAt(points, 0), pointAt(points, count - 1)];
@@ -1211,7 +1237,10 @@ export function drawnCurve(kind: GuideKind, points: ArrayLike<number>, step: num
       const target = sub(last, circle.centre);
       let sweep = Math.atan2(dot(target, v), dot(target, u));
       if (sweep <= 0) sweep += Math.PI * 2;
-      return makeCurve(arcPoints(circle.centre, u, v, circle.radius, sweep, step, false), false);
+      return makeCurve(
+        arcPoints(circle.centre, u, v, circle.radius, sweep, step, false, displayLimit),
+        false,
+      );
     }
     // Collinear or repeated controls: the chord between the two farthest apart, in order.
     const pairs: [V3, V3][] = [
@@ -1222,6 +1251,6 @@ export function drawnCurve(kind: GuideKind, points: ArrayLike<number>, step: num
     [first, last] = pairs.reduce((a, b) => (distance(...b) > distance(...a) ? b : a));
   }
   if (kind === 'spline' && count >= 3)
-    return makeCurve(resample(catmullRom(points, step), step), false);
-  return makeCurve(resample([...first, ...last], step), false);
+    return makeCurve(resample(catmullRom(points, step, displayLimit), step, displayLimit), false);
+  return makeCurve(resample([...first, ...last], step, displayLimit), false);
 }
