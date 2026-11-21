@@ -352,6 +352,33 @@ describe('Refine store helpers for the panel and keys', () => {
     expect(state(drawn)).toBeUndefined();
   });
 
+  it('routes Escape and Delete to a chosen point before acting on its guide', async () => {
+    setup([boxPart()], ['box']);
+    await ready();
+    editor().setRefineEdge({ kind: 'spline' });
+    for (const x of [-1, 0, 1]) editor().addRefinePoint(crest(x));
+    const id = session().selected[0];
+    editor().clickRefinePoint(id, 0, 1);
+    const before = session().undo.length;
+    expect(refineKey(editor(), 'cancel')).toBe(true);
+    expect(session().chosenPoint).toBeNull();
+    expect(session().features[0].id).toBe(id);
+    expect(session().drawing).toBe(true);
+    expect(session().undo).toHaveLength(before);
+
+    editor().clickRefinePoint(id, 0, 1);
+    refineKey(editor(), 'delete');
+    expect(session().features[0].id).toBe(id);
+    expect(session().undo).toHaveLength(before + 1);
+    editor().clickRefinePoint(id, 0, 1);
+    refineKey(editor(), 'delete');
+    expect(session().features[0].id).toBe(id);
+    expect(session().undo).toHaveLength(before + 1);
+    refineKey(editor(), 'cancel');
+    refineKey(editor(), 'delete');
+    expect(session().features).toEqual([]);
+  });
+
   it('keeps the tool on Escape in every mode while the session holds work, and only then', async () => {
     setup([boxPart()], ['box']);
     await ready();

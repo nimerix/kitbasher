@@ -2412,6 +2412,36 @@ describe('refine session integrity', { timeout: 20_000 }, () => {
     expect(session().features.find((f) => f.id === id)).toBe(feature);
   });
 
+  it('removes only a chosen point that leaves a complete guide, in one undo step', async () => {
+    setup([boxPart()], ['box']);
+    await ready();
+    editor().setRefineEdge({ kind: 'spline' });
+    const points = [-1, 0, 1].map(crest);
+    for (const point of points) editor().addRefinePoint(point);
+    const id = session().selected[0];
+    const steps = session().undo.length;
+    editor().clickRefinePoint(id, 0, 1);
+    expect(session().chosenPoint).toEqual({ feature: id, segment: 0, index: 1 });
+    expect(session().undo).toHaveLength(steps);
+    editor().removeChosenRefinePoint();
+    expect(edgeInput(id).segments[0].points).toEqual([points[0], points[2]]);
+    expect(session().features[0].id).toBe(id);
+    expect(session().chosenPoint).toBeNull();
+    expect(session().undo).toHaveLength(steps + 1);
+    editor().clickRefinePoint(id, 0, 1);
+    editor().removeChosenRefinePoint();
+    expect(edgeInput(id).segments[0].points).toEqual([points[0], points[2]]);
+    expect(session().undo).toHaveLength(steps + 1);
+    editor().undoRefine();
+    expect(edgeInput(id).segments[0].points).toEqual(points);
+    expect(session().chosenPoint).toBeNull();
+    editor().clickRefinePoint(id, 0, 0);
+    expect(edgeInput(id).closed).toBe(true);
+    expect(session().chosenPoint).toBeNull();
+    editor().clickRefinePoint(id, 0, 0);
+    expect(session().chosenPoint).toEqual({ feature: id, segment: 0, index: 0 });
+  });
+
   it('keeps a closed path closed when its shared first and last point is removed', async () => {
     setup([boxPart()], ['box']);
     await ready();

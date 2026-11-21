@@ -1030,6 +1030,37 @@ test('undoes each point and each handle drag as its own step', async ({ page }) 
 });
 
 // A selected guide's handle stays reachable when the guide's own preview stands in front of it.
+test('chooses a guide point and removes it with the key or panel button', async ({ page }) => {
+  await openRefine(page);
+  await page.getByRole('radio', { name: 'Spline', exact: true }).click();
+  for (const x of [-2, 0, 2]) await clickSurface(page, crest(x));
+  const remove = page.getByRole('button', { name: 'Remove point', exact: true });
+  const points = () =>
+    inStore(page, (s) => {
+      const guide = s.refine!.features[0]?.feature;
+      return guide?.type === 'edge' ? guide.input.segments[0].points.length : null;
+    });
+  await expect(remove).toBeDisabled();
+  await clickSurface(page, crest(0));
+  await expect(remove).toBeEnabled();
+  await page.keyboard.press('Escape');
+  await expect(remove).toBeDisabled();
+  expect(await points()).toBe(3);
+  await clickSurface(page, crest(0));
+  const before = await steps(page);
+  await page.keyboard.press('Backspace');
+  await expect.poll(points).toBe(2);
+  expect((await steps(page)).undo).toBe(before.undo + 1);
+  await expect(remove).toBeDisabled();
+  await undo(page);
+  await expect.poll(points).toBe(3);
+  await clickSurface(page, crest(0));
+  await expect(remove).toBeEnabled();
+  await remove.click();
+  await expect.poll(points).toBe(2);
+  await expect(page.getByText('0 accepted · 1 proposed')).toBeVisible();
+});
+
 test('drags the middle handle of a guide on an exterior edge', async ({ page }) => {
   await openRefine(page);
   for (const x of [-3, 0, 3]) await clickSurface(page, crest(x));

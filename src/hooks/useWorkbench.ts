@@ -2,6 +2,7 @@ import { useEffect, useRef } from 'react';
 import { joinLiveSession } from '../core/live';
 import {
   committedScene,
+  chosenRefinePoint,
   brushingRefine,
   drawingRefineGuide,
   liveSession,
@@ -45,7 +46,12 @@ export function refineKey(
   action: 'cancel' | 'delete' | 'apply',
 ) {
   const refine = state.refine?.stage === 'ready' ? state.refine : null;
+  const point = refine && chosenRefinePoint(refine);
   if (action === 'cancel') {
+    if (point) {
+      state.clearChosenRefinePoint();
+      return true;
+    }
     const guide = refine?.mode === 'edge' && drawingRefineGuide(refine);
     if (guide) state.dismissRefine([guide]);
     else if (refine?.mode === 'brush' && refineTargets(refine).length) state.selectRefine([]);
@@ -55,6 +61,10 @@ export function refineKey(
     return true;
   }
   if (!refine) return true;
+  if (action === 'delete' && point) {
+    state.removeChosenRefinePoint();
+    return true;
+  }
   if (action === 'apply' && refine.draggingHandle) return true;
   if (action === 'apply' && refine.drawing) {
     state.finishRefineGuide();

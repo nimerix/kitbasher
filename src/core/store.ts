@@ -388,6 +388,11 @@ export interface RefineStep {
   /** Whether the selected guide's last spline segment still took points. */
   drawing: boolean;
 }
+interface RefinePointSelection {
+  feature: string;
+  segment: number;
+  index: number;
+}
 export interface RefineSession {
   id: string;
   partId: string;
@@ -409,6 +414,7 @@ export interface RefineSession {
   mode: RefineMode;
   features: RefineFeature[];
   selected: string[];
+  chosenPoint: RefinePointSelection | null;
   /** Painted triangles of the working surface: the region being made, or where Detect looks. */
   triangles: number[];
   edge: {
@@ -653,6 +659,9 @@ interface EditorState {
     begin?: boolean,
   ) => void;
   removeRefinePoint: (feature: string, segment: number, index: number) => void;
+  clickRefinePoint: (feature: string, segment: number, index: number) => void;
+  clearChosenRefinePoint: () => void;
+  removeChosenRefinePoint: () => void;
   /** Ends the spline segment being drawn. */
   finishRefineGuide: () => void;
   paintRefineRegion: (
@@ -3389,7 +3398,16 @@ export const useEditor = create<EditorState>((set, get) => ({
     }
     // A handle drag still under the pointer is left for the pointer code to cancel.
     const { refine } = get();
-    if (refine) set({ painting: false, refine: { ...refine, mode, drawing: false } });
+    if (refine)
+      set({
+        painting: false,
+        refine: {
+          ...refine,
+          mode,
+          drawing: false,
+          chosenPoint: changed ? null : refine.chosenPoint,
+        },
+      });
     if (changed && refine && framesRefineDraft()) scheduleRefineDraft();
   },
   setRefineEdge: (options, each = {}) => {
@@ -3576,6 +3594,27 @@ export const useEditor = create<EditorState>((set, get) => ({
     }
     restRefineDraft();
   },
+  clickRefinePoint: (id, segment, index) => {
+    const refine = readyRefine();
+    const guide = refine && selectedEdge(refine, id);
+    const point = guide?.segments[segment]?.points[index];
+    if (!refine || !guide || !point) return;
+    if (!guide.closed && segment === 0 && index === 0 && refine.mode === 'edge') {
+      get().addRefinePoint(point, true);
+      if (get().refine !== refine) return;
+    }
+    set({ refine: { ...refine, chosenPoint: { feature: id, segment, index } } });
+  },
+  clearChosenRefinePoint: () => {
+    const { refine } = get();
+    if (refine?.chosenPoint) set({ refine: { ...refine, chosenPoint: null } });
+  },
+  removeChosenRefinePoint: () => {
+    const refine = readyRefine();
+    if (!refine || !refinePointRemovable(refine)) return;
+    const { feature, segment, index } = refine.chosenPoint!;
+    get().removeRefinePoint(feature, segment, index);
+  },
   removeRefinePoint: (id, segment, index) => {
     const refine = readyRefine();
     const feature = refine?.features.find((f) => f.id === id);
@@ -3661,7 +3700,14 @@ export const useEditor = create<EditorState>((set, get) => ({
     clearRefineRest();
     cancelRefineDraft();
     const known = new Set(refine.features.map((f) => f.id));
-    set({ refine: { ...refine, selected: ids.filter((id) => known.has(id)), drawing: false } });
+    set({
+      refine: {
+        ...refine,
+        selected: ids.filter((id) => known.has(id)),
+        chosenPoint: null,
+        drawing: false,
+      },
+    });
     scheduleRefineDraft();
   },
   acceptRefine: (ids) => {
@@ -5378,6 +5424,7 @@ const newRefineSession = (part: Part, epoch: number): RefineSession => ({
   mode: 'edge',
   features: [],
   selected: [],
+  chosenPoint: null,
   triangles: [],
   edge: { kind: 'line', width: null, joint: 'sharp', strength: 1, ends: [null, null] },
   region: {
@@ -5644,7 +5691,11 @@ export function commitRefine(next: Partial<RefineSession>) {
   if (!refine?.model || refine.stage !== 'ready') return;
   refineDrag = null;
   if (next.model) shareCrease(next.model.mesh, refine.model.mesh);
-  const updated = { ...refine, ...next };
+  const updated = {
+    ...refine,
+    ...(next.features || next.selected ? { chosenPoint: null } : {}),
+    ...next,
+  };
   const kept = trimRefineSteps(
     updated.model!,
     [...refine.undo, refineStep(refine)].slice(-refineUndoLimit),
@@ -6442,7 +6493,7 @@ function shareCrease(mesh: RefineMesh, before: RefineMesh) {
 }
 
 /** What undo and redo reset: none of it is recorded in a step. */
-const unsteppedRefine = { draft: null, folds: noFolds, skipped: noFolds };
+const unsteppedRefine = { draft: null, folds: noFolds, skipped: noFolds, chosenPoint: null };
 
 const noEdgeNotice =
   'No edge found under this guide. Move it onto the rounded edge or change Width.';
@@ -6559,6 +6610,32 @@ function updateSelected(
     return sameInput(feature, f.feature) ? { ...f, feature } : { ...f, feature, edited: true };
   });
   return changed ? features : refine.features;
+}
+
+type PointSelectionState = Pick<RefineSession, 'selected' | 'features' | 'chosenPoint'>;
+
+function selectedEdge(refine: PointSelectionState, id: string) {
+  if (!refine.selected.includes(id)) return null;
+  const feature = refine.features.find((f) => f.id === id);
+  return feature?.state === 'pending' && feature.feature.type === 'edge'
+    ? feature.feature.input
+    : null;
+}
+
+export function chosenRefinePoint(refine: PointSelectionState) {
+  const point = refine.chosenPoint;
+  if (!point) return null;
+  return selectedEdge(refine, point.feature)?.segments[point.segment]?.points[point.index]
+    ? point
+    : null;
+}
+
+export function refinePointRemovable(refine: PointSelectionState) {
+  const point = chosenRefinePoint(refine);
+  if (!point) return false;
+  const guide = selectedEdge(refine, point.feature)!;
+  const next = withoutPoint(guide, point.segment, point.index);
+  return next !== null && solvable(next);
 }
 
 /**

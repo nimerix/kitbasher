@@ -997,8 +997,7 @@ export function RefinePointerController({ pressed }: { pressed: () => boolean })
       }
       if (d.kind === 'stroke') return state.endRefineStroke();
       state.endRefineDrag();
-      // A click on the open path's first handle closes it.
-      if (!d.moved && d.handle.first) state.addRefinePoint(d.handle.point, true);
+      if (!d.moved) state.clickRefinePoint(d.handle.feature, d.handle.segment, d.handle.index);
     };
 
     // The release of a press whose gesture was cancelled does nothing.
@@ -1087,8 +1086,10 @@ export function RefinePointerController({ pressed }: { pressed: () => boolean })
         if (d.track.moved) return;
         const state = useEditor.getState();
         const { refine } = state;
-        if (d.click && d.click.handle.first && handleClickHolds(d.click, refine))
-          state.addRefinePoint(d.click.handle.point, true);
+        if (d.click && handleClickHolds(d.click, refine)) {
+          const { feature, segment, index } = d.click.handle;
+          state.clickRefinePoint(feature, segment, index);
+        }
         const region = d.region;
         if (
           region &&

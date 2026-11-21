@@ -18,6 +18,7 @@ import {
   refineBrushRadius,
   refineDraftLimit,
   refineEdited,
+  refinePointRemovable,
   refineSolved,
   useEditor,
   type RefineFeature,
@@ -60,6 +61,7 @@ const panelView = (refine: RefineSession | null) =>
     mode: refine.mode,
     features: refine.features,
     selected: refine.selected,
+    chosenPoint: refine.chosenPoint,
     edge: refine.edge,
     region: refine.region,
     brush: refine.brush,
@@ -683,6 +685,14 @@ function EdgeControls({ view, targets, owned }: ModeProps) {
           </div>
         </div>
       )}
+      <button
+        type="button"
+        className="button secondary full-width"
+        disabled={!refinePointRemovable(view)}
+        onClick={() => editor().removeChosenRefinePoint()}
+      >
+        Remove point
+      </button>
       <FeatureActions targets={targets} />
     </>
   );

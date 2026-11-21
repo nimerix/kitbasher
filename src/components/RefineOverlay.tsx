@@ -23,7 +23,13 @@ import type { EdgeSegment, EdgeSolve } from '../core/refine-edge';
 import type { RefineMesh } from '../core/refine-mesh';
 import type { RefineModel } from '../core/refine-model';
 import type { RegionSolve } from '../core/refine-region';
-import { refineSolved, useEditor, type RefineFeature, type RefineSession } from '../core/store';
+import {
+  chosenRefinePoint,
+  refineSolved,
+  useEditor,
+  type RefineFeature,
+  type RefineSession,
+} from '../core/store';
 import { contactColors } from '../core/surfaces';
 import type { Part } from '../core/types';
 import { refineCurves, refineHandles, type RefineHandle } from './RefinePointer';
@@ -448,21 +454,29 @@ function Tints({ refine, part }: { refine: RefineSession; part: Part }) {
 const Handles = memo(function Handles({
   features,
   selected,
+  chosenPoint,
   model,
-}: Pick<RefineSession, 'features' | 'selected'> & { model: RefineModel }) {
-  const refine = { features, selected, model };
+}: Pick<RefineSession, 'features' | 'selected' | 'chosenPoint'> & { model: RefineModel }) {
+  const refine = { features, selected, chosenPoint, model };
+  const point = chosenRefinePoint(refine);
+  const chosen = (h: RefineHandle) =>
+    point?.feature === h.feature && point.segment === h.segment && point.index === h.index;
   const invalidate = useThree((s) => s.invalidate);
   // Point sizes are in device pixels; handles keep their size in CSS pixels, as picking measures.
   const dpr = useThree((s) => s.viewport.dpr);
   const handles = refineHandles(refine);
   const keyRef = useRef<unknown[]>([]);
-  const next: unknown[] = handles.flatMap((h) => [h.point, refine.selected.includes(h.feature)]);
+  const next: unknown[] = handles.flatMap((h) => [
+    h.point,
+    selected.includes(h.feature),
+    chosen(h),
+  ]);
   if (next.length !== keyRef.current.length || next.some((v, i) => v !== keyRef.current[i]))
     keyRef.current = next;
   const key = keyRef.current;
   const dots = useMemo(() => {
     const mesh = refine.model!.mesh;
-    const build = (list: RefineHandle[]) => {
+    const build = (list: RefineHandle[], highlighted = false) => {
       if (!list.length) return null;
       const positions = new Float32Array(list.length * 3),
         normals = new Float32Array(list.length * 3),
@@ -470,7 +484,7 @@ const Handles = memo(function Handles({
       const a = new Vector3(),
         b = new Vector3(),
         c = new Vector3(),
-        accent = new Color(pointAccent),
+        accent = new Color(highlighted ? pointIdle : pointAccent),
         idle = new Color(guideIdle);
       list.forEach((handle, i) => {
         positions.set(handle.point.position, i * 3);
@@ -495,8 +509,9 @@ const Handles = memo(function Handles({
         .setAttribute('color', new BufferAttribute(colors, 3));
     };
     return {
-      rest: build(handles.filter((h) => !h.first)),
-      first: build(handles.filter((h) => h.first)),
+      rest: build(handles.filter((h) => !h.first && !chosen(h))),
+      first: build(handles.filter((h) => h.first && !chosen(h))),
+      chosen: build(handles.filter(chosen), true),
     };
     // The key stands for the handles' points and selection.
   }, [key, refine.model]);
@@ -504,6 +519,7 @@ const Handles = memo(function Handles({
     () => () => {
       dots.rest?.dispose();
       dots.first?.dispose();
+      dots.chosen?.dispose();
     },
     [dots],
   );
@@ -526,7 +542,7 @@ const Handles = memo(function Handles({
         sizeAttenuation: false,
         ...more,
       });
-    const sizes = { rest: [10, 6], first: [13, 9] } as const;
+    const sizes = { rest: [10, 6], first: [13, 9], chosen: [17, 11] } as const;
     return Object.fromEntries(
       Object.entries(sizes).map(([key, [outer, inner]]) => [
         key,
@@ -541,7 +557,7 @@ const Handles = memo(function Handles({
   useEffect(() => invalidate(), [dots, invalidate]);
   const objects = useMemo(
     () =>
-      (['rest', 'first'] as const).flatMap((key) => {
+      (['rest', 'first', 'chosen'] as const).flatMap((key) => {
         const geometry = dots[key];
         if (!geometry) return [];
         return materials[key].map((material, i) => {
@@ -642,7 +658,12 @@ export function RefineOverlay() {
           materials={materials}
         />
       ))}
-      <Handles features={refine.features} selected={refine.selected} model={refine.model} />
+      <Handles
+        features={refine.features}
+        selected={refine.selected}
+        chosenPoint={refine.chosenPoint}
+        model={refine.model}
+      />
     </>
   );
 }
