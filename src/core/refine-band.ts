@@ -1757,9 +1757,10 @@ function classify(
   let found = classifyOriented(mesh, topology, kind, oriented, width, noise);
   // Where the solved edge strays past reach of the guide, a band reaching `width` from it there is
   // gathered once more, as far as the edge strayed. Should it stray further on that reading, the
-  // band holds to what this gather covers.
+  // band holds to what that gather covers. Should that reading show no edge, the first one stands,
+  // and the band holds to what the first gather covers.
   if (found && width !== null && width > found.gathered)
-    found = classifyOriented(mesh, topology, kind, oriented, width, noise, found.strayed);
+    found = classifyOriented(mesh, topology, kind, oriented, width, noise, found.strayed) ?? found;
   if (!found || !backward) return found;
   return {
     ...found,
@@ -1780,7 +1781,7 @@ export type BandClassification = NonNullable<ReturnType<typeof classify>>;
  * The band of vertices within `width` of the solved edge, or null when no edge lies under the guide:
  * two flank surfaces meeting within reach of it. The band's own width is `width` or what its gather
  * covers, whichever is smaller. `known`, a classification of the same guide on the same surface, is
- * capped instead when it reaches `width`.
+ * capped instead when it reaches `width`, or when a classification read for `width` shows no edge.
  */
 export function buildBand(
   mesh: RefineMesh,
@@ -1792,7 +1793,9 @@ export function buildBand(
   known?: BandClassification | null,
 ): EdgeBand | null {
   const found =
-    known && width <= known.gathered ? known : classify(mesh, topology, kind, points, width, noise);
+    (known && width <= known.gathered
+      ? known
+      : classify(mesh, topology, kind, points, width, noise)) ?? known;
   return found?.result(width) ?? null;
 }
 
@@ -1835,5 +1838,9 @@ export function estimateBand(
   const held = judged(limited);
   if (held) return held;
   const wide = wanted > limited ? judged(wanted) : null;
-  return wide ?? { width: 0, found };
+  if (wide) return wide;
+  // Where a classification read for the width shows no edge, the one read without a width still
+  // serves a band held to what it covers.
+  const band = found.result(limited);
+  return band ? { width: band.width, found } : { width: 0, found };
 }

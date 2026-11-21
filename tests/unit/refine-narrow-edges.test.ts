@@ -323,6 +323,42 @@ describe('the automatic width and the classification it hands on', () => {
   });
 });
 
+describe('a wider gather that shows no edge', () => {
+  it('leaves a band from the classification read without a width', () => {
+    // The guide strays from 0.05 to 0.6 mm off the edge, so a band wider than its first gather is
+    // gathered again, further. Should that wider reading show no edge, the first classification
+    // stands, held to what it covers. No fixture here, no other unit test and none of the 20 scan
+    // guides makes the wider reading refuse (measured on 1290 solves made to look for one), so this
+    // holds the promise where it can be read: wherever the classification read without a width
+    // serves a band, a wider band is built too.
+    let checked = 0;
+    for (const seed of [1, 2, 3, 4]) {
+      const model = corner(seed);
+      const { found } = estimateBand(
+        model.mesh,
+        model.topology,
+        'line',
+        straying(model),
+        model.noise,
+      );
+      for (const width of [0.6, 0.8, 1.0, 1.2, 1.5]) {
+        if (!found?.result(width)) continue;
+        checked++;
+        const band = buildBand(
+          model.mesh,
+          model.topology,
+          'line',
+          straying(model),
+          width,
+          model.noise,
+        );
+        expect(band, `seed ${seed}, width ${width}`).not.toBeNull();
+      }
+    }
+    expect(checked).toBe(20);
+  }, 60_000);
+});
+
 describe('a path whose bands hold different widths', () => {
   // A spline along the top front crest of a 16 mm box to its right end, then along the right crest,
   // a sharp joint between them: the front band, past the slices at the box's end, covers only 0.267
