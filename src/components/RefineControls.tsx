@@ -34,6 +34,7 @@ import {
   foldWarning,
   manualStart,
   manualStarts,
+  piecesWarning,
   refineTargets,
   shared,
   skippedWarning,
@@ -1152,6 +1153,14 @@ export function RefineControls() {
           {skippedWarning(view.skipped)}
         </p>
       ) : null}
+      {view.features.map((feature) =>
+        feature.state === 'accepted' && feature.pieces && feature.pieces > 1 ? (
+          <p className="warp-warning" role="status" key={feature.id}>
+            <TriangleAlert size={13} aria-hidden="true" />
+            {piecesWarning(feature.pieces)}
+          </p>
+        ) : null,
+      )}
       <div className="warp-actions">
         <button className="button secondary" onClick={cancel}>
           Cancel

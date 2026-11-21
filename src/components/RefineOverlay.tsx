@@ -182,10 +182,16 @@ const EdgeLines = memo(function EdgeLines({
   step: number;
   materials: Materials;
 }) {
-  if (feature.state === 'accepted')
-    return feature.curve ? (
-      <SurfaceLine points={curvePolyline(feature.curve)} style="accepted" materials={materials} />
-    ) : null;
+  if (feature.state === 'accepted') {
+    const cut = feature.cutDisplay;
+    if (!cut?.segments.length) return null;
+    return (
+      <>
+        <SurfaceLine points={cut.segments} style="accepted" materials={materials} pairs />
+        {cut.breaks.length ? <CutBreaks positions={cut.breaks} /> : null}
+      </>
+    );
+  }
   const guide = guidePolyline(feature.feature.input.segments, step);
   const showGuide = feature.origin === 'hand' || selected;
   const mark = solved ? curvePolyline(solved) : guide;
@@ -212,6 +218,20 @@ const EdgeLines = memo(function EdgeLines({
     </>
   );
 });
+
+function CutBreaks({ positions }: { positions: Float32Array }) {
+  const dpr = useThree((s) => s.viewport.dpr);
+  const normals = useMemo(() => new Float32Array(positions.length), [positions]);
+  return (
+    <points renderOrder={10} raycast={() => {}}>
+      <bufferGeometry>
+        <bufferAttribute attach="attributes-position" args={[positions, 3]} />
+        <bufferAttribute attach="attributes-normal" args={[normals, 3]} />
+      </bufferGeometry>
+      <pointsMaterial {...surfacePoints} color={foldColor} size={8 * dpr} sizeAttenuation={false} />
+    </points>
+  );
+}
 
 function PickOnly({ id, points }: { id: string; points: Float32Array }) {
   useEffect(() => {

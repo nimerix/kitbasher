@@ -5,6 +5,7 @@ import {
   type EdgeSolve,
   applyEdge,
   correctedFlanks,
+  cutEdgeDisplay,
   moveWeights,
   solveEdge,
   splitCorners,
@@ -16,7 +17,7 @@ import {
   vertexNormal,
 } from '../../src/core/refine-mesh';
 import { BandZone, type GuidePoint, estimateWidth } from '../../src/core/refine-band';
-import { type GuideKind, closestOnCurve } from '../../src/core/refine-curve';
+import { type GuideKind, closestOnCurve, drawnCurve } from '../../src/core/refine-curve';
 import {
   closedMesh,
   cutLineage,
@@ -884,4 +885,21 @@ describe('splitting sharp joints', () => {
       expect(meshMinTriangleArea(out)).toBeGreaterThan(0);
     }
   });
+});
+
+it('shows only mesh edge pairs and marks breaks away from the open guide ends', () => {
+  const position = Float64Array.of(0, 0, 0, 1, 0, 0, 3, 0, 0, 4, 0, 0);
+  const edges = Uint32Array.of(0, 1, 2, 3);
+  const curve = drawnCurve('line', [0, 0, 0, 4, 0, 0], 0.1);
+  const input = { curve, bounds: Float64Array.of(0, 4), ends: ['hold', 'hold'] as const };
+  const cut = cutEdgeDisplay(position, edges, input, 0.1);
+  expect([...cut.segments]).toEqual([...position]);
+  expect([...cut.breaks]).toEqual([1, 0, 0, 3, 0, 0]);
+  const closed = cutEdgeDisplay(
+    position,
+    edges,
+    { ...input, curve: { ...curve, closed: true } },
+    0.1,
+  );
+  expect([...closed.breaks]).toEqual([...position]);
 });

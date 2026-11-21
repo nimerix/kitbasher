@@ -1969,6 +1969,62 @@ describe('refine session integrity', { timeout: 20_000 }, () => {
     expect(session().draft).toBeNull();
   });
 
+  it('says failure before pieces before skipped triangles and undo removes the cut marks', async () => {
+    setup([boxPart()], ['box']);
+    await ready();
+    editor().addRefinePoint(top(-1));
+    editor().addRefinePoint(top(1));
+    const failed = session().selected[0];
+    const edge = crestGuide();
+    const apply = edgeCode.applyEdge;
+    const cut = vi.spyOn(edgeCode, 'applyEdge').mockImplementation((...args) => {
+      const result = apply(...args);
+      if (!result.cut) return result;
+      const pairs = result.cut.edges;
+      const position = args[0].position;
+      const kept = [];
+      for (let i = 0; i < pairs.length; i += 2) {
+        const [a, b] = [pairs[i], pairs[i + 1]];
+        if (
+          (position[a * 3] < -0.2 && position[b * 3] < -0.2) ||
+          (position[a * 3] > 0.2 && position[b * 3] > 0.2)
+        )
+          kept.push(a, b);
+      }
+      return {
+        ...result,
+        pieces: 2,
+        cut: { ...result.cut, edges: Uint32Array.from(kept) },
+        skipped: Uint32Array.of(10),
+      };
+    });
+    try {
+      editor().setRefineMode('detect');
+      editor().selectRefine([failed, edge]);
+      useActivity.setState({ notifications: [] });
+      editor().acceptRefine();
+      expect(useActivity.getState().notifications.map((n) => n.message)).toEqual([
+        'No edge found under this guide. Move it onto the rounded edge or change Width.',
+      ]);
+      editor().undoRefine();
+      editor().selectRefine([edge]);
+      useActivity.setState({ notifications: [] });
+      editor().acceptRefine();
+      expect(useActivity.getState().notifications.map((n) => n.message)).toEqual([
+        'The edge was cut in 2 pieces. Undo to adjust the guide, or keep it.',
+      ]);
+      const accepted = (id: string) => session().features.find((f) => f.id === id)!;
+      expect(accepted(edge).pieces).toBe(2);
+      expect(accepted(edge).cutDisplay?.breaks).toHaveLength(6);
+      expect(session().skipped).toEqual(Uint32Array.of(10));
+      editor().undoRefine();
+      expect(accepted(edge).pieces).toBeUndefined();
+      expect(accepted(edge).cutDisplay).toBeUndefined();
+    } finally {
+      cut.mockRestore();
+    }
+  });
+
   it('says one thing per Accept press when a batch both fails a guide and leaves a rough cut', async () => {
     setup(
       [boxPart({ geometry: softBox([2, 1.5, 1], 0.3, { seed: 8, step: 0.2, noise: 0.012 }) })],

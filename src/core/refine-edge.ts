@@ -2411,6 +2411,53 @@ function foldedAgainst(
   return Uint32Array.from(folded).sort();
 }
 
+/** Segment and break positions of the mesh cut, without bridging any missing edges. */
+export function cutEdgeDisplay(
+  position: Float64Array,
+  edges: Uint32Array,
+  solve: Pick<EdgeSolve, 'curve' | 'bounds'> & { ends: readonly EdgeEnd[] },
+  step: number,
+) {
+  const segments = new Float32Array(edges.length * 3);
+  const degree = new Map<number, number>();
+  edges.forEach((v, i) => {
+    segments.set(position.subarray(v * 3, v * 3 + 3), i * 3);
+    degree.set(v, (degree.get(v) ?? 0) + 1);
+  });
+  const terminals = [...degree].filter(([, count]) => count === 1).map(([v]) => v);
+  if (!solve.curve.closed && terminals.length) {
+    const first = solve.bounds[0];
+    const last = solve.bounds[solve.bounds.length - 1];
+    const span = Math.abs(last - first);
+    const tapers = solve.ends.filter((end) => end === 'taper').length;
+    const taper = taperOf(span, step, tapers);
+    const at = new Float64Array(3);
+    const stations = new Map(
+      terminals.map((v) => [
+        v,
+        onCurve(solve.curve, position[v * 3], position[v * 3 + 1], position[v * 3 + 2], at),
+      ]),
+    );
+    for (const [i, end] of [first, last].entries()) {
+      const reach = Math.min(span / 3, 2 * step + (solve.ends[i] === 'taper' ? taper : 0));
+      let nearest = reach;
+      let natural = -1;
+      for (const [v, station] of stations) {
+        const distance = Math.abs(station - end);
+        if (distance <= nearest) {
+          nearest = distance;
+          natural = v;
+        }
+      }
+      if (natural !== -1) terminals.splice(terminals.indexOf(natural), 1);
+      stations.delete(natural);
+    }
+  }
+  const breaks = new Float32Array(terminals.length * 3);
+  terminals.forEach((v, i) => breaks.set(position.subarray(v * 3, v * 3 + 3), i * 3));
+  return { segments, breaks };
+}
+
 /** Number of connected pieces of the chain whose edges are `pairs` of welded ids. */
 function chainPieces(pairs: Uint32Array) {
   const root = new Map<number, number>();

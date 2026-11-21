@@ -375,6 +375,7 @@ export interface RefineFeature {
   curve?: EdgeCurve;
   /** Pieces an accepted edge's cut came out in; more than 1 when it could not be cut whole. */
   pieces?: number;
+  cutDisplay?: ReturnType<typeof import('./refine-edge').cutEdgeDisplay>;
   /** Whether the user changed it since it was made or proposed; a new Detect keeps it then. */
   edited?: boolean;
 }
@@ -5928,6 +5929,7 @@ function acceptFeatures(
   const byId = new Map(features.map((f) => [f.id, f]));
   const pass: { id: string; notice: string | null }[] = [];
   let accepted = false;
+  let brokenPieces = 0;
   for (const target of targets) {
     const feature = byId.get(target.id)!;
     const proposal = feature.feature;
@@ -5938,6 +5940,10 @@ function acceptFeatures(
       const mesh = cloneRefineMesh(model.mesh, true);
       const result = edge.applyEdge(mesh, model.topology, solve, proposal.input.strength, true);
       const children = result.cut?.children;
+      const cutDisplay = result.cut
+        ? edge.cutEdgeDisplay(mesh.position, result.cut.edges, solve, model.step)
+        : undefined;
+      if (result.pieces > 1 && !brokenPieces) brokenPieces = result.pieces;
       // A cut leaves its arrays room to grow: the model kept, and each undo step, holds what is used.
       model = result.cut
         ? refineCode!.model.modelFromMesh(trimRefineMesh(mesh), model)
@@ -5964,7 +5970,7 @@ function acceptFeatures(
         ...feature,
         state: 'accepted',
         curve: solve.curve,
-        ...(result.cut ? { pieces: result.pieces } : {}),
+        ...(cutDisplay ? { pieces: result.pieces, cutDisplay } : {}),
       });
     } else {
       const solve = solveProposal(model, model.mesh, proposal);
@@ -5979,8 +5985,7 @@ function acceptFeatures(
     accepted = true;
   }
   const { notify } = useEditor.getState();
-  // One press says at most one thing: a failure to solve, by its own rules, or else the cut warning.
-  // Skipped and folded triangles stay in the footer and on the surface either way.
+  // One notice per press, with failures ahead of pieces and pieces ahead of skipped or folded triangles.
   solvePass(refine.id, pass, true);
   const failed = pass.some((p) => p.notice !== null);
   if (!accepted) return;
@@ -5994,7 +5999,9 @@ function acceptFeatures(
     skipped,
     drawing: false,
   });
-  if (!failed && (skipped.length || folds.length)) notify(cutNotice, 'info');
+  if (failed) return;
+  if (brokenPieces) notify(piecesWarning(brokenPieces), 'info');
+  else if (skipped.length || folds.length) notify(cutNotice, 'info');
 }
 
 /** solveEdge takes a closed path of one spline as two splines joined smoothly. */
@@ -6358,6 +6365,8 @@ const noEdgeNotice =
 const longGuideNotice = 'This guide is too long for this mesh. Try a shorter guide.';
 const smallRegionNotice = 'This area is too small to fit a surface. Paint more of it.';
 const wideCreaseNotice = 'The edge is wider than the brush. Check the preview, then accept it.';
+export const piecesWarning = (pieces: number) =>
+  `The edge was cut in ${pieces} pieces. Undo to adjust the guide, or keep it.`;
 const cutNotice = 'Some triangles along this edge could not be cut cleanly. Check the marked area.';
 
 /** The session, when it is ready for work. */

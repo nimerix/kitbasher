@@ -3,6 +3,8 @@ import type { RefineModel } from '../core/refine-model';
 import type { RegionSolve } from '../core/refine-region';
 import type { RefineFeature, RefineSession } from '../core/store';
 
+export { piecesWarning } from '../core/store';
+
 const triangles = (n: number) => (n === 1 ? '1 triangle' : `${n} triangles`);
 
 export const featureCounts = (features: readonly Pick<RefineFeature, 'state'>[]) => {

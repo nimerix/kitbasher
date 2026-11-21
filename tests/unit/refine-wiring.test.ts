@@ -12,6 +12,7 @@ import {
   foldWarning,
   manualStart,
   manualStarts,
+  piecesWarning,
   refineLeaveHint,
   refineTargets,
   shared,
@@ -67,6 +68,12 @@ describe('Refine panel text', () => {
   it('words the skipped warning for one triangle and for several', () => {
     expect(skippedWarning(1)).toBe('1 triangle could not be cut cleanly.');
     expect(skippedWarning(3)).toBe('3 triangles could not be cut cleanly.');
+  });
+
+  it('names the number of pieces in the cut warning', () => {
+    expect(piecesWarning(3)).toBe(
+      'The edge was cut in 3 pieces. Undo to adjust the guide, or keep it.',
+    );
   });
 
   it('names what Auto fitted', () => {
