@@ -320,3 +320,45 @@ describe('a path whose bands hold different widths', () => {
     expect(solve.width).toBe(0.6);
   }, 60_000);
 });
+
+describe('a band about slices that did not find the edge', () => {
+  // A spline along the top front crest of a 16 mm box, out to its end faces: near each end the
+  // slices find no flank of their own on either side (measured), and their solved offsets could lie
+  // further from the guide than the band's coverage allowed for.
+  const box = () => {
+    const model = modelOf(softBox([8, 2, 2], 0.3, { step: 0.04 }));
+    const inset = 0.3 - 0.3 / Math.SQRT2;
+    const guide = [-8, -4, 0, 4, 8].map((x) => pointOn(model.mesh, [x, 2 - inset, 2 - inset]));
+    const band = (width: number) =>
+      buildBand(model.mesh, model.topology, 'spline', guide, width, model.noise)!;
+    return { band };
+  };
+
+  it('holds every vertex within its width of the edge offset each slice uses', () => {
+    const { band } = box();
+    const small = band(0.5);
+    const large = band(2.5);
+    expect(small).not.toBeNull();
+    expect(large).not.toBeNull();
+    // Each vertex's distance from the small band's edge, read as membership reads it: its offset
+    // across the guide less the edge's offset, interpolated between the two nearest slices.
+    const slices = small.offset.length;
+    const total = small.drawn.lengths[small.drawn.lengths.length - 1];
+    const kept = new Set(small.vertices);
+    let checked = 0;
+    const left: number[] = [];
+    for (let j = 0; j < large.vertices.length; j++) {
+      const f = Math.min(
+        slices - 1,
+        Math.max(0, ((large.station[j] - total / 2) / total) * slices + (slices - 1) / 2),
+      );
+      const k = Math.min(slices - 2, Math.floor(f));
+      const at = small.offset[k] * (1 - (f - k)) + small.offset[k + 1] * (f - k);
+      if (Math.abs(large.cross[j] - at) > small.width - 1e-9) continue;
+      checked++;
+      if (!kept.has(large.vertices[j])) left.push(large.vertices[j]);
+    }
+    expect(checked).toBeGreaterThan(1000);
+    expect(left).toEqual([]);
+  }, 60_000);
+});

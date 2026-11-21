@@ -54,6 +54,12 @@ export interface EdgeBand {
    * slice where they do not meet takes a point interpolated along the guide.
    */
   edge: Float64Array;
+  /**
+   * Per slice, in order along the guide: the solved edge's signed offset from the guide along the
+   * surface, positive on the Left. In a slice that did not find the edge on both sides it is held
+   * within the furthest of those that did. The band holds the vertices within `width` of it.
+   */
+  offset: Float64Array;
   /** Median angle between the two flank surfaces' normals along `edge`, degrees. */
   angle: number;
   /** The width the band holds, mm: the one asked for, or what its gather covers if that is less. */
@@ -1471,6 +1477,28 @@ function classifyOriented(
     if (settled) ({ fits, solved, classified } = state);
   }
   const { zone, sides, o } = classified;
+  // A slice that did not find the edge on both sides carries its solved edge over from other slices
+  // or reads it where the gather stops, so that it can move out as the gather grows. Its offset is
+  // held within the furthest the slices that found the edge on both sides lie from the guide, so
+  // that no offset the band's membership reads lies further out than its coverage allows for.
+  const supported = Array.from({ length: slices }, (_, k) =>
+    sides.every((side) => side.end[k] > side.start[k]),
+  );
+  if (supported.some(Boolean)) {
+    let held = 0;
+    for (let k = 0; k < slices; k++)
+      if (supported[k]) held = Math.max(held, Math.abs(solved.offset[k]));
+    let clamped = false;
+    for (let k = 0; k < slices; k++)
+      if (!supported[k] && Math.abs(solved.offset[k]) > held) {
+        solved.offset[k] = Math.sign(solved.offset[k]) * held;
+        clamped = true;
+      }
+    if (clamped)
+      for (let i = 0; i < count; i++)
+        o[i] =
+          u[i] - (solved.offset[slice[i]] * (1 - blend[i]) + solved.offset[upper(i)] * blend[i]);
+  }
   // A flank that ends at a second transition stops short of it: positions within the tolerance
   // reach into the next fillet before they leave the flank's surface. The zones are final from here.
   const stops = sides.map((side) =>
@@ -1510,14 +1538,9 @@ function classifyOriented(
   );
   if (flatness < minFlankFlatness) return null;
 
-  // Slices that found the edge themselves, with a flank of their own on both sides.
-  const larger: number[] = [],
-    found: number[] = [];
+  const larger: number[] = [];
   for (let k = 0; k < slices; k++)
-    if (sides.every((side) => side.end[k] > side.start[k])) {
-      larger.push(Math.max(sides[0].start[k], sides[1].start[k]));
-      found.push(Math.abs(solved.offset[k]));
-    }
+    if (supported[k]) larger.push(Math.max(sides[0].start[k], sides[1].start[k]));
   const soft = larger.length ? median(larger) : 0;
   const at = new Float64Array(3);
   const locate = (p: number[]): [number, number, number] => {
@@ -1532,11 +1555,9 @@ function classifyOriented(
   };
   const flanks: [BandFlank, BandFlank] = [bandFlank(fits[0], locate), bandFlank(fits[1], locate)];
 
-  // The band holds every vertex within `gathered` of the solved edge in every slice that found the
-  // edge on both sides, the furthest of which lies `strayed` from the guide. Elsewhere the solved
-  // edge is carried over from other slices or read where the gather stops, and moves out as the
-  // gather grows, so a width about it there means nothing. With no such slice, every slice counts.
-  const strayed = Math.max(...(found.length ? found : Array.from(solved.offset, Math.abs)));
+  // The band holds every vertex within `gathered` of the solved edge, as membership reads it, in
+  // every slice: the furthest that edge lies from the guide is `strayed`.
+  const strayed = Math.max(...Array.from(solved.offset, Math.abs));
   const gathered = band.width - strayed;
   // The band capped to a width measured from the solved edge, so that a guide laid to one side of
   // the edge does not starve the far flank, or null when its flanks there show no edge: on each
@@ -1576,6 +1597,7 @@ function classifyOriented(
       fits: [fits[0].kind, fits[1].kind],
       flanks,
       edge: solved.point.slice(),
+      offset: solved.offset.slice(),
       angle,
       width,
     };
@@ -1619,6 +1641,7 @@ function mirrored(band: EdgeBand): EdgeBand {
     fits: [band.fits[1], band.fits[0]],
     flanks: [band.flanks[1], band.flanks[0]],
     edge: reversed(band.edge),
+    offset: Float64Array.from(band.offset, (_, k) => -band.offset[band.offset.length - 1 - k]),
     angle: band.angle,
     width: band.width,
   };
