@@ -567,6 +567,8 @@ export function RefineOverlay() {
   // Dashes keep their size on screen at any zoom.
   const centre = useMemo(() => new Vector3(), []);
   useFrame(({ camera, size }) => {
+    if (refine?.draftStatus === 'presenting' && refine.preview && part?.visible && !hidden)
+      requestAnimationFrame(() => useEditor.getState().presentRefineDraft(refine));
     if (!part) return;
     centre.fromArray(part.position);
     let pixel: number;

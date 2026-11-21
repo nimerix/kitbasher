@@ -402,6 +402,8 @@ export interface RefineSession {
   draft: RefineMesh | null;
   /** Whether more than refineDraftLimit pending features are selected, so no draft is built. */
   draftSkipped: boolean;
+  draftStatus: 'building' | 'presenting' | null;
+  draggingHandle: boolean;
   /** Never in the scene or history. Face t is triangle t of the working surface. */
   preview: BufferGeometry | null;
   mode: RefineMode;
@@ -664,12 +666,14 @@ interface EditorState {
   selectRefine: (ids: string[]) => void;
   /** Accepts the given pending features, or the selected ones. */
   acceptRefine: (ids?: string[]) => void;
+  presentRefineDraft: (presented: RefineSession) => void;
   dismissRefine: (ids?: string[]) => void;
   beginRefineStroke: (point: GuidePoint) => void;
   moveRefineStroke: (point: GuidePoint) => void;
   endRefineStroke: () => void;
   /** Ends the stroke under way without committing it: no step, and the preview shows the model. */
   cancelRefineStroke: () => void;
+  beginRefineDrag: () => void;
   /** Puts the session back as it was when the handle drag under way began, its steps included. */
   cancelRefineDrag: () => void;
   /** The handle drag under way was released: its draft is built on the next frame. */
@@ -3377,10 +3381,16 @@ export const useEditor = create<EditorState>((set, get) => ({
     scheduleRefineDraft();
   },
   setRefineMode: (mode) => {
-    if (get().refine?.mode !== mode) discardRefineStroke();
+    const changed = get().refine?.mode !== mode;
+    if (changed) {
+      discardRefineStroke();
+      cancelRefineDraft();
+      clearRefineRest();
+    }
     // A handle drag still under the pointer is left for the pointer code to cancel.
     const { refine } = get();
     if (refine) set({ painting: false, refine: { ...refine, mode, drawing: false } });
+    if (changed && refine && framesRefineDraft()) scheduleRefineDraft();
   },
   setRefineEdge: (options, each = {}) => {
     const { refine } = get();
@@ -3541,7 +3551,7 @@ export const useEditor = create<EditorState>((set, get) => ({
     if (!begin && refineDrag?.key === key && refineDrag.step === refine.undo.at(-1))
       set({ refine: { ...refine, features } });
     else {
-      const { selected, undo, redo, drawing, draft, draftSkipped } = refine;
+      const { selected, undo, redo, drawing, draft, draftSkipped, draftStatus } = refine;
       const before = {
         features: refine.features,
         selected,
@@ -3550,6 +3560,7 @@ export const useEditor = create<EditorState>((set, get) => ({
         drawing,
         draft,
         draftSkipped,
+        draftStatus,
       };
       const built = builtDraft;
       commitRefine({ features });
@@ -3639,16 +3650,23 @@ export const useEditor = create<EditorState>((set, get) => ({
     const { refine } = get();
     if (!refine) return;
     refineDrag = null;
+    clearRefineRest();
+    cancelRefineDraft();
     const known = new Set(refine.features.map((f) => f.id));
     set({ refine: { ...refine, selected: ids.filter((id) => known.has(id)), drawing: false } });
     scheduleRefineDraft();
   },
   acceptRefine: (ids) => {
     const refine = readyRefine();
-    if (!refine) return;
-    const wanted = new Set(ids ?? refine.selected);
+    if (!refine || refine.draggingHandle || refine.draftStatus) return;
+    const wanted = new Set(ids ?? drafted(refine).map((f) => f.id));
     const targets = refine.features.filter((f) => f.state === 'pending' && wanted.has(f.id));
     if (targets.length) acceptFeatures(refine, refine.features, targets);
+  },
+  presentRefineDraft: (presented) => {
+    const { refine } = get();
+    if (refine === presented && refine.draftStatus === 'presenting')
+      set({ refine: { ...refine, draftStatus: null } });
   },
   dismissRefine: (ids) => {
     const refine = readyRefine();
@@ -3675,8 +3693,14 @@ export const useEditor = create<EditorState>((set, get) => ({
     if (!refine || refine.mode !== 'brush') return;
     // The stroke owns the preview: a draft rebuild queued before it would overwrite its dabs.
     cancelRefineDraft();
-    if (refine.selected.length || refine.draft) {
-      refine = showRefine({ ...refine, selected: [], draft: null, drawing: false });
+    if (refine.selected.length || refine.draft || refine.draftStatus) {
+      refine = showRefine({
+        ...refine,
+        selected: [],
+        draft: null,
+        draftStatus: null,
+        drawing: false,
+      });
       set({ refine });
     }
     const model = refine.model!;
@@ -3750,19 +3774,30 @@ export const useEditor = create<EditorState>((set, get) => ({
     get().notify(wideCreaseNotice, 'info');
   },
   cancelRefineStroke: () => discardRefineStroke(),
+  beginRefineDrag: () => {
+    const refine = readyRefine();
+    if (refine && !refine.draggingHandle) set({ refine: { ...refine, draggingHandle: true } });
+  },
   cancelRefineDrag: () => {
     const drag = refineDrag;
     refineDrag = null;
     clearRefineRest();
     const refine = readyRefine();
     // Only while nothing else has happened since the drag began.
-    if (!drag || refine?.id !== drag.session || drag.step !== refine.undo.at(-1)) return;
+    if (!drag || refine?.id !== drag.session || drag.step !== refine.undo.at(-1)) {
+      if (refine?.draggingHandle) set({ refine: { ...refine, draggingHandle: false } });
+      return;
+    }
     // A rebuild the drag queued would overwrite the draft put back.
     cancelRefineDraft();
     builtDraft = drag.built;
-    set({ refine: showRefine({ ...refine, ...drag.before }) });
+    set({ refine: showRefine({ ...refine, ...drag.before, draggingHandle: false }) });
+    if (drag.before.draftStatus === 'building') scheduleRefineDraft();
   },
   endRefineDrag: () => {
+    refineDrag = null;
+    const { refine } = get();
+    if (refine?.draggingHandle) set({ refine: { ...refine, draggingHandle: false } });
     if (!draftRest) return;
     clearRefineRest();
     scheduleRefineDraft();
@@ -5307,6 +5342,8 @@ const newRefineSession = (part: Part, epoch: number): RefineSession => ({
   model: null,
   draft: null,
   draftSkipped: false,
+  draftStatus: null,
+  draggingHandle: false,
   preview: null,
   mode: 'edge',
   features: [],
@@ -5598,7 +5635,7 @@ let refineDrag: {
   /** The session as the drag found it, and the draft record then, which a cancel puts back. */
   before: Pick<
     RefineSession,
-    'features' | 'selected' | 'undo' | 'redo' | 'drawing' | 'draft' | 'draftSkipped'
+    'features' | 'selected' | 'undo' | 'redo' | 'drawing' | 'draft' | 'draftSkipped' | 'draftStatus'
   >;
   built: typeof builtDraft;
 } | null = null;
@@ -6156,7 +6193,11 @@ const union = (a: Uint32Array, b: Uint32Array) =>
 /** The selected pending features, in list order: what the draft previews. */
 const drafted = (refine: RefineSession) => {
   const selected = new Set(refine.selected);
-  return refine.features.filter((f) => f.state === 'pending' && selected.has(f.id));
+  const kind = refine.mode === 'brush' ? 'edge' : refine.mode;
+  const all = !framesRefineDraft() || kind === 'detect';
+  return refine.features.filter(
+    (f) => f.state === 'pending' && selected.has(f.id) && (all || f.feature.type === kind),
+  );
 };
 
 /** What the draft was last built from. */
@@ -6164,6 +6205,8 @@ let builtDraft: { session: string; model: RefineModel; proposals: RefineProposal
 /** Per draft, the welded vertices it moved off its model's surface. */
 const draftMoves = new WeakMap<RefineMesh, { base: RefineMesh; moved: Uint32Array }>();
 let draftFrame = 0;
+const framesRefineDraft = () =>
+  typeof window !== 'undefined' && typeof requestAnimationFrame === 'function';
 
 /**
  * Rebuilds the draft once per frame in a browser, at once without one. A brush stroke owns the
@@ -6171,13 +6214,17 @@ let draftFrame = 0;
  */
 function scheduleRefineDraft() {
   if (refineStroke) return;
-  if (typeof window === 'undefined' || typeof requestAnimationFrame !== 'function')
-    rebuildRefineDraft();
+  clearRefineRest();
+  if (!framesRefineDraft()) rebuildRefineDraft();
   else if (!draftFrame) {
+    const refine = readyRefine();
+    if (!refine) return;
+    if (refine.draftStatus !== 'building')
+      useEditor.setState({ refine: { ...refine, draftStatus: 'building' } });
     const frame = requestAnimationFrame(() => {
       if (draftFrame !== frame) return;
       draftFrame = 0;
-      rebuildRefineDraft();
+      rebuildRefineDraft('presenting');
     });
     draftFrame = frame;
   }
@@ -6198,8 +6245,10 @@ let draftRest: ReturnType<typeof setTimeout> | null = null;
  * `refineDragRest` or the drag ends, not every frame: one rebuild can take longer than a frame.
  */
 function restRefineDraft() {
-  if (typeof window === 'undefined' || typeof requestAnimationFrame !== 'function')
-    return scheduleRefineDraft();
+  if (!framesRefineDraft()) return scheduleRefineDraft();
+  const refine = readyRefine();
+  if (refine && (refine.draftStatus !== 'building' || !refine.draggingHandle))
+    useEditor.setState({ refine: { ...refine, draftStatus: 'building', draggingHandle: true } });
   cancelRefineDraft();
   clearRefineRest();
   draftRest = setTimeout(() => {
@@ -6213,7 +6262,7 @@ function clearRefineRest() {
   draftRest = null;
 }
 
-function rebuildRefineDraft() {
+function rebuildRefineDraft(draftStatus: RefineSession['draftStatus'] = null) {
   const refine = readyRefine();
   if (!refine || refineStroke) return;
   const model = refine.model!;
@@ -6229,11 +6278,16 @@ function rebuildRefineDraft() {
     (refine.draft !== null) === proposals.length > 0 &&
     builtDraft.proposals.length === proposals.length &&
     builtDraft.proposals.every((p, i) => p === proposals[i])
-  )
+  ) {
+    if (refine.draftStatus !== draftStatus)
+      useEditor.setState({ refine: { ...refine, draftStatus } });
     return;
+  }
   builtDraft = { session: refine.id, model, proposals };
   if (!proposals.length) {
-    useEditor.setState({ refine: showDraft({ ...refine, draftSkipped: skipped }, null, noFolds) });
+    useEditor.setState({
+      refine: showDraft({ ...refine, draftSkipped: skipped, draftStatus }, null, noFolds),
+    });
     return;
   }
   const { edge, region } = refineCode!;
@@ -6271,7 +6325,11 @@ function rebuildRefineDraft() {
   const changed = Uint32Array.from(new Set(moved.flatMap((m) => [...m])));
   draftMoves.set(mesh, { base: model.mesh, moved: changed });
   useEditor.setState({
-    refine: showDraft({ ...refine, features: curved, draftSkipped: false }, mesh, changed),
+    refine: showDraft(
+      { ...refine, features: curved, draftSkipped: false, draftStatus },
+      mesh,
+      changed,
+    ),
   });
   solvePass(refine.id, pass);
 }

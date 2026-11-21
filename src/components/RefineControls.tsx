@@ -512,6 +512,7 @@ function PreviewOffHint() {
 /** Dismiss and Accept for the mode's selected pending features. */
 function FeatureActions({ targets }: { targets: RefineFeature[] }) {
   const ids = targets.map((f) => f.id);
+  const waiting = useEditor((s) => !!(s.refine?.draftStatus || s.refine?.draggingHandle));
   return (
     <div className="warp-gap-row">
       <button
@@ -523,8 +524,8 @@ function FeatureActions({ targets }: { targets: RefineFeature[] }) {
       </button>
       <button
         className="button primary"
-        disabled={!ids.length}
-        onClick={() => editor().acceptRefine(ids)}
+        disabled={!ids.length || waiting}
+        onClick={() => editor().acceptRefine()}
       >
         Accept
       </button>
@@ -957,6 +958,7 @@ function BrushControls({ view, targets, owned }: ModeProps) {
 const detectTitle = 'Finding edges and surfaces';
 
 function DetectControls({ view, targets, owned }: ModeProps) {
+  const waiting = useEditor((s) => !!(s.refine?.draftStatus || s.refine?.draggingHandle));
   const { detect, features } = view;
   const painted = useEditor((s) => (s.refine?.triangles.length ?? 0) > 0);
   const task = useActivity((s) =>
@@ -1043,8 +1045,8 @@ function DetectControls({ view, targets, owned }: ModeProps) {
             </button>
             <button
               className="button primary"
-              disabled={!ids.length}
-              onClick={() => editor().acceptRefine(ids)}
+              disabled={!ids.length || waiting}
+              onClick={() => editor().acceptRefine()}
             >
               Accept selected
             </button>

@@ -1035,8 +1035,7 @@ export function RefinePointerController({ pressed }: { pressed: () => boolean })
       if (!d.waiting) cancelledPointer = d.pointer;
       const state = useEditor.getState();
       if (d.kind === 'handle') {
-        // A drag that moved the point puts the session back as it found it, history included.
-        if (d.began) state.cancelRefineDrag();
+        state.cancelRefineDrag();
         return;
       }
       if (d.kind === 'stroke') state.cancelRefineStroke();
@@ -1276,6 +1275,7 @@ export function RefinePointerController({ pressed }: { pressed: () => boolean })
           },
           event.pointerId,
         );
+        state.beginRefineDrag();
         return;
       }
       if (refine.mode !== 'detect') return;

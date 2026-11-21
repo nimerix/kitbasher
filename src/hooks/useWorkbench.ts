@@ -55,12 +55,16 @@ export function refineKey(
     return true;
   }
   if (!refine) return true;
+  if (action === 'apply' && refine.draggingHandle) return true;
   if (action === 'apply' && refine.drawing) {
     state.finishRefineGuide();
     return true;
   }
   const ids = refineTargets(refine).map((f) => f.id);
-  if (ids.length) (action === 'apply' ? state.acceptRefine : state.dismissRefine)(ids);
+  if (ids.length) {
+    if (action === 'apply') state.acceptRefine();
+    else state.dismissRefine(ids);
+  }
   return true;
 }
 

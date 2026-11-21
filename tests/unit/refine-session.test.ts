@@ -1439,6 +1439,71 @@ describe('refine session integrity', { timeout: 20_000 }, () => {
     }
   });
 
+  it.each(['release', 'mode', 'selection'] as const)(
+    'guards Accept when a handle draft is pending on %s',
+    async (change) => {
+      setup([boxPart()], ['box']);
+      await ready();
+      const first = crestGuide(-1.4, 1.2);
+      editor().selectRefine([]);
+      const second = crestGuide(-1.4, 1.1);
+      editor().selectRefine([first]);
+      const { model, draft } = session();
+      let frame: FrameRequestCallback | undefined;
+      let frameId = 0;
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+      vi.stubGlobal('window', {});
+      vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => {
+        frame = callback;
+        return ++frameId;
+      });
+      vi.stubGlobal('cancelAnimationFrame', () => (frame = undefined));
+      try {
+        editor().moveRefinePoint(first, 0, 1, crest(0.6), true);
+        editor().acceptRefine();
+        expect(session().model).toBe(model);
+        expect(session().draft).toBe(draft);
+        vi.advanceTimersByTime(refineDragRest);
+        frame!(0);
+        expect(session().draft).not.toBe(draft);
+        editor().presentRefineDraft(session());
+        editor().acceptRefine();
+        expect(session().model).toBe(model);
+
+        editor().moveRefinePoint(first, 0, 1, crest(0.9));
+        editor().endRefineDrag();
+        const released = session();
+        const queued = frame!;
+        if (change === 'mode') editor().setRefineMode('region');
+        if (change === 'selection') editor().selectRefine([second]);
+        editor().presentRefineDraft(released);
+        editor().acceptRefine();
+        expect(session().model).toBe(model);
+        const solve = vi.spyOn(edgeCode, 'solveEdge');
+        queued(0);
+        if (change !== 'release') {
+          expect(solve).not.toHaveBeenCalled();
+          frame!(0);
+        }
+        editor().acceptRefine();
+        expect(session().model).toBe(model);
+        editor().presentRefineDraft(session());
+        editor().acceptRefine();
+        const accepted = session()
+          .features.filter((f) => f.state === 'accepted')
+          .map((f) => f.id);
+        expect(accepted).toEqual(change === 'mode' ? [] : [change === 'release' ? first : second]);
+        if (change === 'mode') {
+          expect(solve).not.toHaveBeenCalled();
+          expect(session().draft).toBeNull();
+        }
+      } finally {
+        vi.useRealTimers();
+        vi.unstubAllGlobals();
+      }
+    },
+  );
+
   it('discards a stroke on a mode change: nothing is committed and the preview shows the model', async () => {
     setup([boxPart()], ['box']);
     await ready();

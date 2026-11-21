@@ -1048,6 +1048,34 @@ test('drags the middle handle of a guide on an exterior edge', async ({ page }) 
   await expect.poll(middle).toBeGreaterThan(0.8);
 });
 
+test('Enter waits for release and presentation of a dragged guide', async ({ page }) => {
+  await openRefine(page);
+  await clickSurface(page, crest(-3));
+  await clickSurface(page, crest(3));
+  const accept = page.getByRole('button', { name: 'Accept', exact: true });
+  await expect(accept).toBeEnabled();
+  const a = await screen(page, crest(3));
+  const b = await screen(page, crest(1.7));
+  await page.mouse.move(a.x, a.y);
+  await page.mouse.down();
+  await expect(accept).toBeDisabled();
+  await page.mouse.move(b.x, b.y, { steps: 3 });
+  await expect
+    .poll(() =>
+      inStore(page, (s) => {
+        const f = s.refine!.features[0].feature;
+        return f.type === 'edge' ? f.input.segments[0].points[1].position[0] : null;
+      }),
+    )
+    .toBeLessThan(2);
+  await page.keyboard.press('Enter');
+  await expect(page.getByText('0 accepted · 1 proposed')).toBeVisible();
+  await page.mouse.up();
+  await expect(accept).toBeEnabled();
+  await page.keyboard.press('Enter');
+  await expect(page.getByText('1 accepted · 0 proposed')).toBeVisible();
+});
+
 test('Escape during a handle drag leaves the session as it was', async ({ page }) => {
   await openRefine(page);
   await clickSurface(page, crest(-3));
