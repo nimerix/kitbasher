@@ -611,6 +611,30 @@ export function largestGap(
 }
 
 /**
+ * The curve fitted where a segment's flanks meet, `points` (xyz), and the kind it is fitted as: the
+ * guide's own `kind`, drawn as `drawn`, or an arc. A Line guide laid along an edge that curves, as
+ * round a rim, would pull the edge onto its chord: where the meet leaves the line by more than an
+ * edge length, it is fitted as the arc it follows. An arc that closes on itself is no edge of an open
+ * line. Every fit of a segment's meet goes through here, so that each decides by the same rule.
+ */
+export function fitMeet(
+  kind: GuideKind,
+  drawn: EdgeCurve,
+  points: ArrayLike<number>,
+  controls: number,
+  edge: number,
+): { kind: GuideKind; curve: EdgeCurve } {
+  const curve = fitCurve(kind, points, controls, edge);
+  if (kind !== 'line' || points.length < curvedPoints * 3) return { kind, curve };
+  const gap = largestGap(curve, drawn, points, edge);
+  if (!(gap > edge)) return { kind, curve };
+  const arc = fitCurve('arc', points, 3, edge);
+  if (arc.closed || !(largestGap(arc, drawn, points, edge) < gap / curvedGain))
+    return { kind, curve };
+  return { kind: 'arc', curve: arc };
+}
+
+/**
  * The flanks, refitted from vertices clear of the rounding's shoulder, where they meet and the curve
  * fitted there. Vertices a little way up the rounding lie within tolerance of a flank and tilt its
  * fit toward the rounding, pulling the edge inward: each flank is refitted from its vertices past
@@ -679,22 +703,9 @@ function unbiasedFlanks(
   const meetWith = (flanks: [Flank, Flank], read: (FlankSample | null)[]) => {
     const meet = meetFlanks(band, flanks);
     if (meet.angles.length < 2) return null;
-    let fitted = kind;
-    let curve = fitCurve(kind, meet.points, controls, edge);
-    // A Line guide laid along an edge that curves, as round a rim, would pull the edge onto its
-    // chord: where the meet leaves the line, it is fitted as the arc it follows. Each step decides
-    // again from the guide's own kind. An arc that closes on itself is no edge of an open line.
-    if (kind === 'line' && meet.points.length >= curvedPoints * 3) {
-      const gap = largestGap(curve, band.drawn, meet.points, edge);
-      if (gap > edge) {
-        const arc = fitCurve('arc', meet.points, 3, edge);
-        if (!arc.closed && largestGap(arc, band.drawn, meet.points, edge) < gap / curvedGain) {
-          curve = arc;
-          fitted = 'arc';
-        }
-      }
-    }
-    return { flanks, meet, curve, samples: read, kind: fitted };
+    // Each step decides again from the guide's own kind.
+    const fitted = fitMeet(kind, band.drawn, meet.points, controls, edge);
+    return { flanks, meet, curve: fitted.curve, samples: read, kind: fitted.kind };
   };
   // The band's own flanks seed the first step; once two steps agree, the nearer one is kept. With
   // both flanks kept as profiles no step changes them, so the seed is the answer.
@@ -716,6 +727,8 @@ function unbiasedFlanks(
 
 /** One segment of a path, solved on its own as a single edge. */
 interface Part {
+  /** The guide's kind as drawn, which every refit of its meet decides from. */
+  drawnKind: GuideKind;
   /** The kind its edge was fitted as, not the guide's as drawn: a Line guide's may be an arc. */
   kind: GuideKind;
   band: EdgeBand;
@@ -770,7 +783,17 @@ function solvePart(
   for (let k = 0; k < meet.points.length; k += 3)
     depths.push(find(meet.points[k], meet.points[k + 1], meet.points[k + 2]).distance);
   if (median(depths) > deepestEdge * band.width) return null;
-  return { kind: fitted, band, edge, flanks, meet, curve, samples, controls: points.length };
+  return {
+    drawnKind: kind,
+    kind: fitted,
+    band,
+    edge,
+    flanks,
+    meet,
+    curve,
+    samples,
+    controls: points.length,
+  };
 }
 
 /** True when `sample` lies within tolerance of `flank`: `sameShare` within 3 local, mean within local. */
@@ -902,7 +925,15 @@ function resolveParts(parts: Part[], changed: Set<number>) {
     const part = parts[i];
     part.meet = meetFlanks(part.band, part.flanks);
     if (part.meet.angles.length < 2 || median(part.meet.angles) < minBandAngle) return false;
-    part.curve = fitCurve(part.kind, part.meet.points, part.controls, part.edge);
+    const fitted = fitMeet(
+      part.drawnKind,
+      part.band.drawn,
+      part.meet.points,
+      part.controls,
+      part.edge,
+    );
+    part.curve = fitted.curve;
+    part.kind = fitted.kind;
   }
   return true;
 }

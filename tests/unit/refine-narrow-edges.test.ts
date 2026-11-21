@@ -1,7 +1,13 @@
 import { describe, expect, it, vi } from 'vitest';
 import { type EdgeBand, buildBand, estimateBand, estimateWidth } from '../../src/core/refine-band';
 import { drawnCurve } from '../../src/core/refine-curve';
-import { type EdgeInput, applyEdge, largestGap, solveEdge } from '../../src/core/refine-edge';
+import {
+  type EdgeInput,
+  applyEdge,
+  fitMeet,
+  largestGap,
+  solveEdge,
+} from '../../src/core/refine-edge';
 import { cloneRefineMesh } from '../../src/core/refine-mesh';
 import type { Vec3 } from '../../src/core/types';
 import { modelFrom, modelOf, pointOn } from '../helpers/refine';
@@ -714,5 +720,64 @@ describe("the meet's largest gap from its curve", () => {
     expect(largestGap(guide, guide, points, 0.06)).toBe(0);
     // With nothing clear of the tapers, the gap is the largest of them all.
     expect(largestGap(guide, guide, [0.1, 0.3, 0, 3.9, 0, 0], 0.06)).toBeCloseTo(0.3, 9);
+  });
+});
+
+describe('the kind a meet is fitted as', () => {
+  // Meets 3.4 mm long along x, with a guide drawn straight between their ends, edge length 0.067.
+  const edge = 0.067;
+  /** `count` points on a circle of `radius` through (+-1.7, 0, 0), bowing toward -z. */
+  const rim = (count: number, radius = 5) => {
+    const half = Math.asin(1.7 / radius);
+    return Array.from({ length: count }, (_, i) => {
+      const angle = -half + (2 * half * i) / (count - 1);
+      return [radius * Math.sin(angle), 0, radius * Math.cos(angle) - radius * Math.cos(half)];
+    }).flat();
+  };
+  const decide = (kind: 'line' | 'arc' | 'spline', points: number[]) => {
+    const n = points.length;
+    const drawn = drawnCurve('line', [...points.slice(0, 3), ...points.slice(n - 3)], 0.06);
+    return fitMeet(kind, drawn, points, 2, edge).kind;
+  };
+
+  it('fits a Line guide whose meet follows a circle as an arc, from nine points', () => {
+    // On radius 5 the line misses the meet by 0.12 and the arc by 0.0001 (measured).
+    expect(decide('line', rim(13))).toBe('arc');
+    expect(decide('line', rim(9))).toBe('arc');
+    expect(decide('line', rim(8))).toBe('line');
+  });
+
+  it('keeps a line where the meet scatters about a straight line by under an edge length', () => {
+    // The line misses it by 0.043 (measured).
+    const points = Array.from({ length: 13 }, (_, i) => [
+      -1.7 + (3.4 * i) / 12,
+      0,
+      i % 2 ? 0.04 : -0.04,
+    ]).flat();
+    expect(decide('line', points)).toBe('line');
+  });
+
+  it('keeps a line where the meet bows from it by under an edge length', () => {
+    // On radius 15 the line misses the meet by 0.038 (measured), though an arc follows it.
+    expect(decide('line', rim(13, 15))).toBe('line');
+  });
+
+  it('keeps a line where the meet bends but an arc follows it hardly better', () => {
+    // Flat along the middle, turning up steeply near the ends: the line misses it by 0.090 and the
+    // arc that fits by 0.078 (measured), not half as much.
+    const points = Array.from({ length: 25 }, (_, i) => {
+      const x = -1.7 + (3.4 * i) / 24;
+      return [x, 0, -0.5 * (x / 1.7) ** 6];
+    }).flat();
+    expect(decide('line', points)).toBe('line');
+  });
+
+  it('keeps a line where the arc that fits closes on itself', () => {
+    // A meet all the way round a circle of radius 1, as a line drawn across it.
+    const points = Array.from({ length: 48 }, (_, i) => {
+      const angle = (2 * Math.PI * i) / 48;
+      return [Math.cos(angle), 0, Math.sin(angle)];
+    }).flat();
+    expect(decide('line', points)).toBe('line');
   });
 });
