@@ -436,7 +436,7 @@ function guideSpan(curve: EdgeCurve, drawn: EdgeCurve, edge: number, tapers = 2)
 }
 
 /** The point of `curve` at `station`, continued past its ends along their tangents, into `out`. */
-function curveAt(curve: EdgeCurve, station: number, out: Float64Array) {
+export function curveAt(curve: EdgeCurve, station: number, out: Float64Array) {
   const { points, lengths } = curve;
   const n = lengths.length;
   const total = lengths[n - 1];
@@ -1624,6 +1624,7 @@ function frameWeights(
   ];
   // The blend grows, up to half the band's width, until each vertex beside one that stays along the
   // band's sides, clear of its ends by half the band's width, moves no more than `seamMove`.
+  // The path's width, not a band's: it only weights vertices already in the frame.
   let blend = Math.max(blendEdges[0] * edge, Math.min(solve.width / 2, blendEdges[1] * edge));
   const [low, high] = [Math.min(...stations), Math.max(...stations)];
   for (const i of queue.slice(0, seeded)) {
@@ -1883,6 +1884,7 @@ function surfacesOf(
       bandEdgeLength(mesh, topology, solve.bands[i]),
     ));
   const smoothJoints = frame.joints.filter((joint) => !joint.sharp);
+  // The path's width, not a band's: it only weights vertices already in the frame.
   const reach = solve.width / 2;
   const total = pathLength(solve.curve);
   const at = new Float64Array(3);
@@ -1905,6 +1907,7 @@ function surfacesOf(
   return (x, y, z) => {
     for (const { corner, side, across } of bisected) {
       const p = corner.point;
+      // The path's width, not a band's: it only weights vertices already in the frame.
       if (Math.hypot(x - p[0], y - p[1], z - p[2]) > solve.width) continue;
       const before = (x - p[0]) * across[0] + (y - p[1]) * across[1] + (z - p[2]) * across[2];
       return mixedSide(
@@ -1951,6 +1954,7 @@ function cornerFade(solve: EdgeSolve, frame: Frame, owner: number, side: number,
   for (const corner of frame.corners) {
     if (!corner.apart[side] || (corner.from !== owner && corner.to !== owner)) continue;
     const near = Math.hypot(p[0] - corner.point[0], p[1] - corner.point[1], p[2] - corner.point[2]);
+    // The path's width, not a band's: it only weights vertices already in the frame.
     if (near > jointReach * solve.width) continue;
 
     const flank = solve.flanks[corner.from === owner ? corner.to : corner.from][side];
@@ -2009,6 +2013,7 @@ function facingOn(
   for (const corner of frame.corners) {
     if (!corner.apart[side] || (corner.from !== owner && corner.to !== owner)) continue;
     const [px, py, pz] = corner.point;
+    // The path's width, not a band's: it only weights vertices already in the frame.
     if (Math.hypot(x - px, y - py, z - pz) > jointReach * solve.width) continue;
     const own = solve.flanks[owner][side];
     const other = solve.flanks[corner.from === owner ? corner.to : corner.from][side];

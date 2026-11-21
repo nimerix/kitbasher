@@ -4,6 +4,7 @@ import { drawnCurve } from '../../src/core/refine-curve';
 import {
   type EdgeInput,
   applyEdge,
+  curveAt,
   fitMeet,
   largestGap,
   solveEdge,
@@ -454,14 +455,16 @@ describe('a path whose bands hold different widths', () => {
 
   it('edits nothing outside both bands past the narrower band width from the joint', () => {
     // The joint takes in vertices no band holds out to the narrower of the two bands' widths. Before,
-    // it reached the 0.6 asked for, and edited 5 such vertices from 0.27 to 0.49 mm from the joint
-    // (measured; now the farthest is 0.20).
+    // it reached the 0.6 asked for, and edited 5 such vertices from 0.27 to 0.49 mm from the guide's
+    // drawn end (measured). Now 16 such vertices are edited, the farthest 0.267 from the joint on the
+    // solved curve, the narrower width; that joint lies 0.167 from the drawn end (measured).
     const { model, solve } = path();
     const out = cloneRefineMesh(model.mesh, true);
     const { changed } = applyEdge(out, model.topology, solve, 1, true);
     const held = new Set(solve.bands.flatMap((band) => [...band.vertices]));
-    // The joint, where the right crest's guide starts.
-    const joint = solve.bands[1].drawn.points;
+    // The joint, on the solved curve where the right crest's stretch starts, as the patch reads it.
+    const joint = new Float64Array(3);
+    curveAt(solve.curve, solve.bounds[1], joint);
     const p = model.mesh.position;
     const narrower = Math.min(...solve.bands.map((band) => band.width));
     const outside = [...changed].filter(
