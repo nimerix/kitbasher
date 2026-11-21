@@ -795,6 +795,46 @@ describe('a line over an edge that curves', () => {
     const { worst, seen } = offRim(r, 0.7 * half, 1.3 * half);
     expect(seen).toBeGreaterThan(10);
     expect(worst).toBeLessThan(0.04);
+    // A tie takes in the earlier edge's creased vertices out to the band's width from the tie, so
+    // the new chain goes on along the earlier crease that far. It did so before lines were fitted as
+    // arcs: an Arc guide over this rim gives the same chain past the tie at eb6c2e8.
+    const p = r.out.position;
+    const angle = (v: number) => Math.atan2(p[v * 3 + 2], p[v * 3]);
+    // Distance from the tie, on the rim's sharp edge at radius 5 and height 1.
+    const fromTie = (v: number) =>
+      Math.hypot(
+        p[v * 3] - 5 * Math.cos(half),
+        p[v * 3 + 1] - 1,
+        p[v * 3 + 2] - 5 * Math.sin(half),
+      );
+    // The edge length as the solver reads it: the median length of the mesh edges at the band's
+    // vertices.
+    const q = after.mesh.position;
+    const lengths: number[] = [];
+    for (const v of solve!.bands[0].vertices)
+      for (
+        let j = after.topology.neighbourStart[v];
+        j < after.topology.neighbourStart[v + 1];
+        j++
+      ) {
+        const w = after.topology.neighbours[j];
+        lengths.push(
+          Math.hypot(q[v * 3] - q[w * 3], q[v * 3 + 1] - q[w * 3 + 1], q[v * 3 + 2] - q[w * 3 + 2]),
+        );
+      }
+    const edge = lengths.sort((a, b) => a - b)[lengths.length >> 1];
+    const onCrease = new Set(creased);
+    const start = creased.reduce((a, b) => (angle(a) <= angle(b) ? a : b));
+    const past = r.chain.filter((v) => angle(v) > half);
+    const bridging = past.filter((v) => !onCrease.has(v));
+    const gap = (v: number) => Math.hypot(...[0, 1, 2].map((k) => p[v * 3 + k] - p[start * 3 + k]));
+    // Past the tie the new chain keeps to the earlier crease: 14 of its 16 vertices there are the
+    // crease's own, and the other 2 bridge to where the crease starts, 0.111 and 0.057 from it, within
+    // two edge lengths of 0.067 (measured).
+    expect(past.length - bridging.length).toBeGreaterThan(0);
+    for (const v of bridging) expect(gap(v)).toBeLessThanOrEqual(2 * edge);
+    // It reaches no farther past the tie than the band's width: measured 0.507 at width 0.52.
+    expect(Math.max(...past.map(fromTie))).toBeLessThanOrEqual(solve!.bands[0].width);
   });
 
   it('stays a line on a straight edge of a rippled, noisy box', () => {
@@ -856,7 +896,7 @@ describe("the meet's largest gap from its curve", () => {
 describe('the kind a meet is fitted as', () => {
   // Meets 3.4 mm long along x, with a guide drawn straight between their ends, edge length 0.067.
   const edge = 0.067;
-  /** `count` points on a circle of `radius` through (+-1.7, 0, 0), bowing toward -z. */
+  /** `count` points on a circle of `radius` through (+-1.7, 0, 0), bowing toward +z. */
   const rim = (count: number, radius = 5) => {
     const half = Math.asin(1.7 / radius);
     return Array.from({ length: count }, (_, i) => {
