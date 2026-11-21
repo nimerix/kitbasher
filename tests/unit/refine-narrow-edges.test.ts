@@ -984,6 +984,41 @@ describe('a wide rounding', () => {
     expect(chainOff(r, [0, 0], 0.5)).toBeLessThan(0.07); // measured 0.0517
   });
 
+  it('keeps the edge it finds from seeds within reach over one past a wide rounding', () => {
+    // A face with a 90 degree edge rounded 0.04 at x = near and a 60 degree edge rounded 0.35 at
+    // x = 0. The guide lies 0.25 mm from the first edge and 0.12 mm before the second's round. Its
+    // own face and the side face past the first edge seed within reach; the face past the round
+    // seeds only from past the reach. Both edges meet within reach, and the guide's face on both
+    // sides is no pair, so the two pairs left tie in the order they are tried.
+    const round = 0.35 * Math.tan(deg(30));
+    const back = step([0, 0], -60, round + 0.25 + 0.227);
+    const end = step(back, -140, 1.5);
+    const x = -(round + 0.12),
+      near = x - 0.25;
+    for (const seed of [1, 2, 3]) {
+      const profile = extrudedProfile(
+        [[near, -2], [near, 0], [0, 0], back, end],
+        [0.04, 0.35, 0.27],
+        4,
+        {
+          ...scan,
+          seed,
+        },
+      );
+      const model = modelOf(profile);
+      for (const from of [-1.1, 1.1]) {
+        const r = outcome(model, line(model, [x, 0, from], [x, 0, -from], 0.48, 0.65));
+        const label = `seed ${seed}, from z = ${from}`;
+        expect(r.solved && [r.pieces, r.skipped, r.folded], label).toEqual([1, 0, 0]);
+        if (!r.solved) continue;
+        // Measured 91.1 to 91.5 degrees and 0.0099 to 0.011 mm; the 60 degree edge is 0.57 mm away.
+        expect(r.angle, label).toBeGreaterThan(85);
+        expect(r.angle, label).toBeLessThan(95);
+        expect(chainOff(r, [near, 0], 0.5), label).toBeLessThan(0.05);
+      }
+    }
+  });
+
   it('still refuses 1.2 mm onto the flat face', () => {
     const model = fin();
     const r = outcome(model, line(model, [-1.2, 0, -1.1], [-1.2, 0, 1.1], 0.48, 0.65));

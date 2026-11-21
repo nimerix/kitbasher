@@ -1166,7 +1166,7 @@ function classifyOriented(
       members[b].push(i);
     }
     const turn = turns.map((t) => (t.length ? median(t) : NaN));
-    const stretches: { seed: number[]; turn: number }[] = [];
+    const stretches: { seed: number[]; turn: number; withinReach: boolean }[] = [];
     const seedLimit = seedReach * reach;
     for (let b = 0; b * bin <= seedLimit; b++) {
       let end = b;
@@ -1183,6 +1183,8 @@ function classifyOriented(
       stretches.push({
         seed: seedMembers,
         turn: median(turn.slice(b, end + 1)),
+        // A seed starts within reach by its own vertices, not by where its first bin begins.
+        withinReach: seedMembers.some((i) => sign * u[i] <= reach),
       });
       b = end;
     }
@@ -1194,7 +1196,17 @@ function classifyOriented(
       if (Math.abs(left.turn - right.turn) >= (minBandAngle * Math.PI) / 180) pairs.push([i, j]);
     }),
   );
-  pairs.sort((p, q) => p[0] + p[1] - q[0] - q[1] || Math.abs(p[0] - p[1]) - Math.abs(q[0] - q[1]));
+  // Pairs of seeds that both start within reach go first, in their own order, so that a guide whose
+  // flanks start within reach keeps the pair it would have without the seeds past the reach. Those
+  // seeds come after every seed within reach on their side, so they only add pairs to try after.
+  const pastReach = ([i, j]: [number, number]) =>
+    +!(candidates[0][i].withinReach && candidates[1][j].withinReach);
+  pairs.sort(
+    (p, q) =>
+      pastReach(p) - pastReach(q) ||
+      p[0] + p[1] - q[0] - q[1] ||
+      Math.abs(p[0] - p[1]) - Math.abs(q[0] - q[1]),
+  );
 
   // The edge per slice: the point of the slice's cross-section where both flank surfaces meet, and
   // its offset along the surface from the guide, read at the band vertex nearest it.
