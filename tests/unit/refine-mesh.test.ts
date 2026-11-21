@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   Box3,
   BufferAttribute,
@@ -53,19 +53,38 @@ const degrees = (start: Uint32Array) =>
 it('builds sorted topology for a closed mesh with two 40,000-valence vertices', () => {
   const count = 40_000;
   const mesh = buildRefineMesh(highValenceBipyramid(count), new Matrix4());
-  const start = performance.now();
-  const topology = buildTopology(mesh);
-  const elapsed = performance.now() - start;
-  console.log(`buildTopology: ${mesh.triangleCount} triangles in ${elapsed.toFixed(1)} ms`);
-  expect(elapsed).toBeLessThan(400);
-  const valences = degrees(topology.neighbourStart);
-  expect(valences.filter((degree) => degree === count)).toHaveLength(2);
-  const pole = valences.findIndex((degree) => degree === count);
-  const row = topology.neighbours.subarray(
-    topology.neighbourStart[pole],
-    topology.neighbourStart[pole + 1],
+  let cornerReads = 0;
+  const corners = new Proxy(mesh.corners, {
+    get(target, key) {
+      if (typeof key === 'string' && /^\d+$/.test(key)) cornerReads++;
+      return Reflect.get(target, key, target);
+    },
+  });
+  const sort = vi.spyOn(Uint32Array.prototype, 'sort');
+  const { topology, sortedRows } = (() => {
+    try {
+      const topology = buildTopology({ ...mesh, corners });
+      return { topology, sortedRows: sort.mock.contexts.map((row) => (row as Uint32Array).length) };
+    } finally {
+      sort.mockRestore();
+    }
+  })();
+  const poles = degrees(topology.neighbourStart).flatMap((degree, v) =>
+    degree === count ? [v] : [],
   );
-  expect(row.every((v, i) => i === 0 || v > row[i - 1])).toBe(true);
+  expect(poles).toHaveLength(2);
+  for (const pole of poles) {
+    const row = topology.neighbours.subarray(
+      topology.neighbourStart[pole],
+      topology.neighbourStart[pole + 1],
+    );
+    expect(
+      row.every((v, i) => i === 0 || v > row[i - 1]),
+      `pole ${pole}`,
+    ).toBe(true);
+  }
+  expect(cornerReads).toBeLessThanOrEqual(mesh.triangleCount * 18);
+  expect(sortedRows).toEqual([2 * count, 2 * count]);
 });
 
 const cases = [
