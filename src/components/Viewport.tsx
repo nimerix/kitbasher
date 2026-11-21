@@ -78,6 +78,7 @@ import {
   endingRefinePointer,
   pressingRefineProposal,
   refineSurfaceAt,
+  refineRegionAt,
   occludingRaycast,
   previewRaycast,
   RefinePointerController,
@@ -293,13 +294,7 @@ const PartMesh = memo(function PartMesh({
         state.addRefinePoint({ triangle: event.faceIndex, position: event.point.toArray() });
       else if (refine.mode === 'detect') {
         // Proposals near the pointer are taken before this; here a click picks a region under it.
-        const face = event.faceIndex;
-        const region = refine.features.find(
-          (f) =>
-            f.state === 'pending' &&
-            f.feature.type === 'region' &&
-            f.feature.input.triangles.includes(face),
-        );
+        const region = refineRegionAt(refine, event.faceIndex);
         const adding = event.shiftKey || event.metaKey || event.ctrlKey;
         if (!region) {
           // A click that paints where to look leaves the selection alone.

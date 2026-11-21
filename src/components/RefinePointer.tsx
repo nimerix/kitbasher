@@ -348,12 +348,11 @@ interface Paint extends GestureBase {
 /** A press the tool refused while the surface has no index: it owns the pointer and does nothing. */
 interface Refused extends GestureBase {
   kind: 'refused';
-  x: number;
-  y: number;
   /** Every sample of the press, from down to release; once one leaves the slop it is no click. */
   track: PressTrack;
   /** For a press on a handle, the click that may still close its path. */
   click: HandleClick | null;
+  region: { id: string; triangle: number; model: RefineSession['model'] } | null;
 }
 interface HandleDrag extends GestureBase {
   kind: 'handle';
@@ -397,6 +396,15 @@ export const pressingRefineProposal = () => pressedProposal !== null;
  */
 export const refineSurfaceAt = (partId: string, x: number, y: number) =>
   surfaceHit?.(partId, x, y) ?? null;
+
+/** The pending Detect region covering a picked triangle. */
+export const refineRegionAt = (refine: RefineSession, triangle: number) =>
+  refine.features.find(
+    (f) =>
+      f.state === 'pending' &&
+      f.feature.type === 'region' &&
+      f.feature.input.triangles.includes(triangle),
+  );
 
 const blocked = (state: ReturnType<typeof useEditor.getState>) =>
   !!state.navigationMode ||
@@ -627,22 +635,24 @@ export function RefinePointerController({ pressed }: { pressed: () => boolean })
       }
     };
 
-    /** The hit under a client position on the part, or null off it or behind another part. */
-    const intersectionAt = (partId: string, x: number, y: number) => {
+    /** The hit on the current ray, or null off the part or behind another part. */
+    const intersectionOnRay = (partId: string) => {
       const own = partMeshes.get(partId);
       if (!own) return null;
-      aimAt(x, y);
       const hits = raycaster.intersectObject(own, false);
       const mine = hits[0]?.faceIndex != null ? hits[0] : null;
       if (!mine) return null;
       const other = firstHitBefore(own, mine.distance);
       return other && other.distance <= mine.distance ? null : mine;
     };
-    const hitAt = (partId: string, x: number, y: number): GuidePoint | null => {
-      const hit = intersectionAt(partId, x, y);
+    const hitOnRay = (partId: string): GuidePoint | null => {
+      const hit = intersectionOnRay(partId);
       return hit && { triangle: hit.faceIndex!, position: hit.point.toArray() };
     };
-    surfaceHit = hitAt;
+    surfaceHit = (partId, x, y) => {
+      aimAt(x, y);
+      return hitOnRay(partId);
+    };
 
     /** Whether the session's part can be picked at pointer moves, read from its preview now. */
     const ready = () => surfaceReady(useEditor.getState().refine);
@@ -713,16 +723,15 @@ export function RefinePointerController({ pressed }: { pressed: () => boolean })
     };
 
     /**
-     * The spot under a client position on the session's model surface, the working surface without
+     * The spot on the current ray on the session's model surface, the working surface without
      * the draft, or null off it or behind another part. Its position comes from the model triangle
      * alone, so a draft rebuilt sooner or later cannot move where a dragged point lands.
      */
-    const modelHitAt = (partId: string, x: number, y: number): GuidePoint | null => {
+    const modelHitOnRay = (partId: string): GuidePoint | null => {
       const refine = useEditor.getState().refine;
       const own = partMeshes.get(partId);
       const model = refine?.model?.mesh;
       if (!refine || !own || !model) return null;
-      aimAt(x, y);
       const front = modelFront(refine, own, true);
       if (front?.triangle === undefined) return null;
       const point = trianglePlaneHit(model, front.triangle, raycaster.ray);
@@ -799,33 +808,32 @@ export function RefinePointerController({ pressed }: { pressed: () => boolean })
     };
 
     /** A position of a gesture's path, or, last, its release. */
-    type Sample = { gesture: Gesture; x: number; y: number; erase: boolean; release?: boolean };
+    type Sample = { gesture: Gesture } & ({ ray: Ray; erase: boolean } | { release: true });
     // Samples that need an exact answer from a part with no index wait here, in order, with every
     // later sample of their gesture behind them; each is answered exactly, never from another ray.
     const samples = new OrderedSamples<Sample>();
     let drainFrame = 0;
     /** Time a frame may spend answering waiting samples exactly, in ms. */
     const drainBudget = 8;
+    const drainSamples = (more: () => boolean) => {
+      const state = useEditor.getState();
+      const repaint = gesture?.kind === 'paint' && !state.painting;
+      if (repaint) useEditor.setState({ painting: true });
+      try {
+        return samples.drain(handleSample, more);
+      } finally {
+        if (repaint) useEditor.getState().endPaintStroke();
+      }
+    };
     const scheduleDrain = () => {
       if (drainFrame) return;
       drainFrame = requestAnimationFrame(() => {
         drainFrame = 0;
         const start = performance.now();
-        const state = useEditor.getState();
-        // Paint answered after its release still belongs to the stroke its press began.
-        const repaint = !state.painting;
-        if (repaint) useEditor.setState({ painting: true });
         let answered = 0;
-        try {
-          // At least one each frame, so a slow exact answer cannot stall the queue.
-          const more = samples.drain(
-            handleSample,
-            () => !answered++ || performance.now() - start < drainBudget,
-          );
-          if (more) scheduleDrain();
-        } finally {
-          if (repaint) useEditor.getState().endPaintStroke();
-        }
+        // At least one each frame, so a slow exact answer cannot stall the queue.
+        if (drainSamples(() => !answered++ || performance.now() - start < drainBudget))
+          scheduleDrain();
       });
     };
     // Time this frame has spent on exact answers inside pointer moves, in ms.
@@ -843,16 +851,17 @@ export function RefinePointerController({ pressed }: { pressed: () => boolean })
      * Handles one sample now: at once when it needs no exact answer; with its own exact answer
      * while this frame's budget lasts; else it waits, as does every sample after one that waits.
      */
-    const offer = (sample: Sample, act: (live: boolean) => boolean) => {
+    const offer = (d: Gesture, x: number, y: number, erase = false) => {
+      aimAt(x, y);
       if (!samples.behind()) {
-        if (act(true)) return;
+        if (handlePath(d, erase, true)) return;
         if (spent < drainBudget) {
           const start = performance.now();
           const moving = pointerMoving;
           // Picks made outside a move test a part with no index exactly, for this ray alone.
           pointerMoving = false;
           try {
-            act(false);
+            handlePath(d, erase, false);
           } finally {
             pointerMoving = moving;
             charge(performance.now() - start);
@@ -860,16 +869,21 @@ export function RefinePointerController({ pressed }: { pressed: () => boolean })
           return;
         }
       }
-      samples.hold(sample);
+      samples.hold({ gesture: d, ray: raycaster.ray.clone(), erase });
       scheduleDrain();
     };
     const handleSample = (sample: Sample) => {
       const d = sample.gesture;
       if (gesture !== d) return;
-      if (sample.release) return finish(d);
-      if (d.kind === 'stroke') strokeSample(d, sample.x, sample.y, false);
-      else if (d.kind === 'paint') paintSample(d, sample.x, sample.y, sample.erase, false);
-      else if (d.kind === 'handle') dragSample(d, sample.x, sample.y, false);
+      if ('release' in sample) return finish(d);
+      raycaster.ray.copy(sample.ray);
+      handlePath(d, sample.erase, false);
+    };
+    const handlePath = (d: Gesture, erase: boolean, live: boolean) => {
+      if (d.kind === 'stroke') return strokeSample(d, live);
+      if (d.kind === 'paint') return paintSample(d, erase, live);
+      if (d.kind === 'handle') return dragSample(d, live);
+      return true;
     };
 
     /** Runs one sample's pick, and whether it lay near an unindexed part, so it must wait. */
@@ -885,8 +899,8 @@ export function RefinePointerController({ pressed }: { pressed: () => boolean })
      * One stroke sample: a dab, or a point of the crease's current run. With `live`, false is
      * returned without acting when the sample needs an exact answer.
      */
-    const strokeSample = (d: Stroke, x: number, y: number, live: boolean) => {
-      const [point, near] = nearPick(() => hitAt(d.partId, x, y));
+    const strokeSample = (d: Stroke, live: boolean) => {
+      const [point, near] = nearPick(() => hitOnRay(d.partId));
       if (near && live) return false;
       if (point && d.runs) {
         if (!d.onPart) d.runs.push([]);
@@ -898,7 +912,7 @@ export function RefinePointerController({ pressed }: { pressed: () => boolean })
     const sampleAt = (d: Stroke, x: number, y: number) => {
       d.x = x;
       d.y = y;
-      offer({ gesture: d, x, y, erase: false }, () => strokeSample(d, x, y, true));
+      offer(d, x, y);
     };
     /** Samples the path to (x, y) every few pixels; on release, at (x, y) itself too. */
     const sampleStroke = (d: Stroke, x: number, y: number, release = false) => {
@@ -914,9 +928,9 @@ export function RefinePointerController({ pressed }: { pressed: () => boolean })
       if (release && (d.x !== x || d.y !== y)) sampleAt(d, x, y);
     };
 
-    /** Paints where (x, y) falls on the part, when the part is the first thing there. */
-    const paintSample = (d: Paint, x: number, y: number, erase: boolean, live: boolean) => {
-      const [hit, near] = nearPick(() => intersectionAt(d.partId, x, y));
+    /** Paints where the sample's ray first hits the part. */
+    const paintSample = (d: Paint, erase: boolean, live: boolean) => {
+      const [hit, near] = nearPick(() => intersectionOnRay(d.partId));
       if (near && live) return false;
       if (!hit) return true;
       const { object, point, face, faceIndex } = hit;
@@ -931,11 +945,10 @@ export function RefinePointerController({ pressed }: { pressed: () => boolean })
       );
       return true;
     };
-    const paintAt = (d: Paint, x: number, y: number, erase: boolean) =>
-      offer({ gesture: d, x, y, erase }, () => paintSample(d, x, y, erase, true));
     /** The press of a paint stroke: answered exactly, as every press is. */
     const paintPress = (d: Paint, x: number, y: number, erase: boolean) => {
-      const hit = intersectionAt(d.partId, x, y);
+      aimAt(x, y);
+      const hit = intersectionOnRay(d.partId);
       if (!hit) return false;
       const { object, point, face, faceIndex } = hit;
       return useEditor.getState().paintRefineRegion(
@@ -950,9 +963,9 @@ export function RefinePointerController({ pressed }: { pressed: () => boolean })
       );
     };
 
-    /** Moves the dragged point to the model surface under (x, y). */
-    const dragSample = (d: HandleDrag, x: number, y: number, live: boolean) => {
-      const [point, near] = nearPick(() => modelHitAt(d.partId, x, y));
+    /** Moves the dragged point to the model surface under the sample. */
+    const dragSample = (d: HandleDrag, live: boolean) => {
+      const [point, near] = nearPick(() => modelHitOnRay(d.partId));
       if (near && live) return false;
       if (!point) return true;
       const { handle } = d;
@@ -967,7 +980,7 @@ export function RefinePointerController({ pressed }: { pressed: () => boolean })
     const dragHandle = (d: HandleDrag, x: number, y: number) => {
       if (!d.moved && Math.hypot(x - d.x, y - d.y) < dragStart) return;
       d.moved = true;
-      offer({ gesture: d, x, y, erase: false }, () => dragSample(d, x, y, true));
+      offer(d, x, y);
     };
 
     /** Completes a released gesture once every sample of it is handled. */
@@ -1021,6 +1034,8 @@ export function RefinePointerController({ pressed }: { pressed: () => boolean })
       if (!d) return null;
       gesture = null;
       samples.clear();
+      if (drainFrame) cancelAnimationFrame(drainFrame);
+      drainFrame = 0;
       letGo(d);
       window.removeEventListener('keydown', key, true);
       unsubscribe?.();
@@ -1039,6 +1054,7 @@ export function RefinePointerController({ pressed }: { pressed: () => boolean })
         return;
       }
       if (d.kind === 'stroke') state.cancelRefineStroke();
+      if (d.kind === 'paint') state.endPaintStroke();
     };
 
     const move = (event: PointerEvent) => {
@@ -1052,7 +1068,7 @@ export function RefinePointerController({ pressed }: { pressed: () => boolean })
         return;
       }
       if (d.kind === 'handle') return dragHandle(d, event.clientX, event.clientY);
-      if (d.kind === 'paint') return void paintAt(d, event.clientX, event.clientY, event.altKey);
+      if (d.kind === 'paint') return void offer(d, event.clientX, event.clientY, event.altKey);
       const events = event.getCoalescedEvents?.() ?? [];
       for (const e of events.length ? events : [event]) sampleStroke(d, e.clientX, e.clientY);
     };
@@ -1060,28 +1076,40 @@ export function RefinePointerController({ pressed }: { pressed: () => boolean })
       const d = gesture;
       if (!d || d.waiting || event.pointerId !== d.pointer) return;
       if (d.kind === 'refused') d.track.see(event.clientX, event.clientY);
-      // In Detect, a paint click, even one refused for want of an index, still reaches the part to
-      // select a pending region under it by its exact pick; a refused press only if it stayed still.
-      const click =
-        d.kind === 'refused'
-          ? !d.click && !d.track.moved
-          : d.kind === 'paint' && Math.hypot(event.clientX - d.x, event.clientY - d.y) <= clickSlop;
-      if (!(click && d.binding.mode === 'detect')) swallowRelease();
+      const detectClick =
+        d.kind === 'paint' &&
+        d.binding.mode === 'detect' &&
+        Math.hypot(event.clientX - d.x, event.clientY - d.y) <= clickSlop;
+      if (!detectClick) swallowRelease();
       if (pressed()) return discard();
       if (d.kind === 'refused') {
         end();
-        const refine = useEditor.getState().refine;
-        // A click on the open path's first handle closes it, if it is still that handle's.
-        if (d.click && !d.track.moved && d.click.handle.first && handleClickHolds(d.click, refine))
-          useEditor.getState().addRefinePoint(d.click.handle.point, true);
+        if (d.track.moved) return;
+        const state = useEditor.getState();
+        const { refine } = state;
+        if (d.click && d.click.handle.first && handleClickHolds(d.click, refine))
+          state.addRefinePoint(d.click.handle.point, true);
+        const region = d.region;
+        if (
+          region &&
+          refine?.model === region.model &&
+          refine.features.some(
+            (f) =>
+              f.id === region.id &&
+              f.state === 'pending' &&
+              f.feature.type === 'region' &&
+              f.feature.input.triangles.includes(region.triangle),
+          )
+        )
+          state.selectRefine([region.id]);
         return;
       }
       if (d.kind === 'handle') dragHandle(d, event.clientX, event.clientY);
-      else if (d.kind === 'paint') paintAt(d, event.clientX, event.clientY, event.altKey);
+      else if (d.kind === 'paint') offer(d, event.clientX, event.clientY, event.altKey);
       else sampleStroke(d, event.clientX, event.clientY, true);
       if (!samples.waiting) return finish(d);
       // Samples still wait for exact answers: the pointer is let go, and the gesture ends after them.
-      samples.hold({ gesture: d, x: event.clientX, y: event.clientY, erase: false, release: true });
+      samples.hold({ gesture: d, release: true });
       d.waiting = true;
       letGo(d);
     };
@@ -1117,9 +1145,22 @@ export function RefinePointerController({ pressed }: { pressed: () => boolean })
         // A pointer that is not active cannot be captured; window listeners still follow it.
       }
       // Anything that takes the pointer, the session, its part, mode or brush away ends it at once.
-      unsubscribe = useEditor.subscribe((s) => {
+      unsubscribe = useEditor.subscribe((s, previous) => {
         if (gesture !== d) return;
         if (bindingBroken(d.binding, s) || (!d.waiting && blocked(s))) return discard();
+        if (d.kind === 'paint' || d.kind === 'stroke') {
+          const before = previous.refine!;
+          const after = s.refine!;
+          if (
+            after.model !== before.model ||
+            after.undo !== before.undo ||
+            after.redo !== before.redo ||
+            after.selected.length !== before.selected.length ||
+            after.selected.some((id, i) => id !== before.selected[i]) ||
+            (d.kind === 'paint' && after.detect.where !== before.detect.where)
+          )
+            return discard();
+        }
         // A refused handle press is a click on that handle of that selected guide, or nothing.
         if (d.kind === 'refused' && d.click && !handleClickHolds(d.click, s.refine)) d.click = null;
       });
@@ -1161,16 +1202,16 @@ export function RefinePointerController({ pressed }: { pressed: () => boolean })
       partId: string,
       binding: GestureBinding,
       click: HandleClick | null = null,
+      region: Refused['region'] = null,
     ) => {
       own(
         {
           ...base(event, partId, binding),
           kind: 'refused',
-          x: event.clientX,
-          y: event.clientY,
           // A handle's click ends where its drag would begin; a Detect click where the part's does.
           track: new PressTrack(event.clientX, event.clientY, click ? dragStart : clickSlop),
           click,
+          region,
         },
         event.pointerId,
       );
@@ -1192,7 +1233,8 @@ export function RefinePointerController({ pressed }: { pressed: () => boolean })
       if (!gate(state, true)) return refuse(event.nativeEvent, partId, binding);
       const { clientX: x, clientY: y } = event.nativeEvent;
       // A press on another part in front reaches this one too; it starts nothing.
-      const first = hitAt(partId, x, y);
+      aimAt(x, y);
+      const first = hitOnRay(partId);
       if (!first) return false;
       const crease = binding.kind === 'crease';
       own(
@@ -1216,8 +1258,21 @@ export function RefinePointerController({ pressed }: { pressed: () => boolean })
       const binding = gestureBinding(state, false);
       if (!binding || !paintingRefine(state) || binding.partId !== partId || !pressable(event))
         return false;
-      if (!gate(state, false)) return refuse(event.nativeEvent, partId, binding);
       const { clientX: x, clientY: y } = event.nativeEvent;
+      if (!gate(state, false)) {
+        const { refine } = state;
+        if (refine?.mode !== 'detect') return refuse(event.nativeEvent, partId, binding);
+        aimAt(x, y);
+        const triangle = intersectionOnRay(partId)?.faceIndex;
+        const region = triangle != null && refineRegionAt(refine, triangle);
+        return refuse(
+          event.nativeEvent,
+          partId,
+          binding,
+          null,
+          region && triangle != null ? { id: region.id, triangle, model: refine.model } : null,
+        );
+      }
       const d: Paint = { ...base(event.nativeEvent, partId, binding), kind: 'paint', x, y };
       // As a brush stroke, only where the part is the first thing under the pointer.
       if (!paintPress(d, x, y, event.altKey)) return false;
@@ -1237,6 +1292,8 @@ export function RefinePointerController({ pressed }: { pressed: () => boolean })
     const down = (event: PointerEvent) => {
       clearPress();
       cancelledPointer = null;
+      if (gesture?.waiting && event.button === 0 && canvas().contains(event.target as Node))
+        drainSamples(() => true);
       const state = useEditor.getState(),
         refine = state.refine;
       const binding = gestureBinding(state, false);
