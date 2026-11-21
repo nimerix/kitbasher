@@ -607,8 +607,9 @@ approved by the product owner.
   to tell apart.
 - **Why.** 7 of the study's 20 edge guides are still refused: the closed plate border, the
   cross strap line, the neck collar arcs, the cable support spline and the pocket wall.
-  The seven guides that gain a line each rebuild one edge, with a band 0.38 to 0.64 wide
-  on either side of it, which does not show at whole-part scale. The outlet arc is still
+  Of the guides that now solve, the seven that gain a line each rebuild one edge, with a
+  band 0.38 to 0.64 wide on either side of it, which does not show at whole-part scale.
+  The outlet arc is still
   cut in 3 pieces, now with 31 triangles skipped where 21 were before, and its line tilts
   across the collar with a bump at each end. Keep detail cannot tell molded relief from
   scan roughness. Sweep refused the cable and both elbows.
@@ -632,8 +633,18 @@ approved by the product owner.
     not a stable result either.
   - Only the kept strap lip and the barrel ring stay within both limits.
 
-  At each guide's own strength, as a user runs it again, the plate border moves 0.0785
-  (0.0788 after Flatten) and is cut in 2 pieces, and the buckle lip is cut in 2 pieces.
+  At each guide's own strength, as a user runs it again (under full strength for every
+  guide but Detect's buckle guide):
+  - The plate border moves 0.0785 (0.0788 after Flatten) and is cut in 2 pieces.
+  - The buckle lip moves 0.0169 away from the ends and is cut in 2 pieces.
+  - The outlet arc's second pass is refused. Before these rules it solved in 3 pieces with
+    28 triangles skipped.
+  - Over both limits: the fin edge (0.0228 away from the ends, 0.0423 anywhere), Detect's
+    buckle guide (0.0159 and 0.0223) and the valve rim (0.0199 and 0.0289).
+  - Over 0.005 away from the ends: the wider buckle lip (0.0161), the belt edge (0.0147),
+    the lighter outlet arc (0.0181), and the kept strap lip (0.0131) and frame rail
+    (0.0176), which moved 0.013 and 0.0154 before these rules.
+  - Only the barrel ring stays within both limits (0.0045 and 0.0076).
 
 - **Performance.** A preview update takes 92 to 106 ms for a strap lip guide on part 45
   and 139 to 165 ms for the valve rim on part 57 (80 to 96 ms and 150 to 163 ms before the
