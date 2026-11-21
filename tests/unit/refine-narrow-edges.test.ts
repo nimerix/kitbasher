@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { estimateWidth } from '../../src/core/refine-band';
+import { buildBand, estimateWidth } from '../../src/core/refine-band';
 import { type EdgeInput, applyEdge, solveEdge } from '../../src/core/refine-edge';
 import { cloneRefineMesh } from '../../src/core/refine-mesh';
 import type { Vec3 } from '../../src/core/types';
@@ -134,6 +134,40 @@ describe('a guide laid beside the edge', () => {
         expect(r.solved && [r.pieces, r.skipped, r.folded]).toEqual([1, 0, 0]);
         expect(chainOff(r, [nearer, 0], 0.7)).toBeLessThan(0.05);
       }
+  });
+});
+
+describe('a guide that strays from its edge', () => {
+  it('keeps every vertex within Width of the solved edge where the edge lies past reach', () => {
+    // The guide runs from 0.05 mm onto the top face at one end to 0.6 mm at the other. The solved
+    // edge is within reach of it (0.41 mm, 6 edge lengths) in over half of the slices, and up to
+    // 0.60 mm from it at the far end (measured): there the band reaches further from the guide.
+    const m = modelOf(
+      extrudedProfile(
+        [
+          [-2, 0],
+          [0, 0],
+          [0, -2],
+        ],
+        [0.08],
+        4,
+        scan,
+      ),
+    );
+    const width = 0.55;
+    const points = [pointOn(m.mesh, [-0.05, 0, -1.4]), pointOn(m.mesh, [-0.6, 0, 1.4])];
+    const band = buildBand(m.mesh, m.topology, 'line', points, width, m.noise);
+    expect(band).not.toBeNull();
+    const kept = new Set(band!.vertices);
+    // Vertices on the side face at most Width less 0.05 mm below the corner, along the guide: the
+    // 0.08 mm rounding makes the way round it shorter than to the corner and back.
+    const p = m.mesh.position;
+    const near: number[] = [];
+    for (let v = 0; v < m.mesh.weldedCount; v++)
+      if (p[v * 3] > -0.02 && p[v * 3 + 1] < -0.1 && p[v * 3 + 1] >= 0.05 - width)
+        if (Math.abs(p[v * 3 + 2]) <= 1.3) near.push(v);
+    expect(near.length).toBeGreaterThan(100);
+    expect(near.filter((v) => !kept.has(v))).toEqual([]);
   });
 });
 

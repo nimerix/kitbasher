@@ -1057,7 +1057,10 @@ function bandFlank(fit: FlankFit, locate: (p: number[]) => [number, number, numb
   };
 }
 
-/** The band classified from the guide as drawn, or null when no edge lies under it. */
+/**
+ * The band classified from the guide as drawn, or null when no edge lies under it. `away`, from an
+ * earlier classification of the same guide, is how far its solved edge strayed from the guide.
+ */
 function classifyOriented(
   mesh: RefineMesh,
   topology: RefineTopology,
@@ -1065,6 +1068,7 @@ function classifyOriented(
   points: GuidePoint[],
   width: number | null,
   noise: number,
+  away = 0,
 ) {
   const clicked = localEdge(mesh, topology, points);
   if (points.length < 2 || !(clicked > 0)) return null;
@@ -1079,7 +1083,8 @@ function classifyOriented(
   const spanOf = (edge: number) => Math.max(seedEdges * edge, seedSpan);
   // Every vertex the classification reads lies within reach of the guide plus a seed, so a width
   // only caps the band it returns and the classification is the same at every width up to that.
-  // The width is measured from the solved edge, which lies within reach of the guide.
+  // The width is measured from the solved edge, which lies within reach of the guide in at least
+  // half of the slices, or `away` from it where an earlier classification found it further.
   const band = gather(
     mesh,
     topology,
@@ -1087,7 +1092,10 @@ function classifyOriented(
     total,
     points,
     (edge) =>
-      Math.max((width ?? 0) + reachOf(edge), reachOf(edge) + seedStart * edge + spanOf(edge)),
+      Math.max(
+        (width ?? 0) + Math.max(reachOf(edge), away),
+        reachOf(edge) + seedStart * edge + spanOf(edge),
+      ),
     noise,
   );
   const { vertices, edge } = band;
@@ -1557,7 +1565,10 @@ function classifyOriented(
       angle,
     };
   };
-  return { result, soft, edge, gathered: band.width - reach };
+  // The band holds every vertex within `gathered` of the solved edge in every slice, the furthest
+  // of which lies `strayed` from the guide.
+  const strayed = Math.max(...Array.from(solved.offset, Math.abs));
+  return { result, soft, edge, strayed, gathered: band.width - strayed };
 }
 
 /** True when the guide's last point comes before its first, in x, then y, then z, then triangle. */
@@ -1614,14 +1625,12 @@ function classify(
 ) {
   if (points.length < 2) return null;
   const backward = drawnBackward(points);
-  const found = classifyOriented(
-    mesh,
-    topology,
-    kind,
-    backward ? [...points].reverse() : points,
-    width,
-    noise,
-  );
+  const oriented = backward ? [...points].reverse() : points;
+  let found = classifyOriented(mesh, topology, kind, oriented, width, noise);
+  // Where the solved edge strays past reach of the guide, a band reaching `width` from it there is
+  // gathered once more, as far as the edge strayed.
+  if (found && width !== null && width > found.gathered)
+    found = classifyOriented(mesh, topology, kind, oriented, width, noise, found.strayed);
   if (!found || !backward) return found;
   return {
     ...found,
