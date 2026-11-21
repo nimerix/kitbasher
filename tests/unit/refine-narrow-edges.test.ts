@@ -951,3 +951,51 @@ describe('the kind a meet is fitted as', () => {
     expect(decide('line', points)).toBe('line');
   });
 });
+
+describe('a wide rounding', () => {
+  /** A fin edge: a flat face, a 0.27 mm round and an edge face 0.25 mm wide, along z. */
+  const fin = () => {
+    const back = step([0, 0], -95, 0.25 + 0.295 + 0.227);
+    const end = step(back, -175, 1.5);
+    return modelOf(extrudedProfile([[-2, 0], [0, 0], back, end], [0.27, 0.27], 4, scan));
+  };
+
+  it('finds a fin edge across a 0.27 mm round', () => {
+    const model = fin();
+    // The guide lies where the round leaves the flat face, 0.295 mm before the ideal corner.
+    const r = outcome(model, line(model, [-0.295, 0, -1.1], [-0.295, 0, 1.1], 0.48, 0.65));
+    expect(r.solved && [r.pieces, r.skipped, r.folded]).toEqual([1, 0, 0]);
+    if (!r.solved) return;
+    expect(r.angle).toBeGreaterThan(90);
+    expect(r.angle).toBeLessThan(99); // measured 94.5
+    expect(chainOff(r, [0, 0], 0.5)).toBeLessThan(0.07); // measured 0.05
+  });
+
+  it('still refuses 1.2 mm onto the flat face', () => {
+    const model = fin();
+    const r = outcome(model, line(model, [-1.2, 0, -1.1], [-1.2, 0, 1.1], 0.48, 0.65));
+    expect(r.solved).toBe(false);
+  });
+
+  it('still refuses a line and an arc on a cylinder wall', () => {
+    // A cylinder wall of radius 3 has no edge.
+    const model = modelOf(softCylinder(3, 2, 0.3, scan));
+    const wall = line(model, [3, -1, 0], [3, 1, 0], null);
+    const round: EdgeInput = {
+      segments: [
+        {
+          kind: 'arc',
+          points: [-0.4, 0, 0.4].map((a) =>
+            pointOn(model.mesh, [3 * Math.cos(a), 0, 3 * Math.sin(a)]),
+          ),
+        },
+      ],
+      joints: [],
+      closed: false,
+      width: 0.5,
+      strength: 1,
+    };
+    expect(outcome(model, wall).solved).toBe(false);
+    expect(outcome(model, round).solved).toBe(false);
+  });
+});

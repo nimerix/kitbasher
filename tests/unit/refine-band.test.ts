@@ -383,10 +383,19 @@ describe('estimateWidth', () => {
     const z = 1 - crest - 0.5;
     const near = [pointOn(mesh, [-1.2, 1.5, z]), pointOn(mesh, [1.2, 1.5, z])];
     expect(estimateWidth(mesh, topology, 'line', near, noise)).toBeLessThan(0.7);
+  });
+
+  it('finds the edge from a clean face 0.3 mm beside it', () => {
+    const { mesh, topology, noise } = modelOf(softBox([2, 1.5, 1], 0.3));
     // 0.3 from the crest line the guide is on the clean face, 0.21 from the soft zone.
     const nearer = [-1.2, 1.2].map((x) => pointOn(mesh, [x, 1.5, 1 - crest - 0.3]));
-    expect(estimateWidth(mesh, topology, 'line', nearer, noise)).toBe(0);
-    expect(buildBand(mesh, topology, 'line', nearer, 0.6, noise)).toBeNull();
+    const width = estimateWidth(mesh, topology, 'line', nearer, noise);
+    expect(width).toBeGreaterThan(0);
+    expect(width).toBeLessThanOrEqual(1);
+    const band = buildBand(mesh, topology, 'line', nearer, 0.6, noise)!;
+    expect(band).not.toBeNull();
+    expect(band.angle).toBeGreaterThan(85);
+    expect(band.angle).toBeLessThan(95);
   });
 
   describe('rebuilds the band it estimates', () => {
