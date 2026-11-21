@@ -293,10 +293,11 @@ function nearestMember(mesh: RefineMesh, band: EdgeBand, members: number[], cell
 
 /**
  * Where the two flanks meet, refined from each point of the band's own solved edge by Newton's
- * method in the cross-section plane there, with the angle between the flanks' normals.
+ * method in the cross-section plane there, within the band's own width of it, with the angle
+ * between the flanks' normals.
  */
-function meetFlanks(band: EdgeBand, flanks: [Flank, Flank], width: number) {
-  const edge = band.edge;
+function meetFlanks(band: EdgeBand, flanks: [Flank, Flank]) {
+  const { edge, width } = band;
   const n = edge.length / 3;
   const points: number[] = [],
     angles: number[] = [];
@@ -605,7 +606,6 @@ function unbiasedFlanks(
   band: EdgeBand,
   kind: GuideKind,
   controls: number,
-  width: number,
   noise: number,
   edge: number,
 ) {
@@ -659,7 +659,7 @@ function unbiasedFlanks(
     return fitted[0] && fitted[1] ? [fitted[0], fitted[1]] : null;
   };
   const meetWith = (flanks: [Flank, Flank], read: (FlankSample | null)[]) => {
-    const meet = meetFlanks(band, flanks, width);
+    const meet = meetFlanks(band, flanks);
     if (meet.angles.length < 2) return null;
     return { flanks, meet, curve: fitCurve(kind, meet.points, controls, edge), samples: read };
   };
@@ -721,10 +721,8 @@ function solvePart(
 ): Part | null {
   const band = buildBand(mesh, topology, kind, points, width, noise, known);
   if (!band) return null;
-  // The band's own width, held to what its gather covers, is the one every reading below takes.
-  width = band.width;
   const edge = bandEdgeLength(mesh, topology, band);
-  const solved = unbiasedFlanks(mesh, topology, band, kind, points.length, width, noise, edge);
+  const solved = unbiasedFlanks(mesh, topology, band, kind, points.length, noise, edge);
   if (!solved) return null;
   const { flanks, meet, curve, samples } = solved;
   if (median(meet.angles) < minBandAngle) return null;
@@ -735,7 +733,7 @@ function solvePart(
   const depths: number[] = [];
   for (let k = 0; k < meet.points.length; k += 3)
     depths.push(find(meet.points[k], meet.points[k + 1], meet.points[k + 2]).distance);
-  if (median(depths) > deepestEdge * width) return null;
+  if (median(depths) > deepestEdge * band.width) return null;
   return { kind, band, edge, flanks, meet, curve, samples, controls: points.length };
 }
 
@@ -789,7 +787,7 @@ function fitTogether(parts: Part[], group: number[], s: number, noise: number) {
  * so the face they share has no step where segments meet, then solves each changed segment's edge
  * again. False when a changed segment's flanks no longer meet.
  */
-function shareFlanks(parts: Part[], closed: boolean, width: number, noise: number) {
+function shareFlanks(parts: Part[], closed: boolean, noise: number) {
   const n = parts.length;
   const changed = new Set<number>();
   for (const s of [0, 1]) {
@@ -810,7 +808,7 @@ function shareFlanks(parts: Part[], closed: boolean, width: number, noise: numbe
       }
     }
   }
-  return resolveParts(parts, changed, width);
+  return resolveParts(parts, changed);
 }
 
 /**
@@ -819,7 +817,7 @@ function shareFlanks(parts: Part[], closed: boolean, width: number, noise: numbe
  * vertices farther than `cornerClear` soft half-widths from the other face, then its segment's edge
  * solved again. False when a changed segment's flanks no longer meet.
  */
-function clearCorners(parts: Part[], joints: GuideJoint[], width: number, noise: number) {
+function clearCorners(parts: Part[], joints: GuideJoint[], noise: number) {
   const n = parts.length;
   const far: { part: number; side: number; from: Flank; reach: number }[] = [];
   joints.forEach((joint, k) => {
@@ -859,14 +857,14 @@ function clearCorners(parts: Part[], joints: GuideJoint[], width: number, noise:
       part.samples[side] = { points, normals, kind: sample.kind };
       changed.add(index);
     }
-  return resolveParts(parts, changed, width);
+  return resolveParts(parts, changed);
 }
 
 /** Solves again where the flanks of each changed part meet. False when they no longer do. */
-function resolveParts(parts: Part[], changed: Set<number>, width: number) {
+function resolveParts(parts: Part[], changed: Set<number>) {
   for (const i of changed) {
     const part = parts[i];
-    part.meet = meetFlanks(part.band, part.flanks, width);
+    part.meet = meetFlanks(part.band, part.flanks);
     if (part.meet.angles.length < 2 || median(part.meet.angles) < minBandAngle) return false;
     part.curve = fitCurve(part.kind, part.meet.points, part.controls, part.edge);
   }
@@ -1119,11 +1117,9 @@ export function solveEdge(
     if (!part) return null;
     parts.push(part);
   }
-  // A band whose gather covers less than the width holds the solve to what it covers.
-  width = Math.min(width, ...parts.map((part) => part.band.width));
   const n = parts.length;
-  if (n > 1 && !clearCorners(parts, joints, width, noise)) return null;
-  if (n > 1 && !shareFlanks(parts, closed, width, noise)) return null;
+  if (n > 1 && !clearCorners(parts, joints, noise)) return null;
+  if (n > 1 && !shareFlanks(parts, closed, noise)) return null;
   const edge = median(parts.map((part) => part.edge));
 
   let curve: EdgeCurve;
@@ -1607,11 +1603,10 @@ function correctedSurfaces(
   band: EdgeBand,
   flanks: [Flank, Flank],
   curve: EdgeCurve,
-  width: number,
   edge: number,
 ) {
   const { position } = mesh;
-  const meet = meetFlanks(band, flanks, width).points;
+  const meet = meetFlanks(band, flanks).points;
   const at = new Float64Array(3);
   const samples = Array.from({ length: meet.length / 3 }, (_, k) => {
     const p = [meet[k * 3], meet[k * 3 + 1], meet[k * 3 + 2]];
@@ -1806,7 +1801,6 @@ function surfacesOf(
       solve.bands[i],
       solve.flanks[i],
       frame.pieces[i],
-      solve.width,
       bandEdgeLength(mesh, topology, solve.bands[i]),
     ));
   const smoothJoints = frame.joints.filter((joint) => !joint.sharp);

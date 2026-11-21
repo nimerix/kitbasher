@@ -4,7 +4,7 @@ import { type EdgeInput, applyEdge, solveEdge } from '../../src/core/refine-edge
 import { cloneRefineMesh } from '../../src/core/refine-mesh';
 import type { Vec3 } from '../../src/core/types';
 import { modelOf, pointOn } from '../helpers/refine';
-import { extrudedProfile, softCylinder } from '../helpers/soft-edges';
+import { extrudedProfile, softBox, softCylinder } from '../helpers/soft-edges';
 
 const scan = { step: 0.06, ripple: 0.01, noise: 0.006 };
 type Model = ReturnType<typeof modelOf>;
@@ -288,4 +288,35 @@ describe('the automatic width and the classification it hands on', () => {
       expect(left).toEqual([]);
     }
   });
+});
+
+describe('a path whose bands hold different widths', () => {
+  it('solves each segment at its own band width, the path at the width asked for', () => {
+    // A spline along the top front crest of a 16 mm box to its right end, then along the right
+    // crest: the front band, past the slices at the box's end, covers only 0.267 of the 0.6 asked
+    // for (measured); the right one covers all of it. Before, the whole path was solved at 0.267.
+    const model = modelOf(softBox([8, 2, 2], 0.3, { step: 0.04 }));
+    const inset = 0.3 - 0.3 / Math.SQRT2;
+    const front = [-8, -4, 0, 4, 8 - inset].map((x) =>
+      pointOn(model.mesh, [x, 2 - inset, 2 - inset]),
+    );
+    const right = [2 - inset, 0, inset - 2].map((z) =>
+      pointOn(model.mesh, [8 - inset, 2 - inset, z]),
+    );
+    const input: EdgeInput = {
+      segments: [
+        { kind: 'spline', points: front },
+        { kind: 'spline', points: right },
+      ],
+      joints: ['sharp'],
+      closed: false,
+      width: 0.6,
+      strength: 1,
+    };
+    const solve = solveEdge(model.mesh, model.topology, input, model.noise)!;
+    expect(solve).not.toBeNull();
+    expect(solve.bands[0].width).toBeLessThan(0.5);
+    expect(solve.bands[1].width).toBe(0.6);
+    expect(solve.width).toBe(0.6);
+  }, 60_000);
 });
