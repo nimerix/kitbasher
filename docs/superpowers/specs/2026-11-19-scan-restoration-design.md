@@ -609,15 +609,14 @@ approved by the product owner.
   cross strap line, the neck collar arcs, the cable support spline and the pocket wall.
   Of the guides that now solve, the seven that gain a line each rebuild one edge, with a
   band 0.38 to 0.64 wide on either side of it, which does not show at whole-part scale.
-  The outlet arc is still
-  cut in 3 pieces, now with 31 triangles skipped where 21 were before, and its line tilts
-  across the collar with a bump at each end. Keep detail cannot tell molded relief from
-  scan roughness. Sweep refused the cable and both elbows.
-- **Running a guide again.** On the reference scans, a guide run again over its own result
-  does not meet the statement that this changes nothing visible, nor the 0.002 re-run
-  tolerance, in "Verification" and "Changes made while building". The synthetic fixtures do
-  not show this. Measured with both passes at full strength, against 0.005 away from the
-  guide's ends (the last 0.5 at each end) and 0.02 anywhere:
+  The outlet arc is still cut in 3 pieces, now with 31 triangles skipped where 21 were
+  before, and its line tilts across the collar with a bump at each end. Keep detail cannot
+  tell molded relief from scan roughness. Sweep refused the cable and both elbows.
+- **Running a guide again.** The spec says that running a guide again over its own result
+  changes nothing visible, with a re-run tolerance of 0.002 in an edge's full-strength core
+  ("Verification", "Changes made while building"). On the reference scans this does not
+  hold. Measured with both passes at full strength, against 0.005 away from the guide's
+  ends (the last 0.5 at each end) and 0.02 anywhere, these guides fail:
   - The plate border, as a line before and after Flatten, moves 0.05 and is cut in 4
     pieces.
   - The belt edge moves 0.11 and is cut in 2 pieces with 8 triangles skipped.
@@ -628,23 +627,23 @@ approved by the product owner.
   - Detect's buckle guide moves 0.0159 away from the ends and 0.0223 anywhere, about as
     before these rules.
   - The kept frame rail moves 0.0054 away from the ends, where it moved 0.0036 before.
-  - On the fin edge, the wider buckle lip and the lighter outlet arc the second pass is
-    refused. It moves nothing, but the guide does not solve on its own result, which is
-    not a stable result either.
-  - Only the kept strap lip and the barrel ring stay within both limits.
 
-  At each guide's own strength, as a user runs it again (under full strength for every
-  guide but Detect's buckle guide):
-  - The plate border moves 0.0785 (0.0788 after Flatten) and is cut in 2 pieces.
-  - The buckle lip moves 0.0169 away from the ends and is cut in 2 pieces.
+  Only the kept strap lip and the barrel ring stay within both limits. On the fin edge, the
+  wider buckle lip and the lighter outlet arc the second pass is refused. It moves nothing,
+  but the guide does not solve on its own result, which is not a stable result either.
+
+  The study ran every guide but Detect's buckle guide below full strength. Below full
+  strength each pass moves the surface part of the way again, so a move over 0.005 there is
+  expected and is not counted as falling short. Run again at their own strength, every one
+  of those guides that solves again moves more than 0.005 away from the ends, except the
+  barrel ring, as expected. What is a fault at any strength:
   - The outlet arc's second pass is refused. Before these rules it solved in 3 pieces with
     28 triangles skipped.
-  - Over both limits: the fin edge (0.0228 away from the ends, 0.0423 anywhere), Detect's
-    buckle guide (0.0159 and 0.0223) and the valve rim (0.0199 and 0.0289).
-  - Over 0.005 away from the ends: the wider buckle lip (0.0161), the belt edge (0.0147),
-    the lighter outlet arc (0.0181), and the kept strap lip (0.0131) and frame rail
-    (0.0176), which moved 0.013 and 0.0154 before these rules.
-  - Only the barrel ring stays within both limits (0.0045 and 0.0076).
+  - The plate border is cut in 2 pieces, and moves 0.0785 (0.0788 after Flatten).
+  - The buckle lip is cut in 2 pieces.
+
+  The synthetic fixtures show none of this: on them a second pass moves only a few cut-line
+  vertices near a guide's free ends, by about 0.01.
 
 - **Performance.** A preview update takes 92 to 106 ms for a strap lip guide on part 45
   and 139 to 165 ms for the valve rim on part 57 (80 to 96 ms and 150 to 163 ms before the
