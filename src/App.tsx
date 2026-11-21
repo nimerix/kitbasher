@@ -27,6 +27,7 @@ import {
   LoaderCircle,
   Magnet,
   Shield,
+  Sparkles,
   Maximize,
   MousePointer2,
   Move3D,
@@ -48,7 +49,15 @@ import {
   Undo2,
   X,
 } from 'lucide-react';
-import { liveHost, liveSession, useEditor, type WarpGizmo } from './core/store';
+import {
+  liveHost,
+  liveSession,
+  refineHoldsWork,
+  useEditor,
+  type RefineMode,
+  type WarpGizmo,
+} from './core/store';
+import { refineLeaveHint } from './components/refine-panel';
 import {
   chooseTransformTool,
   downloadCurrentScene,
@@ -372,6 +381,7 @@ function Toolbar({
     paint: useShortcut('paint'),
     anchors: useShortcut('anchors'),
     warp: useShortcut('warp'),
+    refine: useShortcut('refine'),
     joint: useShortcut('joint'),
     measure: useShortcut('measure'),
   };
@@ -467,7 +477,7 @@ function Toolbar({
           <span>Pin</span>
         </button>
         <button
-          className={`tool-button ${tool === 'anchors' ? 'active' : ''}`}
+          className={`tool-button compact-tool ${tool === 'anchors' ? 'active' : ''}`}
           title={withShortcut('Rigid anchor fit', keys.anchors)}
           onClick={() => useEditor.getState().setTool('anchors')}
         >
@@ -483,6 +493,15 @@ function Toolbar({
           <Grid3x3 size={16} />
           <span>Warp</span>
           {keys.warp ? <Keyboard>{keys.warp}</Keyboard> : null}
+        </button>
+        <button
+          className={`tool-button refine-tool ${tool === 'refine' ? 'active' : ''}`}
+          title={withShortcut('Refine edges and surfaces on a scan', keys.refine)}
+          onClick={() => useEditor.getState().setTool('refine')}
+        >
+          <Sparkles size={16} />
+          <span>Refine</span>
+          {keys.refine ? <Keyboard>{keys.refine}</Keyboard> : null}
         </button>
         <button
           className={`tool-button compact-tool ${tool === 'joint' ? 'active' : ''}`}
@@ -608,6 +627,22 @@ function Toolbar({
   );
 }
 
+/** The status hint for each Refine mode, naming the brush size keys as bound. */
+function refineHints(mode: RefineMode | 'building', smaller: string, larger: string) {
+  switch (mode) {
+    case 'building':
+      return 'Preparing the surface…';
+    case 'edge':
+      return 'Click along a rounded edge to place a guide. Enter accepts, Esc dismisses.';
+    case 'region':
+      return 'Paint the area to treat. Alt erases.';
+    case 'brush':
+      return `Drag across the surface.${smaller && larger ? ` ${smaller} and ${larger} change the brush size.` : ''}`;
+    case 'detect':
+      return 'Find edges and surfaces, then accept the proposals you want.';
+  }
+}
+
 function StatusBar() {
   const freeMode = useEditor((s) => s.freeTransform?.mode);
   const pivotPicking = useEditor((s) => s.pivotPicking),
@@ -618,7 +653,18 @@ function StatusBar() {
     indexing = useEditor((s) => s.indexingMeshes > 0),
     live = useEditor((s) => s.liveStatus),
     warpStage = useEditor((s) => (s.tool === 'warp' ? s.warp?.stage : undefined)),
-    warpAdd = useEditor((s) => s.warpAdd);
+    warpAdd = useEditor((s) => s.warpAdd),
+    refineMode = useEditor((s) =>
+      s.tool === 'refine' && s.refine
+        ? s.refine.stage === 'building'
+          ? 'building'
+          : s.refine.mode
+        : undefined,
+    ),
+    // Escape keeps the tool while leaving would lose work, so the hint says how to leave.
+    refineWork = useEditor(
+      (s) => s.tool === 'refine' && s.refine?.stage === 'ready' && refineHoldsWork(s.refine),
+    );
   const hold = useShortcut('holdOrbit'),
     cancel = useShortcut('cancel'),
     pivot = useShortcut('pivot'),
@@ -643,32 +689,36 @@ function StatusBar() {
           {freeMode
             ? 'Move pointer · X / Y / Z: axis · Enter / click: confirm · Esc / right-click: cancel'
             : indexing
-              ? 'Preparing a dense mesh · It can be clicked when this finishes'
+              ? refineMode && refineMode !== 'building'
+                ? 'Preparing a dense mesh. Strokes, paint and handle drags wait. Single clicks still work.'
+                : 'Preparing a dense mesh · It can be clicked when this finishes'
               : navigationMode
                 ? `${navigationMode === 'pan' ? 'Pan' : 'Orbit'} tool · Drag to navigate${cancel ? ` · ${cancel} to return` : ''}`
                 : pivotPicking
                   ? `Click a model surface to set its pivot${[pivot, cancel].some(Boolean) ? ` · ${[pivot, cancel].filter(Boolean).join(' or ')} to cancel` : ''}`
                   : surfacePainting
                     ? `Drag to paint · Alt erases${smaller || larger ? ` · ${[smaller, larger].filter(Boolean).join(' / ')} brush size` : ''} · ${orbitHint} orbits`
-                    : warpStage === 'warp'
-                      ? warpAdd === 'line'
-                        ? `Drag on the surface to draw a line · Esc discards it · ${orbitHint} orbits`
-                        : warpAdd === 'area'
-                          ? `Drag to paint an area${smaller || larger ? ` · ${[smaller, larger].filter(Boolean).join(' / ')} brush size` : ''} · Esc discards it · ${orbitHint} orbits`
-                          : 'Click the surface to add a control point · Drag a handle to warp · Shift for fine adjustment'
-                      : warpStage
-                        ? `Paint the area to warp, or choose Whole part · Alt erases · ${orbitHint} orbits`
-                        : tool === 'align'
-                          ? `Pick source → target · ${orbitHint} orbits`
-                          : tool === 'pins'
-                            ? 'Place hard or soft pins on the surface · Move or rotate to adjust the part'
-                            : tool === 'anchors'
-                              ? 'Add surface anchors · Drag a target to fit · Shift for fine adjustment'
-                              : tool === 'joint'
-                                ? 'Pick anchors to connect parts'
-                                : ['translate', 'rotate', 'scale', 'transform'].includes(tool)
-                                  ? 'Hold Shift while dragging for 10× finer adjustment'
-                                  : 'Shift + click to select multiple'}
+                    : refineMode
+                      ? `${refineHints(refineMode, smaller, larger)}${refineWork ? ` ${refineLeaveHint}` : ''}`
+                      : warpStage === 'warp'
+                        ? warpAdd === 'line'
+                          ? `Drag on the surface to draw a line · Esc discards it · ${orbitHint} orbits`
+                          : warpAdd === 'area'
+                            ? `Drag to paint an area${smaller || larger ? ` · ${[smaller, larger].filter(Boolean).join(' / ')} brush size` : ''} · Esc discards it · ${orbitHint} orbits`
+                            : 'Click the surface to add a control point · Drag a handle to warp · Shift for fine adjustment'
+                        : warpStage
+                          ? `Paint the area to warp, or choose Whole part · Alt erases · ${orbitHint} orbits`
+                          : tool === 'align'
+                            ? `Pick source → target · ${orbitHint} orbits`
+                            : tool === 'pins'
+                              ? 'Place hard or soft pins on the surface · Move or rotate to adjust the part'
+                              : tool === 'anchors'
+                                ? 'Add surface anchors · Drag a target to fit · Shift for fine adjustment'
+                                : tool === 'joint'
+                                  ? 'Pick anchors to connect parts'
+                                  : ['translate', 'rotate', 'scale', 'transform'].includes(tool)
+                                    ? 'Hold Shift while dragging for 10× finer adjustment'
+                                    : 'Shift + click to select multiple'}
         </span>
       </div>
       <div className="local-save-status">
@@ -794,7 +844,7 @@ export default function App() {
     };
   }, []);
   useEffect(() => {
-    if (['align', 'joint', 'anchors', 'pins', 'warp'].includes(tool)) setRight(true);
+    if (['align', 'joint', 'anchors', 'pins', 'warp', 'refine'].includes(tool)) setRight(true);
   }, [tool]);
   useEffect(() => {
     // Dropped files belong to one import dialog, not to the next one opened from a menu.

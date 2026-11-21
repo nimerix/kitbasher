@@ -4,7 +4,7 @@ import { nextIsolation } from './isolation';
 import { matchKeyAction } from './keybindings';
 import type { KeyActionId, KeyInput } from './keybindings';
 import { primaryShortcutText, usePreferences } from './preferences';
-import { canRedo, canUndo, useEditor, warpEdited, type WarpGizmo } from './store';
+import { canRedo, canUndo, refineEdited, useEditor, warpEdited, type WarpGizmo } from './store';
 import {
   activeTransformTool,
   stepTransform,
@@ -39,19 +39,24 @@ export async function downloadCurrentScene() {
 
 type EditorState = ReturnType<typeof useEditor.getState>;
 
-/** Whether scene undo and redo would end a warp session that holds work. */
-const holdingWarp = (state: EditorState) =>
-  state.tool === 'warp' && !!state.warp && warpEdited(state.warp);
+/** Whether scene undo and redo would end a warp or refine session that holds work. */
+const holdingSession = (state: EditorState) =>
+  (state.tool === 'warp' && !!state.warp && warpEdited(state.warp)) ||
+  (state.tool === 'refine' && !!state.refine && refineEdited(state.refine));
 
 /**
- * What Undo steps back first: a paint stroke, a step of the warp session, or the scene. Scene
- * undo would leave the warp tool and end the session, so it waits until the session holds no work.
+ * What Undo steps back first: a paint stroke, a step of the warp or refine session, or the scene.
+ * Scene undo would leave the tool and end the session, so it waits until the session holds no work.
  */
-function undoTarget(state: EditorState) {
+export function undoTarget(state: EditorState) {
   if (state.tool === 'warp' && state.warp) {
     if (state.paintHistory.length) return 'stroke';
     if (state.warp.undo.length) return 'warp';
-    return holdingWarp(state) ? null : 'scene';
+    return holdingSession(state) ? null : 'scene';
+  }
+  if (state.tool === 'refine' && state.refine) {
+    if (state.refine.undo.length) return 'refine';
+    return holdingSession(state) ? null : 'scene';
   }
   if (state.tool === 'align' && state.operation.mode === 'surface' && state.paintHistory.length)
     return 'stroke';
@@ -63,7 +68,12 @@ export const undoAvailable = (state: EditorState) => {
   return target === 'scene' ? canUndo(state) || state.paintHistory.length > 0 : target !== null;
 };
 
-export const redoAvailable = (state: EditorState) => canRedo(state) && !holdingWarp(state);
+/** Whether Redo steps a refine session forward rather than the scene. */
+const redoingRefine = (state: EditorState) =>
+  state.tool === 'refine' && !!state.refine?.redo.length;
+
+export const redoAvailable = (state: EditorState) =>
+  redoingRefine(state) || (canRedo(state) && !holdingSession(state));
 
 /** Chooses a transform tool, or while warping, the gizmo that moves control points. */
 export function chooseTransformTool(tool: WarpGizmo) {
@@ -118,12 +128,18 @@ export function editorCommands(context: CommandContext = {}) {
         const target = undoTarget(state);
         if (target === 'stroke') state.undoPaintStroke();
         else if (target === 'warp') void state.undoWarpEdit();
+        else if (target === 'refine') state.undoRefine();
         else if (target === 'scene') state.undo();
       },
       idle && undoAvailable(state),
       'undo',
     ),
-    redo: command('Redo', state.redo, idle && redoAvailable(state), 'redo'),
+    redo: command(
+      'Redo',
+      () => (redoingRefine(state) ? state.redoRefine() : state.redo()),
+      idle && redoAvailable(state),
+      'redo',
+    ),
     selectAll: command(
       'Select all components',
       state.selectAll,
@@ -135,7 +151,7 @@ export function editorCommands(context: CommandContext = {}) {
     cut: command(
       'Cut components',
       () => state.copySelected(true),
-      idle && editable && !holdingWarp(state),
+      idle && editable && !holdingSession(state),
       'cut',
     ),
     paste: command(
@@ -159,7 +175,7 @@ export function editorCommands(context: CommandContext = {}) {
     delete: command(
       'Delete unlocked parts',
       state.deleteSelected,
-      idle && editable && !holdingWarp(state),
+      idle && editable && !holdingSession(state),
       'delete',
     ),
     move: command('Move', () => chooseTransformTool('translate'), idle && editable, 'move'),

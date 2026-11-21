@@ -2,11 +2,17 @@ import { useEffect, useRef } from 'react';
 import { joinLiveSession } from '../core/live';
 import {
   committedScene,
+  chosenRefinePoint,
+  brushingRefine,
+  drawingRefineGuide,
   liveSession,
+  paintingRefine,
   paintingWarpArea,
   paintingWarpRegion,
+  refineBrushRadius,
   useEditor,
   warpBrushRadius,
+  refineHoldsWork,
 } from '../core/store';
 import { readRecovery, saveRecovery } from '../core/recovery';
 import { driveAutosave, useDrive } from '../core/drive-sync';
@@ -14,6 +20,63 @@ import { chooseTransformTool, executeEditorCommand, shortcutCommand } from '../c
 import { isEditableTarget, keyboardContextMenu } from '../core/context-menu';
 import { actionRepeats, keyName, matchKeyAction } from '../core/keybindings';
 import { usePreferences } from '../core/preferences';
+import { refineTargets } from '../components/refine-panel';
+
+/** Key actions that choose a tool. */
+export const keyTools = {
+  select: 'select',
+  align: 'align',
+  joint: 'joint',
+  anchors: 'anchors',
+  warp: 'warp',
+  refine: 'refine',
+  measure: 'measure',
+} as const;
+
+/**
+ * What Escape, Delete and Enter do in the Refine tool. Escape dismisses the guide being drawn in
+ * Edge mode and lets go of (deselects, never dismisses) a crease guide waiting in Brush mode;
+ * otherwise, unless the session holds work leaving would lose, it returns false and the tool is
+ * left. Delete dismisses and Enter accepts the mode's
+ * targets; Enter first finishes a spline being drawn. Without a ready session they do nothing,
+ * and Delete never reaches the scene's parts.
+ */
+export function refineKey(
+  state: ReturnType<typeof useEditor.getState>,
+  action: 'cancel' | 'delete' | 'apply',
+) {
+  const refine = state.refine?.stage === 'ready' ? state.refine : null;
+  const point = refine && chosenRefinePoint(refine);
+  if (action === 'cancel') {
+    if (point) {
+      state.clearChosenRefinePoint();
+      return true;
+    }
+    const guide = refine?.mode === 'edge' && drawingRefineGuide(refine);
+    if (guide) state.dismissRefine([guide]);
+    else if (refine?.mode === 'brush' && refineTargets(refine).length) state.selectRefine([]);
+    // Leaving would discard the session; with work in it Escape stays (the status line says how
+    // to leave), and only an empty or untouched session lets the tool go.
+    else if (!refine || !refineHoldsWork(refine)) return false;
+    return true;
+  }
+  if (!refine) return true;
+  if (action === 'delete' && point) {
+    state.removeChosenRefinePoint();
+    return true;
+  }
+  if (action === 'apply' && refine.draggingHandle) return true;
+  if (action === 'apply' && refine.drawing) {
+    state.finishRefineGuide();
+    return true;
+  }
+  const ids = refineTargets(refine).map((f) => f.id);
+  if (ids.length) {
+    if (action === 'apply') state.acceptRefine();
+    else state.dismissRefine(ids);
+  }
+  return true;
+}
 
 export function useLiveSession() {
   useEffect(() => (liveSession ? joinLiveSession() : undefined), []);
@@ -146,22 +209,14 @@ export function useKeyboard(openScene: () => void, searchParts: () => void) {
         scale: 'scale',
         transform: 'transform',
       } as const;
-      const tools = {
-        select: 'select',
-        align: 'align',
-        joint: 'joint',
-        anchors: 'anchors',
-        warp: 'warp',
-        measure: 'measure',
-      } as const;
       if (action in transformTools) {
         event.preventDefault();
         chooseTransformTool(transformTools[action as keyof typeof transformTools]);
         return;
       }
-      if (action in tools) {
+      if (action in keyTools) {
         event.preventDefault();
-        state.setTool(tools[action as keyof typeof tools]);
+        state.setTool(keyTools[action as keyof typeof keyTools]);
         return;
       }
       switch (action) {
@@ -182,15 +237,20 @@ export function useKeyboard(openScene: () => void, searchParts: () => void) {
         case 'brushSmaller':
         case 'brushLarger': {
           const warping = paintingWarpRegion(state) || paintingWarpArea(state);
-          if (!paintingSurface && !warping) return;
+          const refining = paintingRefine(state) || brushingRefine(state);
+          if (!paintingSurface && !warping && !refining) return;
           event.preventDefault();
           const radius = Number(
             (
-              (warping ? warpBrushRadius(state) : state.brushRadius) *
-              (action === 'brushSmaller' ? 0.8 : 1.25)
+              (warping
+                ? warpBrushRadius(state)
+                : refining
+                  ? refineBrushRadius(state)
+                  : state.brushRadius) * (action === 'brushSmaller' ? 0.8 : 1.25)
             ).toFixed(2),
           );
           if (warping) state.setWarpBrushRadius(radius);
+          else if (refining) state.setRefineBrushRadius(radius);
           else state.setBrush({ radius });
           return;
         }
@@ -234,6 +294,8 @@ export function useKeyboard(openScene: () => void, searchParts: () => void) {
             state.setNavigationMode(null);
             return;
           }
+          // Otherwise Escape leaves the tool, as it does for Warp.
+          if (state.tool === 'refine' && refineKey(state, 'cancel')) return;
           const wasSelecting = state.tool === 'select';
           state.setTool('select');
           state.resetPicks();
@@ -244,10 +306,17 @@ export function useKeyboard(openScene: () => void, searchParts: () => void) {
           event.preventDefault();
           if (state.tool === 'warp' && state.warp) {
             if (state.warp.stage === 'warp') state.removeWarpPoints();
-          } else executeEditorCommand('delete');
+          } else if (state.tool === 'refine') refineKey(state, 'delete');
+          else executeEditorCommand('delete');
           return;
         case 'apply':
-          if (nativeActivation || !['align', 'joint'].includes(state.tool)) return;
+          if (nativeActivation) return;
+          if (state.tool === 'refine') {
+            event.preventDefault();
+            refineKey(state, 'apply');
+            return;
+          }
+          if (!['align', 'joint'].includes(state.tool)) return;
           event.preventDefault();
           if (state.tool === 'joint') state.createJoint();
           else state.applyAlignment();

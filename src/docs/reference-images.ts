@@ -130,6 +130,14 @@ export const referenceImages = {
     caption:
       'Explode separates the parts for inspection. Return the slider to 0% before measuring or evaluating an assembled join.',
   },
+  refine: {
+    src: './images/reference/refine.webp',
+    width: 1440,
+    height: 1000,
+    alt: 'Refine panel in Edge mode beside a synthetic block with softened edges. An accepted edge runs along the top front edge as a solid green line, and a pending guide runs down the right front edge as a dashed line with square handles at its ends. The panel reads 1 accepted · 1 proposed.',
+    caption:
+      'The accepted edge is solid and the selected pending guide is dashed between its handles. Accept keeps a guide in this session; Apply saves the accepted edges to the part.',
+  },
   mobilePanels: {
     src: './images/reference/mobile-panels.webp',
     width: 640,

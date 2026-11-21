@@ -42,7 +42,7 @@ import { partMeshes } from '../xr/part-meshes';
 /** Handle colours, shared with the point markers. */
 export const pointAccent = '#ed9b54',
   pointIdle = '#e9eaec';
-const casingColor = '#15181b';
+export const casingColor = '#15181b';
 
 /** Screen pixels between the spots a stroke is sampled at, whatever the pointer's speed. */
 const strokeStep = 2;
@@ -62,7 +62,7 @@ const lineLiftMax = 0.05;
 const glsl = (value: number) => (Number.isInteger(value) ? `${value}.0` : `${value}`);
 
 /** A line material whose corners lie on the surface's tangent plane, lifted a little toward the eye. */
-function liftedLine(color: string, width: number) {
+export function liftedLine(color: string, width: number) {
   const material = new LineMaterial({ color, linewidth: width });
   material.onBeforeCompile = (shader) => {
     shader.vertexShader = shader.vertexShader

@@ -314,6 +314,32 @@ surfaces were drawn. The work is sliced, so the viewport keeps drawing throughou
 | Unindexed scan | 1.2M      | 0.26 to 0.31 s              | 0.05 s                     |
 | Unindexed scan | 10M       | 0.67 to 0.68 s              | 0.05 s                     |
 
+Refine was timed with `KITBASHER_REFINE_BENCH=m4 npx vitest run tests/unit/refine-benchmark.test.ts`
+on a 3-million-triangle unindexed sphere, cut by two planes and rippled, with a 40 mm line guide
+along the rounded edge where the planes meet. The same operations were timed on scans with
+861,910 and 827,970 triangles. Times are single runs on a machine shared with other work.
+
+| Refine operation                          | 3M sphere | Two scans      |
+| ----------------------------------------- | --------- | -------------- |
+| Build the model                           | 1.44 s    | 0.69 s, 0.72 s |
+| Preview update (solve plus uncut apply)   | 0.93 s    | 0.13 s, 0.10 s |
+| Accept: solve, cut, topology, geometry    | 2.0 s     | 0.43 s, 0.38 s |
+| Smooth region, 200,000 triangles          | 1.37 s    | 1.78 s, 2.06 s |
+| Smooth region, 20,000 triangles           | -         | 0.17 s, 0.18 s |
+| Flatten region on a plate                 | -         | 0.17 s, 0.04 s |
+| Shape region on a barrel or tank          | -         | 0.39 s, 0.34 s |
+| Sweep region, 20,000 triangles of hose    | -         | 0.69 s         |
+| Smooth dab after the first, median        | 2.5 ms    | 20 ms, 9.4 ms  |
+| Flatten dab after the first, median       | -         | 8.2 ms, 4.3 ms |
+| Crease stroke, end to end                 | -         | 0.45 s         |
+| Detection over the whole part             | 29.5 s    | 8.6 s, 8.8 s   |
+| Detection job, with each proposal's check | -         | 23.7 s, 24.2 s |
+
+While a guide's handle is dragged, its draft is rebuilt once the pointer rests for 120 ms or is
+released, so the guide follows the pointer at the frame rate: frames during a drag on a scan took
+16.7 ms at the median and 18.1 ms at the 90th percentile, where each move had rebuilt the draft
+in 93 ms before.
+
 The GLB exporter's limit was located by bisection: 2,036 MiB of output works and 2,060 MiB does
 not. Preparing a mesh for clicking took 19 s at 120 million triangles and failed at 150 million
 with `Array buffer allocation failed`.

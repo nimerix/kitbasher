@@ -15,7 +15,8 @@ export type Tool =
   | 'measure'
   | 'pins'
   | 'anchors'
-  | 'warp';
+  | 'warp'
+  | 'refine';
 export type AlignmentMode = 'point' | 'point-plane' | 'plane' | 'multi' | 'surface';
 export type AlignmentView = 'scene' | 'pair' | 'active' | 'ghost';
 

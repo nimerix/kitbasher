@@ -25,6 +25,7 @@ export const keyActions = {
   paint: { group: 'Tools', label: 'Paint contact surfaces', keys: ['B'] },
   anchors: { group: 'Tools', label: 'Rigid anchor fit', keys: ['K'] },
   warp: { group: 'Tools', label: 'Warp', keys: ['W'] },
+  refine: { group: 'Tools', label: 'Refine', keys: ['E'] },
   joint: { group: 'Tools', label: 'Create joint', keys: ['J'] },
   measure: { group: 'Tools', label: 'Measure distance', keys: ['D'] },
   brushSmaller: { group: 'Tools', label: 'Shrink paint brush', keys: ['['], repeat: true },

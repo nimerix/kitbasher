@@ -16,19 +16,34 @@ export interface BvhRequest {
   options: typeof bvhOptions;
 }
 
+/** Geometries whose positions may be edited while their index builds; see prepareEditedForPicking. */
+const edited = new WeakSet<BufferGeometry>();
+
+/** What a tree's triangle layout depends on: the attributes and index, not the positions' values. */
+function layoutKey(geometry: BufferGeometry) {
+  const position = geometry.getAttribute('position');
+  const index = geometry.index;
+  return [position, position?.count, index, index?.array, index?.count, index?.version];
+}
+const sameLayout = (a: unknown[], b: unknown[]) => a.every((value, i) => value === b[i]);
+
+/** Thrown when an edited geometry's layout changed while its index was built, so it is built again. */
+class LayoutChanged extends Error {}
+
 function buildInWorker(geometry: BufferGeometry, signal: AbortSignal, taskId: string) {
   const key = geometryKey(geometry);
+  const layout = layoutKey(geometry);
   return new Promise<void>((resolve, reject) => {
     if (signal.aborted) return resolve();
     let worker: Worker | undefined;
     let settled = false;
-    const finish = (error?: string) => {
+    const finish = (error?: string | Error) => {
       if (settled) return;
       settled = true;
       signal.removeEventListener('abort', cancel);
       worker?.terminate();
       if (error === undefined) resolve();
-      else reject(new Error(error));
+      else reject(error instanceof Error ? error : new Error(error));
     };
     const cancel = () => finish();
     signal.addEventListener('abort', cancel, { once: true });
@@ -43,12 +58,18 @@ function buildInWorker(geometry: BufferGeometry, signal: AbortSignal, taskId: st
         }
         if (data.error) return finish(data.error);
         try {
-          if (geometryKey(geometry) !== key)
+          const moved = geometryKey(geometry) !== key;
+          if (moved && edited.has(geometry) && !sameLayout(layout, layoutKey(geometry)))
+            throw new LayoutChanged('The mesh changed while preparing its surface index.');
+          if (moved && !edited.has(geometry))
             throw new Error('The mesh changed while preparing its surface index.');
-          geometry.boundsTree = MeshBVH.deserialize(data.bvh, geometry, { setIndex: false });
+          const tree = MeshBVH.deserialize(data.bvh, geometry, { setIndex: false });
+          // Its triangles are unchanged, so the tree stands once its bounds follow the edits.
+          if (moved) tree.refit();
+          geometry.boundsTree = tree;
           finish();
         } catch (error) {
-          finish((error as Error).message);
+          finish(error instanceof LayoutChanged ? error : (error as Error).message);
         }
       };
       worker.onerror = (event) => finish(event.message || 'The worker stopped.');
@@ -105,6 +126,16 @@ async function buildIndex(geometry: BufferGeometry, signal: AbortSignal, taskId:
   await buildInWorker(geometry, signal, taskId);
 }
 
+/**
+ * As prepareForPicking, for a geometry whose positions are edited in place while its index builds:
+ * the finished tree is refitted to the positions of that moment, and an index whose triangles no
+ * longer match is built again, so the geometry always ends up indexed.
+ */
+export function prepareEditedForPicking(geometry: BufferGeometry) {
+  edited.add(geometry);
+  prepareForPicking(geometry);
+}
+
 export function prepareForPicking(geometry: BufferGeometry) {
   const triangles = triangleCount(geometry);
   if (triangles <= indexedTriangles || geometry.boundsTree || building.has(geometry)) return;
@@ -133,6 +164,7 @@ export function prepareForPicking(geometry: BufferGeometry) {
   const count = (change: number) =>
     useEditor.setState((state) => ({ indexingMeshes: state.indexingMeshes + change }));
   count(1);
+  let rebuild = false;
   void backgroundWork
     .run(
       meshWorkBytes(geometry),
@@ -142,6 +174,11 @@ export function prepareForPicking(geometry: BufferGeometry) {
           if (!controller.signal.aborted)
             completeTask(taskId, 'Surface index ready for picking and fitting.');
         } catch (error) {
+          if (error instanceof LayoutChanged && !controller.signal.aborted) {
+            rebuild = true;
+            cancelTask(taskId, 'The mesh changed, so its surface index is built again.');
+            return;
+          }
           failTask(
             taskId,
             `${error instanceof Error ? error.message : String(error)} Select this mesh in the parts list.`,
@@ -157,6 +194,7 @@ export function prepareForPicking(geometry: BufferGeometry) {
       geometry.removeEventListener('dispose', dispose);
       building.delete(geometry);
       count(-1);
+      if (rebuild && !controller.signal.aborted) prepareForPicking(geometry);
     });
 }
 

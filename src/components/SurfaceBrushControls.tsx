@@ -1,18 +1,29 @@
+import type { ReactNode } from 'react';
 import { Eraser, Paintbrush, Undo2 } from 'lucide-react';
 import { useEditor } from '../core/store';
 import { LogRangeInput, NumericInput } from './ui';
 
 type EditorState = ReturnType<typeof useEditor.getState>;
 
-/** With `fitted`, the radius is the caller's and the slider is logarithmic over its range. */
+/**
+ * With `fitted`, the radius is the caller's and the slider is logarithmic over its range. A caller
+ * whose painting has its own undo and ignores the seed plane turns those off, and `radius` replaces
+ * the radius field and slider.
+ */
 export function SurfaceBrushControls({
   fitted,
+  paintUndo = true,
+  seedPlane = true,
+  radius: radiusControl,
 }: {
   fitted?: {
     radius: (state: EditorState) => number;
     range: { min: number; max: number };
     set: (radius: number) => void;
   };
+  paintUndo?: boolean;
+  seedPlane?: boolean;
+  radius?: ReactNode;
 } = {}) {
   const radius = useEditor((state) => (fitted ? fitted.radius(state) : state.brushRadius)),
     setRadius = fitted?.set ?? ((radius: number) => useEditor.getState().setBrush({ radius })),
@@ -21,7 +32,11 @@ export function SurfaceBrushControls({
     plane = useEditor((state) => state.brushPlane);
   return (
     <>
-      <div className="paint-brush-modes" role="group" aria-label="Surface brush mode">
+      <div
+        className={paintUndo ? 'paint-brush-modes' : 'paint-brush-modes without-undo'}
+        role="group"
+        aria-label="Surface brush mode"
+      >
         <button
           className={!erase ? 'active' : ''}
           aria-pressed={!erase}
@@ -36,92 +51,100 @@ export function SurfaceBrushControls({
         >
           <Eraser size={14} /> Erase
         </button>
-        <button
-          title="Undo last paint stroke"
-          aria-label="Undo last paint stroke"
-          disabled={!history.length}
-          onClick={() => useEditor.getState().undoPaintStroke()}
-        >
-          <Undo2 size={14} />
-        </button>
-      </div>
-      <label className="brush-radius">
-        <span>Brush radius</span>
-        <NumericInput
-          label="Brush radius"
-          value={radius}
-          min={0.05}
-          max={100}
-          step={fitted ? 0.1 : 0.5}
-          onCommit={setRadius}
-        />
-        <small>mm</small>
-      </label>
-      {fitted ? (
-        <LogRangeInput
-          className="brush-radius-slider"
-          label="Brush radius slider"
-          value={radius}
-          min={fitted.range.min}
-          max={fitted.range.max}
-          onChange={setRadius}
-        />
-      ) : (
-        <input
-          className="brush-radius-slider"
-          aria-label="Brush radius slider"
-          type="range"
-          min={0.1}
-          max={20}
-          step={0.1}
-          value={Math.min(radius, 20)}
-          onChange={(event) => setRadius(Number(event.target.value))}
-        />
-      )}
-      <div className="plane-brush-settings">
-        <div className="appearance-row">
-          <span>Stay on seed plane</span>
+        {paintUndo ? (
           <button
-            role="switch"
-            aria-label="Restrict brush to seed plane"
-            aria-checked={plane.enabled}
-            className={`toggle ${plane.enabled ? 'on' : ''}`}
-            onClick={() => useEditor.getState().setBrush({ plane: { enabled: !plane.enabled } })}
+            title="Undo last paint stroke"
+            aria-label="Undo last paint stroke"
+            disabled={!history.length}
+            onClick={() => useEditor.getState().undoPaintStroke()}
           >
-            <span />
+            <Undo2 size={14} />
           </button>
-        </div>
-        {plane.enabled ? (
-          <>
-            <label className="brush-radius">
-              <span>Normal tolerance</span>
-              <NumericInput
-                label="Brush plane angle tolerance"
-                value={plane.angle}
-                min={0}
-                max={90}
-                onCommit={(angle) => useEditor.getState().setBrush({ plane: { angle } })}
-              />
-              <small>°</small>
-            </label>
-            <label className="brush-radius">
-              <span>Plane tolerance</span>
-              <NumericInput
-                label="Brush plane distance tolerance"
-                value={plane.distance}
-                min={0}
-                max={100}
-                step={0.1}
-                onCommit={(distance) => useEditor.getState().setBrush({ plane: { distance } })}
-              />
-              <small>mm</small>
-            </label>
-            <p className="field-help">
-              Measured from this patch’s first hit. Clear a patch to choose a new seed plane.
-            </p>
-          </>
         ) : null}
       </div>
+      {radiusControl ?? (
+        <>
+          <label className="brush-radius">
+            <span>Brush radius</span>
+            <NumericInput
+              label="Brush radius"
+              value={radius}
+              min={0.05}
+              max={100}
+              step={fitted ? 0.1 : 0.5}
+              onCommit={setRadius}
+            />
+            <small>mm</small>
+          </label>
+          {fitted ? (
+            <LogRangeInput
+              className="brush-radius-slider"
+              label="Brush radius slider"
+              value={radius}
+              min={fitted.range.min}
+              max={fitted.range.max}
+              onChange={setRadius}
+            />
+          ) : (
+            <input
+              className="brush-radius-slider"
+              aria-label="Brush radius slider"
+              type="range"
+              min={0.1}
+              max={20}
+              step={0.1}
+              value={Math.min(radius, 20)}
+              onChange={(event) => setRadius(Number(event.target.value))}
+            />
+          )}
+        </>
+      )}
+      {seedPlane ? (
+        <div className="plane-brush-settings">
+          <div className="appearance-row">
+            <span>Stay on seed plane</span>
+            <button
+              role="switch"
+              aria-label="Restrict brush to seed plane"
+              aria-checked={plane.enabled}
+              className={`toggle ${plane.enabled ? 'on' : ''}`}
+              onClick={() => useEditor.getState().setBrush({ plane: { enabled: !plane.enabled } })}
+            >
+              <span />
+            </button>
+          </div>
+          {plane.enabled ? (
+            <>
+              <label className="brush-radius">
+                <span>Normal tolerance</span>
+                <NumericInput
+                  label="Brush plane angle tolerance"
+                  value={plane.angle}
+                  min={0}
+                  max={90}
+                  onCommit={(angle) => useEditor.getState().setBrush({ plane: { angle } })}
+                />
+                <small>°</small>
+              </label>
+              <label className="brush-radius">
+                <span>Plane tolerance</span>
+                <NumericInput
+                  label="Brush plane distance tolerance"
+                  value={plane.distance}
+                  min={0}
+                  max={100}
+                  step={0.1}
+                  onCommit={(distance) => useEditor.getState().setBrush({ plane: { distance } })}
+                />
+                <small>mm</small>
+              </label>
+              <p className="field-help">
+                Measured from this patch’s first hit. Clear a patch to choose a new seed plane.
+              </p>
+            </>
+          ) : null}
+        </div>
+      ) : null}
     </>
   );
 }
