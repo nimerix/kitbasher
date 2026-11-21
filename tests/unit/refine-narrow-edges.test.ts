@@ -47,16 +47,21 @@ const line = (model: Model, a: Vec3, b: Vec3, width: number | null, strength = 1
   strength,
 });
 
-/** Largest distance in (x, y) of the chain within `half` mm of z = 0 from the point `at`. */
+/**
+ * Largest distance in (x, y) of the chain within `half` mm of z = 0 from the point `at`. NaN when
+ * nothing was solved or no chain vertex lies in that window, so that no comparison passes on it.
+ */
 function chainOff(result: ReturnType<typeof outcome>, at: [number, number], half: number) {
   if (!result.solved) return NaN;
-  let worst = 0;
+  let worst = 0,
+    seen = 0;
   for (const v of result.chain) {
     const [x, y, z] = [0, 1, 2].map((a) => result.out.position[v * 3 + a]);
     if (Math.abs(z) > half) continue;
+    seen++;
     worst = Math.max(worst, Math.hypot(x - at[0], y - at[1]));
   }
-  return +worst.toFixed(4);
+  return seen ? +worst.toFixed(4) : NaN;
 }
 
 describe('a guide laid beside the edge', () => {
@@ -92,32 +97,43 @@ describe('a guide laid beside the edge', () => {
 
   it('solves or refuses cleanly at a width under its distance from the edge', () => {
     const model = edge();
+    const position = model.mesh.position.slice(),
+      corners = model.mesh.corners.slice();
     const r = outcome(model, line(model, [-0.28, 0, -1.4], [-0.28, 0, 1.4], 0.2, 0.65));
     if (r.solved) expect([r.pieces, r.skipped, r.folded]).toEqual([1, 0, 0]);
-    // A refusal is a plain one, with nothing cut.
-    else expect(r).toEqual({ solved: false });
+    else {
+      // A refusal is a plain one, with nothing cut and the source mesh as it was.
+      expect(r).toEqual({ solved: false });
+      expect(model.mesh.position).toEqual(position);
+      expect(model.mesh.corners).toEqual(corners);
+    }
   });
 
   it('takes the nearer of two edges 0.5 mm apart', () => {
-    // A belt: a face 0.5 mm wide between a 90 degree edge at x = 0 and another at x = -0.5.
-    for (const seed of [1, 2, 3]) {
-      const m = modelOf(
-        extrudedProfile(
-          [
-            [-0.5, -2],
-            [-0.5, 0],
-            [0, 0],
-            [0, -2],
-          ],
-          [0.08, 0.08],
-          4,
-          { ...scan, seed },
-        ),
-      );
-      const r = outcome(m, line(m, [-0.15, 0, -1.4], [-0.15, 0, 1.4], 0.4, 0.65));
-      expect(r.solved).toBe(true);
-      expect(chainOff(r, [0, 0], 0.7)).toBeLessThan(0.05);
-    }
+    // A belt: a face 0.5 mm wide between a 90 degree edge at x = 0 and another at x = -0.5. A guide
+    // 0.15 mm in from either edge takes that edge.
+    for (const [x, nearer] of [
+      [-0.15, 0],
+      [-0.35, -0.5],
+    ])
+      for (const seed of [1, 2, 3]) {
+        const m = modelOf(
+          extrudedProfile(
+            [
+              [-0.5, -2],
+              [-0.5, 0],
+              [0, 0],
+              [0, -2],
+            ],
+            [0.08, 0.08],
+            4,
+            { ...scan, seed },
+          ),
+        );
+        const r = outcome(m, line(m, [x, 0, -1.4], [x, 0, 1.4], 0.4, 0.65));
+        expect(r.solved && [r.pieces, r.skipped, r.folded]).toEqual([1, 0, 0]);
+        expect(chainOff(r, [nearer, 0], 0.7)).toBeLessThan(0.05);
+      }
   });
 });
 
