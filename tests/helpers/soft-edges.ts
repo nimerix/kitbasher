@@ -692,74 +692,7 @@ export function extrudedProfile(
 ) {
   const surface = new Surface(options);
   const step = surface.options.step;
-  type Piece =
-    | { line: true; from: Vec2; to: Vec2; length: number }
-    | { line: false; centre: Vec2; radius: number; start: number; turn: number; length: number };
-  const pieces: Piece[] = [];
-  const unit = (a: Vec2, b: Vec2): Vec2 => {
-    const l = Math.hypot(b[0] - a[0], b[1] - a[1]);
-    return [(b[0] - a[0]) / l, (b[1] - a[1]) / l];
-  };
-  let from = corners[0];
-  for (let i = 1; i < corners.length; i++) {
-    const corner = corners[i];
-    const r = i < corners.length - 1 ? radii[i - 1] : 0;
-    if (!r) {
-      pieces.push({
-        line: true,
-        from,
-        to: corner,
-        length: Math.hypot(corner[0] - from[0], corner[1] - from[1]),
-      });
-      from = corner;
-      continue;
-    }
-    const d1 = unit(corners[i - 1], corner),
-      d2 = unit(corner, corners[i + 1]);
-    const turn = Math.atan2(d1[0] * d2[1] - d1[1] * d2[0], d1[0] * d2[0] + d1[1] * d2[1]);
-    const tangent = r * Math.tan(Math.abs(turn) / 2);
-    const t1: Vec2 = [corner[0] - d1[0] * tangent, corner[1] - d1[1] * tangent];
-    const side = Math.sign(turn);
-    const centre: Vec2 = [t1[0] - d1[1] * r * side, t1[1] + d1[0] * r * side];
-    pieces.push({ line: true, from, to: t1, length: Math.hypot(t1[0] - from[0], t1[1] - from[1]) });
-    pieces.push({
-      line: false,
-      centre,
-      radius: r,
-      start: Math.atan2(t1[1] - centre[1], t1[0] - centre[0]),
-      turn,
-      length: r * Math.abs(turn),
-    });
-    from = [corner[0] + d2[0] * tangent, corner[1] + d2[1] * tangent];
-  }
-  const total = pieces.reduce((sum, piece) => sum + piece.length, 0);
-  const at = (s: number): Sample => {
-    for (const piece of pieces) {
-      if (s > piece.length && piece !== pieces[pieces.length - 1]) {
-        s -= piece.length;
-        continue;
-      }
-      if (piece.line) {
-        const d = unit(piece.from, piece.to);
-        return {
-          point: [piece.from[0] + d[0] * s, piece.from[1] + d[1] * s],
-          normal: [-d[1], d[0]],
-        };
-      }
-      const angle = piece.start + (Math.sign(piece.turn) * s) / piece.radius;
-      const radial: Vec2 = [Math.cos(angle), Math.sin(angle)];
-      // On a left turn the centre lies on the side the sheet faces.
-      const facing = piece.turn > 0 ? -1 : 1;
-      return {
-        point: [
-          piece.centre[0] + radial[0] * piece.radius,
-          piece.centre[1] + radial[1] * piece.radius,
-        ],
-        normal: [radial[0] * facing, radial[1] * facing],
-      };
-    }
-    throw new Error('empty profile');
-  };
+  const { total, at } = filletedProfile(corners, radii);
   const columns = Math.round(total / step) + 1,
     rows = Math.round(length / step) + 1;
   const index: number[][] = [];
@@ -780,7 +713,10 @@ export function extrudedProfile(
   return surface.geometry();
 }
 
-/** The polyline through `corners` with each interior corner rounded by `radii[i]`, by distance along it. */
+/**
+ * The polyline through `corners` with each interior corner rounded by `radii[i]`, as its length and
+ * its point and normal at a distance along it.
+ */
 function filletedProfile(corners: Vec2[], radii: number[]) {
   type Piece =
     | { line: true; from: Vec2; to: Vec2; length: number }
@@ -838,6 +774,7 @@ function filletedProfile(corners: Vec2[], radii: number[]) {
       }
       const angle = piece.start + (Math.sign(piece.turn) * s) / piece.radius;
       const radial: Vec2 = [Math.cos(angle), Math.sin(angle)];
+      // On a left turn the centre lies on the side the sheet faces.
       const facing = piece.turn > 0 ? -1 : 1;
       return {
         point: [
