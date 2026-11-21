@@ -111,13 +111,6 @@ const seedSpan = 0.3;
 /** The solved edge lies within this many mm of the guide, or `reachEdges` edge lengths if more. */
 const reachWidth = 0.35;
 const reachEdges = 6;
-/**
- * A flank's first seed may start up to this many times the reach from the guide, so that across a
- * rounding wider than the reach the far flank is still tried. In practice seeds are read only within
- * the reach and one seed span of the guide, inside the gather, which bounds a seed's start at about
- * one and a half reaches. The solved edge must still lie within the reach itself (`reaches`).
- */
-const seedReach = 2;
 /** Most degrees the measured normals may turn across a flank's first seed. */
 const flatTurn = 15;
 /** Fewest bins, each a sixth of a seed, over which the normals stop turning to start a first seed. */
@@ -1148,14 +1141,17 @@ function classifyOriented(
   const bySlice: number[][] = Array.from({ length: slices }, () => []);
   for (let i = 0; i < count; i++) bySlice[nearestSlice(i)].push(i);
 
-  // First seeds: per side, in bins a sixth of a seed wide from the guide outward, the runs that
-  // start within `seedReach` reaches of it over which the measured normals stop turning, until they
-  // turn again. Only where a seed may start goes past the reach; where the edge may lie does not.
+  // First seeds: per side, in bins a sixth of a seed wide from the guide outward, the runs over which
+  // the measured normals stop turning, until they turn again. A seed may start past the reach, so
+  // that across a rounding wider than the reach the far flank is still tried; the solved edge must
+  // still lie within the reach (`reaches`).
   // The nearest pair of runs whose normals differ by minBandAngle seeds the two flanks: a guide off
   // the crest sees the face it lies on from both sides, and a rounded rib turns all the way over.
   const limit = (flatTurn * Math.PI) / 180;
   const bin = span / seedEdges;
   const candidates = [1, -1].map((sign) => {
+    // The window seeds are read from: a seed may start anywhere in it, the reach plus one seed span,
+    // so at most about one and a half reaches from the guide.
     const bins = Math.ceil((reach + span) / bin);
     const turns = Array.from({ length: bins }, () => [] as number[]);
     const members = Array.from({ length: bins }, () => [] as number[]);
@@ -1167,8 +1163,7 @@ function classifyOriented(
     }
     const turn = turns.map((t) => (t.length ? median(t) : NaN));
     const stretches: { seed: number[]; turn: number; withinReach: boolean }[] = [];
-    const seedLimit = seedReach * reach;
-    for (let b = 0; b * bin <= seedLimit; b++) {
+    for (let b = 0; b < bins; b++) {
       let end = b;
       while (
         end + 1 < bins &&
@@ -1178,8 +1173,6 @@ function classifyOriented(
         end++;
       if (end - b < flatBins - 1) continue;
       const seedMembers = members.slice(b, end + 1).flat();
-      // A seed counts as near enough by its own vertices, not by where its first bin begins.
-      if (!seedMembers.some((i) => sign * u[i] <= seedLimit)) continue;
       stretches.push({
         seed: seedMembers,
         turn: median(turn.slice(b, end + 1)),
