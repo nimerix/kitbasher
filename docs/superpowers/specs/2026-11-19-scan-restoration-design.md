@@ -279,8 +279,8 @@ again over its own result changes nothing visible.
   scaled by Strength. Vertices beyond the threshold, and those connected to them above it,
   are detail: each island keeps its form and is carried with the surface under it, so a
   rivet stays seated on its plate.
-- **Smooth.** Low-pass smoothing that does not shrink, in repeated passes scaled by
-  Strength. With Keep detail on, detail is whatever stands off the smoothed base by more
+- **Smooth.** Each vertex moves onto a smooth surface fitted to the scan around it, within
+  Reach along the surface, scaled by Strength. With Keep detail on, detail is whatever stands off the smoothed base by more
   than the threshold, and it is carried in the same way.
 - **Border.** Vertices on the region's outer border and beyond keep their exact bits. The
   change fades in across the Blend band.
@@ -470,6 +470,36 @@ None of these came from the product owner. Each can be overruled.
 - **Region joining removed.** Detection had a pass that joined neighbouring regions on one
   surface. Removing it left the proposals on both reference scans identical, so it was
   removed.
+- **How Smooth works.** The approved text chose low-pass smoothing in repeated passes. As
+  built, Smooth fits a local quadratic surface around each vertex and moves the vertex onto
+  it.
+- **What the preview shows.** The preview shows the selected pending features of the
+  current mode's kind. Detect shows any kind.
+- **Preview while dragging.** While a guide point is dragged, the preview is rebuilt when
+  the pointer rests and on release, not on every move. Accept waits until that preview has
+  been shown.
+- **Re-run tolerances are fixture figures.** On a real hose a second Sweep over its own
+  result moved the surface by up to 0.037 mm, so the guide says to apply a Sweep once.
+
+## Where the build falls short of this spec
+
+Measured on the branch on 2026-11-20. None of this was approved by the product owner.
+
+- **The acceptance test is not met.** Both reference scans were refined by hand, feature by
+  feature, keeping only what looked better. 6 of 35 attempts were kept. Part 45's riveted
+  plate face is flatter with its fasteners kept, and one strap lip and one frame rail are
+  straighter. Part 57's two tank domes are less blotchy and one hose span is smoother. The
+  plate border, barrel rings and fin on 45, and the buckle, belt, flanges and pocket on 57,
+  were not restored. At whole-part scale the before and after renders are hard to tell
+  apart.
+- **Why.** An edge guide is refused unless it finds enough surface on both sides of the
+  edge, and narrow lips and rims give too little. Some guides that pass their checks are
+  cut in several pieces or leave a seam. Keep detail cannot tell molded relief from scan
+  roughness. Sweep refused the cable and both elbows.
+- **Performance.** A preview update takes 74 to 87 ms on the reference scans and 640 ms on
+  a 3 million triangle part. A smooth dab takes about 20 ms on part 45. Detect takes about
+  24 s on each scan and Accept about 0.35 to 0.4 s, followed by a pause of about 0.4 s
+  while picking is rebuilt. The tool is not usable for live preview at 3 million triangles.
 
 ## Out of scope (deferred)
 
