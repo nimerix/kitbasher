@@ -316,13 +316,13 @@ surfaces were drawn. The work is sliced, so the viewport keeps drawing throughou
 
 Refine was timed with `KITBASHER_REFINE_BENCH=m4 npx vitest run tests/unit/refine-benchmark.test.ts`
 on a 3-million-triangle unindexed sphere, cut by two planes and rippled, with a 40 mm line guide
-along the rounded edge where the planes meet. The same operations were timed on two
-860,000-triangle scans. Times are single runs on a machine shared with other work.
+along the rounded edge where the planes meet. The same operations were timed on scans with
+861,910 and 827,970 triangles. Times are single runs on a machine shared with other work.
 
-| Refine operation                          | 3M sphere | Two 860K scans |
+| Refine operation                          | 3M sphere | Two scans      |
 | ----------------------------------------- | --------- | -------------- |
 | Build the model                           | 1.44 s    | 0.69 s, 0.72 s |
-| Preview update: one edge solved and shown | 0.93 s    | 0.13 s, 0.10 s |
+| Preview update (solve plus uncut apply)   | 0.93 s    | 0.13 s, 0.10 s |
 | Accept: solve, cut, topology, geometry    | 2.0 s     | 0.43 s, 0.38 s |
 | Smooth region, 200,000 triangles          | 1.37 s    | 1.78 s, 2.06 s |
 | Smooth region, 20,000 triangles           | -         | 0.17 s, 0.18 s |

@@ -187,7 +187,6 @@ for (const part of ['45', '57'])
       ...(await framedViews(page)),
       ...(existsSync(extra) ? (JSON.parse(readFileSync(extra, 'utf8')) as View[]) : []),
     ];
-    await shoot(page, views[0], `${part}-${views[0].name}-before.png`);
     for (const view of views) await shoot(page, view, `${part}-${view.name}-before.png`);
     await turnOver(page, false);
     if (!existsSync(features)) return;

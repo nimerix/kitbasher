@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { BufferAttribute, BufferGeometry, Matrix4, SphereGeometry, Vector3 } from 'three';
 import { weldedPositionIndex } from '../../src/core/mesh-topology';
-import { buildTopology, cloneRefineMesh, writeRefinedGeometry } from '../../src/core/refine-mesh';
+import { cloneRefineMesh, writeRefinedGeometry } from '../../src/core/refine-mesh';
 import { cutAlongField, remapTriangles } from '../../src/core/refine-cut';
 import {
   closed,
@@ -422,7 +422,7 @@ it('remaps a painted set through the children map', () => {
   expect(remapped.size).toBe(new Set(children).size);
 });
 
-it('cuts a band of about 2,000 vertices in a mesh of 800,000 triangles in a fraction of a pass over it', () => {
+it('reads only local triangle corners to cut a band in a mesh of 800,000 triangles', () => {
   const { mesh, topology } = modelOf(new SphereGeometry(10, 640, 640));
   expect(mesh.triangleCount).toBeGreaterThanOrEqual(800_000);
   const band: number[] = [];
@@ -431,26 +431,25 @@ it('cuts a band of about 2,000 vertices in a mesh of 800,000 triangles in a frac
   expect(band.length).toBeGreaterThan(1500);
   expect(band.length).toBeLessThan(2500);
   const ids = Uint32Array.from(band);
-  // Each cut, on a fresh copy, is timed next to one pass over the whole mesh, best of five of each,
-  // so that load from other work on the machine falls on both alike.
-  let time = Infinity,
-    reference = Infinity;
-  for (let run = 0; run < 5; run++) {
-    const cut = cloneRefineMesh(mesh, true);
-    const field = Float32Array.from(ids, (v) => cut.position[v * 3 + 1] - 0.013);
-    let start = performance.now();
-    const result = cutAlongField(cut, topology, ids, field, (x, _y, z, out) =>
-      out.set([x, 0.013, z]),
-    );
-    time = Math.min(time, performance.now() - start);
-    expect(result.chain.length).toBeGreaterThan(0);
-    start = performance.now();
-    buildTopology(mesh);
-    reference = Math.min(reference, performance.now() - start);
-  }
-  console.log(
-    `cutAlongField: ${ids.length} band vertices, ${time.toFixed(1)} ms; buildTopology ${reference.toFixed(1)} ms`,
+  const cut = cloneRefineMesh(mesh, true);
+  // Reserve space so copying the backing array on growth is outside the traversal count.
+  const corners = new Uint32Array(mesh.corners.length + ids.length * 30);
+  corners.set(mesh.corners);
+  let reads = 0;
+  const counted = new Proxy(corners, {
+    get(target, key) {
+      if (typeof key === 'string' && /^\d+$/.test(key)) reads++;
+      return Reflect.get(target, key, target);
+    },
+  });
+  cut.corners = counted;
+  const field = Float32Array.from(ids, (v) => cut.position[v * 3 + 1] - 0.013);
+  const result = cutAlongField(cut, topology, ids, field, (x, _y, z, out) =>
+    out.set([x, 0.013, z]),
   );
-  // About a quarter of a pass alone: a cut that read the whole mesh would take a pass or more.
-  expect(time / reference).toBeLessThan(1);
+  expect(result.chain.length).toBeGreaterThan(0);
+  expect(cut.corners === counted).toBe(true);
+  expect(reads).toBeGreaterThan(0);
+  expect(reads).toBeLessThan(ids.length * 100);
+  console.log(`cutAlongField: ${reads} corner reads for ${ids.length} band vertices`);
 });
