@@ -4,7 +4,7 @@ import { type EdgeInput, applyEdge, solveEdge } from '../../src/core/refine-edge
 import { cloneRefineMesh } from '../../src/core/refine-mesh';
 import type { Vec3 } from '../../src/core/types';
 import { modelOf, pointOn } from '../helpers/refine';
-import { extrudedProfile, softBox, softCylinder } from '../helpers/soft-edges';
+import { extrudedProfile, softBox, softCylinder, variedProfile } from '../helpers/soft-edges';
 
 const scan = { step: 0.06, ripple: 0.01, noise: 0.006 };
 type Model = ReturnType<typeof modelOf>;
@@ -38,6 +38,13 @@ function outcome(model: Model, input: EdgeInput) {
     out,
   };
 }
+
+const deg = (d: number) => (d * Math.PI) / 180;
+/** The point `length` mm from `from` at `angle` degrees in (x, y). */
+const step = (from: [number, number], angle: number, length: number): [number, number] => [
+  from[0] + Math.cos(deg(angle)) * length,
+  from[1] + Math.sin(deg(angle)) * length,
+];
 
 const line = (model: Model, a: Vec3, b: Vec3, width: number | null, strength = 1): EdgeInput => ({
   segments: [{ kind: 'line', points: [pointOn(model.mesh, a), pointOn(model.mesh, b)] }],
@@ -388,4 +395,137 @@ describe('a band about slices that did not find the edge', () => {
     expect(checked).toBeGreaterThan(1000);
     expect(left).toEqual([]);
   }, 60_000);
+});
+
+describe('a narrow flank', () => {
+  /**
+   * A bead and groove border: a plate face from `plate` to the crest at (0, 0), fillet 0.10; a wall
+   * falling at -50 degrees, fillet 0.08; a rise at 20 degrees for 0.35 mm, fillet 0.12; a fall at
+   * -60 degrees for 1.2 mm. Length 6. `run` is the wall's straight length between its two fillets.
+   */
+  const border = (plate: [number, number], run: number) => {
+    const tilt = (Math.atan2(-plate[1], -plate[0]) * 180) / Math.PI;
+    const tangents = 0.1 * Math.tan(deg((50 + tilt) / 2)) + 0.08 * Math.tan(deg(35));
+    const groove = step([0, 0], -50, run + tangents);
+    const second = step(groove, 20, 0.35);
+    return modelOf(
+      extrudedProfile(
+        [plate, [0, 0], groove, second, step(second, -60, 1.2)],
+        [0.1, 0.08, 0.12],
+        6,
+        scan,
+      ),
+    );
+  };
+  const crestGuide = (model: Model, width: number | null, strength: number) =>
+    line(model, [0, -0.02, -2.5], [0, -0.02, 2.5], width, strength);
+
+  it('solves a groove wall of 0.20 to 0.30 mm straight run', () => {
+    for (const plate of [[-2, 0] as [number, number], [-2, -0.8] as [number, number]])
+      for (const run of [0.2, 0.22, 0.24, 0.26, 0.28, 0.3]) {
+        const model = border(plate, run);
+        for (const width of [null, 0.45]) {
+          const r = outcome(model, crestGuide(model, width, 0.8));
+          expect(r.solved && [r.pieces, r.skipped, r.folded]).toEqual([1, 0, 0]);
+        }
+      }
+  }, 60_000);
+
+  it('cuts in one piece past two rivets beside the edge and leaves them alone', () => {
+    // A 90 degree edge, fillet 0.08, with domes of radius 0.25 mm and height 0.10 mm on its top face
+    // centred 0.35 mm from the corner at z = -0.9 and 0.9: each dome's foot is 0.10 mm from the
+    // corner. A Line guide 3.4 mm long on the crest.
+    const lift = (x: number, y: number, z: number) => {
+      if (y < -1e-6) return 0;
+      return Math.max(
+        ...[-0.9, 0.9].map((c) => {
+          const d = Math.hypot(x + 0.35, z - c) / 0.25;
+          return d >= 1 ? 0 : 0.1 * (1 - d * d) ** 2;
+        }),
+      );
+    };
+    const model = modelOf(
+      variedProfile(
+        () => [
+          [-2, 0],
+          [0, 0],
+          [0, -2],
+        ],
+        [0.08],
+        4,
+        scan,
+        0,
+        lift,
+      ),
+    );
+    const c = 0.08 - 0.08 / Math.SQRT2;
+    const r = outcome(model, line(model, [-c, -c, -1.7], [-c, -c, 1.7], 0.5, 1));
+    expect(r.solved && [r.pieces, r.skipped, r.folded]).toEqual([1, 0, 0]);
+    expect(chainOff(r, [0, 0], 1)).toBeLessThan(0.02); // measured 0.007
+    // Every vertex standing 0.03 mm or more above the top face on a rivet stays where it stood.
+    let rivetMove = NaN;
+    if (r.solved) {
+      rivetMove = 0;
+      for (let v = 0; v < model.mesh.weldedCount; v++) {
+        const [x, y, z] = [0, 1, 2].map((a) => model.mesh.position[v * 3 + a]);
+        if (y < 0.03 || lift(x, 0, z) < 0.03) continue;
+        rivetMove = Math.max(
+          rivetMove,
+          Math.hypot(
+            r.out.position[v * 3] - x,
+            r.out.position[v * 3 + 1] - y,
+            r.out.position[v * 3 + 2] - z,
+          ),
+        );
+      }
+    }
+    expect(rivetMove).toBe(0);
+  });
+
+  /** The level border with the wall's straight run 0.30 mm, narrowing to `low` round each dip. */
+  const narrowing = (low: number, dips: number[]) => {
+    const tangents = 0.1 * Math.tan(deg(25)) + 0.08 * Math.tan(deg(35));
+    // Each dip is 0.4 mm long at `low`, with 0.2 mm ramps either side.
+    const runAt = (z: number) => {
+      let run = 0.3;
+      for (const c of dips) {
+        const d = Math.abs(z - c);
+        const f = d <= 0.2 ? 1 : d >= 0.4 ? 0 : (0.4 - d) / 0.2;
+        run = Math.min(run, 0.3 + (low - 0.3) * f);
+      }
+      return run;
+    };
+    const model = modelOf(
+      variedProfile(
+        (z) => {
+          const groove = step([0, 0], -50, runAt(z) + tangents);
+          const second = step(groove, 20, 0.35);
+          return [[-2, 0], [0, 0], groove, second, step(second, -60, 1.2)];
+        },
+        [0.1, 0.08, 0.12],
+        6,
+        scan,
+        1.8,
+      ),
+    );
+    return { model, guide: crestGuide(model, 0.45, 0.8) };
+  };
+
+  it('cuts in one piece along a wall that narrows in two places, and in four', () => {
+    // Dips to 0.06 mm of straight run at z = -1.0 and 0.9, and at z = -1.5, -0.5, 0.5 and 1.5.
+    for (const dips of [
+      [-1.0, 0.9],
+      [-1.5, -0.5, 0.5, 1.5],
+    ]) {
+      const { model, guide } = narrowing(0.06, dips);
+      const r = outcome(model, guide);
+      expect(r.solved && [r.pieces, r.skipped, r.folded]).toEqual([1, 0, 0]);
+    }
+  });
+
+  it('refuses a wall that has its own flank in fewer than half of the slices', () => {
+    // Five dips, at z = -2, -1, 0, 1 and 2.
+    const { model, guide } = narrowing(0.06, [-2, -1, 0, 1, 2]);
+    expect(outcome(model, guide).solved).toBe(false);
+  });
 });

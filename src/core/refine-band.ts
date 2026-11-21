@@ -1296,8 +1296,10 @@ function classifyOriented(
     return pick(values[slice[i]], values[upper(i)]);
   };
   // Zones outward from the solved edge, per side and slice: soft, then the first sustained run that
-  // fits the side's surface, then beyond from the first sustained run that does not.
-  const split = (pair: FlankFit[], solved: Solved) => {
+  // fits the side's surface, then beyond from the first sustained run that does not. With `fill`, a
+  // slice without a flank of its own takes its boundaries from the slices with one either side of it,
+  // so that one short slice does not leave a hole in the band along the edge.
+  const split = (pair: FlankFit[], solved: Solved, fill = false) => {
     const o = new Float64Array(count);
     for (let i = 0; i < count; i++)
       o[i] = u[i] - (solved.offset[slice[i]] * (1 - blend[i]) + solved.offset[upper(i)] * blend[i]);
@@ -1360,6 +1362,31 @@ function classifyOriented(
         fields.start[k] = flank ? run.start : 0;
         fields.end[k] = flank ? run.end : 0;
         fields.extent[k] = run.extent;
+      }
+      // Only where at least half of the side's slices have a flank of their own, and only between
+      // two of them: before the first and past the last, a path's corner or the guide's end is where
+      // the flank really stops. Each vertex is still tested against the flank's surface before it
+      // is moved.
+      const has = Array.from({ length: slices }, (_, k) => fields.end[k] > fields.start[k]);
+      if (fill && has.filter(Boolean).length >= slices / 2) {
+        const start = fields.start.slice(),
+          end = fields.end.slice();
+        for (let k = 0; k < slices; k++) {
+          if (has[k]) continue;
+          let lo = k - 1,
+            hi = k + 1;
+          while (lo >= 0 && !has[lo]) lo--;
+          while (hi < slices && !has[hi]) hi++;
+          if (lo < 0 || hi >= slices) continue;
+          const w = (k - lo) / (hi - lo);
+          // A run to the end of its slice's vertices has no finite end to interpolate.
+          const lerp = (v: Float64Array) =>
+            Number.isFinite(v[lo]) && Number.isFinite(v[hi])
+              ? v[lo] * (1 - w) + v[hi] * w
+              : Math.min(v[lo], v[hi]);
+          fields.start[k] = lerp(start);
+          fields.end[k] = Math.min(lerp(end), Math.max(fields.extent[k], fields.start[k]));
+        }
       }
       return fields;
     });
@@ -1476,7 +1503,7 @@ function classifyOriented(
     }
     if (settled) ({ fits, solved, classified } = state);
   }
-  const { zone, sides, o } = classified;
+  const { sides, o } = classified;
   // Two sets of edge offsets per slice, and of offsets from the edge per vertex. `solved.offset`, and
   // `o` read from it, are where each slice solved the edge: the classification's geometry reads
   // them (the zones, `reaches`, the flanks' flatness and runs). `heldOffset`, and `heldO` read from
@@ -1506,29 +1533,38 @@ function classifyOriented(
         (x, i) => x - (heldOffset[slice[i]] * (1 - blend[i]) + heldOffset[upper(i)] * blend[i]),
       );
   }
-  // A flank that ends at a second transition stops short of it: positions within the tolerance
-  // reach into the next fillet before they leave the flank's surface. The zones are final from here.
-  const stops = sides.map((side) =>
-    Float64Array.from(side.end, (end, k) => {
-      const run = Math.min(end, side.extent[k]) - side.start[k];
-      return end - Math.min(flankRun * edge, Math.max(marginFloor * edge, run - keptRun * edge));
-    }),
-  );
-  for (let i = 0; i < count; i++) {
-    if (zone[i] !== BandZone.Left && zone[i] !== BandZone.Right) continue;
-    if (Math.abs(o[i]) >= touching(stops[zone[i] - 1], i, Math.min)) zone[i] = BandZone.Beyond;
-  }
-  // A vertex in a flank's run but off its surface by more than the tolerance would be moved by more
-  // than it: on the rounding's shoulder it is Soft, further out Beyond. The evidence below reads the
-  // runs as they were.
-  const runZone = zone.slice();
-  for (let i = 0; i < count; i++) {
-    if (zone[i] !== BandZone.Left && zone[i] !== BandZone.Right) continue;
-    const s = zone[i] - 1;
-    if (Math.abs(fits[s].distance(i)) <= 3 * fits[s].local) continue;
-    const shoulder = touching(sides[s].start, i, Math.max) + shoulderEdges * edge;
-    zone[i] = Math.abs(o[i]) < shoulder ? BandZone.Soft : BandZone.Beyond;
-  }
+  // The zones of a classification made final. A flank that ends at a second transition stops short
+  // of it: positions within the tolerance reach into the next fillet before they leave the flank's
+  // surface. A vertex in a flank's run but off its surface by more than the tolerance would be
+  // moved by more than it: on the rounding's shoulder it is Soft, further out Beyond. `runZone`
+  // keeps the runs as they were.
+  const finish = (from: ReturnType<typeof split>) => {
+    const { zone, sides, o } = from;
+    const stops = sides.map((side) =>
+      Float64Array.from(side.end, (end, k) => {
+        const run = Math.min(end, side.extent[k]) - side.start[k];
+        return end - Math.min(flankRun * edge, Math.max(marginFloor * edge, run - keptRun * edge));
+      }),
+    );
+    for (let i = 0; i < count; i++) {
+      if (zone[i] !== BandZone.Left && zone[i] !== BandZone.Right) continue;
+      if (Math.abs(o[i]) >= touching(stops[zone[i] - 1], i, Math.min)) zone[i] = BandZone.Beyond;
+    }
+    const runZone = zone.slice();
+    for (let i = 0; i < count; i++) {
+      if (zone[i] !== BandZone.Left && zone[i] !== BandZone.Right) continue;
+      const s = zone[i] - 1;
+      if (Math.abs(fits[s].distance(i)) <= 3 * fits[s].local) continue;
+      const shoulder = touching(sides[s].start, i, Math.max) + shoulderEdges * edge;
+      zone[i] = Math.abs(o[i]) < shoulder ? BandZone.Soft : BandZone.Beyond;
+    }
+    return { zone, runZone };
+  };
+  // Every piece of evidence below, and `supported` above, reads the classification as each slice
+  // made it. Only the zones the band returns, which decide what is moved and what is cut, come from
+  // the classification with its slices filled: filling never decides whether an edge is found.
+  const { runZone } = finish(classified);
+  const { zone } = finish(split(fits, solved, true));
 
   // Evidence of an edge that does not depend on the width: the solved edge within reach of the
   // guide, the flank surfaces apart there, and flanks that turn far less than the edge does.
@@ -1568,30 +1604,25 @@ function classifyOriented(
   const gathered = band.width - strayed;
   // The band capped to a width measured from the solved edge, so that a guide laid to one side of
   // the edge does not starve the far flank, or null when its flanks there show no edge: on each
-  // side enough vertices, running far enough outward in half of the slices. A cap past `gathered`
-  // is held to it, since vertices within the cap of the solved edge may lie outside the gather.
+  // side enough vertices, and in half of the slices a flank of the slice's own whose run, from its
+  // start to the first of its end, its slice's last vertex and the width, is flankRun edges long. A
+  // cap past `gathered` is held to it, since vertices within the cap of the solved edge may lie
+  // outside the gather.
   const result = (cap: number): EdgeBand | null => {
     const width = Math.min(cap, gathered);
     const keep: number[] = [];
     const counts = [0, 0];
-    const inner = new Float64Array(slices * 2).fill(Infinity),
-      outer = new Float64Array(slices * 2).fill(-Infinity);
     for (let i = 0; i < count; i++) {
       if (Math.abs(heldO[i]) > width) continue;
       keep.push(i);
-      if (runZone[i] !== BandZone.Left && runZone[i] !== BandZone.Right) continue;
-      const s = runZone[i] - 1,
-        k = nearestSlice(i) * 2 + s,
-        offset = Math.abs(o[i]);
-      counts[s]++;
-      inner[k] = Math.min(inner[k], offset);
-      outer[k] = Math.max(outer[k], offset);
+      if (runZone[i] === BandZone.Left || runZone[i] === BandZone.Right) counts[runZone[i] - 1]++;
     }
     if (counts[0] < minimumFlank || counts[1] < minimumFlank) return null;
-    for (let s = 0; s < 2; s++) {
+    for (const { start, end, extent } of sides) {
       let long = 0;
       for (let k = 0; k < slices; k++)
-        if (outer[k * 2 + s] - inner[k * 2 + s] >= flankRun * edge) long++;
+        if (end[k] > start[k] && Math.min(end[k], extent[k], width) - start[k] >= flankRun * edge)
+          long++;
       if (long < half) return null;
     }
     return {

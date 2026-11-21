@@ -780,6 +780,124 @@ export function extrudedProfile(
   return surface.geometry();
 }
 
+/** The polyline through `corners` with each interior corner rounded by `radii[i]`, by distance along it. */
+function filletedProfile(corners: Vec2[], radii: number[]) {
+  type Piece =
+    | { line: true; from: Vec2; to: Vec2; length: number }
+    | { line: false; centre: Vec2; radius: number; start: number; turn: number; length: number };
+  const pieces: Piece[] = [];
+  const unit = (a: Vec2, b: Vec2): Vec2 => {
+    const l = Math.hypot(b[0] - a[0], b[1] - a[1]);
+    return [(b[0] - a[0]) / l, (b[1] - a[1]) / l];
+  };
+  let from = corners[0];
+  for (let i = 1; i < corners.length; i++) {
+    const corner = corners[i];
+    const r = i < corners.length - 1 ? radii[i - 1] : 0;
+    if (!r) {
+      pieces.push({
+        line: true,
+        from,
+        to: corner,
+        length: Math.hypot(corner[0] - from[0], corner[1] - from[1]),
+      });
+      from = corner;
+      continue;
+    }
+    const d1 = unit(corners[i - 1], corner),
+      d2 = unit(corner, corners[i + 1]);
+    const turn = Math.atan2(d1[0] * d2[1] - d1[1] * d2[0], d1[0] * d2[0] + d1[1] * d2[1]);
+    const tangent = r * Math.tan(Math.abs(turn) / 2);
+    const t1: Vec2 = [corner[0] - d1[0] * tangent, corner[1] - d1[1] * tangent];
+    const side = Math.sign(turn);
+    const centre: Vec2 = [t1[0] - d1[1] * r * side, t1[1] + d1[0] * r * side];
+    pieces.push({ line: true, from, to: t1, length: Math.hypot(t1[0] - from[0], t1[1] - from[1]) });
+    pieces.push({
+      line: false,
+      centre,
+      radius: r,
+      start: Math.atan2(t1[1] - centre[1], t1[0] - centre[0]),
+      turn,
+      length: r * Math.abs(turn),
+    });
+    from = [corner[0] + d2[0] * tangent, corner[1] + d2[1] * tangent];
+  }
+  const total = pieces.reduce((sum, piece) => sum + piece.length, 0);
+  const at = (s: number): Sample => {
+    for (const piece of pieces) {
+      if (s > piece.length && piece !== pieces[pieces.length - 1]) {
+        s -= piece.length;
+        continue;
+      }
+      if (piece.line) {
+        const d = unit(piece.from, piece.to);
+        return {
+          point: [piece.from[0] + d[0] * s, piece.from[1] + d[1] * s],
+          normal: [-d[1], d[0]],
+        };
+      }
+      const angle = piece.start + (Math.sign(piece.turn) * s) / piece.radius;
+      const radial: Vec2 = [Math.cos(angle), Math.sin(angle)];
+      const facing = piece.turn > 0 ? -1 : 1;
+      return {
+        point: [
+          piece.centre[0] + radial[0] * piece.radius,
+          piece.centre[1] + radial[1] * piece.radius,
+        ],
+        normal: [radial[0] * facing, radial[1] * facing],
+      };
+    }
+    throw new Error('empty profile');
+  };
+  return { total, at };
+}
+
+/**
+ * `extrudedProfile` with a profile that changes along z. `cornersAt(z)` gives the polyline at
+ * each row; every row is sampled at the same fractions of its own length, with the first `anchored`
+ * mm of every row sampled at the same distances so a face shared by all rows keeps a regular grid.
+ * `lift`, when given, raises a point along its normal by that many mm (a rivet on a face).
+ */
+export function variedProfile(
+  cornersAt: (z: number) => Vec2[],
+  radii: number[],
+  length: number,
+  options?: SoftOptions,
+  anchored = 0,
+  lift?: (x: number, y: number, z: number) => number,
+) {
+  const surface = new Surface(options);
+  const step = surface.options.step;
+  const rows = Math.round(length / step) + 1;
+  const profiles = Array.from({ length: rows }, (_, j) =>
+    filletedProfile(cornersAt(-length / 2 + (j * length) / (rows - 1)), radii),
+  );
+  const longest = Math.max(...profiles.map((profile) => profile.total));
+  const columns = Math.round(longest / step) + 1;
+  const head = Math.round(anchored / step);
+  const index: number[][] = [];
+  for (let i = 0; i < columns; i++)
+    index.push(
+      profiles.map((profile, j) => {
+        const s =
+          i <= head
+            ? i * step
+            : head * step + ((i - head) * (profile.total - head * step)) / (columns - 1 - head);
+        const { point, normal } = profile.at(s);
+        const z = -length / 2 + (j * length) / (rows - 1);
+        const up = lift ? lift(point[0], point[1], z) : 0;
+        return surface.add(
+          [point[0] + normal[0] * up, point[1] + normal[1] * up, z],
+          [normal[0], normal[1], 0],
+        );
+      }),
+    );
+  for (let i = 0; i + 1 < columns; i++)
+    for (let j = 0; j + 1 < rows; j++)
+      surface.quad(index[i][j], index[i][j + 1], index[i + 1][j + 1], index[i + 1][j]);
+  return surface.geometry();
+}
+
 /** A piece of a profile in (x, y): `length` mm turning by `turn` radians (0 is straight, + is left). */
 export interface TurnedPiece {
   length: number;
