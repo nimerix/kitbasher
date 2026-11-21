@@ -546,8 +546,18 @@ pieces, for five measured reasons:
 
 **What still refuses.** A guide on a flat face with no edge within its reach (0.35, or 6
 edge lengths on a coarser mesh). A guide on one
-smooth surface, such as a cylinder wall. Flanks less than 10 degrees apart, and flanks that
-turn too much themselves (flatness under 2.2). These checks are unchanged.
+smooth surface, such as a cylinder wall, with one exception below. Flanks less than 10
+degrees apart, and flanks that turn too much themselves (flatness under 2.2). These checks
+are unchanged.
+
+**A false edge on a narrow cylinder.** A Line laid slanting across a cylinder wall of radius
+0.7 can be taken as an edge and creased. Measured on four seeds: on one seed a slant from
+angle 1.1 at the bottom to 1.5 at the top, and on another the opposite slant, fit two planes
+52.5 and 61.5 degrees apart and cut the wall in one piece, moving it up to 0.064 and 0.097.
+Every other seed and slant is refused, as are slanting lines on walls of radius 1 to 2, and
+lines and arcs on walls of radius 3 to 12, at Width 0.5 and automatic width. Rules 2 and 4 admit it: each flank's run is 3.6 to 4 edge
+lengths, as long as a narrow wall's, and its flatness of 2.5 to 2.7 passes. Before these
+rules both were refused.
 
 **What changes for a guide beside an edge.** A guide on a clean face 0.3 mm from a rounded
 edge used to be refused. It now finds that edge. On a coarse mesh the reach is 6 edge
@@ -593,6 +603,9 @@ total solve time of the 20 guides went from 1254 ms to 1738 ms (median of three 
   before these rules.
 - Which slices find the edge can depend on how far the band is read, so a band is not
   identical across widths at a guide's ends.
+- A Line slanting across a cylinder wall of radius 0.7 can be creased, as described above.
+  Telling it from an edge needs a check of whether one curved surface explains the cross
+  section, which these rules do not make.
 - Beside a concave edge, a rivet whose foot reaches into the rounding can still be moved by
   a slice's own reading, as before these rules: the rounding and the rivet both stand off
   the flank toward the other flank. Measured with domes 0.02 from the corner: 0.053 to

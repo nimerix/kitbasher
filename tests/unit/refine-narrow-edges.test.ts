@@ -11,7 +11,13 @@ import {
 import { cloneRefineMesh } from '../../src/core/refine-mesh';
 import type { Vec3 } from '../../src/core/types';
 import { chainPieces, modelFrom, modelOf, pointOn } from '../helpers/refine';
-import { extrudedProfile, softBox, softCylinder, variedProfile } from '../helpers/soft-edges';
+import {
+  extrudedProfile,
+  rippledSphere,
+  softBox,
+  softCylinder,
+  variedProfile,
+} from '../helpers/soft-edges';
 
 /** When `zones` is set, every band the solver builds moves and cuts by the zones its slices found. */
 const found = vi.hoisted(() => ({ zones: false }));
@@ -1141,5 +1147,85 @@ describe('a wide rounding', () => {
     };
     expect(outcome(model, wall).solved).toBe(false);
     expect(outcome(model, round).solved).toBe(false);
+  });
+});
+
+describe('a guide on one smooth surface', () => {
+  /** A guide of `kind` through `points` on `model`, at `width` and full strength. */
+  const guide = (model: Model, kind: 'line' | 'arc', points: Vec3[], width: number | null) => ({
+    segments: [{ kind, points: points.map((p) => pointOn(model.mesh, p)) }],
+    joints: [],
+    closed: false,
+    width,
+    strength: 1,
+  });
+
+  it('refuses lines and arcs on cylinder walls of radius 6 to 12', () => {
+    // Two seeds at opposite ends of the seed window are 10 degrees apart on any radius up to about
+    // 9 mm, so the angle check alone does not refuse these: all are refused (measured).
+    for (const seed of [1, 2, 3, 4])
+      for (const r of [6, 8, 10, 12]) {
+        const model = modelOf(softCylinder(r, 2, 0.3, { ...scan, seed }));
+        const at = (a: number, y: number): Vec3 => [r * Math.cos(a), y, r * Math.sin(a)];
+        const around = 1.5 / r;
+        for (const width of [0.5, null]) {
+          const label = `seed ${seed}, radius ${r}, width ${width ?? 'auto'}`;
+          for (const [kind, points] of [
+            ['line', [at(0, -1), at(0, 1)]],
+            ['line', [at(-0.4 / r, -1), at(0.4 / r, 1)]],
+            ['line', [at(-around, 0), at(around, 0)]],
+            ['arc', [at(-around, 0), at(0, 0), at(around, 0)]],
+          ] as const)
+            expect(outcome(model, guide(model, kind, [...points], width)).solved, label).toBe(
+              false,
+            );
+        }
+      }
+  }, 120_000);
+
+  it('refuses lines and arcs on a dome', () => {
+    // Spheres of radius 2 and 3. On radius 1, seed 4, an arc is accepted, as it was before guides
+    // could be laid beside the edge (measured at fc2d452).
+    for (const seed of [1, 2, 3, 4])
+      for (const r of [2, 3]) {
+        const model = modelOf(rippledSphere(r, { ...scan, seed }));
+        const at = (polar: number, a: number): Vec3 => [
+          r * Math.sin(polar) * Math.cos(a),
+          r * Math.cos(polar),
+          r * Math.sin(polar) * Math.sin(a),
+        ];
+        const span = Math.min(0.5, 1.5 / r);
+        for (const width of [0.5, null]) {
+          const label = `seed ${seed}, radius ${r}, width ${width ?? 'auto'}`;
+          for (const [kind, points] of [
+            ['line', [at(0.3, 0), at(0.3 + 2 * span, 0)]],
+            ['line', [at(0.6, -span), at(0.6 + span, span)]],
+            ['arc', [at(0.8, -span), at(0.8, 0), at(0.8, span)]],
+          ] as const)
+            expect(outcome(model, guide(model, kind, [...points], width)).solved, label).toBe(
+              false,
+            );
+        }
+      }
+  }, 120_000);
+
+  // Known fault, not fixed: a Line laid slanting across a cylinder wall of radius 0.7 is taken as
+  // an edge. Seed 1 from (angle 1.1, y -1) to (1.5, 1), and seed 2 slanting the other way, each at
+  // Width 0.5 and automatic width, fit two planes 52.5 and 61.5 degrees apart and cut the wall in
+  // one piece, moving it up to 0.064 and 0.097 (measured). Every other seed, and slants of 0.1 and
+  // 0.3, are refused, as are walls of radius 1 to 2. The run test of slices filled from their
+  // neighbours (seed 1) and seeds past the reach (seed 2) admit it: each flank's run is 3.6 to 4
+  // edge lengths, as long as a narrow wall's, and its flatness 2.5 to 2.7 passes 2.2.
+  it.skip('refuses a line slanting across a cylinder wall of radius 0.7', () => {
+    for (const seed of [1, 2, 3, 4]) {
+      const model = modelOf(softCylinder(0.7, 2, 0.1, { ...scan, seed }));
+      const at = (a: number, y: number): Vec3 => [0.7 * Math.cos(a), y, 0.7 * Math.sin(a)];
+      for (const slant of [-0.3, -0.2, -0.1, 0.1, 0.2, 0.3])
+        for (const width of [0.5, null]) {
+          const ends = [at(1.3 - slant, -1), at(1.3 + slant, 1)];
+          const label = `seed ${seed}, slant ${slant}, width ${width ?? 'auto'}`;
+          expect(outcome(model, guide(model, 'line', ends, width)).solved, label).toBe(false);
+        }
+    }
   });
 });
