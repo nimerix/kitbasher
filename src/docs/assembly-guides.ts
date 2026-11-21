@@ -471,7 +471,7 @@ export const assemblyGuides: DocArticle[] = [
         bullets: [
           'Restore edges before smoothing or flattening across them. Smoothing or flattening across an edge that has not been rebuilt can soften it further; rebuilt edges are held.',
           'On a plate with rivets, use a painted region with Flatten and Keep detail rather than the Flatten brush. The brush can flatten rivets, and clipping one can leave a step at its rim.',
-          'A guide needs surface on both sides to work with. Lay it along the rounded edge itself or close beside it. A line laid along an edge that curves follows the curve. If the tool says no edge was found, move the guide onto the rounding or change Width. A lip or rib rounded right over, with no flat top left, has no edge for the tool to find.',
+          'A guide needs surface on both sides to work with. Lay it along the rounded edge itself or close beside it. A line laid along an edge that clearly curves follows the curve instead of cutting straight across it. If the tool says no edge was found, move the guide onto the rounding or change Width. A lip or rib rounded right over, with no flat top left, has no edge for the tool to find.',
           'Where three faces meet, in a pocket or at a box corner, guide the edges separately if a path through the corner leaves a mark there.',
           'Treat proposals as a starting point. Check them before accepting many at once. Where Detect proposes a guide on a smooth tube or across a scan dent, dismiss it.',
           'Small hardware such as clips, flanges, and buckle lips is often shorter than Minimum length. Lower it to pick those up, and expect more short guides to check.',

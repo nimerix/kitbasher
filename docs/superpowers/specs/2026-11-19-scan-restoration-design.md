@@ -507,7 +507,9 @@ pieces, for five measured reasons:
    the edge: the solved edge must lie within reach of it, the larger of 0.35 and 6 edge
    lengths, in at least half of the slices. A band is built at the requested Width or at what
    it read, whichever is smaller. In a slice where the edge was not found on both sides, its
-   position is held within the range of positions seen where it was. Automatic width is
+   offset counts as no farther from the guide than the farthest offset seen where the edge
+   was found on both sides. Only how far the band covers and which vertices it keeps read
+   that offset. Automatic width is
    soft + max(2 x soft, 6 edge lengths), where soft is the width of the rounding. It is held
    to 1 unless the edge cannot be read within 1. It no longer adds the guide's distance from
    the edge.
@@ -525,15 +527,18 @@ pieces, for five measured reasons:
    remains in what will be moved reads the filled zones, because it checks that move.
 4. **A flank may start past the reach.** A flank's seed may start anywhere in the seed
    window: the reach plus one seed span, which is up to twice the reach. Pairs of flanks
-   whose seeds both start within the reach are tried first, so a guide that solved before
-   keeps its result. The solved edge must still lie within reach.
-5. **A Line guide follows an edge that curves.** When the points where the flanks meet leave
-   the fitted line by more than one edge length, clear of the fading ends, they are fitted
-   as an arc, and the arc is kept only when it at least halves that gap. The choice is made
+   whose seeds both start within the reach are tried first, so a guide whose flanks start
+   within the reach keeps the pair of flanks it was seeded from. The solved edge must still
+   lie within reach.
+5. **A Line guide follows an edge that clearly curves.** When there are at least 9 points
+   where the flanks meet, and they leave the fitted line by more than one edge length, clear
+   of the fading ends, they are fitted as an arc. The arc is kept only when it does not
+   close on itself and its own largest gap is under half the line's. The choice is made
    again at each refit, including at joints, from the kind as drawn. The guide as stored and
    shown stays a line.
 
-**What still refuses.** A guide on a flat face 0.5 mm or more from any edge. A guide on one
+**What still refuses.** A guide on a flat face with no edge within its reach (0.35, or 6
+edge lengths on a coarser mesh). A guide on one
 smooth surface, such as a cylinder wall. Flanks less than 10 degrees apart, and flanks that
 turn too much themselves (flatness under 2.2). These checks are unchanged.
 
@@ -549,15 +554,24 @@ Flatten), the fin edge, the buckle lip (two widths), the belt's lower edge and t
 outlet arc; the valve rim, cut in 3 pieces before, is now one piece. The two edges the study
 kept solve as before and look the same, and the barrel ring and Detect's buckle guide solve
 as before. Still refused: the closed plate border (two widths), the cross strap line, the
-neck collar arc (two widths), the cable support spline and the pocket wall. Still damaged: the outlet arc, cut in 3 pieces with 31 triangles skipped (21
-before). Judged by eye against the photos, the plate border, fin edge, belt edge and valve
-rim each become one cleaner line; the buckle lip gains a crisp line with a small step where
-the guide starts, and does not read as the flat frame in the photo; the lighter outlet arc
-shows nothing; the outlet arc's hard line now tilts across the collar with a bump at each
-end, which looks slightly worse than before. At whole-part scale neither part looks closer
-to its photos. Every guide that solves leaves a closed mesh after Apply with no zero-area
-triangle, and scene Undo and Redo restore the exact geometries. The total solve time of the
-20 guides went from 1254 ms to 1738 ms (median of three runs).
+neck collar arc (two widths), the cable support spline and the pocket wall. Still damaged:
+the outlet arc, cut in 3 pieces with 31 triangles skipped (21 before).
+
+Judged by eye against the photos:
+
+- The plate border, belt edge and valve rim each become one cleaner line.
+- The middle of the fin's edge becomes a hard straight line, with a small notch where the
+  line starts; the last stretch to the rear corner stays round.
+- The buckle lip gains a crisp line with a small step where the guide starts, and does not
+  read as the flat frame in the photo.
+- The lighter outlet arc shows nothing.
+- The outlet arc's hard line now tilts across the collar with a bump at each end, which
+  looks slightly worse than before.
+- At whole-part scale neither part looks closer to its photos.
+
+Every guide that solves leaves a closed mesh after Apply with no zero-area triangle. Scene
+Undo restores the part's vertex arrays element for element, and Redo the applied ones. The
+total solve time of the 20 guides went from 1254 ms to 1738 ms (median of three runs).
 
 **Not covered by these rules.**
 
@@ -584,26 +598,52 @@ approved by the product owner.
   plate face is flatter with its fasteners kept, and one strap lip and one frame rail are
   straighter. Part 57's two tank domes are less blotchy and one hose span is smoother. On
   replaying the study's edge guides with the narrow-edge rules, one span of the plate border
-  and the fin edge on 45, and the buckle lip, belt edge and valve rim on 57, each gain one
-  cleaner line. The rest of the plate border, the barrel rings and collars on 45, and the
-  outlet flange and pocket on 57, were not restored. At whole-part scale the renders, with
-  or without those lines, are hard to tell apart.
+  on 45 and the belt edge and valve rim on 57 each gain one cleaner line. The fin's edge on
+  45 is hard and straight in its middle, with a small notch where the line starts, and round
+  over its last stretch. The buckle lip on 57 gains a crisp line with a small step where the
+  guide starts. The outlet arc on 57 looks slightly worse than before. The rest of the
+  plate border, the barrel rings and collars on 45, and the outlet flange and pocket on 57,
+  were not restored. At whole-part scale the renders, with or without those lines, are hard
+  to tell apart.
 - **Why.** 7 of the study's 20 edge guides are still refused: the closed plate border, the
   cross strap line, the neck collar arcs, the cable support spline and the pocket wall.
-  Where a guide now solves, the gain is one line along one edge, rebuilt within 0.38 to
-  0.64 of it, which does not show at whole-part scale. The outlet arc is still cut in
-  pieces with triangles skipped. Keep detail cannot tell molded relief from scan roughness.
-  Sweep refused the cable and both elbows.
-- **Running a guide again.** Over its own result, both times at full strength, a guide moves
-  the surface by up to 0.05 on the plate border and 0.11 on the belt edge, away from the
-  guide's ends, and cuts the border in 4 pieces and the belt edge in 2 with 8 triangles
-  skipped. On the two kept edges and the barrel ring it moves under 0.006 away from the
-  ends.
+  The seven guides that gain a line each rebuild one edge, with a band 0.38 to 0.64 wide
+  on either side of it, which does not show at whole-part scale. The outlet arc is still
+  cut in 3 pieces, now with 31 triangles skipped where 21 were before, and its line tilts
+  across the collar with a bump at each end. Keep detail cannot tell molded relief from
+  scan roughness. Sweep refused the cable and both elbows.
+- **Running a guide again.** On the reference scans, a guide run again over its own result
+  does not meet the statement that this changes nothing visible, nor the 0.002 re-run
+  tolerance, in "Verification" and "Changes made while building". The synthetic fixtures do
+  not show this. Measured with both passes at full strength, against 0.005 away from the
+  guide's ends (the last 0.5 at each end) and 0.02 anywhere:
+  - The plate border, as a line before and after Flatten, moves 0.05 and is cut in 4
+    pieces.
+  - The belt edge moves 0.11 and is cut in 2 pieces with 8 triangles skipped.
+  - The buckle lip moves 0.0114 away from the ends.
+  - The valve rim moves 0.0221 away from the ends and 0.0229 anywhere, and is cut in 3
+    pieces with 9 triangles skipped.
+  - The outlet arc moves 0.044 and is cut in 6 pieces with 27 triangles skipped.
+  - Detect's buckle guide moves 0.0159 away from the ends and 0.0223 anywhere, about as
+    before these rules.
+  - The kept frame rail moves 0.0054 away from the ends, where it moved 0.0036 before.
+  - On the fin edge, the wider buckle lip and the lighter outlet arc the second pass is
+    refused. It moves nothing, but the guide does not solve on its own result, which is
+    not a stable result either.
+  - Only the kept strap lip and the barrel ring stay within both limits.
+
+  At each guide's own strength, as a user runs it again, the plate border moves 0.0785
+  (0.0788 after Flatten) and is cut in 2 pieces, and the buckle lip is cut in 2 pieces.
+
 - **Performance.** A preview update takes 92 to 106 ms for a strap lip guide on part 45
   and 139 to 165 ms for the valve rim on part 57 (80 to 96 ms and 150 to 163 ms before the
-  narrow-edge rules), and 640 ms on a 3 million triangle part. A smooth dab takes about
+  narrow-edge rules), and 640 ms on a 3 million triangle part. Over the study's 20 edge
+  guides the total solve time rose 39 %, from 1254 ms to 1738 ms. A smooth dab takes about
   20 ms on part 45. Detect takes about 24 s on each scan and Accept about 0.35 to 0.4 s,
-  followed by a pause of about 0.4 s while picking is rebuilt. The tool is not usable for live preview at 3 million triangles.
+  followed by a pause of about 0.4 s while picking is rebuilt. In one run each, Detect's
+  check that each edge proposal solves went from 13.8 s to 14.9 s on part 45 and from
+  14.3 s to 15.9 s on part 57. The tool is not usable for live preview at 3 million
+  triangles.
 
 ## Out of scope (deferred)
 
