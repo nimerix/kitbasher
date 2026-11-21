@@ -584,19 +584,30 @@ function taperOf(length: number, edge: number, tapers = 2) {
   return Math.max(0, (length - coreEdges * edge) / tapers);
 }
 
-/** Largest distance from `points` (xyz) to `curve`, among those clear of the guide's end tapers. */
-function largestGap(curve: EdgeCurve, drawn: EdgeCurve, points: ArrayLike<number>, edge: number) {
+/**
+ * Largest distance from `points` (xyz) to `curve`, among those clear of the guide's end tapers, or
+ * among them all when none is clear.
+ */
+export function largestGap(
+  curve: EdgeCurve,
+  drawn: EdgeCurve,
+  points: ArrayLike<number>,
+  edge: number,
+) {
   const { from, to, taper } = guideSpan(curve, drawn, edge);
   const at = new Float64Array(3);
   let clear = 0,
-    all = 0;
+    all = 0,
+    measured = false;
   for (let k = 0; k < points.length; k += 3) {
     const station = onCurve(curve, points[k], points[k + 1], points[k + 2], at);
     const gap = Math.hypot(points[k] - at[0], points[k + 1] - at[1], points[k + 2] - at[2]);
     all = Math.max(all, gap);
-    if (station >= from + taper && station <= to - taper) clear = Math.max(clear, gap);
+    if (station < from + taper || station > to - taper) continue;
+    clear = Math.max(clear, gap);
+    measured = true;
   }
-  return clear || all;
+  return measured ? clear : all;
 }
 
 /**

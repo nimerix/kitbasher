@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { type EdgeBand, buildBand, estimateBand, estimateWidth } from '../../src/core/refine-band';
-import { type EdgeInput, applyEdge, solveEdge } from '../../src/core/refine-edge';
+import { drawnCurve } from '../../src/core/refine-curve';
+import { type EdgeInput, applyEdge, largestGap, solveEdge } from '../../src/core/refine-edge';
 import { cloneRefineMesh } from '../../src/core/refine-mesh';
 import type { Vec3 } from '../../src/core/types';
 import { modelFrom, modelOf, pointOn } from '../helpers/refine';
@@ -701,5 +702,17 @@ describe('a line over an edge that curves', () => {
       // Measured under 0.0001 on every seed: the flanks fit as planes, which meet in a line.
       expect(worst, `seed ${seed}`).toBeLessThan(0.02);
     }
+  });
+});
+
+describe("the meet's largest gap from its curve", () => {
+  it('is zero over an exactly straight interior, whatever lies in the end tapers', () => {
+    // A guide 4 mm along x, edge length 0.06: each end taper is 0.5 mm. The meet lies on the guide
+    // from x = 1 to 3, with one point 0.3 mm off it 0.1 mm from the start.
+    const guide = drawnCurve('line', [0, 0, 0, 4, 0, 0], 0.06);
+    const points = [0.1, 0.3, 0, ...[1, 1.5, 2, 2.5, 3].flatMap((x) => [x, 0, 0])];
+    expect(largestGap(guide, guide, points, 0.06)).toBe(0);
+    // With nothing clear of the tapers, the gap is the largest of them all.
+    expect(largestGap(guide, guide, [0.1, 0.3, 0, 3.9, 0, 0], 0.06)).toBeCloseTo(0.3, 9);
   });
 });
