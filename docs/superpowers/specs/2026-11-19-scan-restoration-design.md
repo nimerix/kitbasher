@@ -526,9 +526,10 @@ pieces, for five measured reasons:
    flank's tolerance is neither soft nor flank, so filling leaves a rivet or other detail
    there where it is. In every slice, a vertex standing off its flank's surface on the side
    away from the other flank, as a rivet beside a convex edge does, is never soft. Measured
-   on a 90 degree edge rounded 0.08 with domes 0.05 and 0.1 high, their feet 0.005 to 0.06
-   from the corner: beside a convex edge no dome vertex standing 0.03 or more off the face
-   moves, and beside a concave edge none moves where filling used to move it.
+   on a 90 degree edge rounded 0.08 with domes 0.05 and 0.1 high on four seeds: beside a
+   convex edge, with their feet 0.005 to 0.06 from the corner, no dome vertex standing 0.03
+   or more off the face moves. Beside a concave edge, with their feet 0.02 to 0.2 from the
+   corner, filling moves none; a slice's own reading still moves some, as described below.
    The edge is found, fitted and oriented, and its free ends decided, from the slices' own
    zones. Filled zones only decide what moves and what is cut. The check that a sharp core
    remains in what will be moved reads the filled zones, because it checks that move. It

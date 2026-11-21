@@ -40,7 +40,8 @@ export interface EdgeBand {
    * guide along the surface, positive on the Left), and zone. `zone` is what moves and what is cut:
    * a slice without a flank of its own takes its zones from the slices with one either side of it.
    * `foundZone` is each vertex's zone as its own slices found it, without that filling: everything
-   * that fits, orients or decides where a free end goes reads it.
+   * that fits, orients or decides where a free end goes reads it. Neither makes a vertex standing off
+   * its flank's surface Soft where `split` reads it as detail, such as a rivet.
    */
   station: Float32Array;
   cross: Float32Array;
