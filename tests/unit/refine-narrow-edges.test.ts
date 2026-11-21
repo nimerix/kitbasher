@@ -439,7 +439,10 @@ describe('a narrow flank', () => {
         const model = border(plate, run);
         for (const width of [null, 0.45]) {
           const r = outcome(model, crestGuide(model, width, 0.8));
-          expect(r.solved && [r.pieces, r.skipped, r.folded]).toEqual([1, 0, 0]);
+          expect(
+            r.solved && [r.pieces, r.skipped, r.folded],
+            `plate ${plate}, run ${run}, width ${width ?? 'auto'}`,
+          ).toEqual([1, 0, 0]);
         }
       }
   }, 60_000);
@@ -474,21 +477,23 @@ describe('a narrow flank', () => {
       ),
     );
     const c = 0.08 - 0.08 / Math.SQRT2;
-    return { model, lift, guide: line(model, [-c, -c, -1.7], [-c, -c, 1.7], 0.5, 1) };
+    return { model, guide: line(model, [-c, -c, -1.7], [-c, -c, 1.7], 0.5, 1) };
   };
 
   it('cuts in one piece past two rivets beside the edge and leaves them alone', () => {
-    const { model, lift, guide } = rivets();
+    const { model, guide } = rivets();
     const r = outcome(model, guide);
     expect(r.solved && [r.pieces, r.skipped, r.folded]).toEqual([1, 0, 0]);
     expect(chainOff(r, [0, 0], 1)).toBeLessThan(0.02); // measured 0.007
-    // Every vertex standing 0.03 mm or more above the top face on a rivet stays where it stood.
-    let rivetMove = NaN;
-    if (r.solved) {
-      rivetMove = 0;
-      for (let v = 0; v < model.mesh.weldedCount; v++) {
-        const [x, y, z] = [0, 1, 2].map((a) => model.mesh.position[v * 3 + a]);
-        if (y < 0.03 || lift(x, 0, z) < 0.03) continue;
+    // Every vertex standing 0.03 mm or more above the top face stays where it stood: each rivet has
+    // some.
+    const standing = [0, 0];
+    let rivetMove = 0;
+    for (let v = 0; v < model.mesh.weldedCount; v++) {
+      const [x, y, z] = [0, 1, 2].map((a) => model.mesh.position[v * 3 + a]);
+      if (y < 0.03) continue;
+      standing[z < 0 ? 0 : 1]++;
+      if (r.solved)
         rivetMove = Math.max(
           rivetMove,
           Math.hypot(
@@ -497,8 +502,9 @@ describe('a narrow flank', () => {
             r.out.position[v * 3 + 2] - z,
           ),
         );
-      }
     }
+    expect(standing[0]).toBeGreaterThan(0);
+    expect(standing[1]).toBeGreaterThan(0);
     expect(rivetMove).toBe(0);
   });
 
