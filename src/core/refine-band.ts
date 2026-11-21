@@ -1079,13 +1079,15 @@ function classifyOriented(
   const spanOf = (edge: number) => Math.max(seedEdges * edge, seedSpan);
   // Every vertex the classification reads lies within reach of the guide plus a seed, so a width
   // only caps the band it returns and the classification is the same at every width up to that.
+  // The width is measured from the solved edge, which lies within reach of the guide.
   const band = gather(
     mesh,
     topology,
     drawn,
     total,
     points,
-    (edge) => Math.max(width ?? 0, reachOf(edge) + seedStart * edge + spanOf(edge)),
+    (edge) =>
+      Math.max((width ?? 0) + reachOf(edge), reachOf(edge) + seedStart * edge + spanOf(edge)),
     noise,
   );
   const { vertices, edge } = band;
@@ -1516,15 +1518,16 @@ function classifyOriented(
   };
   const flanks: [BandFlank, BandFlank] = [bandFlank(fits[0], locate), bandFlank(fits[1], locate)];
 
-  // The band capped to a width, or null when its flanks there show no edge: on each side enough
-  // vertices, running far enough outward in half of the slices.
+  // The band capped to a width measured from the solved edge, so that a guide laid to one side of
+  // the edge does not starve the far flank, or null when its flanks there show no edge: on each
+  // side enough vertices, running far enough outward in half of the slices.
   const result = (cap: number): EdgeBand | null => {
     const keep: number[] = [];
     const counts = [0, 0];
     const inner = new Float64Array(slices * 2).fill(Infinity),
       outer = new Float64Array(slices * 2).fill(-Infinity);
     for (let i = 0; i < count; i++) {
-      if (band.g[i] > cap) continue;
+      if (Math.abs(o[i]) > cap) continue;
       keep.push(i);
       if (runZone[i] !== BandZone.Left && runZone[i] !== BandZone.Right) continue;
       const s = runZone[i] - 1,
@@ -1554,8 +1557,7 @@ function classifyOriented(
       angle,
     };
   };
-  const away = median(Array.from(solved.offset, Math.abs));
-  return { result, soft, edge, away, gathered: band.width };
+  return { result, soft, edge, gathered: band.width - reach };
 }
 
 /** True when the guide's last point comes before its first, in x, then y, then z, then triangle. */
@@ -1630,12 +1632,16 @@ function classify(
   };
 }
 
-/** A guide's classification, which every width up to `gathered` caps without classifying again. */
+/**
+ * A guide's classification, which every width up to `gathered`, measured from the solved edge, caps
+ * without classifying again.
+ */
 export type BandClassification = NonNullable<ReturnType<typeof classify>>;
 
 /**
- * Null when no edge lies under the guide: two flank surfaces meeting within reach of it. `known`, a
- * classification of the same guide on the same surface, is capped instead when it reaches `width`.
+ * The band of vertices within `width` of the solved edge, or null when no edge lies under the guide:
+ * two flank surfaces meeting within reach of it. `known`, a classification of the same guide on the
+ * same surface, is capped instead when it reaches `width`.
  */
 export function buildBand(
   mesh: RefineMesh,
@@ -1652,9 +1658,9 @@ export function buildBand(
 }
 
 /**
- * A width that leaves flank on both sides: the solved edge's distance from the guide + soft +
- * max(2 * soft, 6 * the local edge length), at most 1 mm, from the same classification `buildBand`
- * makes. 0 when it shows no edge, or none at that width.
+ * A width, measured from the solved edge, that leaves flank on both sides: soft + max(2 * soft, 6 *
+ * the local edge length), at most 1 mm, from the same classification `buildBand` makes. 0 when it
+ * shows no edge, or none at that width.
  */
 export function estimateWidth(
   mesh: RefineMesh,
@@ -1676,9 +1682,6 @@ export function estimateBand(
 ): { width: number; found: BandClassification | null } {
   const found = classify(mesh, topology, kind, points, null, noise);
   if (!found) return { width: 0, found };
-  const width = Math.min(
-    widestEstimate,
-    found.away + found.soft + Math.max(2 * found.soft, 6 * found.edge),
-  );
+  const width = Math.min(widestEstimate, found.soft + Math.max(2 * found.soft, 6 * found.edge));
   return { width: found.result(width) ? width : 0, found };
 }

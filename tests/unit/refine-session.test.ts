@@ -2117,9 +2117,13 @@ describe('refine session integrity', { timeout: 20_000 }, () => {
         notify(message, kind);
       },
     });
-    // A guide on the flat top, which finds no edge.
-    editor().addRefinePoint(top(-1.2));
-    editor().addRefinePoint(top(1.2));
+    // A guide across the middle of the front face, 1.5 mm from the edges above and below it, past
+    // this coarse mesh's reach of 1.39 mm (6 edge lengths): no pair of flanks meets within reach,
+    // whatever the width is measured from. A guide on the middle of the top face, 1.0 mm from the
+    // front and back edges, is within that reach: it was refused only while the width was measured
+    // from the guide, which left the far flank outside the band.
+    editor().addRefinePoint(surfacePoint([-1.2, 0, 1]));
+    editor().addRefinePoint(surfacePoint([1.2, 0, 1]));
     // A closed loop of lines round the top's four crests, sharp at its corners: cut, but not cleanly.
     const inset = 0.3 * (1 - Math.SQRT1_2);
     const [x, y, z] = [2 - inset, 1.5 - inset, 1 - inset];

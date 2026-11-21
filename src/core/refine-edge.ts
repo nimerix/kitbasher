@@ -123,7 +123,7 @@ const taperEdges = 8;
 /** A move this small, mm, cannot turn a triangle; the fold check passes over it. */
 const foldMove = 0.001;
 /** Most a vertex beside one that stays moves, mm, along the band's sides; the blend grows for it. */
-const seamMove = 0.006;
+export const seamMove = 0.006;
 /** Fewest edge lengths of the edge that keep full weight; the taper shortens to leave them. */
 const coreEdges = 4;
 /** The cut runs among vertices of more than this weight; below it the surface is only moved. */

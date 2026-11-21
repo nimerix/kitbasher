@@ -4,6 +4,7 @@ import {
   type EdgeInput,
   type EdgeSolve,
   applyEdge,
+  seamMove as seamLimit,
   correctedFlanks,
   cutEdgeDisplay,
   moveWeights,
@@ -408,19 +409,33 @@ describe('solveEdge and applyEdge on one segment', () => {
     expect(worst).toBeLessThan(0.002);
   });
 
-  it("moves a vertex beside one that stays, along the band's sides, by at most 0.005 mm", () => {
+  it("moves a vertex beside one that stays, along the band's sides, by at most seamMove", () => {
+    // The blend is grown until no vertex beside one that stays moves more than `seamMove` (0.006
+    // mm), so that constant is the bound while the blend stays under its cap of half the width (it
+    // does on all of these: the blend wanted is 0.26 to 0.27 mm against a cap of 0.3). Where the
+    // band's side falls among the ripples decides how near the bound a mesh comes: over these seeds
+    // 0.0031 to 0.0057 mm, with the width measured from the guide or from the solved edge, so one
+    // seed proves little.
     // Clear of the ends, where the taper along the guide sets the blend.
     const turn = (x: number, z: number) => (Math.atan2(z, x) + 2 * Math.PI) % (2 * Math.PI);
+    const boxes = Array.from({ length: 12 }, (_, k) => {
+      const { model, solve } = refineBoxEdge({ seed: k + 1 });
+      return { model, solve, sides: (x: number) => Math.abs(x) <= 1 };
+    });
+    let nearest = 0;
     for (const { model, solve, sides } of [
-      { ...boxCase(), sides: (x: number) => Math.abs(x) <= 1 },
+      ...boxes,
       { ...rimCase(), sides: (x: number, _: number, z: number) => Math.abs(turn(x, z) - 2) <= 1 },
     ]) {
       const out = cloneRefineMesh(model.mesh, false);
       applyEdge(out, model.topology, solve, 1, false);
       const seam = seamMove(model.mesh, out, model.topology, sides);
       expect(seam).toBeGreaterThan(0);
-      expect(seam).toBeLessThan(0.005);
+      expect(seam).toBeLessThanOrEqual(seamLimit + 1e-9);
+      nearest = Math.max(nearest, seam);
     }
+    // The bound is not slack: some mesh comes within a quarter of it.
+    expect(nearest).toBeGreaterThan(0.75 * seamLimit);
   });
 
   it('holds an edge drawn from corner to corner and tapers one that stops mid-edge', () => {
