@@ -507,8 +507,8 @@ pieces, for five measured reasons:
    across the surface from the solved edge is at most Width. The guide stays what points at
    the edge: the solved edge must lie within reach of it, the larger of 0.35 and 6 edge
    lengths, in at least half of the slices. Automatic width is soft + max(2 x soft, 6 edge
-   lengths), at most 1, where soft is the width of the rounding. It no longer adds the
-   guide's distance from the edge.
+   lengths), where soft is the width of the rounding, held to 1 unless the edge cannot be
+   read within 1. It no longer adds the guide's distance from the edge.
 2. **A flank's run is read between its zone boundaries.** In each slice the run is from
    where the flank starts to the nearest of where it ends, how far the slice reaches, and
    Width. Each side needs a run of 3 edge lengths in at least half of the slices, as before.

@@ -111,7 +111,7 @@ const farCost = 2;
 const fitPoints = 1024;
 /** Robust scale of a residual per unit of median absolute residual. */
 const madScale = 1.4826;
-/** Widest width `estimateWidth` returns, mm. */
+/** Widest width `estimateWidth` returns, mm, unless the edge cannot be read within it. */
 const widestEstimate = 1;
 const unset = -1;
 
@@ -1659,8 +1659,9 @@ export function buildBand(
 
 /**
  * A width, measured from the solved edge, that leaves flank on both sides: soft + max(2 * soft, 6 *
- * the local edge length), at most 1 mm, from the same classification `buildBand` makes. 0 when it
- * shows no edge, or none at that width.
+ * the local edge length), from the same classification `buildBand` makes. It is held to 1 mm unless
+ * the edge cannot be read within that, as on a coarse mesh with a wide rounding. 0 when it shows no
+ * edge, or none at that width.
  */
 export function estimateWidth(
   mesh: RefineMesh,
@@ -1682,6 +1683,8 @@ export function estimateBand(
 ): { width: number; found: BandClassification | null } {
   const found = classify(mesh, topology, kind, points, null, noise);
   if (!found) return { width: 0, found };
-  const width = Math.min(widestEstimate, found.soft + Math.max(2 * found.soft, 6 * found.edge));
-  return { width: found.result(width) ? width : 0, found };
+  const wanted = found.soft + Math.max(2 * found.soft, 6 * found.edge);
+  const limited = Math.min(widestEstimate, wanted);
+  if (found.result(limited)) return { width: limited, found };
+  return { width: wanted > limited && found.result(wanted) ? wanted : 0, found };
 }

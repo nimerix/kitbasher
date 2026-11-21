@@ -4,7 +4,7 @@ import { type EdgeInput, applyEdge, solveEdge } from '../../src/core/refine-edge
 import { cloneRefineMesh } from '../../src/core/refine-mesh';
 import type { Vec3 } from '../../src/core/types';
 import { modelOf, pointOn } from '../helpers/refine';
-import { extrudedProfile } from '../helpers/soft-edges';
+import { extrudedProfile, softCylinder } from '../helpers/soft-edges';
 
 const scan = { step: 0.06, ripple: 0.01, noise: 0.006 };
 type Model = ReturnType<typeof modelOf>;
@@ -118,5 +118,27 @@ describe('a guide laid beside the edge', () => {
       expect(r.solved).toBe(true);
       expect(chainOff(r, [0, 0], 0.7)).toBeLessThan(0.05);
     }
+  });
+});
+
+describe('automatic width on a coarse mesh', () => {
+  it('keeps six edge lengths of flank past a wide rounding, over 1 mm', () => {
+    // The e2e cylinder: radius 3, rims rounded 0.6, edges about 0.23 mm. An Arc on the rim crest.
+    const model = modelOf(softCylinder(3, 1.5, 0.6, { step: 0.2, ripple: 0.04, noise: 0.008 }));
+    const inset = 0.6 - 0.6 / Math.SQRT2;
+    const points = [-0.9, 0, 0.9].map((a) =>
+      pointOn(model.mesh, [(3 - inset) * Math.cos(a), 1.5 - inset, (3 - inset) * Math.sin(a)]),
+    );
+    const width = estimateWidth(model.mesh, model.topology, 'arc', points, model.noise);
+    expect(width).toBeGreaterThan(1); // measured 1.70 (soft 0.32 + 6 x 0.23), as 1 is refused
+    const input: EdgeInput = {
+      segments: [{ kind: 'arc', points }],
+      joints: [],
+      closed: false,
+      width: null,
+      strength: 1,
+    };
+    const r = outcome(model, input);
+    expect(r.solved && [r.pieces, r.skipped, r.folded]).toEqual([1, 0, 0]);
   });
 });
