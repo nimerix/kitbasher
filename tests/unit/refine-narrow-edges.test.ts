@@ -3,7 +3,7 @@ import { type EdgeBand, buildBand, estimateBand, estimateWidth } from '../../src
 import { type EdgeInput, applyEdge, solveEdge } from '../../src/core/refine-edge';
 import { cloneRefineMesh } from '../../src/core/refine-mesh';
 import type { Vec3 } from '../../src/core/types';
-import { modelOf, pointOn } from '../helpers/refine';
+import { modelFrom, modelOf, pointOn } from '../helpers/refine';
 import { extrudedProfile, softBox, softCylinder, variedProfile } from '../helpers/soft-edges';
 
 const scan = { step: 0.06, ripple: 0.01, noise: 0.006 };
@@ -527,5 +527,30 @@ describe('a narrow flank', () => {
     // Five dips, at z = -2, -1, 0, 1 and 2.
     const { model, guide } = narrowing(0.06, [-2, -1, 0, 1, 2]);
     expect(outcome(model, guide).solved).toBe(false);
+  });
+
+  it('changes nothing visible when run again over a narrow wall', () => {
+    // Two limits: the second pass shifts a few cut-line vertices near the guide's free ends by about
+    // 0.01 (measured 0.0106 at z = 2.33), as it did before filling (0.006 to 0.009 on the runs that
+    // solved then), and filling plays no part. Away from the ends it moves 0.0028 at most (measured).
+    const model = border([-2, 0], 0.24);
+    const first = outcome(model, crestGuide(model, 0.45, 1));
+    expect(first.solved && [first.pieces, first.skipped, first.folded]).toEqual([1, 0, 0]);
+    if (!first.solved) return;
+    const again = modelFrom(first.out);
+    const second = outcome(again, crestGuide(again, 0.45, 1));
+    expect(second.solved && [second.pieces, second.skipped, second.folded]).toEqual([1, 0, 0]);
+    if (!second.solved) return;
+    const p = again.mesh.position,
+      q = second.out.position;
+    let inner = 0;
+    for (let v = 0; v < again.mesh.weldedCount; v++)
+      if (Math.abs(p[v * 3 + 2]) <= 2)
+        inner = Math.max(
+          inner,
+          Math.hypot(q[v * 3] - p[v * 3], q[v * 3 + 1] - p[v * 3 + 1], q[v * 3 + 2] - p[v * 3 + 2]),
+        );
+    expect(inner).toBeLessThan(0.005);
+    expect(second.max).toBeLessThan(0.02);
   });
 });
