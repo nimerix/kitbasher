@@ -16,22 +16,37 @@ import {
   type Intersection,
 } from 'three';
 import { acceleratedRaycast } from 'three-mesh-bvh';
-import { SculptMesh, type SculptDab } from '../core/sculpt-mesh';
+import { clearSculptIncidence, SculptMesh, type SculptDab } from '../core/sculpt-mesh';
+import { triangleCount } from '../core/geometry';
+import { workerIndexTriangles } from '../core/spatial-index';
 import { useEditor } from '../core/store';
 import type { Part, SculptureSettings } from '../core/types';
 import { partMeshes } from '../xr/part-meshes';
+import { boundsEntry } from './RefinePointer';
 
 type Sample = Pick<
   PointerEvent,
-  'clientX' | 'clientY' | 'pressure' | 'pointerType' | 'tiltX' | 'tiltY' | 'twist'
+  | 'clientX'
+  | 'clientY'
+  | 'pressure'
+  | 'pointerType'
+  | 'tiltX'
+  | 'tiltY'
+  | 'twist'
+  | 'shiftKey'
+  | 'altKey'
 >;
 type Hit = Pick<SculptDab, 'point' | 'normal' | 'face'>;
+
+const maxQueuedDabs = 8;
 
 const lerp = (a: number, b: number, t: number) => a + (b - a) * t;
 
 function interpolate(a: Sample, b: Sample, t: number): Sample {
   return {
     pointerType: b.pointerType,
+    shiftKey: b.shiftKey,
+    altKey: b.altKey,
     clientX: lerp(a.clientX, b.clientX, t),
     clientY: lerp(a.clientY, b.clientY, t),
     pressure: lerp(a.pressure, b.pressure, t),
@@ -73,6 +88,7 @@ function hitFrom(intersection: Intersection, mesh: Mesh): Hit | null {
 interface Stroke {
   id: number;
   target: Part;
+  mask: Float32Array | null;
   epoch: number;
   revision: number;
   own: Mesh;
@@ -82,12 +98,11 @@ interface Stroke {
   controls: { enabled: boolean } | null;
   controlsEnabled: boolean;
   brush: SculptDab['brush'];
-  inverted: boolean;
-  softenMask: boolean;
+  eraser: boolean;
   last: Sample;
+  latest: Sample;
   pending: Sample[];
   changed: boolean;
-  end: boolean;
   spacing: number;
   first: Hit;
   grabPoint: Vector3;
@@ -206,15 +221,32 @@ export function SculptPointer() {
       stroke.draft.raycast(ray, mesh, hits);
       return hits;
     };
-    const pick = (sample: Sample, own: Mesh): Hit | null => {
+    const pick = (sample: Sample, own: Mesh, exactOcclusion = false): Hit | null => {
       setRay(sample);
-      let closest: Intersection | undefined;
+      const hit = intersect(own)[0];
+      if (!hit || !visible(own)) return null;
       for (const mesh of partMeshes.values()) {
-        if (!visible(mesh)) continue;
-        const hit = intersect(mesh)[0];
-        if (hit && (!closest || hit.distance < closest.distance)) closest = hit;
+        if (mesh === own || !visible(mesh)) continue;
+        const geometry = mesh.geometry;
+        if (geometry.boundsTree || triangleCount(geometry) <= workerIndexTriangles) {
+          const other = intersect(mesh)[0];
+          if (other && other.distance <= hit.distance) return null;
+          continue;
+        }
+        const entry = boundsEntry(ray.ray, mesh);
+        if (entry === null || entry > hit.distance) continue;
+        // Exact fallback is reserved for stroke samples near a mesh whose index is unavailable.
+        if (!exactOcclusion) return null;
+        const hits: Intersection[] = [];
+        ray.far = hit.distance;
+        try {
+          Mesh.prototype.raycast.call(mesh, ray, hits);
+        } finally {
+          ray.far = Infinity;
+        }
+        if (hits.length) return null;
       }
-      return closest?.object === own ? hitFrom(closest, own) : null;
+      return hitFrom(hit, own);
     };
     const mirror = (hit: Hit, own: Mesh, radius: number): Hit | null => {
       const inverse = new Matrix4().copy(own.matrixWorld).invert();
@@ -266,11 +298,28 @@ export function SculptPointer() {
         );
       return tangent.normalize().applyAxisAngle(hit.normal, angle);
     };
-    const show = (i: number, hit: Hit | null, radius: number, aspect: number, angle: number) => {
+    const reflect = (vector: Vector3, own: Mesh) => {
+      const local = vector
+        .clone()
+        .applyMatrix3(new Matrix3().setFromMatrix4(own.matrixWorld.clone().invert()));
+      local.x = -local.x;
+      return local.applyMatrix3(new Matrix3().setFromMatrix4(own.matrixWorld));
+    };
+    const reflectedTangent = (tangent: Vector3, hit: Hit, own: Mesh) => {
+      const reflected = reflect(tangent, own);
+      reflected.addScaledVector(hit.normal, -reflected.dot(hit.normal));
+      return reflected.lengthSq() > 1e-8 ? reflected.normalize() : tangentAt(hit, 0);
+    };
+    const show = (
+      i: number,
+      hit: Hit | null,
+      radius: number,
+      aspect: number,
+      tangent?: Vector3,
+    ) => {
       const cursor = cursors[i];
-      cursor.visible = !!hit && radius > 0;
-      if (!hit) return;
-      const tangent = tangentAt(hit, angle);
+      cursor.visible = !!hit && !!tangent && radius > 0;
+      if (!hit || !tangent) return;
       cursor.position.copy(hit.point).addScaledVector(hit.normal, radius * 0.006);
       cursor.quaternion.setFromRotationMatrix(
         new Matrix4().makeBasis(
@@ -335,8 +384,16 @@ export function SculptPointer() {
         const hit = pick(hover, own);
         const aspect = settings.brush === 'draw' ? settings.aspect : 1;
         const angle = footprint(settings, hover);
-        show(0, hit, radius, aspect, angle);
-        show(1, hit && settings.symmetry ? mirror(hit, own, radius) : null, radius, aspect, -angle);
+        const tangent = hit ? tangentAt(hit, angle) : undefined;
+        const twin = hit && settings.symmetry ? mirror(hit, own, radius) : null;
+        show(0, hit, radius, aspect, tangent);
+        show(
+          1,
+          twin,
+          radius,
+          aspect,
+          twin && tangent ? reflectedTangent(tangent, twin, own) : undefined,
+        );
       }
       displayMask();
       invalidate();
@@ -352,7 +409,12 @@ export function SculptPointer() {
       if (overlay.geometry === active.draft.geometry) overlay.geometry = emptyOverlay;
       if (accept && active.changed) {
         const geometry = active.draft.finish();
-        const mask = active.draft.getMask();
+        const grew =
+          geometry &&
+          geometry.getAttribute('position').count !==
+            active.target.geometry.getAttribute('position').count;
+        const mask =
+          active.brush === 'mask' || (grew && active.mask) ? active.draft.getMask() : active.mask;
         const { id: partId, geometry: source, position, quaternion, scale } = active.target;
         if (
           !useEditor.getState().commitSculpt({
@@ -364,7 +426,7 @@ export function SculptPointer() {
             quaternion,
             scale,
             geometry,
-            mask: mask.some((value) => value > 0) ? mask : null,
+            mask: mask?.some((value) => value > 0) ? mask : null,
           })
         )
           geometry?.dispose();
@@ -382,14 +444,16 @@ export function SculptPointer() {
     };
     const apply = (active: Stroke, sample: Sample) => {
       const s = active.settings;
-      const hit = active.brush === 'grab' ? active.first : pick(sample, active.own);
+      const brush =
+        sample.shiftKey && !active.eraser && active.brush !== 'mask' ? 'smooth' : active.brush;
+      const hit = brush === 'grab' ? active.first : pick(sample, active.own, true);
       if (!hit) return;
       const p = pressure(sample, s);
       const strength = s.strength * (s.pressureStrength ? p : 1);
       if (!(strength > 0)) return;
       const radius = s.radius * (s.pressureRadius ? Math.max(0.08, p) : 1);
       let angle = footprint(s, sample);
-      if (active.brush === 'crease' && active.applied) {
+      if (brush === 'crease' && active.applied) {
         const dx = sample.clientX - active.applied.clientX;
         const dy = active.applied.clientY - sample.clientY;
         if (dx || dy) angle = Math.atan2(dy, dx);
@@ -397,11 +461,7 @@ export function SculptPointer() {
       active.applied = sample;
       const tangent = tangentAt(hit, angle);
       const twin =
-        active.brush === 'grab'
-          ? active.grabMirror
-          : s.symmetry
-            ? mirror(hit, active.own, radius)
-            : null;
+        brush === 'grab' ? active.grabMirror : s.symmetry ? mirror(hit, active.own, radius) : null;
       let grab: Vector3 | undefined;
       let mirroredGrab: Vector3 | undefined;
       if (active.brush === 'grab') {
@@ -411,13 +471,7 @@ export function SculptPointer() {
         const point = ray.ray.at(projection / ray.ray.direction.dot(direction), new Vector3());
         grab = point.clone().sub(active.grabPoint);
         active.grabPoint.copy(point);
-        if (twin) {
-          const local = grab
-            .clone()
-            .applyMatrix3(new Matrix3().setFromMatrix4(active.own.matrixWorld.clone().invert()));
-          local.x = -local.x;
-          mirroredGrab = local.applyMatrix3(new Matrix3().setFromMatrix4(active.own.matrixWorld));
-        }
+        if (twin) mirroredGrab = reflect(grab, active.own);
       }
       active.changed =
         active.draft.dab({
@@ -426,16 +480,16 @@ export function SculptPointer() {
           strength,
           detail: s.detail,
           minEdge: s.minEdge,
-          brush: active.brush,
+          brush,
           falloff: s.falloff,
-          inverted: active.inverted,
+          inverted: active.eraser || sample.altKey,
           pinch: s.pinch,
-          softenMask: active.softenMask,
+          softenMask: brush === 'mask' && sample.shiftKey,
           grab,
           tangent,
-          aspect: active.brush === 'draw' ? s.aspect : 1,
+          aspect: brush === 'draw' ? s.aspect : 1,
           mirror: twin
-            ? { ...twin, tangent: tangentAt(twin, -angle), grab: mirroredGrab }
+            ? { ...twin, tangent: reflectedTangent(tangent, twin, active.own), grab: mirroredGrab }
             : undefined,
         }) || active.changed;
     };
@@ -450,11 +504,21 @@ export function SculptPointer() {
             const sample = active.pending.shift();
             if (sample) apply(active, sample);
           } while (active.pending.length && performance.now() < until);
-          if (!active.pending.length && active.end) detach(true);
-          else if (active.pending.length) schedule();
+          if (active.pending.length) schedule();
         }
         refresh();
       });
+    };
+    const queue = (active: Stroke, sample: Sample) => {
+      active.pending.push(sample);
+      if (active.pending.length > maxQueuedDabs * 2) {
+        // Keep both endpoints and evenly thin old dabs when input outruns rendering.
+        const pending = active.pending;
+        active.pending = Array.from(
+          { length: maxQueuedDabs },
+          (_, i) => pending[Math.round((i * (pending.length - 1)) / (maxQueuedDabs - 1))],
+        );
+      }
     };
     const enqueue = (active: Stroke, incoming: Sample, final = false) => {
       const sample = final
@@ -464,16 +528,24 @@ export function SculptPointer() {
         sample.clientX - active.last.clientX,
         sample.clientY - active.last.clientY,
       );
-      const steps = Math.min(32, Math.floor(distance / active.spacing));
+      const scale = active.settings.pressureRadius
+        ? Math.max(0.08, pressure(sample, active.settings))
+        : 1;
+      const spacing = Math.max(0.5, active.spacing * scale);
+      const steps = Math.min(32, Math.floor(distance / spacing));
       if (steps) {
+        const interval = Math.max(spacing, distance / 32);
         for (let i = 1; i <= steps; i++)
-          active.pending.push(interpolate(active.last, sample, i / steps));
+          queue(active, interpolate(active.last, sample, (interval * i) / distance));
+        active.last = active.pending.at(-1)!;
+        if (!final || distance - interval * steps <= 0.1) return;
+        queue(active, sample);
       } else if (
         final
           ? distance > 0.1
           : distance < 0.1 && Math.abs(sample.pressure - active.last.pressure) > 0.015
       ) {
-        active.pending.push(sample);
+        queue(active, sample);
       } else return;
       active.last = sample;
     };
@@ -502,7 +574,7 @@ export function SculptPointer() {
       const target = state.scene.parts.find((part) => part.id === sculpt.partId);
       const own = target && partMeshes.get(target.id);
       if (!target || !own || target.locked || !visible(own)) return;
-      const hit = pick(event, own);
+      const hit = pick(event, own, true);
       if (!hit) return;
       event.preventDefault();
       event.stopImmediatePropagation();
@@ -534,17 +606,11 @@ export function SculptPointer() {
       const draft =
         cached ?? new SculptMesh(target.geometry, own.matrixWorld, sculpt.mask ?? undefined);
       const eraser = event.button === 5;
-      const brush =
-        settings.brush === 'mask'
-          ? 'mask'
-          : eraser
-            ? 'draw'
-            : event.shiftKey
-              ? 'smooth'
-              : settings.brush;
+      const brush = settings.brush === 'mask' ? 'mask' : eraser ? 'draw' : settings.brush;
       stroke = {
         id: event.pointerId,
         target,
+        mask: sculpt.mask,
         epoch: state.sceneEpoch,
         revision: sculpt.revision,
         own,
@@ -554,17 +620,16 @@ export function SculptPointer() {
         controlsEnabled: controls?.enabled ?? false,
         settings,
         brush,
-        inverted: eraser || event.altKey,
-        softenMask: brush === 'mask' && event.shiftKey,
+        eraser,
         first: hit,
         grabPoint: hit.point.clone(),
         grabMirror:
           brush === 'grab' && settings.symmetry ? mirror(hit, own, settings.radius) : null,
         applied: null,
         last: event,
+        latest: event,
         pending: [event],
         changed: false,
-        end: false,
         spacing: Math.max(0.75, radiusPixels * settings.spacing),
       };
       if (controls) controls.enabled = false;
@@ -576,8 +641,8 @@ export function SculptPointer() {
       if (stroke) {
         if (event.pointerId !== stroke.id) return;
         event.stopImmediatePropagation();
-        if (stroke.end) return;
         const events = event.getCoalescedEvents?.() ?? [];
+        stroke.latest = events.at(-1) ?? event;
         for (const sample of events.length ? events : [event]) enqueue(stroke, sample);
       } else if (!canvas.contains(event.target as Node) || event.pointerType === 'touch') return;
       hover = event;
@@ -586,19 +651,30 @@ export function SculptPointer() {
     const release = (event: PointerEvent) => {
       if (!stroke || event.pointerId !== stroke.id) return;
       event.stopImmediatePropagation();
+      const { pressure, pointerType, tiltX, tiltY, twist } = stroke.latest;
       enqueue(
         stroke,
-        { ...interpolate(stroke.last, event, 1), pressure: stroke.last.pressure },
+        {
+          clientX: event.clientX,
+          clientY: event.clientY,
+          pressure,
+          pointerType,
+          tiltX,
+          tiltY,
+          twist,
+          shiftKey: event.shiftKey,
+          altKey: event.altKey,
+        },
         true,
       );
-      stroke.end = true;
       suppressClick = true;
       window.clearTimeout(clickTimer);
       clickTimer = window.setTimeout(() => (suppressClick = false), 300);
-      schedule();
+      for (const sample of stroke.pending) apply(stroke, sample);
+      detach(true);
     };
     const cancel = (event: PointerEvent) => {
-      if (stroke?.id === event.pointerId && !stroke.end) detach(false);
+      if (stroke?.id === event.pointerId) detach(false);
     };
     const escape = (event: KeyboardEvent) => {
       if (event.key !== 'Escape' || !stroke) return;
@@ -664,6 +740,7 @@ export function SculptPointer() {
       detach(false);
       window.clearTimeout(warmTimer);
       discardWarm();
+      clearSculptIncidence();
       scene.remove(...cursors, overlay);
       cursorShape.dispose();
       cursorPaint.dispose();

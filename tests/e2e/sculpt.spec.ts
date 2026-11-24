@@ -19,8 +19,8 @@ const block = {
   ],
 };
 
-async function openSculpt(page: Page) {
-  await openScene(page, block);
+async function openSculpt(page: Page, scene = block) {
+  await openScene(page, scene);
   await page.locator('.part-select[title="Coarse block"]').click();
   await page.keyboard.press('1');
   await page.keyboard.press('Home');
@@ -67,6 +67,53 @@ async function penTap(page: Page, pressure: number) {
     await session.detach();
   }
 }
+
+test('only sculpts the selected part when its surface is visible under the tip', async ({
+  page,
+}) => {
+  await openSculpt(page, {
+    ...block,
+    parts: [block.parts[0], { ...block.parts[0], id: 'cover', name: 'Cover', position: [0, 0, 6] }],
+  });
+  const before = await mesh(page);
+  await penTap(page, 0.9);
+  await page.evaluate(
+    () =>
+      new Promise<void>((resolve) =>
+        requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+      ),
+  );
+  expect(await mesh(page)).toEqual(before);
+  await page.getByRole('button', { name: 'Hide Cover' }).click();
+  await penTap(page, 0.9);
+  await expect.poll(async () => (await mesh(page)).peak).toBeGreaterThan(before.peak);
+});
+
+test('commits a released stroke before a tool change in the same frame', async ({ page }) => {
+  await openSculpt(page);
+  const before = await mesh(page);
+  const point = await screen(page, [1, 0, 2]);
+  await page.evaluate(async (spot) => {
+    const storeUrl = performance
+      .getEntriesByType('resource')
+      .map((entry) => entry.name)
+      .find((url) => /\/src\/core\/store\.ts(?:\?.*)?$/.test(url))!;
+    const { useEditor } = await import(storeUrl);
+    const canvas = document.querySelector('canvas')!;
+    const event = {
+      clientX: spot.x,
+      clientY: spot.y,
+      pointerId: 42,
+      pointerType: 'pen',
+      isPrimary: true,
+      bubbles: true,
+    };
+    canvas.dispatchEvent(new PointerEvent('pointerdown', { ...event, buttons: 1, pressure: 0.8 }));
+    canvas.dispatchEvent(new PointerEvent('pointerup', event));
+    useEditor.getState().setTool('select');
+  }, point);
+  expect((await mesh(page)).peak).toBeGreaterThan(before.peak);
+});
 
 test('draws into a coarse face with pen pressure and undoes topology with displacement', async ({
   page,
@@ -138,14 +185,14 @@ test('cancels an active stroke and reopens the completed stroke from disk', asyn
 test('a fully inverted mask protects the coarse surface until cleared', async ({ page }) => {
   await openSculpt(page);
   const before = await mesh(page);
-  await page.getByRole('combobox', { name: 'Brush', exact: true }).selectOption('mask');
+  await page.getByRole('button', { name: 'Mask', exact: true }).click();
   await page.getByRole('button', { name: /invert mask/i }).click();
-  await page.getByRole('combobox', { name: 'Brush', exact: true }).selectOption('draw');
+  await page.getByRole('button', { name: 'Draw', exact: true }).click();
   await penTap(page, 0.9);
   expect(await mesh(page)).toEqual(before);
-  await page.getByRole('combobox', { name: 'Brush', exact: true }).selectOption('mask');
+  await page.getByRole('button', { name: 'Mask', exact: true }).click();
   await page.getByRole('button', { name: /clear mask/i }).click();
-  await page.getByRole('combobox', { name: 'Brush', exact: true }).selectOption('draw');
+  await page.getByRole('button', { name: 'Draw', exact: true }).click();
   await penTap(page, 0.9);
   await expect.poll(async () => (await mesh(page)).peak).toBeGreaterThan(before.peak);
 });
@@ -156,7 +203,7 @@ test('mask paint subdivides without displacement and restores weights with undo 
   await openSculpt(page);
   const before = await mesh(page);
   const weights = () => inStore(page, (state) => Array.from(state.sculpt?.mask ?? []));
-  await page.getByRole('combobox', { name: 'Brush', exact: true }).selectOption('mask');
+  await page.getByRole('button', { name: 'Mask', exact: true }).click();
   await penTap(page, 0.8);
   await expect.poll(async () => (await weights()).some((weight) => weight > 0)).toBe(true);
   const painted = await mesh(page);
@@ -176,20 +223,19 @@ test('applies Clay Buildup and Inflate and keeps their falloff settings independ
 }) => {
   await openSculpt(page);
   const before = await mesh(page);
-  const brush = page.getByRole('combobox', { name: 'Brush', exact: true });
   const falloff = page.getByRole('combobox', { name: 'Falloff' });
   await page.getByText('Advanced brush settings', { exact: true }).click();
-  await brush.selectOption({ label: 'Clay Buildup' });
+  await page.getByRole('button', { name: 'Clay Buildup', exact: true }).click();
   await falloff.selectOption('hard');
   await penTap(page, 0.9);
   await expect.poll(async () => (await mesh(page)).peak).toBeGreaterThan(before.peak);
   await page.keyboard.press('ControlOrMeta+z');
   await expect.poll(() => mesh(page)).toEqual(before);
-  await brush.selectOption({ label: 'Inflate/Deflate' });
+  await page.getByRole('button', { name: 'Inflate/Deflate', exact: true }).click();
   await expect(falloff).toHaveValue('soft');
   await penTap(page, 0.9);
   await expect.poll(async () => (await mesh(page)).peak).toBeGreaterThan(before.peak);
-  await brush.selectOption({ label: 'Clay Buildup' });
+  await page.getByRole('button', { name: 'Clay Buildup', exact: true }).click();
   await expect(falloff).toHaveValue('hard');
   await page.getByRole('button', { name: 'Reset brush settings' }).click();
   await expect(falloff).toHaveValue('soft');
