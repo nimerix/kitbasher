@@ -30,6 +30,10 @@ const sceneOf = (...geometries: BufferGeometry[]): SceneDocument => ({
 });
 
 const tiny = vi.hoisted(() => ({ on: false }));
+vi.mock('../../src/core/sculpt-session', async (original) => ({
+  ...(await original<typeof import('../../src/core/sculpt-session')>()),
+  sculptHistoryBytes: 1024,
+}));
 vi.mock('../../src/core/history-budget', async (original) => {
   const actual = await original<typeof import('../../src/core/history-budget')>();
   return {
@@ -98,6 +102,37 @@ describe('history budget', () => {
     expect(state.toast!.id).toBe(id);
     useEditor.getState().setScene(sceneOf(mesh(30)));
     expect(useEditor.getState().historyTrimNotified).toBe(false);
+  });
+
+  it('preserves unrelated undo steps when they exceed the Sculpt mesh limit', () => {
+    const previous = mesh(300);
+    const sculptable = new BoxGeometry();
+    const scene = sceneOf(previous, sculptable);
+    const store = useEditor.getState;
+    store().setScene(scene);
+    store().patchParts(['p0'], { geometry: mesh(3) });
+    const beforeStroke = store().scene;
+    store().select('p1');
+    expect(store().startSculpt()).toBe(true);
+    expect(
+      store().commitSculpt({
+        partId: 'p1',
+        source: sculptable,
+        epoch: store().sceneEpoch,
+        position: [0, 0, 0],
+        quaternion: [0, 0, 0, 1],
+        scale: [1, 1, 1],
+        geometry: sculptable.clone(),
+        mask: null,
+      }),
+    ).toBe(true);
+
+    expect(store().past).toEqual([scene, beforeStroke]);
+    expect(store().historyTrimNotified).toBe(false);
+    store().setTool('select');
+    store().undo();
+    store().undo();
+    expect(store().scene.parts[0].geometry).toBe(previous);
   });
 
   it('keeps undo steps when Cut retains the removed meshes in the new clipboard', () => {

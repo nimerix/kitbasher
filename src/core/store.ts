@@ -1885,12 +1885,7 @@ function appliedWarpGeometry(source: BufferGeometry, output: WarpOutput) {
   return geometry;
 }
 
-const changed = (
-  state: EditorState,
-  scene: SceneDocument,
-  checkpoint = true,
-  budget = historyBudgetBytes,
-) => {
+const changed = (state: EditorState, scene: SceneDocument, checkpoint = true) => {
   const base = committedScene(state);
   let past = checkpoint ? [...state.past.slice(-(historyLimit - 1)), base] : state.past;
   let notice = {};
@@ -1899,7 +1894,7 @@ const changed = (
       past,
       [],
       [scene, ...(state.clipboard ? [{ name: '', parts: state.clipboard.parts, joints: [] }] : [])],
-      budget,
+      historyBudgetBytes,
     );
     if (kept.trimmed) {
       past = kept.past;
@@ -3515,17 +3510,12 @@ export const useEditor = create<EditorState>((set, get) => ({
         ? state.future.length
           ? { future: [] }
           : {}
-        : changed(
-            state,
-            {
-              ...state.scene,
-              parts: state.scene.parts.map((candidate) =>
-                candidate.id === part.id ? { ...part, geometry } : candidate,
-              ),
-            },
-            true,
-            sculptHistoryBytes,
-          )),
+        : changed(state, {
+            ...state.scene,
+            parts: state.scene.parts.map((candidate) =>
+              candidate.id === part.id ? { ...part, geometry } : candidate,
+            ),
+          })),
       sculpt: {
         ...sculpt,
         revision: nextSculptRevision(),
