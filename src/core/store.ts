@@ -2134,7 +2134,7 @@ export const useEditor = create<EditorState>((set, get) => ({
   focusRequest: { id: 0, all: true },
   measurement: [],
   select: (id, additive = false) => {
-    finishReleasedSculpt();
+    if (afterReleasedSculpt(() => get().select(id, additive))) return;
     set((state) => ({
       selected: id
         ? additive
@@ -2248,7 +2248,7 @@ export const useEditor = create<EditorState>((set, get) => ({
     })),
   closeContextMenu: () => set({ contextMenu: null }),
   setTool: (tool) => {
-    finishReleasedSculpt();
+    if (afterReleasedSculpt(() => get().setTool(tool))) return;
     const state = get();
     if (tool === 'warp' && state.tool === 'warp' && state.warp)
       set({ navigationMode: null, pivotPicking: false });
@@ -2442,12 +2442,14 @@ export const useEditor = create<EditorState>((set, get) => ({
       })),
     });
   },
-  setNavigationMode: (navigationMode) =>
+  setNavigationMode: (navigationMode) => {
+    if (afterReleasedSculpt(() => get().setNavigationMode(navigationMode))) return;
     set(() => ({
       navigationMode,
       pivotPicking: false,
       painting: false,
-    })),
+    }));
+  },
   centerOrbit: () => {
     const state = get();
     if (!state.scene.parts.some((part) => part.visible && state.selected.includes(part.id))) {
@@ -3530,6 +3532,7 @@ export const useEditor = create<EditorState>((set, get) => ({
     return true;
   },
   changeSculptMask: (operation) => {
+    if (afterReleasedSculpt(() => get().changeSculptMask(operation))) return;
     const state = get();
     const { sculpt } = state;
     const part = sculpt && state.scene.parts.find((candidate) => candidate.id === sculpt.partId);
@@ -4960,12 +4963,10 @@ export const useEditor = create<EditorState>((set, get) => ({
       return next === state.scene.name ? {} : changed(state, { ...state.scene, name: next });
     }),
   undo: () => {
-    finishReleasedSculpt();
-    moveHistory('undo');
+    if (!afterReleasedSculpt(() => get().undo())) moveHistory('undo');
   },
   redo: () => {
-    finishReleasedSculpt();
-    moveHistory('redo');
+    if (!afterReleasedSculpt(() => get().redo())) moveHistory('redo');
   },
   setView: (patch) => {
     if (patch.orbitSelection !== undefined) saveOrbitPreference(patch.orbitSelection);
@@ -5000,14 +5001,14 @@ useEditor.subscribe((state, previous) => {
     recordNotification(state.toast.message, state.toast.kind);
 });
 
-let finishSculptStroke: (() => void) | null = null;
+let finishSculptStroke: ((action: () => void) => boolean) | null = null;
 
 export function useSculptStrokeFinisher(finish: typeof finishSculptStroke) {
   finishSculptStroke = finish;
 }
 
-export function finishReleasedSculpt() {
-  finishSculptStroke?.();
+export function afterReleasedSculpt(action: () => void): boolean {
+  return finishSculptStroke?.(action) ?? false;
 }
 
 let sharedSculptQueueGuard: ((geometry: BufferGeometry) => boolean) | null = null;

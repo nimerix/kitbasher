@@ -115,6 +115,56 @@ test('commits a released stroke before a tool change in the same frame', async (
   expect((await mesh(page)).peak).toBeGreaterThan(before.peak);
 });
 
+test('queues another press and mask changes while a released stroke finishes', async ({ page }) => {
+  await openSculpt(page);
+  const first = await screen(page, [-1, 0, 2]);
+  const second = await screen(page, [1, 0, 2]);
+  await page.evaluate(
+    ({ first, second }) => {
+      const canvas = document.querySelector('canvas')!;
+      const now = performance.now.bind(performance);
+      let elapsed = now();
+      // Force the released-stroke path regardless of the test machine's speed.
+      performance.now = () => (elapsed += 8);
+      try {
+        for (const point of [first, second]) {
+          const pen = {
+            pointerId: 24,
+            isPrimary: true,
+            pointerType: 'pen',
+            pressure: 0.8,
+            bubbles: true,
+            clientX: point.x,
+            clientY: point.y,
+          };
+          canvas.dispatchEvent(new PointerEvent('pointerdown', { ...pen, buttons: 1 }));
+          canvas.dispatchEvent(new PointerEvent('pointerup', pen));
+        }
+        window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+        const invert = Array.from(document.querySelectorAll('button')).find(
+          (button) => button.textContent?.trim() === 'Invert mask',
+        );
+        if (!invert) throw new Error('Missing Invert mask button');
+        invert.click();
+      } finally {
+        performance.now = now;
+      }
+    },
+    { first, second },
+  );
+  await expect
+    .poll(() =>
+      inStore(page, (state) => {
+        const past = state.sculpt?.past ?? [];
+        return {
+          strokes: past.filter((step) => step.before.geometry !== step.after.geometry).length,
+          mask: state.sculpt?.mask?.every((weight) => weight === 1),
+        };
+      }),
+    )
+    .toEqual({ strokes: 2, mask: true });
+});
+
 test('fills the path of a fast small-brush pen sweep in one undo step', async ({ page }) => {
   await openSculpt(page, {
     ...block,

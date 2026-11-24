@@ -1,6 +1,7 @@
 import { useEffect, useRef } from 'react';
 import { joinLiveSession } from '../core/live';
 import {
+  afterReleasedSculpt,
   committedScene,
   chosenRefinePoint,
   brushingRefine,
@@ -188,7 +189,11 @@ export function useKeyboard(openScene: () => void, searchParts: () => void) {
         event.preventDefault();
         state.endPaintStroke();
         orbitKey = event.code || keyName(event.key);
-        useEditor.setState({ temporaryOrbit: true });
+        const held = orbitKey;
+        const orbit = () => {
+          if (orbitKey === held) useEditor.setState({ temporaryOrbit: true });
+        };
+        if (!afterReleasedSculpt(orbit)) orbit();
         return;
       }
       const key = event.key.toLowerCase();
@@ -295,7 +300,7 @@ export function useKeyboard(openScene: () => void, searchParts: () => void) {
             return;
           }
           if (state.tool === 'sculpt') {
-            state.cancelSculptStroke();
+            if (!afterReleasedSculpt(() => {})) state.cancelSculptStroke();
             return;
           }
           // Otherwise Escape leaves the tool, as it does for Warp.
