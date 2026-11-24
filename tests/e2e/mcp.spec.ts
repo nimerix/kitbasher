@@ -669,6 +669,93 @@ test('recovers a shared scene after a mesh download fails during initial sync', 
   expect(streams).toBe(3);
 });
 
+test('reconnects when the first shared event stream request returns 502', async ({ page }) => {
+  await call('add_parts', { parts: [model[0]] });
+  const { url } = await call('open_live_view', { open_browser: false });
+  let streams = 0;
+  await page.route(/\/live\/events$/, async (route) => {
+    if (++streams !== 1) return route.continue();
+    await route.fulfill({ status: 502, body: 'Stream temporarily unavailable.' });
+  });
+
+  await page.goto(url);
+  await expect(page.locator(part('Agent base'))).toBeVisible();
+  await expect(page.getByText('Shared with agent')).toBeVisible();
+  expect(streams).toBe(2);
+});
+
+async function initialSceneEvent(url: string) {
+  const stream = new AbortController();
+  try {
+    const response = await fetch(new URL('live/events', url), {
+      signal: AbortSignal.any([stream.signal, AbortSignal.timeout(5000)]),
+    });
+    if (!response.ok || !response.body) throw new Error('Could not read the first scene event.');
+    const reader = response.body.pipeThrough(new TextDecoderStream()).getReader();
+    let body = '';
+    for (;;) {
+      const chunk = await reader.read();
+      if (chunk.done) throw new Error('The stream ended before its first scene event.');
+      body += chunk.value;
+      const end = body.indexOf('\n\n');
+      if (end >= 0) return body.slice(0, end + 2);
+    }
+  } finally {
+    stream.abort();
+  }
+}
+
+for (const idle of [false, true]) {
+  test(`recovers a terminal native reconnect ${idle ? 'while idle' : 'while loading the first mesh'}`, async ({
+    page,
+  }) => {
+    await call('new_scene', { name: 'Initial shared scene' });
+    if (!idle) await call('add_parts', { parts: [model[0]] });
+    const { url } = await call('open_live_view', { open_browser: false });
+    const initial = await initialSceneEvent(url);
+    let streams = 0;
+    let firstMeshAborted = false;
+    const meshReads: string[] = [];
+    await page.route(/\/live\/events$/, async (route) => {
+      if (++streams === 1)
+        return route.fulfill({ contentType: 'text/event-stream', body: `retry: 100\n${initial}` });
+      if (streams === 2)
+        return route.fulfill({ status: 502, body: 'Stream temporarily unavailable.' });
+      return route.continue();
+    });
+    if (!idle) {
+      await page.route(/\/live\/geometry\//, async (route) => {
+        const request = route.request();
+        if (request.method() !== 'GET') return route.continue();
+        meshReads.push(request.url());
+        if (meshReads.length !== 1) return route.continue();
+        // The first response stays pending until the disconnect aborts the browser's fetch.
+        const failed = await page
+          .waitForEvent('requestfailed', {
+            predicate: (failed) => failed === request,
+            timeout: 3000,
+          })
+          .catch(() => null);
+        firstMeshAborted = !!failed;
+        await route.abort().catch(() => {});
+      });
+    }
+
+    await page.goto(url);
+    if (idle) {
+      await expect(page.getByText('Initial shared scene').first()).toBeVisible();
+      await call('add_parts', { parts: [model[0]] });
+    }
+    await expect(page.locator(part('Agent base'))).toBeVisible();
+    await expect(page.getByText('Shared with agent')).toBeVisible();
+    expect(streams).toBe(3);
+    if (!idle) {
+      expect(firstMeshAborted).toBe(true);
+      expect(meshReads).toEqual([meshReads[0], meshReads[0]]);
+    }
+  });
+}
+
 for (const replyOrder of [
   'HTTP first',
   'stream first',

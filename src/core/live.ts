@@ -115,7 +115,6 @@ export function joinLiveSession() {
   let source: EventSource | null = null;
   let streamRetry: number | undefined;
   let streamRetryDelay = firstStreamRetry;
-  let refreshingSnapshot = false;
   const meshes = new Map<string, BufferGeometry>();
   /** Mesh keys the server already holds. */
   const known = new Set<string>();
@@ -344,7 +343,6 @@ export function joinLiveSession() {
     const [undo, redo] = message.history[client] ?? [0, 0];
     window.clearTimeout(streamRetry);
     streamRetry = undefined;
-    refreshingSnapshot = false;
     if (ownReplacement || changedScene || !unsent.length) streamRetryDelay = firstStreamRetry;
     if (!connected) {
       connected = true;
@@ -448,7 +446,6 @@ export function joinLiveSession() {
     source?.close();
     source = null;
     invalidateSnapshot();
-    refreshingSnapshot = true;
     lost();
     window.clearTimeout(streamRetry);
     streamRetry = window.setTimeout(() => {
@@ -578,19 +575,7 @@ export function joinLiveSession() {
     }
   };
 
-  const needsSnapshot = () =>
-    !!(
-      refreshingSnapshot ||
-      activeEdit ||
-      dirtyEdit ||
-      edits.length ||
-      requests.length ||
-      (confirmed && awaited > confirmed.version)
-    );
-
   const pump = async () => {
-    if (!closed && !connected && source?.readyState === EventSource.CLOSED && needsSnapshot())
-      refreshStream();
     if (pumping) return;
     pumping = true;
     try {
@@ -646,9 +631,12 @@ export function joinLiveSession() {
     // A native retry leaves the stream CONNECTING. A terminal error needs a new EventSource.
     stream.onerror = () => {
       if (closed || source !== stream) return;
+      if (stream.readyState === EventSource.CLOSED) {
+        refreshStream();
+        return;
+      }
       invalidateSnapshot();
       lost();
-      void pump();
     };
   }
   openStream();
