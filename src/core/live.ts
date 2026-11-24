@@ -102,6 +102,9 @@ const post = (path: string, body: unknown) =>
 const errorOf = async (response: Response) =>
   ((await response.json().catch(() => ({}))) as { error?: string }).error;
 
+const firstStreamRetry = 300;
+const maxStreamRetry = 5000;
+
 /**
  * Edits the scene an MCP server holds, alongside the agent and any other tabs. Changes made here
  * show at once and are sent in the background; the server combines them with everyone else's.
@@ -109,8 +112,9 @@ const errorOf = async (response: Response) =>
  */
 export function joinLiveSession() {
   const client = tabId();
-  let source: EventSource;
+  let source: EventSource | null = null;
   let streamRetry: number | undefined;
+  let streamRetryDelay = firstStreamRetry;
   const meshes = new Map<string, BufferGeometry>();
   /** Mesh keys the server already holds. */
   const known = new Set<string>();
@@ -329,6 +333,7 @@ export function joinLiveSession() {
     const [undo, redo] = message.history[client] ?? [0, 0];
     window.clearTimeout(streamRetry);
     streamRetry = undefined;
+    if (ownReplacement || changedScene || !unsent.length) streamRetryDelay = firstStreamRetry;
     if (!connected) {
       connected = true;
       useSharedHistory(history);
@@ -382,8 +387,11 @@ export function joinLiveSession() {
       headers: { 'X-Kitbasher-Layout': JSON.stringify(layout) },
       body: new Blob(body),
     });
-    if (!response.ok)
-      throw new Refusal((await errorOf(response)) ?? `${host} could not take a mesh.`);
+    if (!response.ok) {
+      const reason = (await errorOf(response)) ?? `${host} could not take a mesh.`;
+      if (response.status >= 500) throw new Error(reason);
+      throw new Refusal(reason);
+    }
   };
 
   /** The server's scene stands. Later changes here were built on the refused one, so they go too. */
@@ -417,15 +425,18 @@ export function joinLiveSession() {
   };
 
   const refreshStream = () => {
+    // The old stream may still have a snapshot from before the request was applied.
+    source?.close();
+    source = null;
+    streamGeneration++;
+    latest = null;
     lost();
     window.clearTimeout(streamRetry);
     streamRetry = window.setTimeout(() => {
       streamRetry = undefined;
-      source.close();
-      streamGeneration++;
-      latest = null;
       openStream();
-    }, 300);
+    }, streamRetryDelay);
+    streamRetryDelay = Math.min(streamRetryDelay * 2, maxStreamRetry);
   };
 
   const sendEdit = async (edit: QueuedEdit) => {
@@ -442,6 +453,7 @@ export function joinLiveSession() {
       !closed &&
       useEditor.getState().sceneEpoch === sceneEpoch &&
       (confirmed?.epoch === base.epoch || replacementObserved());
+    let uploadingMesh = false;
     const observed = () => activeSculptObserved || replacementObserved();
     const rejectEdit = (reason?: string) => {
       if (observed()) return;
@@ -454,7 +466,7 @@ export function joinLiveSession() {
         edits.unshift(edit);
         if (!sculpt) useEditor.getState().retryWarp();
       } else if (!replacementId || submittedReplacement?.id !== replacementId) return;
-      if (replacement || sculpt) refreshStream();
+      if (replacement || sculpt || uploadingMesh) refreshStream();
       else lost();
     };
     activeEdit = { edit, epoch: base.epoch, sceneEpoch };
@@ -465,7 +477,10 @@ export function joinLiveSession() {
       if ('sculpt' in edit) {
         const target = base.scene.parts.find((part) => part.id === edit.sculpt.partId);
         // A request can succeed even when the connection drops before its response arrives.
-        if (target?.geometry.uuid === edit.geometry.uuid) return;
+        if (target?.geometry.uuid === edit.geometry.uuid) {
+          streamRetryDelay = firstStreamRetry;
+          return;
+        }
         if (!matchesSculptTarget(target, edit.sculpt))
           throw new Refusal(
             'The sculpt target changed before the stroke reached the shared scene.',
@@ -475,7 +490,9 @@ export function joinLiveSession() {
       for (const { geometry } of scene.parts) {
         const key = geometry.uuid;
         if (known.has(key)) continue;
+        uploadingMesh = true;
         await upload(key, geometry);
+        uploadingMesh = false;
         known.add(key);
         meshes.set(key, geometry);
       }
@@ -493,6 +510,7 @@ export function joinLiveSession() {
       });
       if (response.ok) {
         awaited = ((await response.json()) as { version: number }).version;
+        streamRetryDelay = firstStreamRetry;
         if (!stillApplies()) return;
         if (!('sculpt' in edit)) {
           if (replacementId && !replacementObserved() && confirmed && confirmed.version < awaited)
@@ -608,7 +626,7 @@ export function joinLiveSession() {
   return () => {
     closed = true;
     window.clearTimeout(streamRetry);
-    source.close();
+    source?.close();
     unsubscribe();
     useSharedSculptQueueGuard(null);
     useSharedHistory(null);

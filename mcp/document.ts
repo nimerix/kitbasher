@@ -116,11 +116,11 @@ export class SharedDocument {
       const target = edit.sculpt;
       const part = current.parts.find((part) => part.id === target.partId);
       const carved = edit.scene.parts.find((part) => part.id === target.partId);
+      if (part && carved && carved.geometry === part.geometry) return this.version;
       if (!part || !carved || !matchesSculptTarget(part, target))
         throw new EditConflict(
           'The sculpt target changed before the stroke reached the shared scene.',
         );
-      if (carved.geometry === part.geometry) return this.version;
       const next = {
         ...current,
         parts: current.parts.map((candidate) =>
