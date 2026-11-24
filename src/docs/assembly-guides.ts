@@ -372,28 +372,9 @@ export const assemblyGuides: DocArticle[] = [
       {
         id: 'brushes',
         title: 'Choose a brush',
-        table: {
-          headers: ['Brush', 'When to use it'],
-          rows: [
-            ['Draw', 'Raise the surface along a stroke. Hold Alt to carve into it.'],
-            [
-              'Clay Buildup',
-              'Layer broad strokes to build up a new form. Hold Alt to cut it back.',
-            ],
-            ['Inflate/Deflate', 'Swell a rounded feature, or hold Alt to shrink it.'],
-            ['Grab', 'Drag a patch of the surface to a new position.'],
-            [
-              'Smooth',
-              'Soften uneven areas. Hold Shift with a shaping brush to smooth temporarily.',
-            ],
-            ['Flatten', 'Level a patch of the surface.'],
-            [
-              'Crease',
-              'Cut a groove or hold Alt to raise a ridge. Adjust Pinch to tighten the crease.',
-            ],
-            ['Mask', 'Paint protection onto details you want to keep.'],
-          ],
-        },
+        paragraphs: [
+          'To change the outline, use Grab. To build or cut relief, try Draw, Clay Buildup, Crease or Inflate/Deflate. Use Smooth for ripples, Flatten for a level patch, and Mask to protect a detail. Each example shows the same view before and after the stroke.',
+        ],
       },
       {
         id: 'stroke',
@@ -405,8 +386,113 @@ export const assemblyGuides: DocArticle[] = [
         ],
       },
       {
+        id: 'draw',
+        title: 'Draw',
+        paragraphs: [
+          'Drag across a flat face to raise a ridge. Hold Alt during the stroke to carve a channel.',
+        ],
+        image: {
+          src: './images/sculpt/draw.webp',
+          width: 1186,
+          height: 466,
+          alt: 'Flat tile before Draw and the same tile with a raised diagonal ridge afterward.',
+          caption: 'One Draw stroke raises a narrow ridge along the pointer path.',
+        },
+      },
+      {
+        id: 'grab',
+        title: 'Grab',
+        paragraphs: [
+          'Start just inside an edge and drag outward. Increase Radius to carry a wider patch with the pointer.',
+        ],
+        image: {
+          src: './images/sculpt/grab.webp',
+          width: 1186,
+          height: 466,
+          alt: 'A straight top edge before Grab and a raised peak near its right end afterward.',
+          caption: 'Dragging the upper edge changes the outline of the tile.',
+        },
+      },
+      {
+        id: 'smooth',
+        title: 'Smooth',
+        paragraphs: [
+          'Brush across the ripples in overlapping passes. You can also hold Shift while using a shaping brush to smooth temporarily.',
+        ],
+        image: {
+          src: './images/sculpt/smooth.webp',
+          width: 1186,
+          height: 466,
+          alt: 'A patch of closely spaced ripples before Smooth and the same patch with most of the ripples softened afterward.',
+          caption: 'The ripples fade where the brush passes over them.',
+        },
+      },
+      {
+        id: 'flatten',
+        title: 'Flatten',
+        paragraphs: [
+          'Center a wide brush on the crown of a rounded bump and drag a short distance across it.',
+        ],
+        image: {
+          src: './images/sculpt/flatten.webp',
+          width: 1186,
+          height: 466,
+          alt: 'A gently rounded bump before Flatten and a broad, flatter face on the bump afterward.',
+          caption: 'The stroke gives the bump a flatter top and a more distinct shoulder.',
+        },
+      },
+      {
+        id: 'crease',
+        title: 'Crease',
+        paragraphs: [
+          'Drag where you want the groove to run. Adjust Pinch to tighten the groove, or hold Alt to form a raised ridge.',
+        ],
+        image: {
+          src: './images/sculpt/crease.webp',
+          width: 1186,
+          height: 466,
+          alt: 'Flat tile before Crease and a recessed diagonal groove afterward.',
+          caption: 'The surface draws inward along the stroke.',
+        },
+      },
+      {
+        id: 'clay',
+        title: 'Clay Buildup',
+        paragraphs: [
+          'Lay down several short strokes side by side, overlapping their edges. Hold Alt to cut material back.',
+        ],
+        image: {
+          src: './images/sculpt/clay.webp',
+          width: 1186,
+          height: 466,
+          alt: 'Flat tile before Clay Buildup and a broad raised patch made by three overlapping strokes afterward.',
+          caption: 'Overlapping passes build a wider pad of material.',
+        },
+      },
+      {
+        id: 'inflate',
+        title: 'Inflate/Deflate',
+        paragraphs: [
+          'Brush over one rounded detail to swell it. Hold Alt while brushing the other to shrink it.',
+        ],
+        image: {
+          src: './images/sculpt/inflate.webp',
+          width: 1186,
+          height: 466,
+          alt: 'Two matching bumps before brushing. Afterward the left bump protrudes farther and the right one is smaller.',
+          caption: 'The left bump was inflated. The right was brushed with Alt held.',
+        },
+      },
+      {
         id: 'mask',
-        title: 'Protect an area with a mask',
+        title: 'Mask',
+        image: {
+          src: './images/sculpt/mask.webp',
+          width: 1186,
+          height: 466,
+          alt: 'Unmarked tile before Mask and the same tile with a dark diagonal band of protection afterward.',
+          caption: 'The dark overlay marks the strip protected from subsequent shaping strokes.',
+        },
         steps: [
           'Choose Mask and paint over the area to protect. Hold Alt to erase protection or Shift to soften the mask edge.',
           'Switch back to a shaping brush and work beside the protected area. Show mask toggles the overlay while keeping the protection active.',

@@ -84,6 +84,14 @@ captures. Keep the captions consistent with the displayed priorities and gaps.
 The SVGs illustrate point and plane alignment, rigid residuals, multi-seam flush
 fitting, and the scene workflow. They are explanatory diagrams, not screenshots.
 
+## Sculpt brush examples
+
+With the development server running, use `node scripts/capture-sculpt-brushes.mjs` to
+regenerate the eight before-and-after images in `public/docs/images/sculpt/`. Each pair
+uses the same viewport and lighting. The script selects the brush in the workbench,
+drags on a practice tile, and waits for the stroke to commit before capturing the result.
+Set `DOCS_CAPTURE_URL` to use another port or pass `--only=grab` to capture one brush.
+
 ## References beside the instructions
 
 `src/docs/reference-images.ts` describes focused screenshots used inside guide
