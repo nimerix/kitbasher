@@ -71,6 +71,7 @@ import { FreeTransformController, FreeTransformPrompt } from './FreeTransform';
 import { CombinedTransform } from './CombinedTransform';
 import { ManagedTransformControls } from './ManagedTransformControls';
 import { WarpOverlay, shownWarpPreview } from './WarpOverlay';
+import { SculptPointer } from './SculptPointer';
 import { beginWarpStroke, endingWarpStroke, WarpStrokeController } from './WarpStroke';
 import {
   beginRefinePaint,
@@ -137,7 +138,7 @@ const noRaycast = () => {};
 const RefineOverlay = lazy(() =>
   import('./RefineOverlay').then(({ RefineOverlay }) => ({ default: RefineOverlay })),
 );
-const toolsPicking = ['align', 'joint', 'measure', 'anchors', 'pins', 'warp', 'refine'];
+const toolsPicking = ['align', 'joint', 'measure', 'anchors', 'pins', 'warp', 'refine', 'sculpt'];
 // A press on a gizmo handle also reaches whatever lies under it, but it is not a selection click.
 let gizmoPressed = false;
 const gizmoWasPressed = () => gizmoPressed;
@@ -250,7 +251,7 @@ const PartMesh = memo(function PartMesh({
     event.stopPropagation();
     if (gizmoPressed) return;
     const state = useEditor.getState();
-    if (state.navigationMode || state.temporaryOrbit) return;
+    if (state.navigationMode || state.temporaryOrbit || state.tool === 'sculpt') return;
     if (state.pivotPicking) {
       state.setPartPivot(toSurface(event));
       return;
@@ -343,6 +344,7 @@ const PartMesh = memo(function PartMesh({
           receiveShadow={!ghost}
           onContextMenu={(event) => {
             event.nativeEvent.preventDefault();
+            if (useEditor.getState().tool === 'sculpt') return;
             event.stopPropagation();
             useEditor.getState().openContextMenu({
               x: event.nativeEvent.clientX,
@@ -449,6 +451,7 @@ const PartMesh = memo(function PartMesh({
           !nearby &&
           !warpPreview &&
           !refinePreview &&
+          tool !== 'sculpt' &&
           triangleCount(part.geometry) < proxyThreshold ? (
             <Edges threshold={32} color="#e8aa6d" lineWidth={0.8} />
           ) : null}
@@ -1233,6 +1236,7 @@ function Scene({
             </Suspense>
           ) : null}
           <RefinePointerController pressed={gizmoWasPressed} />
+          {tool === 'sculpt' ? <SculptPointer /> : null}
           <PinOverlay />
           <LightHandles />
           <AssemblyAnnotations />
@@ -1356,7 +1360,8 @@ export function Viewport() {
                 state.pivotPicking ||
                 tool === 'align' ||
                 tool === 'joint' ||
-                tool === 'measure'
+                tool === 'measure' ||
+                tool === 'sculpt'
               )
                 return;
               // While warping or refining, an empty click clears that tool's selection and keeps

@@ -490,6 +490,23 @@ shared the mesh keep the original.
 Warp works on parts of up to 10 million triangles. On a large region the grid lines follow
 your drag, and the surface updates when you release.
 
+## Sculpt a part
+
+Select a visible, unlocked part and choose **Sculpt**. Draw builds or removes material, Clay
+Buildup layers broad strokes, and Inflate/Deflate changes the volume of rounded details. Grab
+moves a patch, Crease sharpens a groove or ridge, and Smooth and Flatten clean up the surface.
+The brush adds mesh detail locally as needed. Adjust **Detail** to change the density.
+
+- Hold **Alt** to invert an applicable brush and **Shift** for temporary smoothing.
+- Use **Mask** to protect areas. Hold **Alt** to erase protection or **Shift** to soften it.
+  Masks stay with the active Sculpt session. Saved scenes contain the sculpted mesh.
+- Open **Advanced** for falloff, stroke spacing, stabilization, pen pressure, and brush-specific
+  controls. When a Wacom tablet reports pen data through the browser, Sculpt can use pressure,
+  tilt, twist, the eraser, and the barrel button. Available signals depend on the tablet, driver,
+  and browser.
+- Each completed stroke is one undo step, including any triangles it added. Press **Escape**
+  during a stroke to discard it.
+
 ## Part colors and lighting
 
 Editor colors and lighting change only how the scene looks here. Both are undoable, are saved

@@ -31,6 +31,7 @@ const initialOrbitTarget: [number, number, number] = [0, 54, 0];
 /** Whether a left drag paints with a surface brush rather than moving the camera. */
 const brushOwnsLeftDrag = (state: Editor) =>
   ((state.tool === 'align' && state.operation.mode === 'surface') ||
+    state.tool === 'sculpt' ||
     paintingWarpRegion(state) ||
     paintingRefine(state) ||
     brushingRefine(state)) &&
