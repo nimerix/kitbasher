@@ -19,7 +19,12 @@ import { acceleratedRaycast } from 'three-mesh-bvh';
 import { clearSculptIncidence, SculptMesh, type SculptDab } from '../core/sculpt-mesh';
 import { triangleCount } from '../core/geometry';
 import { workerIndexTriangles } from '../core/spatial-index';
-import { useEditor, useSculptStrokeFinisher } from '../core/store';
+import {
+  afterReleasedSculpt,
+  flushSculptActions,
+  setSculptCompletionGate,
+  useEditor,
+} from '../core/store';
 import type { Part, SculptureSettings } from '../core/types';
 import { partMeshes } from '../xr/part-meshes';
 import { SculptPath, type SculptSample as Sample } from '../core/sculpt-path';
@@ -142,8 +147,6 @@ export function SculptPointer() {
     let idleWeights: Float32Array | null = null;
     let stroke: Stroke | null = null;
     let disposed = false;
-    const afterStroke: (() => void)[] = [];
-    let runningAction = false;
     let queuedPointer: {
       down: PointerEvent;
       partId: string;
@@ -455,7 +458,7 @@ export function SculptPointer() {
           );
       active.work?.return(false);
       active.draft.geometry.dispose();
-      flushActions();
+      flushSculptActions();
       prepare();
       refresh();
     };
@@ -525,27 +528,11 @@ export function SculptPointer() {
       } while ((active.work || active.path.pending) && performance.now() < until);
       if (active.released && !active.work && !active.path.pending) detach(true);
     };
-    const defer = (action: () => void) => {
-      if (!stroke?.released && (runningAction || !afterStroke.length)) return false;
-      afterStroke.push(action);
-      return true;
-    };
-    const flushActions = () => {
-      if (runningAction) return;
-      runningAction = true;
-      try {
-        while (afterStroke.length && !stroke?.released && !useEditor.getState().busy)
-          afterStroke.shift()!();
-      } finally {
-        runningAction = false;
-      }
-    };
     const schedule = () => {
       if (frame) return;
       frame = requestAnimationFrame(() => {
         frame = 0;
         if (stroke) drain(stroke, performance.now() + 6);
-        flushActions();
         if (stroke && (stroke.work || stroke.path.pending)) schedule();
         refresh();
       });
@@ -557,7 +544,7 @@ export function SculptPointer() {
         /* The pointer may have ended before the queued press is replayed. */
       }
     };
-    const down = (event: PointerEvent, ended = false) => {
+    const down = (event: PointerEvent, ended = false, replayed = false) => {
       const state = useEditor.getState();
       const sculpt = state.sculpt;
       if (stroke && !stroke.released) {
@@ -579,20 +566,19 @@ export function SculptPointer() {
         event.metaKey
       )
         return;
-      if (stroke?.released) {
+      if (queuedPointer && !replayed) return;
+      const gesture = {
+        down: event,
+        partId: sculpt.partId,
+        epoch: state.sceneEpoch,
+        moves: [],
+        cancelled: false,
+      };
+      if (afterReleasedSculpt(() => replay(gesture))) {
         event.preventDefault();
         event.stopImmediatePropagation();
-        if (queuedPointer) return;
-        const gesture = {
-          down: event,
-          partId: sculpt.partId,
-          epoch: state.sceneEpoch,
-          moves: [],
-          cancelled: false,
-        };
         queuedPointer = gesture;
         capture(event);
-        defer(() => replay(gesture));
         return;
       }
       const target = state.scene.parts.find((part) => part.id === sculpt.partId);
@@ -717,7 +703,6 @@ export function SculptPointer() {
       if (stroke) schedule();
     };
     const replay = (gesture: NonNullable<typeof queuedPointer>) => {
-      if (defer(() => replay(gesture))) return;
       if (queuedPointer === gesture) queuedPointer = null;
       const state = useEditor.getState();
       if (
@@ -727,7 +712,7 @@ export function SculptPointer() {
         state.sculpt?.partId !== gesture.partId
       )
         return;
-      down(gesture.down, !!gesture.up);
+      down(gesture.down, !!gesture.up, true);
       for (const event of gesture.moves) move(event, true);
       if (gesture.up) release(gesture.up, true);
     };
@@ -781,7 +766,7 @@ export function SculptPointer() {
       schedule();
     });
     prepare();
-    useSculptStrokeFinisher(defer);
+    setSculptCompletionGate(() => !!stroke?.released);
     canvas.addEventListener('pointerdown', down, true);
     canvas.addEventListener('lostpointercapture', cancel);
     canvas.addEventListener('pointerleave', leave);
@@ -794,7 +779,7 @@ export function SculptPointer() {
     return () => {
       disposed = true;
       unsubscribe();
-      useSculptStrokeFinisher(null);
+      setSculptCompletionGate(null);
       canvas.removeEventListener('pointerdown', down, true);
       canvas.removeEventListener('lostpointercapture', cancel);
       canvas.removeEventListener('pointerleave', leave);
