@@ -2,7 +2,12 @@ import { BoxGeometry } from 'three';
 import { afterEach, describe, expect, it } from 'vitest';
 import { EditConflict, SharedDocument } from '../../mcp/document';
 import type { SculptStrokeCommit } from '../../src/core/sculpt-session';
-import { restoreSculptAfterRefusal, useEditor, useSharedHistory } from '../../src/core/store';
+import {
+  restoreSculptAfterRefusal,
+  useEditor,
+  useSharedHistory,
+  useSharedSculptQueueGuard,
+} from '../../src/core/store';
 import type { Part, SceneDocument } from '../../src/core/types';
 
 function fixture() {
@@ -47,6 +52,7 @@ function stroke(patch: Partial<SculptStrokeCommit>): SculptStrokeCommit {
 
 afterEach(() => {
   useSharedHistory(null);
+  useSharedSculptQueueGuard(null);
   useEditor.setState({ sharedHistory: null });
   useEditor.getState().setScene({ name: 'Empty', parts: [], joints: [] });
 });
@@ -102,6 +108,20 @@ describe('sculpt session', () => {
     store().receiveScene({ ...store().scene, parts: [{ ...part, position: [1, 0, 0] }] });
     expect(store().commitSculpt(moved)).toBe(false);
     expect(store().past).toHaveLength(0);
+  });
+
+  it('leaves the mesh and weights unchanged when the shared stroke queue is full', () => {
+    const { part, scene } = openSculpt();
+    const store = useEditor.getState;
+    useSharedSculptQueueGuard(() => false);
+    store().changeSculptMask('invert');
+    const session = store().sculpt;
+    expect(store().commitSculpt(stroke({ geometry: part.geometry.clone(), mask: null }))).toBe(
+      false,
+    );
+    expect(store().scene).toBe(scene);
+    expect(store().sculpt).toBe(session);
+    expect(store().toast?.message).toMatch(/pending sculpt strokes/);
   });
 
   it('restores the appropriate weights on shared undo, redo, and refusal', () => {

@@ -495,3 +495,87 @@ test('shared sculpt strokes keep their checkpoints and refuse a stale target pos
   ).toBeVisible();
   expect((await call('get_scene')).parts[0].position).toEqual([2, 0, 0]);
 });
+
+test('an ordinary edit between queued strokes preserves a newer remote mesh', async ({ page }) => {
+  await call('add_parts', {
+    parts: [{ id: 'block', name: 'Sculpt block', shapes: [{ type: 'box', size: [10, 8, 6] }] }],
+  });
+  const { url } = await call('open_live_view', { open_browser: false });
+  await page.goto(url);
+  await page.locator(part('Sculpt block')).click();
+  await page.keyboard.press('1');
+  await page.keyboard.press('Home');
+  await page.getByRole('button', { name: 'Sculpt', exact: true }).click();
+  const radius = page.getByRole('spinbutton', { name: 'Radius', exact: true });
+  await radius.fill('1.5');
+  await radius.press('Enter');
+
+  const canvas = (await page.locator('canvas').boundingBox())!;
+  const x = canvas.x + canvas.width / 2;
+  const y = canvas.y + canvas.height / 2;
+  const editUrl = /\/live\/edit$/;
+  let unblock = () => {};
+  const blocked = new Promise<void>((resolve) => {
+    unblock = resolve;
+  });
+  let applyRemote = () => {};
+  const remoteReady = new Promise<void>((resolve) => {
+    applyRemote = resolve;
+  });
+  let held = false;
+  let completed = false;
+  let remoteGeometry = '';
+  await page.route(editUrl, async (route) => {
+    const body = route.request().postDataJSON();
+    if (held || !body.sculpt) return await route.continue();
+    held = true;
+    await remoteReady;
+    const accepted = await route.fetch();
+    if (accepted.ok()) {
+      const { version } = await accepted.json();
+      remoteGeometry = body.sculpt.source;
+      // Replace the stroke's mesh using a separate author's edit before this tab can send again.
+      const remote = await page.request.post(route.request().url(), {
+        data: {
+          client: 'remote-editor',
+          base: version,
+          epoch: body.epoch,
+          checkpoint: true,
+          scene: {
+            ...body.scene,
+            parts: body.scene.parts.map((part: { id: string }) => ({
+              ...part,
+              ...(part.id === body.sculpt.partId
+                ? { geometry: remoteGeometry, name: 'Remotely edited block' }
+                : {}),
+            })),
+          },
+        },
+      });
+      completed = remote.ok();
+    }
+    await blocked;
+    await route.fulfill({ response: accepted });
+  });
+
+  await page.mouse.click(x + 8, y - 7);
+  await expect.poll(() => held).toBe(true);
+  await page.getByTitle('Rename assembly').click();
+  await page.getByRole('textbox', { name: 'Assembly name' }).fill('Renamed while sculpting');
+  await page.getByRole('textbox', { name: 'Assembly name' }).press('Enter');
+  await page.mouse.click(x + 16, y - 7);
+  applyRemote();
+  await expect.poll(() => completed).toBe(true);
+  await expect(page.locator(part('Remotely edited block'))).toBeVisible();
+  const ordinary = page.waitForRequest(
+    (request) => editUrl.test(request.url()) && !request.postDataJSON().sculpt,
+  );
+  unblock();
+  const request = await ordinary;
+  expect((await request.response())?.status()).toBe(200);
+  await expect(
+    page.getByText(/sculpt target changed before the stroke reached the shared scene/i),
+  ).toBeVisible();
+  expect((await call('get_scene')).name).toBe('Renamed while sculpting');
+  expect(request.postDataJSON().scene.parts[0].geometry).toBe(remoteGeometry);
+});
