@@ -105,6 +105,7 @@ export function joinLiveSession() {
   /** The last scene the server sent. Unsent changes here are relative to it. */
   let confirmed: { version: number; epoch: number; scene: SceneDocument } | null = null;
   let latest: Message | null = null;
+  let streamGeneration = 0;
   let receiving = false;
   let pumping = false;
   let applyingRemote = false;
@@ -279,7 +280,8 @@ export function joinLiveSession() {
       while (latest && !closed) {
         const message = latest;
         latest = null;
-        if ((await load(message)) && !closed) apply(message);
+        const generation = streamGeneration;
+        if ((await load(message)) && !closed && generation === streamGeneration) apply(message);
       }
     } catch (error) {
       notify(`The shared scene stopped updating. ${(error as Error).message}`);
@@ -302,16 +304,16 @@ export function joinLiveSession() {
   };
 
   /** The server's scene stands. Later changes here were built on the refused one, so they go too. */
-  const refused = (reason?: string, sculpt = false) => {
+  const refused = (reason?: string, sculptStroke = false) => {
+    const { sculpt } = useEditor.getState();
     // History requests queued behind a refused stroke refer to the discarded optimistic scene.
-    if (sculpt) {
+    if (sculptStroke) {
       requests.length = 0;
       stopSharedSculptHistory();
     }
     edits.length = 0;
     dirtyEdit = null;
     if (confirmed) {
-      const { sculpt } = useEditor.getState();
       show(confirmed.scene);
       restoreSculptAfterRefusal(confirmed.scene, sculpt);
     }
@@ -466,7 +468,11 @@ export function joinLiveSession() {
     useXR.setState({ sharing: JSON.parse((event as MessageEvent<string>).data) }),
   );
   // EventSource keeps retrying, so a server that is only briefly unreachable reconnects by itself.
-  source.onerror = lost;
+  source.onerror = () => {
+    streamGeneration++;
+    latest = null;
+    lost();
+  };
   useEditor.setState({ liveStatus: 'connecting' });
 
   return () => {
