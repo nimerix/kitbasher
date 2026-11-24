@@ -4972,6 +4972,7 @@ export const useEditor = create<EditorState>((set, get) => ({
     if (!afterReleasedSculpt(() => get().redo())) moveHistory('redo');
   },
   setView: (patch) => {
+    if (patch.explode !== undefined && afterReleasedSculpt(() => get().setView(patch))) return;
     if (patch.orbitSelection !== undefined) saveOrbitPreference(patch.orbitSelection);
     if (patch.partColors !== undefined) savePartColorMode(patch.partColors);
     if (patch.clip) {
