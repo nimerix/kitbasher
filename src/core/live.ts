@@ -115,6 +115,7 @@ export function joinLiveSession() {
   let source: EventSource | null = null;
   let streamRetry: number | undefined;
   let streamRetryDelay = firstStreamRetry;
+  let refreshingSnapshot = false;
   const meshes = new Map<string, BufferGeometry>();
   /** Mesh keys the server already holds. */
   const known = new Set<string>();
@@ -129,6 +130,7 @@ export function joinLiveSession() {
   } | null = null;
   let latest: Message | null = null;
   let streamGeneration = 0;
+  let snapshotLoad: AbortController | null = null;
   let receiving = false;
   let pumping = false;
   let applyingRemote = false;
@@ -162,6 +164,12 @@ export function joinLiveSession() {
   };
 
   const unsentEdits = () => (dirtyEdit ? [...edits, dirtyEdit] : edits);
+
+  const invalidateSnapshot = () => {
+    streamGeneration++;
+    latest = null;
+    snapshotLoad?.abort();
+  };
 
   useSharedSculptQueueGuard((geometry) => {
     if (!connected) return false;
@@ -227,14 +235,17 @@ export function joinLiveSession() {
     void pump();
   });
 
-  const load = async (message: Message) => {
+  const load = async (message: Message, signal: AbortSignal) => {
     for (const [key, layout] of Object.entries(message.geometries)) {
       if (meshes.has(key)) continue;
-      const response = await fetch(`live/geometry/${encodeURIComponent(key)}`);
-      // The scene has already moved on from this mesh, and a newer message is on its way.
-      if (response.status === 404) return false;
+      const response = await fetch(`live/geometry/${encodeURIComponent(key)}`, { signal }).catch(
+        () => null,
+      );
+      // The mesh may be temporarily unavailable or gone from the latest scene.
+      if (!response || response.status === 404 || response.status >= 500) return false;
       if (!response.ok) throw new Error(`${host} did not send a mesh.`);
-      const body = await response.blob();
+      const body = await response.blob().catch(() => null);
+      if (!body) return false;
       validateLayout(layout, 0, body.size);
       const geometry = await readGeometry(body, layout);
       geometry.uuid = key;
@@ -333,6 +344,7 @@ export function joinLiveSession() {
     const [undo, redo] = message.history[client] ?? [0, 0];
     window.clearTimeout(streamRetry);
     streamRetry = undefined;
+    refreshingSnapshot = false;
     if (ownReplacement || changedScene || !unsent.length) streamRetryDelay = firstStreamRetry;
     if (!connected) {
       connected = true;
@@ -366,11 +378,18 @@ export function joinLiveSession() {
         const message = latest;
         latest = null;
         const generation = streamGeneration;
+        const controller = new AbortController();
+        snapshotLoad = controller;
         try {
-          if ((await load(message)) && !closed && generation === streamGeneration) apply(message);
+          const loaded = await load(message, controller.signal);
+          if (closed || generation !== streamGeneration) continue;
+          if (loaded) apply(message);
+          else if (!latest) refreshStream();
         } catch (error) {
           if (!closed && generation === streamGeneration)
             notify(`The shared scene stopped updating. ${(error as Error).message}`);
+        } finally {
+          snapshotLoad = null;
         }
       }
     } finally {
@@ -415,7 +434,7 @@ export function joinLiveSession() {
   };
 
   const lost = () => {
-    if (closed) return;
+    if (closed || useEditor.getState().liveStatus === 'disconnected') return;
     connected = false;
     awaitedHistory = null;
     useSharedHistory(null);
@@ -428,8 +447,8 @@ export function joinLiveSession() {
     // The old stream may still have a snapshot from before the request was applied.
     source?.close();
     source = null;
-    streamGeneration++;
-    latest = null;
+    invalidateSnapshot();
+    refreshingSnapshot = true;
     lost();
     window.clearTimeout(streamRetry);
     streamRetry = window.setTimeout(() => {
@@ -559,7 +578,19 @@ export function joinLiveSession() {
     }
   };
 
+  const needsSnapshot = () =>
+    !!(
+      refreshingSnapshot ||
+      activeEdit ||
+      dirtyEdit ||
+      edits.length ||
+      requests.length ||
+      (confirmed && awaited > confirmed.version)
+    );
+
   const pump = async () => {
+    if (!closed && !connected && source?.readyState === EventSource.CLOSED && needsSnapshot())
+      refreshStream();
     if (pumping) return;
     pumping = true;
     try {
@@ -612,12 +643,12 @@ export function joinLiveSession() {
       if (!closed && source === stream)
         useXR.setState({ sharing: JSON.parse((event as MessageEvent<string>).data) });
     });
-    // EventSource reconnects automatically when the event stream itself fails.
+    // A native retry leaves the stream CONNECTING. A terminal error needs a new EventSource.
     stream.onerror = () => {
       if (closed || source !== stream) return;
-      streamGeneration++;
-      latest = null;
+      invalidateSnapshot();
       lost();
+      void pump();
     };
   }
   openStream();
@@ -627,6 +658,7 @@ export function joinLiveSession() {
     closed = true;
     window.clearTimeout(streamRetry);
     source?.close();
+    invalidateSnapshot();
     unsubscribe();
     useSharedSculptQueueGuard(null);
     useSharedHistory(null);

@@ -643,6 +643,32 @@ async function captureStaleSharedStream(page: Page) {
   });
 }
 
+test('recovers a shared scene after a mesh download fails during initial sync', async ({
+  page,
+}) => {
+  await call('add_parts', {
+    parts: [{ id: 'block', name: 'Shared block', shapes: [{ type: 'box', size: [8, 6, 4] }] }],
+  });
+  const { url } = await call('open_live_view', { open_browser: false });
+  const attempts: string[] = [];
+  let streams = 0;
+  await page.route(/\/live\/events$/, async (route) => {
+    if (++streams !== 2) return route.continue();
+    await route.fulfill({ status: 502, body: 'Stream temporarily unavailable.' });
+  });
+  await page.route(/\/live\/geometry\//, async (route) => {
+    if (route.request().method() !== 'GET') return route.continue();
+    attempts.push(route.request().url());
+    if (attempts.length !== 1) return route.continue();
+    await route.fulfill({ status: 502, body: 'Mesh temporarily unavailable.' });
+  });
+  await page.goto(url);
+  await expect(page.locator(part('Shared block'))).toBeVisible();
+  await expect(page.getByText('Shared with agent')).toBeVisible();
+  expect(attempts).toEqual([attempts[0], attempts[0]]);
+  expect(streams).toBe(3);
+});
+
 for (const replyOrder of [
   'HTTP first',
   'stream first',
@@ -650,12 +676,20 @@ for (const replyOrder of [
   'HTTP error then refreshed stream',
   'HTTP rejection',
   'mesh upload 502',
+  'mesh upload 502 followed by stream 502',
 ] as const) {
   test(`keeps sculpt and Save scoped to the right scene with ${replyOrder}`, async ({ page }) => {
     const holdResponse = replyOrder.startsWith('stream');
     const httpError = replyOrder.includes('HTTP error');
     const rejected = replyOrder === 'HTTP rejection';
-    const uploadError = replyOrder === 'mesh upload 502';
+    const uploadError = replyOrder.startsWith('mesh upload');
+    const streamError = replyOrder === 'mesh upload 502 followed by stream 502';
+    let streams = 0;
+    if (streamError)
+      await page.route(/\/live\/events$/, async (route) => {
+        if (++streams !== 2) return route.continue();
+        await route.fulfill({ status: 502, body: 'Stream temporarily unavailable.' });
+      });
     await page.addInitScript(() => {
       const NativeEventSource = window.EventSource;
       let connections = 0;
@@ -798,6 +832,7 @@ for (const replyOrder of [
     }
     expect((await acceptedStroke)?.ok()).toBe(true);
     if (uploadError) expect(uploads.slice(0, 2)).toEqual([uploads[0], uploads[0]]);
+    if (streamError) expect(streams).toBe(3);
     await expect(prompt).toBeVisible();
     const download = page.waitForEvent('download');
     await page.keyboard.press('Escape');
