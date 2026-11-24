@@ -252,7 +252,11 @@ export class SharedDocument {
     this.log.set(this.version, { author, summary: summarizePatch(patch), replaced });
     this.versions.delete(this.version - keepVersions);
     this.log.delete(this.version - keepVersions);
-    for (const part of this.scene.parts) this.meshes.set(part.geometry.uuid, part.geometry);
+    for (const part of this.scene.parts) {
+      const { geometry } = part;
+      this.meshes.set(geometry.uuid, geometry);
+      this.uploads.delete(geometry.uuid);
+    }
     if (changesGeometry(patch)) this.trimMemory();
     if (this.version % 50 === 0) this.prune();
     for (const listener of this.listeners) listener();

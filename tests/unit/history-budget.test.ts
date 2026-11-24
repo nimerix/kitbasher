@@ -111,7 +111,7 @@ describe('history budget', () => {
     expect(useEditor.getState().past).toHaveLength(3);
   });
 
-  it('trims the shared document history over budget and frees dropped meshes', () => {
+  it('trims the shared document history and frees adopted uploads when dropped', () => {
     const doc = new SharedDocument(1024 * 1024);
     doc.replace(sceneOf(mesh(100_000)));
     const uuids: string[] = [];
@@ -119,6 +119,7 @@ describe('history budget', () => {
       const before = doc.scene;
       const geometry = mesh(100_000 + i);
       uuids.push(geometry.uuid);
+      doc.addMesh(geometry.uuid, geometry);
       useEditor.setState((state) => ({
         scene: { ...before, parts: [part('p0', geometry)] },
         revision: state.revision + 1,
