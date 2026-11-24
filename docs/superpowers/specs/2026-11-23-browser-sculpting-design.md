@@ -1,6 +1,6 @@
 # Browser sculpting v1
 
-Status: proposed for review.
+Status: approved for implementation.
 
 ## Intent
 
@@ -30,10 +30,11 @@ under the tip, and act only when it belongs to the selected part. Resolve the mi
 nearby surface on that same part, including the far side when symmetry explicitly calls for it.
 If the mirrored and direct footprints overlap, apply at most one dab's effect per vertex.
 
-The brush set includes Draw, Grab, Smooth, Flatten, Crease, and Mask. Draw raises the surface or
+The brush set includes Draw, Grab, Smooth, Flatten, Crease, Clay Buildup, Inflate/Deflate, and Mask. Draw raises the surface or
 digs into it when inverted. Grab moves a patch with the pen. Smooth and Flatten use the local
 surface and follow the existing Refine behavior where it suits freehand strokes. Crease pulls the
 surface toward the stroke path while cutting a groove. Invert the depth to form a sharp ridge.
+Clay Buildup adds broad layers against the local surface plane. Inflate/Deflate moves vertices along their individual surface normals.
 Holding Shift temporarily switches to Smooth on the sculpting brushes. In Mask mode it temporarily
 softens the mask.
 
