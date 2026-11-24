@@ -281,10 +281,13 @@ export function joinLiveSession() {
         const message = latest;
         latest = null;
         const generation = streamGeneration;
-        if ((await load(message)) && !closed && generation === streamGeneration) apply(message);
+        try {
+          if ((await load(message)) && !closed && generation === streamGeneration) apply(message);
+        } catch (error) {
+          if (!closed && generation === streamGeneration)
+            notify(`The shared scene stopped updating. ${(error as Error).message}`);
+        }
       }
-    } catch (error) {
-      notify(`The shared scene stopped updating. ${(error as Error).message}`);
     } finally {
       receiving = false;
     }
