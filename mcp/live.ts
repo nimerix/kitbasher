@@ -426,6 +426,7 @@ export class LiveView {
         scene,
         checkpoint: body.checkpoint !== false,
         replace: body.replace === true,
+        sculpt: body.sculpt,
       });
       this.reply(response, 200, { version });
     } catch (error) {

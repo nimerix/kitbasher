@@ -1,5 +1,6 @@
 import type { BufferGeometry } from 'three';
 import { useEditor } from '../src/core/store';
+import { matchesSculptTarget, type SculptTarget } from '../src/core/sculpt-session';
 import {
   applyPatch,
   composePatches,
@@ -26,6 +27,7 @@ export interface Edit {
   checkpoint: boolean;
   /** Starts the scene over, as opening a file does. */
   replace?: boolean;
+  sculpt?: SculptTarget;
 }
 
 interface Logged {
@@ -104,6 +106,25 @@ export class SharedDocument {
     if (!base)
       throw new EditConflict('This change was made on a version of the scene that is too old.');
     const current = this.scene;
+    if (edit.sculpt) {
+      const target = edit.sculpt;
+      const part = current.parts.find((part) => part.id === target.partId);
+      const carved = edit.scene.parts.find((part) => part.id === target.partId);
+      if (!part || !carved || !matchesSculptTarget(part, target))
+        throw new EditConflict(
+          'The sculpt target changed before the stroke reached the shared scene.',
+        );
+      if (carved.geometry === part.geometry) return this.version;
+      const next = {
+        ...current,
+        parts: current.parts.map((candidate) =>
+          candidate === part ? { ...part, geometry: carved.geometry } : candidate,
+        ),
+      };
+      useEditor.setState((state) => ({ scene: next, revision: state.revision + 1 }));
+      this.commit(author, current);
+      return this.version;
+    }
     let next = mergeScenes(base, edit.scene, current, 'ours');
     if (base !== current)
       try {

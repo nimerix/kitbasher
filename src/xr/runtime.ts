@@ -229,7 +229,7 @@ export class XRRuntime {
   ) {
     // Warp and Refine are desktop only.
     const editor = useEditor.getState();
-    if (editor.tool === 'warp' || editor.tool === 'refine') {
+    if (editor.tool === 'warp' || editor.tool === 'refine' || editor.tool === 'sculpt') {
       editor.setTool('select');
       this.tool = 'select';
     }

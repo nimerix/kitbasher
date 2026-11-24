@@ -16,7 +16,33 @@ export type Tool =
   | 'pins'
   | 'anchors'
   | 'warp'
-  | 'refine';
+  | 'refine'
+  | 'sculpt';
+
+export type SculptBrush =
+  'draw' | 'grab' | 'smooth' | 'flatten' | 'crease' | 'clay' | 'inflate' | 'mask';
+
+export interface SculptureSettings {
+  brush: SculptBrush;
+  radius: number;
+  strength: number;
+  detail: number;
+  minEdge: number;
+  falloff: 'soft' | 'linear' | 'hard';
+  symmetry: boolean;
+  spacing: number;
+  stabilization: number;
+  pressureStrength: boolean;
+  pressureRadius: boolean;
+  pressureCurve: number;
+  aspect: number;
+  rotation: number;
+  tilt: boolean;
+  twist: boolean;
+  pinch: number;
+  maskVisible: boolean;
+}
+
 export type AlignmentMode = 'point' | 'point-plane' | 'plane' | 'multi' | 'surface';
 export type AlignmentView = 'scene' | 'pair' | 'active' | 'ghost';
 

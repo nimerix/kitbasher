@@ -2,6 +2,7 @@ import { AnchorControls } from './AnchorControls';
 import { PinControls } from './PinControls';
 import { TransformAdjustments } from './TransformAdjustments';
 import { RefineControls } from './RefineControls';
+import { SculptControls } from './SculptControls';
 import { WarpControls } from './WarpControls';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
@@ -955,11 +956,13 @@ export function Inspector({ onClose }: { onClose: () => void }) {
                 ? 'Warp'
                 : tool === 'refine'
                   ? 'Refine'
-                  : tool === 'align'
-                    ? 'Alignment'
-                    : tool === 'joint'
-                      ? 'Joint builder'
-                      : 'Inspector'}
+                  : tool === 'sculpt'
+                    ? 'Sculpt'
+                    : tool === 'align'
+                      ? 'Alignment'
+                      : tool === 'joint'
+                        ? 'Joint builder'
+                        : 'Inspector'}
         </span>
         <div>
           <IconButton label="Workbench help" onClick={() => useEditor.getState().setModal('help')}>
@@ -985,6 +988,8 @@ export function Inspector({ onClose }: { onClose: () => void }) {
           <WarpControls />
         ) : tool === 'refine' ? (
           <RefineControls />
+        ) : tool === 'sculpt' ? (
+          <SculptControls />
         ) : tool === 'align' || tool === 'joint' ? (
           <AssemblyInspector />
         ) : selected.length > 1 ? (
