@@ -362,8 +362,8 @@ export function joinLiveSession() {
     } catch (error) {
       if (error instanceof Refusal) refused(error.message);
       else {
-        // Kept for when the agent can be reached again.
-        edits.unshift(edit);
+        // Retry an interrupted request unless the stream already confirmed the stroke.
+        if (!activeSculptObserved) edits.unshift(edit);
         if (!sculpt) useEditor.getState().retryWarp();
         lost();
       }
