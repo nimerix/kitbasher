@@ -302,7 +302,7 @@ export class LiveView {
   }
 
   private message() {
-    const { scene, version, epoch } = this.document;
+    const { scene, version, epoch, replacementId } = this.document;
     const geometries: Record<string, GeometryLayout> = {};
     for (const { geometry } of scene.parts) {
       let layout = this.layouts.get(geometry);
@@ -315,6 +315,7 @@ export class LiveView {
     return `event: scene\ndata: ${JSON.stringify({
       version,
       epoch,
+      replacementId,
       scene: sharedScene(scene),
       geometries,
       history: this.document.historyCounts(),
@@ -426,6 +427,10 @@ export class LiveView {
         scene,
         checkpoint: body.checkpoint !== false,
         replace: body.replace === true,
+        replacementId:
+          typeof body.replacementId === 'string' && /^[\w-]{1,64}$/.test(body.replacementId)
+            ? body.replacementId
+            : undefined,
         sculpt: body.sculpt,
       });
       this.reply(response, 200, { version });

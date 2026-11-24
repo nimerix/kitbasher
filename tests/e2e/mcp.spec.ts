@@ -9,7 +9,9 @@ import { expect, test } from '@playwright/test';
 import type { Page } from '@playwright/test';
 import { BoxGeometry, Mesh } from 'three';
 import { STLExporter } from 'three/addons/exporters/STLExporter.js';
+import { serializeGeometry } from '../../src/core/geometry';
 import { queueAfterPenRelease } from './helpers/sculpt';
+import { readSavedScene } from './saved-scene';
 
 // These drive the bundle a client would really start, over real stdio, with the real app.
 let folder: string;
@@ -483,10 +485,13 @@ for (const replaceScene of [false, true]) {
       const originalName = 'Untitled assembly';
       await expect(title).toHaveText(originalName);
       const acceptedName = 'Accepted assembly name';
-      await title.click();
-      const field = page.getByRole('textbox', { name: 'Assembly name' });
-      await field.fill(acceptedName);
-      await field.press('Enter');
+      const rename = async (name: string) => {
+        await title.click();
+        const field = page.getByRole('textbox', { name: 'Assembly name' });
+        await field.fill(name);
+        await field.press('Enter');
+      };
+      await rename(acceptedName);
       await expect(page.getByRole('button', { name: /^Undo \((⌘|Ctrl)\+Z\)$/ })).toBeEnabled();
       await page.locator(part('Sculpt block')).click();
       await page.keyboard.press('1');
@@ -501,6 +506,7 @@ for (const replaceScene of [false, true]) {
       });
       const edit = /\/live\/edit$/;
       await page.route(edit, async (route) => {
+        if (!route.request().postDataJSON().sculpt) return route.continue();
         await held;
         await route.fulfill({ status: 409, json: { error: 'Stroke refused for this test.' } });
       });
@@ -522,14 +528,23 @@ for (const replaceScene of [false, true]) {
         await call('new_scene', { name: 'Replacement', discard_unsaved: true });
         await expect(title).toHaveText('Replacement');
         await expect(prompt).toHaveCount(0);
-      }
-      rejectStroke();
-      await expect(page.getByText(/stroke refused for this test/i)).toBeVisible();
-      await expect(prompt).toHaveCount(0);
-      if (replaceScene) {
+        const renamed = page.waitForResponse(
+          (response) =>
+            edit.test(response.url()) &&
+            response.request().postDataJSON().scene.name === 'Newer rename',
+          { timeout: 8000 },
+        );
+        await rename('Newer rename');
+        await expect(title).toHaveText('Newer rename');
+        rejectStroke();
+        expect((await renamed).ok()).toBe(true);
+        expect((await call('get_scene')).name).toBe('Newer rename');
         await expect(help).toHaveCount(0);
         expect(undoRequests).toBe(0);
       } else {
+        rejectStroke();
+        await expect(page.getByText(/stroke refused for this test/i)).toBeVisible();
+        await expect(prompt).toHaveCount(0);
         // A later non-history command still runs after the refused stroke rolls back.
         await expect(help).toBeVisible();
         await expect(title).toHaveText(acceptedName);
@@ -541,6 +556,178 @@ for (const replaceScene of [false, true]) {
       }
     },
   );
+}
+
+test('publishes Delete queued behind a stroke interrupted by a shared pose update', async ({
+  page,
+}) => {
+  await call('add_parts', {
+    parts: [{ id: 'block', name: 'Sculpt block', shapes: [{ type: 'box', size: [10, 8, 6] }] }],
+  });
+  const { url } = await call('open_live_view', { open_browser: false });
+  await page.goto(url);
+  await page.locator(part('Sculpt block')).click();
+  await page.keyboard.press('1');
+  await page.keyboard.press('Home');
+  await page.getByRole('button', { name: 'Sculpt', exact: true }).click();
+  const radius = page.getByRole('spinbutton', { name: 'Radius', exact: true });
+  await radius.fill('0.12');
+  await radius.press('Enter');
+  const box = (await page.locator('canvas').boundingBox())!;
+  const start = { x: box.x + box.width / 2 - 55, y: box.y + box.height / 2 - 7 };
+  const edit = page.waitForResponse(
+    (response) =>
+      response.url().endsWith('/live/edit') && !response.request().postDataJSON().sculpt,
+    { timeout: 5000 },
+  );
+  await queueAfterPenRelease(page, start, [{ key: 'Delete', code: 'Delete' }], {
+    end: { x: start.x + 140, y: start.y },
+    releaseClockOn: 'resume-sculpt-clock',
+  });
+  try {
+    await call('update_parts', { updates: [{ id: 'block', translate: [2, 0, 0] }] });
+    await expect(page.locator(part('Sculpt block'))).toHaveCount(0);
+    expect((await edit).ok()).toBe(true);
+    expect((await call('get_scene')).parts).toHaveLength(0);
+  } finally {
+    await page.evaluate(() => window.dispatchEvent(new Event('resume-sculpt-clock')));
+  }
+});
+
+for (const holdResponse of [false, true]) {
+  test(`keeps a stroke and queued Save when the tab receives its own replacement ${holdResponse ? 'before' : 'after'} HTTP success`, async ({
+    page,
+  }) => {
+    await page.addInitScript(() => {
+      const NativeEventSource = window.EventSource;
+      window.EventSource = class extends NativeEventSource {
+        constructor(url: string | URL, init?: EventSourceInit) {
+          super(url, init);
+          this.addEventListener('scene', (event) => {
+            const { version } = JSON.parse(event.data);
+            const { dataset } = document.documentElement;
+            dataset.sharedVersion = String(version);
+            if (dataset.holdShared === '1') {
+              event.stopImmediatePropagation();
+              window.addEventListener(
+                'release-shared-scene',
+                () => this.dispatchEvent(new MessageEvent('scene', { data: event.data })),
+                { once: true },
+              );
+            }
+          });
+        }
+      };
+    });
+    await call('add_parts', {
+      parts: [{ id: 'old', name: 'Old block', shapes: [{ type: 'box', size: [10, 8, 6] }] }],
+    });
+    const { url } = await call('open_live_view', { open_browser: false });
+    await page.goto(url);
+    await expect(page.locator(part('Old block'))).toBeVisible();
+    const geometry = new BoxGeometry(10, 8, 6);
+    const openedScene = {
+      format: 'kitbasher',
+      version: 1,
+      units: 'mm',
+      name: 'Opened scene',
+      joints: [],
+      parts: [
+        {
+          id: 'new',
+          name: 'New block',
+          geometry: serializeGeometry(geometry),
+          position: [0, 0, 0],
+          quaternion: [0, 0, 0, 1],
+          scale: [1, 1, 1],
+          color: '#cccccc',
+          visible: true,
+          locked: false,
+          source: 'block',
+        },
+      ],
+    };
+    let submit = () => {};
+    let reply = () => {};
+    const submitted = new Promise<void>((resolve) => {
+      submit = resolve;
+    });
+    const answered = new Promise<void>((resolve) => {
+      reply = resolve;
+    });
+    const edit = /\/live\/edit$/;
+    let replacementVersion = 0;
+    await page.route(edit, async (route) => {
+      if (!route.request().postDataJSON().replace) return route.continue();
+      await submitted;
+      const response = await route.fetch();
+      replacementVersion = (await response.json()).version;
+      if (holdResponse) await answered;
+      await route.fulfill({ response });
+    });
+    await page.getByLabel('Open Kitbasher scene').setInputFiles({
+      name: 'opened.kitbash',
+      mimeType: 'application/json',
+      buffer: Buffer.from(JSON.stringify(openedScene)),
+    });
+    const opening = page.waitForRequest(
+      (request) => edit.test(request.url()) && request.postDataJSON().replace,
+    );
+    await page.getByRole('button', { name: 'Open scene', exact: true }).click();
+    const original = await opening;
+    await page.locator(part('New block')).click();
+    await page.keyboard.press('1');
+    await page.keyboard.press('Home');
+    await page.getByRole('button', { name: 'Sculpt', exact: true }).click();
+    const box = (await page.locator('canvas').boundingBox())!;
+    await queueAfterPenRelease(
+      page,
+      { x: box.x + box.width / 2 + 8, y: box.y + box.height / 2 - 7 },
+      [
+        { key: 'G', code: 'KeyG', shiftKey: true },
+        { key: 's', code: 'KeyS', ctrlKey: true },
+      ],
+    );
+    const prompt = page.locator('.free-transform-prompt');
+    await expect(prompt).toBeVisible();
+    const response = page.waitForResponse((result) => result.request() === original);
+    const acceptedStroke = page
+      .waitForResponse(
+        (result) => edit.test(result.url()) && !!result.request().postDataJSON().sculpt,
+        { timeout: 8000 },
+      )
+      .catch(() => null);
+    if (!holdResponse)
+      await page.evaluate(() => {
+        document.documentElement.dataset.holdShared = '1';
+      });
+    submit();
+    if (!holdResponse) expect((await response).ok()).toBe(true);
+    await expect.poll(() => replacementVersion).toBeGreaterThan(0);
+    await expect(page.locator('html')).toHaveAttribute(
+      'data-shared-version',
+      String(replacementVersion),
+    );
+    if (holdResponse) {
+      reply();
+      expect((await response).ok()).toBe(true);
+    } else {
+      await page.evaluate(() => {
+        delete document.documentElement.dataset.holdShared;
+        window.dispatchEvent(new Event('release-shared-scene'));
+      });
+    }
+    expect((await acceptedStroke)?.ok()).toBe(true);
+    await expect(prompt).toBeVisible();
+    const download = page.waitForEvent('download');
+    await page.keyboard.press('Escape');
+    const saved = await download;
+    const { scene } = await readSavedScene((await saved.path())!);
+    expect(scene.name).toBe('Opened scene');
+    const sculpted = scene.parts[0].geometry;
+    expect(sculpted.index?.count ?? sculpted.getAttribute('position').count).toBeGreaterThan(36);
+    geometry.dispose();
+  });
 }
 
 test('shared sculpt strokes keep their checkpoints and refuse a stale target pose', async ({

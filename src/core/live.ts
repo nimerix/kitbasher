@@ -21,7 +21,7 @@ interface OrdinaryEdit {
   before: SceneDocument;
   scene: SceneDocument;
   checkpoint: boolean;
-  replace: boolean;
+  replacementId?: string;
 }
 
 interface SculptEdit {
@@ -31,6 +31,15 @@ interface SculptEdit {
 
 type QueuedEdit = OrdinaryEdit | SculptEdit;
 
+interface ActiveEdit {
+  edit: QueuedEdit;
+  epoch: number;
+  sceneEpoch: number;
+}
+
+const replacementIdOf = (edit: QueuedEdit | null | undefined) =>
+  edit && !('sculpt' in edit) ? edit.replacementId : undefined;
+
 interface HistoryRequest {
   direction: 'undo' | 'redo';
   sculpt: number | null;
@@ -38,7 +47,7 @@ interface HistoryRequest {
 
 function applyQueuedEdit(scene: SceneDocument, edit: QueuedEdit): SceneDocument {
   if (!('sculpt' in edit))
-    return edit.replace ? edit.scene : mergeScenes(edit.before, edit.scene, scene);
+    return edit.replacementId ? edit.scene : mergeScenes(edit.before, edit.scene, scene);
   const { sculpt, geometry } = edit;
   return {
     ...scene,
@@ -53,6 +62,7 @@ function applyQueuedEdit(scene: SceneDocument, edit: QueuedEdit): SceneDocument 
 interface Message {
   version: number;
   epoch: number;
+  replacementId?: string;
   scene: unknown;
   geometries: Record<string, GeometryLayout>;
   history: Record<string, [number, number]>;
@@ -104,7 +114,12 @@ export function joinLiveSession() {
   const edits: QueuedEdit[] = [];
   const requests: HistoryRequest[] = [];
   /** The last scene the server sent. Unsent changes here are relative to it. */
-  let confirmed: { version: number; epoch: number; scene: SceneDocument } | null = null;
+  let confirmed: {
+    version: number;
+    epoch: number;
+    replacementId?: string;
+    scene: SceneDocument;
+  } | null = null;
   let latest: Message | null = null;
   let streamGeneration = 0;
   let receiving = false;
@@ -114,9 +129,10 @@ export function joinLiveSession() {
   let closed = false;
   let viewMoved = false;
   let dirtyEdit: OrdinaryEdit | null = null;
-  let activeEdit: QueuedEdit | null = null;
+  let activeEdit: ActiveEdit | null = null;
   let activeSculptObserved = false;
   let acceptedSculpt: { edit: SculptEdit; version: number; epoch: number } | null = null;
+  let acceptedReplacement: { edit: OrdinaryEdit; version: number } | null = null;
   /** The version that holds this tab's last request. Nothing more is sent until it arrives. */
   let awaited = 0;
   let awaitedHistory: { version: number; sculpt: number | null } | null = null;
@@ -124,10 +140,14 @@ export function joinLiveSession() {
   const notify = (message: string, kind: 'error' | 'info' = 'error') =>
     useEditor.getState().notify(message, kind);
 
-  const show = (scene: SceneDocument) => {
+  const show = (scene: SceneDocument, replace = false) => {
+    const state = useEditor.getState();
+    const local = committedScene(state);
+    const next = keepUnchanged(local, scene);
+    if (!replace && next === local) return;
     applyingRemote = true;
     try {
-      useEditor.getState().receiveScene(keepUnchanged(useEditor.getState().scene, scene));
+      state.receiveScene(replace && next === state.scene ? { ...next } : next);
     } finally {
       applyingRemote = false;
     }
@@ -137,7 +157,7 @@ export function joinLiveSession() {
 
   useSharedSculptQueueGuard((geometry) => {
     if (!connected) return false;
-    const queued = [activeEdit, acceptedSculpt?.edit, ...edits].flatMap((edit) =>
+    const queued = [activeEdit?.edit, acceptedSculpt?.edit, ...edits].flatMap((edit) =>
       edit && 'sculpt' in edit ? [edit.geometry] : [],
     );
     return queued.length < 40 && geometryBytes([...queued, geometry]) <= sculptHistoryBytes;
@@ -178,7 +198,10 @@ export function joinLiveSession() {
       const replace = state.sceneEpoch !== previous.sceneEpoch;
       if (replace) {
         edits.length = 0;
+        requests.length = 0;
         dirtyEdit = null;
+        acceptedSculpt = null;
+        acceptedReplacement = null;
       }
       // Accumulate only ordinary edits, each relative to what this action actually changed.
       // In particular, an optimistic sculpt mesh in both scenes must not enter this batch.
@@ -189,7 +212,7 @@ export function joinLiveSession() {
             ? mergeScenes(before, scene, dirtyEdit.scene)
             : scene,
         checkpoint: replace || !!dirtyEdit?.checkpoint || state.past !== previous.past,
-        replace: replace || !!dirtyEdit?.replace,
+        replacementId: replace ? uid() : dirtyEdit?.replacementId,
       };
     }
     void pump();
@@ -218,12 +241,29 @@ export function joinLiveSession() {
       return geometry;
     });
     for (const key of Object.keys(message.geometries)) known.add(key);
-    const local = committedScene(useEditor.getState());
+    const state = useEditor.getState();
+    const local = committedScene(state);
     const first = !confirmed;
     const replaced = !!confirmed && message.epoch !== confirmed.epoch;
+    const active =
+      activeEdit &&
+      activeEdit.sceneEpoch === state.sceneEpoch &&
+      activeEdit.epoch === confirmed?.epoch
+        ? activeEdit.edit
+        : null;
+    const acknowledgesReplacement = (edit: QueuedEdit | null | undefined) =>
+      !!message.replacementId && replacementIdOf(edit) === message.replacementId;
+    const acknowledgedRetry = edits.findIndex(acknowledgesReplacement);
+    if (acknowledgedRetry >= 0) edits.splice(acknowledgedRetry, 1);
+    const ownReplacement =
+      acknowledgesReplacement(active) ||
+      acknowledgesReplacement(acceptedReplacement?.edit) ||
+      acknowledgedRetry >= 0;
+    if (acceptedReplacement && message.version >= acceptedReplacement.version)
+      acceptedReplacement = null;
     const unsent = unsentEdits();
-    if (activeEdit && 'sculpt' in activeEdit) {
-      const { sculpt, geometry } = activeEdit;
+    if (!replaced && active && 'sculpt' in active) {
+      const { sculpt, geometry } = active;
       if (
         scene.parts.some(
           (part) => part.id === sculpt.partId && part.geometry.uuid === geometry.uuid,
@@ -236,10 +276,11 @@ export function joinLiveSession() {
       (message.epoch !== acceptedSculpt.epoch || message.version >= acceptedSculpt.version)
     )
       acceptedSculpt = null;
-    const replacing = unsent.some((edit) => !('sculpt' in edit) && edit.replace);
+    const replacing = !!acceptedReplacement || unsent.some(replacementIdOf);
+    const changedScene = !replacing && (first || (replaced && !ownReplacement));
     let next = scene;
     // Changes built on a replaced scene no longer apply, unless we will replace it ourselves.
-    if (!replacing && (first || replaced)) {
+    if (changedScene) {
       dirtyEdit = null;
       edits.length = 0;
       if (replaced) {
@@ -249,11 +290,19 @@ export function joinLiveSession() {
         if (useEditor.getState().sculpt) useEditor.setState({ tool: 'select', sculpt: null });
       }
     } else {
-      const optimistic = acceptedSculpt?.edit ?? (activeSculptObserved ? null : activeEdit);
+      const optimistic =
+        acceptedSculpt?.edit ??
+        acceptedReplacement?.edit ??
+        (replaced || activeSculptObserved ? null : active);
       const pending = optimistic ? [optimistic, ...unsent] : unsent;
       next = pending.reduce(applyQueuedEdit, scene);
     }
-    confirmed = { version: message.version, epoch: message.epoch, scene };
+    confirmed = {
+      version: message.version,
+      epoch: message.epoch,
+      replacementId: message.replacementId,
+      scene,
+    };
     const [undo, redo] = message.history[client] ?? [0, 0];
     if (!connected) {
       connected = true;
@@ -261,12 +310,12 @@ export function joinLiveSession() {
     }
     useEditor.setState({ liveStatus: 'connected', sharedHistory: { undo, redo } });
     const before = new Set(local.parts.map((part) => part.id));
-    show(next);
+    show(next, changedScene && replaced);
     if (awaitedHistory && message.version >= awaitedHistory.version) {
       stopSharedSculptHistory(true, awaitedHistory.sculpt);
       awaitedHistory = null;
     }
-    if (!replacing && (first || replaced)) useEditor.getState().settleWarp(true);
+    if (changedScene) useEditor.getState().settleWarp(true);
     const shown = useEditor.getState().scene;
     if (first) useEditor.getState().markSaved(useEditor.getState().revision);
     // Keep a growing model in view, until the person watching takes over the camera.
@@ -346,11 +395,18 @@ export function joinLiveSession() {
     const base = confirmed!;
     const sculpt = 'sculpt' in edit ? edit.sculpt : undefined;
     const checkpoint = 'sculpt' in edit || edit.checkpoint;
-    const replace = !('sculpt' in edit) && edit.replace;
-    activeEdit = edit;
+    const replacementId = replacementIdOf(edit);
+    const sceneEpoch = useEditor.getState().sceneEpoch;
+    const replacementObserved = () => !!replacementId && confirmed?.replacementId === replacementId;
+    const stillApplies = () =>
+      !closed &&
+      useEditor.getState().sceneEpoch === sceneEpoch &&
+      (confirmed?.epoch === base.epoch || replacementObserved());
+    activeEdit = { edit, epoch: base.epoch, sceneEpoch };
     activeSculptObserved = false;
     if (!sculpt) useEditor.getState().submitWarp();
     try {
+      if (replacementObserved()) return;
       if ('sculpt' in edit) {
         const target = base.scene.parts.find((part) => part.id === edit.sculpt.partId);
         // A request can succeed even when the connection drops before its response arrives.
@@ -368,26 +424,36 @@ export function joinLiveSession() {
         known.add(key);
         meshes.set(key, geometry);
       }
+      if (!stillApplies()) return;
       const response = await post('live/edit', {
         client,
         base: base.version,
         epoch: base.epoch,
         checkpoint,
-        replace,
+        replace: !!replacementId,
+        replacementId,
         sculpt,
         scene: sharedScene(scene),
       });
       if (response.ok) {
         awaited = ((await response.json()) as { version: number }).version;
-        if (!sculpt) useEditor.getState().settleWarp(true, true);
-        else if (!closed && confirmed && confirmed.version >= awaited) {
+        if (!stillApplies()) return;
+        if (!('sculpt' in edit)) {
+          if (replacementId && confirmed && confirmed.version < awaited)
+            acceptedReplacement = { edit, version: awaited };
+          useEditor.getState().settleWarp(true, true);
+        } else if (confirmed && confirmed.version >= awaited) {
           // The stream can skip the accepted mesh or show it before the HTTP response arrives.
           show(unsentEdits().reduce(applyQueuedEdit, confirmed.scene));
-        } else if ('sculpt' in edit && !activeSculptObserved && confirmed?.epoch === base.epoch) {
+        } else if (!activeSculptObserved && confirmed?.epoch === base.epoch) {
           acceptedSculpt = { edit, version: awaited, epoch: base.epoch };
         }
-      } else refused(await errorOf(response));
+      } else {
+        const reason = await errorOf(response);
+        if (stillApplies()) refused(reason);
+      }
     } catch (error) {
+      if (!stillApplies() || replacementObserved()) return;
       if (error instanceof Refusal) refused(error.message);
       else {
         // Retry an interrupted request unless the stream already confirmed the stroke.

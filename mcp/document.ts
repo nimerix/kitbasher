@@ -27,6 +27,7 @@ export interface Edit {
   checkpoint: boolean;
   /** Starts the scene over, as opening a file does. */
   replace?: boolean;
+  replacementId?: string;
   sculpt?: SculptTarget;
 }
 
@@ -55,6 +56,8 @@ export class SharedDocument {
   version = 0;
   /** Counts scene replacements. Edits made before one no longer apply. */
   epoch = 0;
+  /** Identifies the browser edit that started this epoch, if any. */
+  replacementId?: string;
   private readonly versions = new Map<number, SceneDocument>();
   private readonly log = new Map<number, Logged>();
   private readonly histories = new Map<string, { undo: ScenePatch[]; redo: ScenePatch[] }>();
@@ -76,10 +79,11 @@ export class SharedDocument {
   }
 
   /** Starts over from a scene that nobody can undo, such as a file just opened. */
-  replace(scene: SceneDocument, author = agent, saved = true) {
+  replace(scene: SceneDocument, author = agent, saved = true, replacementId?: string) {
     useEditor.getState().setScene(scene);
     if (!saved) useEditor.setState({ savedRevision: -1 });
     this.epoch++;
+    this.replacementId = replacementId;
     this.versions.clear();
     this.log.clear();
     this.histories.clear();
@@ -97,7 +101,8 @@ export class SharedDocument {
 
   apply(author: string, edit: Edit) {
     if (edit.replace) {
-      this.replace(edit.scene, author, false);
+      if (edit.replacementId && this.replacementId === edit.replacementId) return this.version;
+      this.replace(edit.scene, author, false, edit.replacementId);
       return this.version;
     }
     if (edit.epoch !== this.epoch)
