@@ -143,6 +143,7 @@ export function SculptPointer() {
     let stroke: Stroke | null = null;
     let disposed = false;
     const afterStroke: (() => void)[] = [];
+    let runningAction = false;
     let queuedPointer: {
       down: PointerEvent;
       partId: string;
@@ -454,7 +455,7 @@ export function SculptPointer() {
           );
       active.work?.return(false);
       active.draft.geometry.dispose();
-      for (const action of afterStroke.splice(0)) action();
+      flushActions();
       prepare();
       refresh();
     };
@@ -525,15 +526,26 @@ export function SculptPointer() {
       if (active.released && !active.work && !active.path.pending) detach(true);
     };
     const defer = (action: () => void) => {
-      if (!stroke?.released) return false;
+      if (!stroke?.released && (runningAction || !afterStroke.length)) return false;
       afterStroke.push(action);
       return true;
+    };
+    const flushActions = () => {
+      if (runningAction) return;
+      runningAction = true;
+      try {
+        while (afterStroke.length && !stroke?.released && !useEditor.getState().busy)
+          afterStroke.shift()!();
+      } finally {
+        runningAction = false;
+      }
     };
     const schedule = () => {
       if (frame) return;
       frame = requestAnimationFrame(() => {
         frame = 0;
         if (stroke) drain(stroke, performance.now() + 6);
+        flushActions();
         if (stroke && (stroke.work || stroke.path.pending)) schedule();
         refresh();
       });
