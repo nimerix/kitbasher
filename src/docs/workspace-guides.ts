@@ -81,7 +81,7 @@ export const workspaceGuides: DocArticle[] = [
         id: 'undo-and-recovery',
         title: 'Undo is for the current editing session',
         paragraphs: [
-          'Undo and redo retain the most recent 40 changes. A complete gizmo drag, fit, or mesh-processing apply is one undo step; the scene file is a snapshot rather than a record of every earlier step. Save before an experiment if you may need to return after closing the editor.',
+          'Undo and redo retain up to 120 changes. A complete gizmo drag, fit, or mesh-processing apply is one undo step; the scene file is a snapshot rather than a record of every earlier step. Save before an experiment if you may need to return after closing the editor.',
           'If the editor encounters an unexpected error, its recovery screen offers to reload the local save. If the same recovered scene repeatedly fails, it also offers to discard that recovery data. Preserve an independent scene file before discarding when possible.',
         ],
       },

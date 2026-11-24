@@ -99,9 +99,18 @@ import type { RegionInput, RegionSolve } from './refine-region';
 import type { NavigationMode } from './navigation';
 import { createSample } from './sample';
 import { useXR } from './xr-session';
-import { geometryBytes, historyBudgetBytes, trimHistory } from './history-budget';
+import {
+  archiveScene,
+  restoreScene,
+  rememberSculptGeometry,
+  SculptGeometrySnapshot,
+  type HistoryScene,
+} from './sculpt-history';
+import { geometryBytes, historyBudgetBytes, historyLimit, trimHistory } from './history-budget';
 import {
   appendSculptStep,
+  archiveMask,
+  restoreMask,
   maskHistoryBytes,
   sculptDefaults,
   sculptHistoryBytes,
@@ -244,7 +253,7 @@ const initialScene: SceneDocument = liveSession
       constraints: [],
     }
   : createSample();
-const historyLimit = 40;
+
 // Leaves a dragged frame time to draw. The part catches up over the next frames.
 const gestureBudget = 12;
 
@@ -501,8 +510,8 @@ interface EditorState {
   lightingPanel: boolean;
   /** The light being edited in the lighting panel and moved in the viewport. */
   activeLight: string | null;
-  past: SceneDocument[];
-  future: SceneDocument[];
+  past: HistoryScene[];
+  future: HistoryScene[];
   revision: number;
   savedRevision: number;
   driveFile: DriveFileBinding | null;
@@ -1888,7 +1897,9 @@ function appliedWarpGeometry(source: BufferGeometry, output: WarpOutput) {
 
 const changed = (state: EditorState, scene: SceneDocument, checkpoint = true) => {
   const base = committedScene(state);
-  let past = checkpoint ? [...state.past.slice(-(historyLimit - 1)), base] : state.past;
+  let past = checkpoint
+    ? [...state.past.slice(-(historyLimit - 1)), archiveScene(base)]
+    : state.past;
   let notice = {};
   if (checkpoint && (newGeometry(base, scene) || newGeometry(scene, base))) {
     const kept = trimHistory(
@@ -1987,14 +1998,15 @@ function historyScene(state: EditorState, direction: HistoryDirection) {
 function restoreHistoryScene(
   state: EditorState,
   direction: HistoryDirection,
-  scene: SceneDocument,
+  entry: HistoryScene,
   sculpt: SculptSession | null = null,
 ): Partial<EditorState> {
   const undo = direction === 'undo';
+  const scene = restoreScene(entry);
   return {
     scene,
-    past: undo ? state.past.slice(0, -1) : [...state.past, state.scene],
-    future: undo ? [state.scene, ...state.future] : state.future.slice(1),
+    past: undo ? state.past.slice(0, -1) : [...state.past, archiveScene(state.scene)],
+    future: undo ? [archiveScene(state.scene), ...state.future] : state.future.slice(1),
     revision: state.revision + 1,
     selected: state.selected.filter((id) => scene.parts.some((part) => part.id === id)),
     ...restoredIsolated(state, scene),
@@ -3507,9 +3519,10 @@ export const useEditor = create<EditorState>((set, get) => ({
       );
       return false;
     }
+    if (geometry !== part.geometry) rememberSculptGeometry(part.geometry, geometry);
     const step = {
-      before: { geometry: part.geometry.uuid, mask: sculpt.mask },
-      after: { geometry: geometry.uuid, mask },
+      before: { geometry: part.geometry.uuid, mask: archiveMask(sculpt.mask) },
+      after: { geometry: geometry.uuid, mask: archiveMask(mask, sculpt.mask) },
     };
     set({
       ...(geometry === part.geometry
@@ -3526,7 +3539,7 @@ export const useEditor = create<EditorState>((set, get) => ({
         ...sculpt,
         revision: nextSculptRevision(),
         mask,
-        past: appendSculptStep(sculpt.past, step),
+        past: appendSculptStep(sculpt.past, step, mask),
         future: [],
       },
     });
@@ -5120,7 +5133,8 @@ function reachableGeometries(state: EditorState) {
     ...state.future.map((scene) => scene.parts),
     state.clipboard?.parts ?? [],
   ])
-    for (const part of parts) geometries.add(part.geometry);
+    for (const part of parts)
+      if (!(part.geometry instanceof SculptGeometrySnapshot)) geometries.add(part.geometry);
   return geometries;
 }
 
@@ -7023,7 +7037,7 @@ export function restoreSculptAfterRefusal(scene: SceneDocument, sculpt: SculptSe
   useEditor.setState({
     sculpt: {
       ...sculpt,
-      mask: sculpt.past[start].before.mask,
+      mask: restoreMask(sculpt.past[start].before.mask),
       past: sculpt.past.slice(0, start),
       future: [],
       pending: null,

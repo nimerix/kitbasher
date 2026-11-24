@@ -10,8 +10,36 @@ import {
   summarizePatch,
 } from '../src/core/sync';
 import type { ScenePatch } from '../src/core/sync';
-import { arraysOf, historyBudgetBytes } from '../src/core/history-budget';
+import { buffersOf, historyBudgetBytes, historyLimit } from '../src/core/history-budget';
 import type { SceneDocument } from '../src/core/types';
+import {
+  archiveGeometry,
+  archiveScene,
+  rememberSculptGeometry,
+  restoreGeometry,
+  restoreScene,
+  type HistoryScene,
+  type HistoryGeometry,
+} from '../src/core/sculpt-history';
+
+function mapPatchGeometry(
+  patch: ScenePatch,
+  map: (g: HistoryGeometry) => HistoryGeometry,
+): ScenePatch {
+  return patch.map((change) => {
+    if (change.kind !== 'parts') return change;
+    const mapped = (entity: typeof change.before) => {
+      if (!entity) return entity;
+      const geometry = map(entity.geometry as HistoryGeometry);
+      return geometry === entity.geometry ? entity : { ...entity, geometry };
+    };
+    const before = mapped(change.before);
+    const after = mapped(change.after);
+    return before === change.before && after === change.after
+      ? change
+      : { ...change, before, after };
+  });
+}
 
 export const agent = 'agent';
 
@@ -39,7 +67,6 @@ interface Logged {
 
 // Enough for a tab that falls behind during a large upload.
 const keepVersions = 200;
-const keepSteps = 40;
 const keepUploadsMs = 10 * 60 * 1000;
 
 const changesGeometry = (patch: ScenePatch) =>
@@ -58,10 +85,10 @@ export class SharedDocument {
   epoch = 0;
   /** Identifies the browser edit that started this epoch, if any. */
   replacementId?: string;
-  private readonly versions = new Map<number, SceneDocument>();
+  private readonly versions = new Map<number, HistoryScene>();
   private readonly log = new Map<number, Logged>();
   private readonly histories = new Map<string, { undo: ScenePatch[]; redo: ScenePatch[] }>();
-  private readonly meshes = new Map<string, BufferGeometry>();
+  private readonly meshes = new Map<string, HistoryGeometry>();
   private readonly uploads = new Map<string, number>();
   private readonly listeners = new Set<() => void>();
 
@@ -108,8 +135,8 @@ export class SharedDocument {
       this.replace(edit.scene, author, false, edit.replacementId);
       return this.version;
     }
-    const base = this.versions.get(edit.base);
-    if (!base)
+    const version = this.versions.get(edit.base);
+    if (!version)
       throw new EditConflict('This change was made on a version of the scene that is too old.');
     const current = this.scene;
     if (edit.sculpt) {
@@ -121,6 +148,7 @@ export class SharedDocument {
         throw new EditConflict(
           'The sculpt target changed before the stroke reached the shared scene.',
         );
+      rememberSculptGeometry(part.geometry, carved.geometry);
       const next = {
         ...current,
         parts: current.parts.map((candidate) =>
@@ -131,6 +159,7 @@ export class SharedDocument {
       this.commit(author, current);
       return this.version;
     }
+    const base = edit.base === this.version ? current : restoreScene(version);
     let next = mergeScenes(base, edit.scene, current, 'ours');
     if (base !== current)
       try {
@@ -218,7 +247,8 @@ export class SharedDocument {
   }
 
   mesh(key: string) {
-    return this.meshes.get(key);
+    const geometry = this.meshes.get(key);
+    return geometry && restoreGeometry(geometry);
   }
 
   private step(author: string, direction: 'undo' | 'redo') {
@@ -227,7 +257,11 @@ export class SharedDocument {
     const patch = stack?.at(-1);
     if (!history || !stack || !patch) return null;
     const current = this.scene;
-    const { scene, changed } = applyPatch(current, patch, direction);
+    const { scene, changed } = applyPatch(
+      current,
+      mapPatchGeometry(patch, restoreGeometry),
+      direction,
+    );
     const next = changed ? reconcile(scene) : current;
     stack.pop();
     (direction === 'undo' ? history.redo : history.undo).push(patch);
@@ -242,25 +276,26 @@ export class SharedDocument {
   private record(author: string, patch: ScenePatch, amend: boolean) {
     let history = this.histories.get(author);
     if (!history) this.histories.set(author, (history = { undo: [], redo: [] }));
+    patch = mapPatchGeometry(patch, archiveGeometry);
     const last = history.undo.at(-1);
     if (amend && last && !history.redo.length)
       history.undo[history.undo.length - 1] = composePatches(last, patch);
     else {
       history.undo.push(patch);
-      if (history.undo.length > keepSteps) history.undo.shift();
+      if (history.undo.length > historyLimit) history.undo.shift();
     }
     history.redo = [];
   }
 
   private publish(author: string, patch: ScenePatch, replaced = false) {
     this.version++;
-    this.versions.set(this.version, this.scene);
+    this.versions.set(this.version, archiveScene(this.scene));
     this.log.set(this.version, { author, summary: summarizePatch(patch), replaced });
     this.versions.delete(this.version - keepVersions);
     this.log.delete(this.version - keepVersions);
     for (const part of this.scene.parts) {
       const { geometry } = part;
-      this.meshes.set(geometry.uuid, geometry);
+      this.meshes.set(geometry.uuid, archiveGeometry(geometry));
       this.uploads.delete(geometry.uuid);
     }
     if (changesGeometry(patch)) this.trimMemory();
@@ -269,51 +304,62 @@ export class SharedDocument {
   }
 
   /**
-   * Drops old undo steps, far redo steps, then old scene versions until history fits the mesh
-   * budget. Change summaries, each author’s newest undo step, and the current version stay.
+   * Reserve the mesh budget for undo and redo before retaining older scene versions.
+   * Change summaries, each author’s newest undo step, and the current version stay.
    */
   private trimMemory() {
-    const kept = arraysOf(this.scene.parts.map((part) => part.geometry));
-    const counts = new Map<ArrayLike<number>, number>();
+    const kept = buffersOf(this.scene.parts.map((part) => part.geometry));
+    const counts = new Map<ArrayBufferLike, number>();
+    const references = new Map<HistoryGeometry, number>();
     let total = 0;
-    const hold = (geometries: BufferGeometry[], by: 1 | -1) => {
-      for (const array of arraysOf(geometries)) {
-        if (kept.has(array)) continue;
-        const bytes = (array as unknown as { byteLength: number }).byteLength;
-        const count = (counts.get(array) ?? 0) + by;
-        counts.set(array, count);
-        if (by === 1 && count === 1) total += bytes;
-        if (by === -1 && count === 0) total -= bytes;
+    const hold = (geometries: HistoryGeometry[], by: 1 | -1) => {
+      for (const geometry of geometries) {
+        const previous = references.get(geometry) ?? 0;
+        references.set(geometry, previous + by);
+        if (previous !== 0 && previous + by !== 0) continue;
+        for (const buffer of buffersOf([geometry])) {
+          if (kept.has(buffer)) continue;
+          const count = (counts.get(buffer) ?? 0) + by;
+          counts.set(buffer, count);
+          if (by === 1 && count === 1) total += buffer.byteLength;
+          if (by === -1 && count === 0) total -= buffer.byteLength;
+        }
       }
     };
-    const ofScene = (scene: SceneDocument) => scene.parts.map((part) => part.geometry);
+    const ofScene = (scene: HistoryScene) => scene.parts.map((part) => part.geometry);
     const ofPatch = (patch: ScenePatch) =>
       patch.flatMap((change) =>
         change.kind === 'parts'
           ? [change.before, change.after].flatMap((entity) =>
-              entity ? [entity.geometry as BufferGeometry] : [],
+              entity ? [entity.geometry as HistoryGeometry] : [],
             )
           : [],
       );
-    for (const scene of this.versions.values()) hold(ofScene(scene), 1);
+    hold(ofScene(this.versions.get(this.version)!), 1);
     const histories = [...this.histories.values()];
     for (const history of histories)
       for (const patch of [...history.undo, ...history.redo]) hold(ofPatch(patch), 1);
-    if (total <= this.budget) return;
+    let trimmed = total > this.budget;
 
     const drop = () => {
       const undo = histories.find((history) => history.undo.length > 1);
       if (undo) return (hold(ofPatch(undo.undo.shift()!), -1), true);
       const redo = histories.find((history) => history.redo.length);
       if (redo) return (hold(ofPatch(redo.redo.shift()!), -1), true);
-      const old = [...this.versions.keys()].find((version) => version !== this.version);
-      if (old === undefined) return false;
-      hold(ofScene(this.versions.get(old)!), -1);
-      this.versions.delete(old);
-      return true;
+      return false;
     };
     while (total > this.budget && drop());
-    this.prune();
+    // Version snapshots often own exactly the same buffers as undo. Spend any
+    // remaining budget on the newest versions needed by late-arriving edits.
+    for (const [version, scene] of [...this.versions].reverse()) {
+      if (version === this.version) continue;
+      if (total <= this.budget) hold(ofScene(scene), 1);
+      if (total > this.budget) {
+        this.versions.delete(version);
+        trimmed = true;
+      }
+    }
+    if (trimmed) this.prune();
   }
 
   /** Keeps every mesh that a version or an undo step can still bring back. */

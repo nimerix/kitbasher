@@ -16,6 +16,7 @@ import {
   type Raycaster,
 } from 'three';
 import { MeshBVH } from 'three-mesh-bvh';
+import { sculptFaceLimits } from './sculpt-history';
 import type { SculptBrush } from './types';
 
 export type { SculptBrush } from './types';
@@ -92,7 +93,7 @@ const batchMask = 511;
 const maxSplitsPerDab = 192;
 /** Source meshes larger than this remain brushable at their available density. */
 const maxRefinedFaceCount = 1_200_000;
-const inheritedFaceLimits = new WeakMap<BufferGeometry, number>();
+
 const maskName = 'sculptMask';
 
 /** Exact coincident vertices share connectivity without welding a nearby thin shell. */
@@ -384,15 +385,18 @@ export class SculptMesh {
     this.initialFaces = this.faceCount = Math.floor((source.index?.count ?? this.vertexCount) / 3);
     const localBudget = Math.min(65_536, Math.max(4096, Math.ceil(this.initialFaces * 0.2)));
     this.faceLimit =
-      inheritedFaceLimits.get(source) ??
+      sculptFaceLimits.get(source) ??
       Math.min(maxRefinedFaceCount, this.initialFaces + localBudget);
     this.geometry.name = source.name;
     this.geometry.userData = { ...source.userData };
     for (const [name, attribute] of Object.entries(source.attributes))
       this.geometry.setAttribute(name, renderAttribute(attribute));
     const indices = new Uint32Array(this.faceCount * 3);
-    for (let corner = 0; corner < indices.length; corner++)
-      indices[corner] = source.index?.getX(corner) ?? corner;
+    if (source.index?.itemSize === 1 && !source.index.normalized)
+      indices.set(source.index.array.subarray(0, indices.length));
+    else
+      for (let corner = 0; corner < indices.length; corner++)
+        indices[corner] = source.index?.getX(corner) ?? corner;
     this.geometry.setIndex(new BufferAttribute(indices, 1).setUsage(DynamicDrawUsage));
     this.geometry.groups = source.groups.map((group) => ({ ...group }));
     this.geometry.setDrawRange(0, indices.length);
@@ -1397,15 +1401,38 @@ export class SculptMesh {
     for (const [name, attribute] of Object.entries(this.geometry.attributes)) {
       if (name === maskName) continue;
       const { array, itemSize, normalized } = attribute;
+      const original = this.source.getAttribute(name);
+      if (
+        name !== 'position' &&
+        name !== 'normal' &&
+        this.vertexCount === this.initialVertices &&
+        original instanceof BufferAttribute &&
+        original.count === this.vertexCount
+      ) {
+        geometry.setAttribute(name, new BufferAttribute(original.array, itemSize, normalized));
+        continue;
+      }
       geometry.setAttribute(
         name,
         new BufferAttribute(array.slice(0, this.vertexCount * itemSize), itemSize, normalized),
       );
     }
-    if (this.source.index || this.faceCount !== this.initialFaces) {
-      const index = this.geometry.index!.array.slice(0, this.faceCount * 3) as Uint32Array;
+    if (
+      this.source.index?.itemSize === 1 &&
+      !this.source.index.normalized &&
+      this.source.index.count === this.faceCount * 3 &&
+      this.source.index.array instanceof (this.vertexCount <= 65_536 ? Uint16Array : Uint32Array) &&
+      this.vertexCount === this.initialVertices &&
+      this.faceCount === this.initialFaces
+    ) {
+      geometry.setIndex(new BufferAttribute(this.source.index.array, 1));
+    } else if (this.source.index || this.faceCount !== this.initialFaces) {
+      const index = this.geometry.index!.array.subarray(0, this.faceCount * 3) as Uint32Array;
       geometry.setIndex(
-        new BufferAttribute(this.vertexCount <= 65_536 ? Uint16Array.from(index) : index, 1),
+        new BufferAttribute(
+          this.vertexCount <= 65_536 ? Uint16Array.from(index) : index.slice(),
+          1,
+        ),
       );
     }
     geometry.groups = this.geometry.groups.map((group) => ({ ...group }));
@@ -1415,7 +1442,7 @@ export class SculptMesh {
       geometry.boundingSphere = new Sphere(bounds.center.clone(), bounds.radius);
     }
     this.refitPicking(geometry);
-    inheritedFaceLimits.set(geometry, this.faceLimit);
+    sculptFaceLimits.set(geometry, this.faceLimit);
     if (this.faceStart.length)
       rememberIncidence(geometry, {
         weldOf:

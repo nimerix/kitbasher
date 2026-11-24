@@ -465,7 +465,7 @@ describe('geometry lifetime', () => {
     open([dropped]);
     useEditor.getState().select('dropped');
     useEditor.getState().deleteSelected();
-    for (let i = 0; i < 39; i++) useEditor.getState().renameScene(`Name ${i}`);
+    for (let i = 0; i < 119; i++) useEditor.getState().renameScene(`Name ${i}`);
     expect(disposed).not.toHaveBeenCalled();
     useEditor.getState().renameScene('One more');
     expect(disposed).toHaveBeenCalledTimes(1);

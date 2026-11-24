@@ -1,4 +1,6 @@
 import type { BufferGeometry } from 'three';
+import { PackedArray, packArray } from './sculpt-history';
+import { historyLimit } from './history-budget';
 import { same } from './sync';
 import type { Part, Quat, SculptBrush, SculptureSettings, Vec3 } from './types';
 
@@ -34,9 +36,43 @@ export interface SculptStrokeCommit {
   mask: Float32Array | null;
 }
 
+type MaskSnapshot = PackedArray<Float32Array> | null;
+const maskSnapshots = new WeakMap<Float32Array, PackedArray<Float32Array>>();
+
+export function archiveMask(
+  mask: Float32Array | null,
+  previous?: Float32Array | null,
+): MaskSnapshot {
+  if (!mask) return null;
+  const known = maskSnapshots.get(mask);
+  if (known) return known;
+  let packed = packArray(
+    mask,
+    previous ?? undefined,
+    previous ? maskSnapshots.get(previous) : undefined,
+  );
+  if (
+    packed.slices.length &&
+    packed.slices.reduce(
+      (bytes, slice) => bytes + slice.bytes.byteLength,
+      packed.base.buffer.byteLength,
+    ) > maskHistoryBytes
+  )
+    packed = packArray(mask);
+  maskSnapshots.set(mask, packed);
+  return packed;
+}
+
+export function restoreMask(snapshot: MaskSnapshot) {
+  if (!snapshot) return null;
+  const mask = snapshot.restore();
+  maskSnapshots.set(mask, snapshot);
+  return mask;
+}
+
 interface SculptSnapshot {
   geometry: string;
-  mask: Float32Array | null;
+  mask: MaskSnapshot;
 }
 
 export interface SculptStep {
@@ -87,18 +123,38 @@ export const maskHistoryBytes = 64 * 1024 * 1024;
 export const sculptHistoryBytes = 256 * 1024 * 1024;
 
 /** Count unique allocations because consecutive strokes can share unchanged weights. */
-export function appendSculptStep(past: SculptStep[], step: SculptStep) {
-  const kept = [...past, step].slice(-40);
-  const seen = new Set([step.after.mask?.buffer]);
+export function appendSculptStep(
+  past: SculptStep[],
+  step: SculptStep,
+  current: Float32Array | null,
+) {
+  const kept = [...past, step].slice(-historyLimit);
+  const seen = new Set<ArrayBufferLike>();
+  const masks = new Set<MaskSnapshot>();
+  if (current) seen.add(current.buffer);
   let bytes = 0;
+  const count = (buffer: ArrayBufferLike) => {
+    if (seen.has(buffer)) return;
+    seen.add(buffer);
+    bytes += buffer.byteLength;
+  };
   for (let i = kept.length - 1; i >= 0; i--) {
     for (const { mask } of [kept[i].before, kept[i].after]) {
-      if (mask && !seen.has(mask.buffer)) {
-        seen.add(mask.buffer);
-        bytes += mask.buffer.byteLength;
-      }
+      if (!mask || masks.has(mask)) continue;
+      masks.add(mask);
+      count(mask.base.buffer);
+      for (const slice of mask.slices) count(slice.bytes.buffer);
     }
-    if (bytes > maskHistoryBytes) return kept.slice(i + 1);
+    if (bytes <= maskHistoryBytes) continue;
+    if (i < kept.length - 1) return kept.slice(i + 1);
+    // The latest mask already lives in the session. Keeping it directly frees
+    // its patches when the preceding mask needs the entire undo budget.
+    if (current) {
+      const full = packArray(current);
+      maskSnapshots.set(current, full);
+      return [{ ...step, after: { ...step.after, mask: full } }];
+    }
+    return [step];
   }
   return kept;
 }
@@ -112,7 +168,7 @@ export function stepSculptSession(
   return {
     ...session,
     revision: session.revision + 1,
-    mask: (undo ? step.before : step.after).mask,
+    mask: restoreMask((undo ? step.before : step.after).mask),
     pending: null,
     past: undo ? session.past.slice(0, -1) : [...session.past, step],
     future: undo ? [step, ...session.future] : session.future.slice(1),
