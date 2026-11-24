@@ -28,7 +28,10 @@ function waitForReleasedSculpt(run: () => Promise<void>) {
     resolveSave = resolve;
     rejectSave = reject;
   });
-  if (afterReleasedSculpt(() => void run().then(resolveSave, rejectSave))) return saved;
+  if (
+    afterReleasedSculpt(() => void run().then(resolveSave, rejectSave), { onCancel: resolveSave })
+  )
+    return saved;
 }
 
 export async function saveCurrentScene() {
@@ -344,7 +347,12 @@ export function editorCommands(context: CommandContext = {}) {
 export type CommandId = keyof ReturnType<typeof editorCommands>;
 
 export function executeEditorCommand(id: CommandId, context: CommandContext = {}) {
-  if (afterReleasedSculpt(() => executeEditorCommand(id, context))) return;
+  if (
+    afterReleasedSculpt(() => executeEditorCommand(id, context), {
+      history: id === 'undo' || id === 'redo',
+    })
+  )
+    return;
   const command = editorCommands(context)[id];
   useEditor.getState().closeContextMenu();
   if (command.enabled) command.run();

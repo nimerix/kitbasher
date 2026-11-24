@@ -3,6 +3,7 @@ import { uid } from './geometry';
 import { geometryBytes } from './history-budget';
 import { appendGeometry, parseSceneDocument, readGeometry, validateLayout } from './scene-file';
 import {
+  cancelQueuedSculptActions,
   committedScene,
   liveHost,
   restoreSculptAfterRefusal,
@@ -241,9 +242,12 @@ export function joinLiveSession() {
     if (!replacing && (first || replaced)) {
       dirtyEdit = null;
       edits.length = 0;
-      // A released stroke still draining belongs to the previous scene.
-      if (replaced && useEditor.getState().sculpt)
-        useEditor.setState({ tool: 'select', sculpt: null });
+      if (replaced) {
+        // Pending history and editor actions belong to the previous scene.
+        requests.length = 0;
+        cancelQueuedSculptActions();
+        if (useEditor.getState().sculpt) useEditor.setState({ tool: 'select', sculpt: null });
+      }
     } else {
       const optimistic = acceptedSculpt?.edit ?? (activeSculptObserved ? null : activeEdit);
       const pending = optimistic ? [optimistic, ...unsent] : unsent;
@@ -313,6 +317,7 @@ export function joinLiveSession() {
     const { sculpt } = useEditor.getState();
     // Queued history requests refer to the discarded optimistic scene.
     requests.length = 0;
+    cancelQueuedSculptActions('history');
     stopSharedSculptHistory(true);
     edits.length = 0;
     dirtyEdit = null;

@@ -10,7 +10,7 @@ import { useEditor } from '../core/store';
 /** Own the entire confirm click so it never also selects a part or starts camera orbit. */
 export function FreeTransformController() {
   const { camera, gl, invalidate } = useThree();
-  const baseline = useEditor((s) => s.freeTransform?.baseline);
+  const sessionId = useEditor((s) => s.freeTransform?.id);
   const pointer = useRef<{ x: number; y: number } | null>(null);
   const suppress = useRef<number | null>(null);
   const update = useRef<((event?: PointerEvent) => void) | null>(null);
@@ -65,7 +65,7 @@ export function FreeTransformController() {
   useEffect(() => {
     const start = useEditor.getState();
     const session = start.freeTransform;
-    if (!session || !baseline) return;
+    if (!sessionId || session?.id !== sessionId) return;
     const selection = transformSelection(start, session.mode);
     const rect = gl.domElement.getBoundingClientRect();
     const motion = new FreeTransformMotion(camera, selection.pivot, rect.width, rect.height);
@@ -81,7 +81,7 @@ export function FreeTransformController() {
     const apply = () => {
       const state = useEditor.getState(),
         current = state.freeTransform;
-      if (current?.baseline !== baseline) return;
+      if (current?.id !== sessionId) return;
       const step = session.mode === 'translate' ? state.view.snapStep : state.view.rotationSnapStep;
       state.previewFreeTransform(
         motion.patches(
@@ -108,7 +108,7 @@ export function FreeTransformController() {
       if (event.isComposing) return;
       const state = useEditor.getState(),
         current = state.freeTransform;
-      if (current?.baseline !== baseline) return;
+      if (current?.id !== sessionId) return;
       event.preventDefault();
       event.stopImmediatePropagation();
       if (event.key === 'Shift') {
@@ -138,7 +138,10 @@ export function FreeTransformController() {
     const up = (event: KeyboardEvent) => {
       if (event.key === 'Shift') fine = false;
     };
-    const cancel = () => useEditor.getState().finishFreeTransform(false);
+    const cancel = () => {
+      const state = useEditor.getState();
+      if (state.freeTransform?.id === sessionId) state.finishFreeTransform(false);
+    };
     const visibility = () => {
       if (document.hidden) cancel();
     };
@@ -156,10 +159,10 @@ export function FreeTransformController() {
       window.removeEventListener('pointercancel', cancel);
       window.removeEventListener('resize', cancel);
       document.removeEventListener('visibilitychange', visibility);
-      if (useEditor.getState().freeTransform?.baseline === baseline) cancel();
+      cancel();
       invalidate();
     };
-  }, [baseline, camera, gl.domElement, invalidate]);
+  }, [sessionId, camera, gl.domElement, invalidate]);
   return null;
 }
 

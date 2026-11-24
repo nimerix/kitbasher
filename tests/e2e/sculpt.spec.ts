@@ -1,7 +1,8 @@
 import { expect, test, type Page } from '@playwright/test';
 import { BoxGeometry, PlaneGeometry } from 'three';
 import { serializeGeometry } from '../../src/core/geometry';
-import { fixture, inStore, openScene, screen } from './helpers/refine';
+import { fixture, inEditor, inStore, openScene, screen } from './helpers/refine';
+import { queueAfterPenRelease } from './helpers/sculpt';
 import { failOnBrowserErrors } from './helpers/warp-grid';
 import { readSavedScene } from './saved-scene';
 
@@ -469,37 +470,10 @@ for (const queueUndo of [false, true]) {
       await openSculpt(page);
       const before = await mesh(page);
       const point = await screen(page, [1, 0, 2]);
-      await page.evaluate(
-        ({ point, queueUndo }) => {
-          const now = performance.now.bind(performance);
-          let elapsed = now();
-          performance.now = () => (elapsed += 8);
-          try {
-            const canvas = document.querySelector('canvas')!;
-            const pen = {
-              clientX: point.x,
-              clientY: point.y,
-              pointerType: 'pen',
-              pointerId: 40,
-              isPrimary: true,
-              pressure: 0.8,
-              bubbles: true,
-            };
-            canvas.dispatchEvent(new PointerEvent('pointerdown', { ...pen, buttons: 1 }));
-            canvas.dispatchEvent(new PointerEvent('pointerup', pen));
-            window.dispatchEvent(
-              new KeyboardEvent('keydown', { key: 'G', code: 'KeyG', shiftKey: true }),
-            );
-            if (queueUndo)
-              window.dispatchEvent(
-                new KeyboardEvent('keydown', { key: 'z', code: 'KeyZ', ctrlKey: true }),
-              );
-          } finally {
-            performance.now = now;
-          }
-        },
-        { point, queueUndo },
-      );
+      await queueAfterPenRelease(page, point, [
+        { key: 'G', code: 'KeyG', shiftKey: true },
+        ...(queueUndo ? [{ key: 'z', code: 'KeyZ', ctrlKey: true }] : []),
+      ]);
       await expect(page.locator('.free-transform-prompt')).toBeVisible();
       const sculpted = await mesh(page);
       expect(sculpted.triangles).toBeGreaterThan(before.triangles);
@@ -518,6 +492,90 @@ for (const queueUndo of [false, true]) {
     },
   );
 }
+
+test('starts a fresh rotation preview after cancelling a queued move on the same mesh', async ({
+  page,
+}) => {
+  await openSculpt(page);
+  const point = await screen(page, [1, 0, 2]);
+  const pose = () =>
+    inStore(page, (state) => {
+      const { position, quaternion } = state.scene.parts[0];
+      return { position, quaternion };
+    });
+  const before = await pose();
+  const prompt = page.locator('.free-transform-prompt');
+  await page.mouse.move(point.x, point.y);
+  await queueAfterPenRelease(page, point, [
+    { key: 'G', code: 'KeyG', shiftKey: true },
+    { key: 'R', code: 'KeyR', shiftKey: true },
+  ]);
+  await expect(prompt).toContainText('Free move');
+  await page.mouse.move(point.x + 40, point.y + 15);
+  await expect.poll(pose).not.toEqual(before);
+  await page.keyboard.press('Escape');
+  await expect(prompt).toContainText('Free rotation');
+  expect(await pose()).toEqual(before);
+  await page.mouse.move(point.x + 65, point.y + 30);
+  await expect.poll(async () => (await pose()).quaternion).not.toEqual(before.quaternion);
+  await page.keyboard.press('Escape');
+  await expect(prompt).toHaveCount(0);
+  expect(await pose()).toEqual(before);
+});
+
+test('discards queued commands when a new scene replaces a free-transform preview', async ({
+  page,
+}) => {
+  await openSculpt(page);
+  const point = await screen(page, [1, 0, 2]);
+  await queueAfterPenRelease(page, point, [
+    { key: 'G', code: 'KeyG', shiftKey: true },
+    { key: 'E', code: 'KeyE', shiftKey: true, ctrlKey: true },
+  ]);
+  const prompt = page.locator('.free-transform-prompt');
+  await expect(prompt).toBeVisible();
+  await inEditor(page, ({ useEditor }) => {
+    const state = useEditor.getState();
+    state.setScene({ ...state.scene, name: 'Replacement' });
+  });
+  await expect(prompt).toHaveCount(0);
+  expect(await inStore(page, (state) => [state.scene.name, state.modal])).toEqual([
+    'Replacement',
+    null,
+  ]);
+});
+
+test('discards queued Undo if a scene update interrupts the released stroke before commit', async ({
+  page,
+}) => {
+  await openSculpt(page);
+  const point = await screen(page, [1, 0, 2]);
+  await inEditor(page, ({ useEditor }) => {
+    useEditor.getState().renameScene('Earlier edit');
+    const interrupt = (event: KeyboardEvent) => {
+      if (event.code !== 'Pause') return;
+      window.removeEventListener('keydown', interrupt);
+      const state = useEditor.getState();
+      state.receiveScene({
+        ...state.scene,
+        parts: [{ ...state.scene.parts[0], position: [2, 0, 0] }],
+      });
+    };
+    window.addEventListener('keydown', interrupt);
+  });
+  await queueAfterPenRelease(page, point, [
+    { key: 'z', code: 'KeyZ', ctrlKey: true },
+    { key: 'Pause', code: 'Pause' },
+  ]);
+  expect(
+    await inStore(page, (state) => [
+      state.scene.name,
+      state.scene.parts[0].position,
+      state.past.length,
+      state.future.length,
+    ]),
+  ).toEqual(['Earlier edit', [2, 0, 0], 1, 0]);
+});
 
 test('fills the path of a fast small-brush pen sweep in one undo step', async ({ page }) => {
   await openSculpt(page, {
