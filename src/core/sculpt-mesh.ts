@@ -86,7 +86,6 @@ function rememberIncidence(source: BufferGeometry, incidence: Incidence) {
 }
 
 const maxSplitsPerDab = 192;
-const maxFacesPerPatch = 8192;
 /** Source meshes larger than this remain brushable at their available density. */
 const maxRefinedFaceCount = 1_200_000;
 const inheritedFaceLimits = new WeakMap<BufferGeometry, number>();
@@ -179,17 +178,20 @@ function weldSeams(position: Attribute, corners: ArrayLike<number>) {
     const a = weldOf[u],
       b = weldOf[v];
     if (a === b || !(duplicates[a] || duplicates[b])) continue;
+    // Looking up the smaller fan avoids walking a high-valence center for every spoke.
+    const smaller = faceStart[a + 1] - faceStart[a] <= faceStart[b + 1] - faceStart[b] ? a : b;
+    const opposite = smaller === a ? b : a;
     let match = -1;
     let previous = -1;
-    for (let i = faceStart[a]; i < faceStart[a + 1]; i++) {
+    for (let i = faceStart[smaller]; i < faceStart[smaller + 1]; i++) {
       const neighbor = incidentFaces[i];
       if (neighbor === face || neighbor === previous) continue;
       previous = neighbor;
       const start = neighbor * 3;
       if (
-        weldOf[corners[start]] !== b &&
-        weldOf[corners[start + 1]] !== b &&
-        weldOf[corners[start + 2]] !== b
+        weldOf[corners[start]] !== opposite &&
+        weldOf[corners[start + 1]] !== opposite &&
+        weldOf[corners[start + 2]] !== opposite
       )
         continue;
       if (match !== -1) {
@@ -592,7 +594,7 @@ export class SculptMesh {
     if (seed < 0 || seed >= this.faceCount || !Number.isInteger(seed)) return faces;
     const visited = new Set<number>([seed]);
     const queue = [seed];
-    for (let i = 0; i < queue.length && i < maxFacesPerPatch; i++) {
+    for (let i = 0; i < queue.length; i++) {
       const face = queue[i];
       if (!this.overlaps(face, footprint)) continue;
       faces.add(face);

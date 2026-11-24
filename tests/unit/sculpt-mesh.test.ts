@@ -4,6 +4,7 @@ import {
   Matrix4,
   Mesh,
   MeshBasicMaterial,
+  PlaneGeometry,
   Raycaster,
   Vector3,
   type Intersection,
@@ -35,6 +36,26 @@ function mesh(positions: number[], corners?: number[]) {
 }
 
 describe('sculpt mesh', () => {
+  it('protects the full footprint of a large mask on a dense surface', () => {
+    const segments = 200;
+    const source = new PlaneGeometry(100, 100, segments, segments);
+    const draft = new SculptMesh(source, identity);
+    expect(
+      draft.dab(
+        dab(new Vector3(), {
+          face: 2 * ((segments / 2) * segments + segments / 2),
+          radius: 30,
+          brush: 'mask',
+          falloff: 'hard',
+          detail: 0,
+        }),
+      ),
+    ).toBe(true);
+    const positions = source.getAttribute('position');
+    const weights = draft.getMask();
+    for (let i = 0; i < positions.count; i++)
+      expect(weights[i]).toBe(Math.hypot(positions.getX(i), positions.getY(i)) < 30 ? 1 : 0);
+  });
   it('adds detail under a small dab in a coarse face, keeping original positions and winding', () => {
     const source = mesh([-4, -3, 0, 4, -3, 0, 0, 4, 0], [0, 1, 2]);
     const draft = new SculptMesh(source, identity);

@@ -114,6 +114,7 @@ export function joinLiveSession() {
   let dirtyEdit: OrdinaryEdit | null = null;
   let activeEdit: QueuedEdit | null = null;
   let activeSculptObserved = false;
+  let acceptedSculpt: { edit: SculptEdit; version: number; epoch: number } | null = null;
   /** The version that holds this tab's last request. Nothing more is sent until it arrives. */
   let awaited = 0;
   let awaitedHistory: { version: number; sculpt: number | null } | null = null;
@@ -134,7 +135,7 @@ export function joinLiveSession() {
 
   useSharedSculptQueueGuard((geometry) => {
     if (!connected) return false;
-    const queued = [activeEdit, ...edits].flatMap((edit) =>
+    const queued = [activeEdit, acceptedSculpt?.edit, ...edits].flatMap((edit) =>
       edit && 'sculpt' in edit ? [edit.geometry] : [],
     );
     return queued.length < 40 && geometryBytes([...queued, geometry]) <= sculptHistoryBytes;
@@ -228,6 +229,11 @@ export function joinLiveSession() {
       )
         activeSculptObserved = true;
     }
+    if (
+      acceptedSculpt &&
+      (message.epoch !== acceptedSculpt.epoch || message.version >= acceptedSculpt.version)
+    )
+      acceptedSculpt = null;
     const replacing = unsent.some((edit) => !('sculpt' in edit) && edit.replace);
     let next = scene;
     // Changes built on a replaced scene no longer apply, unless we will replace it ourselves.
@@ -236,11 +242,16 @@ export function joinLiveSession() {
       edits.length = 0;
       if (replaced && useEditor.getState().sculpt) useEditor.getState().setTool('select');
     } else {
-      const pending = activeEdit && !activeSculptObserved ? [activeEdit, ...unsent] : unsent;
+      const optimistic = acceptedSculpt?.edit ?? (activeSculptObserved ? null : activeEdit);
+      const pending = optimistic ? [optimistic, ...unsent] : unsent;
       next = pending.reduce(applyQueuedEdit, scene);
     }
     confirmed = { version: message.version, epoch: message.epoch, scene };
     const [undo, redo] = message.history[client] ?? [0, 0];
+    if (!connected) {
+      connected = true;
+      useSharedHistory(history);
+    }
     useEditor.setState({ liveStatus: 'connected', sharedHistory: { undo, redo } });
     const before = new Set(local.parts.map((part) => part.id));
     show(next);
@@ -291,7 +302,12 @@ export function joinLiveSession() {
   };
 
   /** The server's scene stands. Later changes here were built on the refused one, so they go too. */
-  const refused = (reason?: string) => {
+  const refused = (reason?: string, sculpt = false) => {
+    // History requests queued behind a refused stroke refer to the discarded optimistic scene.
+    if (sculpt) {
+      requests.length = 0;
+      stopSharedSculptHistory();
+    }
     edits.length = 0;
     dirtyEdit = null;
     if (confirmed) {
@@ -357,10 +373,12 @@ export function joinLiveSession() {
         else if (!closed && confirmed && confirmed.version >= awaited) {
           // The stream can skip the accepted mesh or show it before the HTTP response arrives.
           show(unsentEdits().reduce(applyQueuedEdit, confirmed.scene));
+        } else if ('sculpt' in edit && !activeSculptObserved && confirmed?.epoch === base.epoch) {
+          acceptedSculpt = { edit, version: awaited, epoch: base.epoch };
         }
-      } else refused(await errorOf(response));
+      } else refused(await errorOf(response), !!sculpt);
     } catch (error) {
-      if (error instanceof Refusal) refused(error.message);
+      if (error instanceof Refusal) refused(error.message, !!sculpt);
       else {
         // Retry an interrupted request unless the stream already confirmed the stroke.
         if (!activeSculptObserved) edits.unshift(edit);
@@ -441,10 +459,6 @@ export function joinLiveSession() {
 
   source.addEventListener('scene', (event) => {
     latest = JSON.parse((event as MessageEvent<string>).data);
-    if (!connected) {
-      connected = true;
-      useSharedHistory(history);
-    }
     void receive();
   });
   // Sent only to tabs on the computer that holds the scene: how another device joins it.

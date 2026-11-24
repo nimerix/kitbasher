@@ -486,6 +486,11 @@ test('shared sculpt strokes keep their checkpoints and refuse a stale target pos
   const third = page.waitForRequest((request) => editUrl.test(request.url()) && ofSculpt(request));
   await page.mouse.click(x + 24, y - 7);
   const thirdRequest = await third;
+  const extraUndo: string[] = [];
+  page.on('request', (request) => {
+    if (/\/live\/undo$/.test(request.url())) extraUndo.push(request.url());
+  });
+  await page.keyboard.press('ControlOrMeta+z');
   await call('update_parts', { updates: [{ id: 'block', translate: [2, 0, 0] }] });
   const refused = page.waitForResponse((response) => response.request() === thirdRequest);
   unpause();
@@ -494,6 +499,7 @@ test('shared sculpt strokes keep their checkpoints and refuse a stale target pos
     page.getByText(/sculpt target changed before the stroke reached the shared scene/i),
   ).toBeVisible();
   expect((await call('get_scene')).parts[0].position).toEqual([2, 0, 0]);
+  expect(extraUndo).toEqual([]);
 });
 
 test('an ordinary edit between queued strokes preserves a newer remote mesh', async ({ page }) => {
