@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { expect, test } from '@playwright/test';
-import type { Page } from '@playwright/test';
+import type { Page, Request } from '@playwright/test';
 import { BoxGeometry, Mesh } from 'three';
 import { STLExporter } from 'three/addons/exporters/STLExporter.js';
 import { serializeGeometry } from '../../src/core/geometry';
@@ -594,17 +594,68 @@ test('publishes Delete queued behind a stroke interrupted by a shared pose updat
   }
 });
 
+const isMeshUpload = (request: Request) =>
+  request.method() === 'POST' && /\/live\/geometry\/[^/]+$/.test(request.url());
+
+async function failFirstMeshUpload(page: Page, held: Promise<void>) {
+  const keys: string[] = [];
+  await page.route(/\/live\/geometry\//, async (route) => {
+    if (!isMeshUpload(route.request())) return route.continue();
+    keys.push(route.request().url());
+    if (keys.length !== 1) return route.continue();
+    await held;
+    await route.fulfill({ status: 502, json: { error: 'The mesh upload response was lost.' } });
+  });
+  return keys;
+}
+
+async function captureStaleSharedStream(page: Page) {
+  await page.addInitScript(() => {
+    const fetch = window.fetch.bind(window);
+    window.fetch = async (...args) => {
+      const response = await fetch(...args);
+      if (response.status === 502 && response.url.endsWith('/live/edit'))
+        window.setTimeout(() => window.dispatchEvent(new Event('replay-stale-scene')), 20);
+      return response;
+    };
+    const NativeEventSource = window.EventSource;
+    let first = true;
+    window.EventSource = class extends NativeEventSource {
+      constructor(url: string | URL, init?: EventSourceInit) {
+        super(url, init);
+        if (!first) return;
+        first = false;
+        let initial: string | null = null;
+        this.addEventListener('scene', (event) => {
+          initial ??= event.data;
+          if (event.data !== initial) event.stopImmediatePropagation();
+        });
+        window.addEventListener(
+          'replay-stale-scene',
+          () => {
+            document.documentElement.dataset.replayedStaleScene = '1';
+            this.dispatchEvent(new MessageEvent('scene', { data: initial }));
+          },
+          { once: true },
+        );
+      }
+    };
+  });
+}
+
 for (const replyOrder of [
   'HTTP first',
   'stream first',
   'stream then HTTP error',
   'HTTP error then refreshed stream',
   'HTTP rejection',
+  'mesh upload 502',
 ] as const) {
   test(`keeps sculpt and Save scoped to the right scene with ${replyOrder}`, async ({ page }) => {
     const holdResponse = replyOrder.startsWith('stream');
     const httpError = replyOrder.includes('HTTP error');
     const rejected = replyOrder === 'HTTP rejection';
+    const uploadError = replyOrder === 'mesh upload 502';
     await page.addInitScript(() => {
       const NativeEventSource = window.EventSource;
       let connections = 0;
@@ -665,6 +716,7 @@ for (const replyOrder of [
       reply = resolve;
     });
     const edit = /\/live\/edit$/;
+    const uploads = uploadError ? await failFirstMeshUpload(page, submitted) : [];
     let replacementVersion = 0;
     await page.route(edit, async (route) => {
       if (!route.request().postDataJSON().replace) return route.continue();
@@ -687,7 +739,9 @@ for (const replyOrder of [
       buffer: Buffer.from(JSON.stringify(openedScene)),
     });
     const opening = page.waitForRequest(
-      (request) => edit.test(request.url()) && request.postDataJSON().replace,
+      uploadError
+        ? isMeshUpload
+        : (request) => edit.test(request.url()) && request.postDataJSON().replace,
     );
     await page.getByRole('button', { name: 'Open scene', exact: true }).click();
     const original = await opening;
@@ -723,27 +777,27 @@ for (const replyOrder of [
         { timeout: 8000 },
       )
       .catch(() => null);
-    if (!holdResponse)
+    if (!holdResponse && !uploadError)
       await page.evaluate(() => {
         document.documentElement.dataset.holdShared = '1';
       });
     submit();
-    if (!holdResponse) expect((await response).status()).toBe(httpError ? 502 : 200);
+    if (!holdResponse) expect((await response).status()).toBe(httpError || uploadError ? 502 : 200);
     await expect.poll(() => replacementVersion).toBeGreaterThan(0);
-    await expect(page.locator('html')).toHaveAttribute(
-      'data-shared-version',
-      String(replacementVersion),
-    );
+    await expect
+      .poll(async () => Number(await page.locator('html').getAttribute('data-shared-version')))
+      .toBeGreaterThanOrEqual(replacementVersion);
     if (holdResponse) {
       reply();
       expect((await response).status()).toBe(httpError ? 502 : 200);
-    } else if (!httpError) {
+    } else if (!httpError && !uploadError) {
       await page.evaluate(() => {
         delete document.documentElement.dataset.holdShared;
         window.dispatchEvent(new Event('release-shared-scene'));
       });
     }
     expect((await acceptedStroke)?.ok()).toBe(true);
+    if (uploadError) expect(uploads.slice(0, 2)).toEqual([uploads[0], uploads[0]]);
     await expect(prompt).toBeVisible();
     const download = page.waitForEvent('download');
     await page.keyboard.press('Escape');
@@ -838,12 +892,15 @@ for (const loseReply of [false, true]) {
   );
 }
 
-for (const fromSameTab of [false, true]) {
+for (const firstEdit of ['remote', 'same tab', 'same tab with stale stream'] as const) {
+  const fromSameTab = firstEdit !== 'remote';
   test(
     fromSameTab
-      ? 'advances a queued second Open when this tab’s first Open is acknowledged'
+      ? `advances a queued second Open when this tab’s first Open is acknowledged (${firstEdit})`
       : 'discards an unsent Open when another editor replaces its starting scene',
     async ({ page }) => {
+      const staleStream = firstEdit === 'same tab with stale stream';
+      if (staleStream) await captureStaleSharedStream(page);
       const { url } = await call('open_live_view', { open_browser: false });
       await page.goto(url);
       const title = page.getByTitle('Rename assembly');
@@ -862,7 +919,13 @@ for (const fromSameTab of [false, true]) {
       const requests: { replace: boolean; epoch: number }[] = [];
       await page.route(edit, async (route) => {
         requests.push(route.request().postDataJSON());
-        if (requests.length === 1) await held;
+        if (requests.length === 1) {
+          await held;
+          if (staleStream) {
+            expect((await route.fetch()).ok()).toBe(true);
+            return route.fulfill({ status: 502, json: { error: 'Open response was lost.' } });
+          }
+        }
         await route.continue();
       });
       const first = page.waitForRequest(edit);
@@ -874,6 +937,8 @@ for (const fromSameTab of [false, true]) {
       if (fromSameTab) {
         resume();
         await expect.poll(async () => (await call('get_scene')).name).toBe('Queued Open');
+        if (staleStream)
+          await expect(page.locator('html')).toHaveAttribute('data-replayed-stale-scene', '1');
         expect(requests.map(({ epoch }) => epoch)).toEqual([
           requests[0].epoch,
           requests[0].epoch + 1,
@@ -895,21 +960,30 @@ for (const fromSameTab of [false, true]) {
   );
 }
 
-for (const dropResponse of [false, true]) {
-  test(`publishes the next shared stroke after a stream-confirmed stroke gets a ${dropResponse ? 'connection reset' : '502'}`, async ({
-    page,
-  }) => {
-    await page.addInitScript(() => {
-      const NativeEventSource = window.EventSource;
-      window.EventSource = class extends NativeEventSource {
-        constructor(url: string | URL, init?: EventSourceInit) {
-          super(url, init);
-          this.addEventListener('scene', (event) => {
-            document.documentElement.dataset.sharedVersion = String(JSON.parse(event.data).version);
-          });
-        }
-      };
-    });
+for (const failure of [
+  'late 502',
+  'connection reset',
+  'upload 502',
+  '502 with stale stream',
+] as const) {
+  test(`publishes the next shared stroke after ${failure}`, async ({ page }) => {
+    const staleStream = failure === '502 with stale stream';
+    const uploadError = failure === 'upload 502';
+    if (staleStream) await captureStaleSharedStream(page);
+    else
+      await page.addInitScript(() => {
+        const NativeEventSource = window.EventSource;
+        window.EventSource = class extends NativeEventSource {
+          constructor(url: string | URL, init?: EventSourceInit) {
+            super(url, init);
+            this.addEventListener('scene', (event) => {
+              document.documentElement.dataset.sharedVersion = String(
+                JSON.parse(event.data).version,
+              );
+            });
+          }
+        };
+      });
     await call('add_parts', {
       parts: [{ id: 'block', name: 'Sculpt block', shapes: [{ type: 'box', size: [10, 8, 6] }] }],
     });
@@ -926,29 +1000,45 @@ for (const dropResponse of [false, true]) {
       settle = resolve;
     });
     const edit = /\/live\/edit$/;
+    const uploads = uploadError ? await failFirstMeshUpload(page, held) : [];
+    const firstUpload = uploadError ? page.waitForRequest(isMeshUpload) : null;
     let firstVersion = 0;
     let strokes = 0;
     await page.route(edit, async (route) => {
-      if (!route.request().postDataJSON().sculpt || ++strokes !== 1) return route.continue();
+      if (!route.request().postDataJSON().sculpt || ++strokes !== 1 || uploadError)
+        return route.continue();
       const response = await route.fetch();
       expect(response.ok()).toBe(true);
       firstVersion = (await response.json()).version;
       await held;
-      if (dropResponse) await route.abort('connectionreset');
+      if (failure === 'connection reset') await route.abort('connectionreset');
       else await route.fulfill({ status: 502, json: { error: 'Stroke response was lost.' } });
     });
     await page.mouse.click(point.x, point.y);
-    await expect.poll(() => firstVersion).toBeGreaterThan(0);
-    await expect(page.locator('html')).toHaveAttribute('data-shared-version', String(firstVersion));
+    if (firstUpload) await firstUpload;
+    else {
+      await expect.poll(() => firstVersion).toBeGreaterThan(0);
+      if (!staleStream)
+        await expect(page.locator('html')).toHaveAttribute(
+          'data-shared-version',
+          String(firstVersion),
+        );
+    }
     await page.mouse.click(point.x + 18, point.y);
     const next = page.waitForResponse(
       (result) =>
-        edit.test(result.url()) && result.ok() && !!result.request().postDataJSON().sculpt,
+        edit.test(result.url()) &&
+        result.ok() &&
+        !!result.request().postDataJSON().sculpt &&
+        strokes >= 2,
       { timeout: 8000 },
     );
     settle();
     expect((await next).ok()).toBe(true);
+    if (staleStream)
+      await expect(page.locator('html')).toHaveAttribute('data-replayed-stale-scene', '1');
     expect(strokes).toBe(2);
+    if (uploadError) expect(uploads.slice(0, 2)).toEqual([uploads[0], uploads[0]]);
     await expect(page.getByText('Shared with agent')).toBeVisible();
   });
 }

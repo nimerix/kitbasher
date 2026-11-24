@@ -197,7 +197,15 @@ describe('shared sculpt transactions', () => {
     document.apply('sculpt-tab', edit);
     expect(document.scene.name).toBe('Renamed');
     expect(document.scene.parts[0].geometry).toBe(geometry);
-    expect(() => document.apply('sculpt-tab', edit)).toThrow(EditConflict);
+    const installed = document.version;
+    expect(document.apply('sculpt-tab', edit)).toBe(installed);
+    expect(document.counts('sculpt-tab').undo).toBe(1);
+    expect(() =>
+      document.apply('sculpt-tab', {
+        ...edit,
+        scene: { ...scene, parts: [{ ...part, geometry: geometry.clone() }] },
+      }),
+    ).toThrow(EditConflict);
     document.undo('sculpt-tab');
     const base = document.version;
     document.apply('another-tab', {
