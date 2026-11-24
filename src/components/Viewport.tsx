@@ -71,7 +71,7 @@ import { FreeTransformController, FreeTransformPrompt } from './FreeTransform';
 import { CombinedTransform } from './CombinedTransform';
 import { ManagedTransformControls } from './ManagedTransformControls';
 import { WarpOverlay, shownWarpPreview } from './WarpOverlay';
-import { SculptPointer } from './SculptPointer';
+import { restoreSculptPreview, SculptPointer } from './SculptPointer';
 import { beginWarpStroke, endingWarpStroke, WarpStrokeController } from './WarpStroke';
 import {
   beginRefinePaint,
@@ -211,6 +211,10 @@ const PartMesh = memo(function PartMesh({
     (proxy?.source === part.geometry && shouldDrawProxy(detail, moving, headset, precision)
       ? proxy.geometry
       : part.geometry);
+  useLayoutEffect(() => {
+    const mesh = partMeshes.get(part.id);
+    if (mesh) restoreSculptPreview(mesh);
+  });
   const [brushHit, setBrushHit] = useState<SurfacePoint | null>(null);
   const register = useCallback(
     (mesh: Mesh | null) => {

@@ -165,6 +165,102 @@ test('queues another press and mask changes while a released stroke finishes', a
     .toEqual({ strokes: 2, mask: true });
 });
 
+test('cancels a held queued press and preserves the released stroke through part edits', async ({
+  page,
+}) => {
+  await openSculpt(page);
+  const point = await screen(page, [1, 0, 2]);
+  await page.evaluate(async (point) => {
+    const storeUrl = performance
+      .getEntriesByType('resource')
+      .map((entry) => entry.name)
+      .find((url) => /\/src\/core\/store\.ts(?:\?.*)?$/.test(url))!;
+    const { useEditor } = await import(storeUrl);
+    const canvas = document.querySelector('canvas')!;
+    const now = performance.now.bind(performance);
+    let elapsed = now();
+    performance.now = () => (elapsed += 8);
+    const pen = {
+      clientX: point.x,
+      clientY: point.y,
+      pointerId: 24,
+      isPrimary: true,
+      pointerType: 'pen',
+      pressure: 0.8,
+      bubbles: true,
+    };
+    const press = () =>
+      canvas.dispatchEvent(new PointerEvent('pointerdown', { ...pen, buttons: 1 }));
+    const release = () => canvas.dispatchEvent(new PointerEvent('pointerup', pen));
+    try {
+      press();
+      release();
+      press();
+      document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+      release();
+      for (const event of ['keydown', 'keyup']) {
+        document.body.dispatchEvent(
+          new KeyboardEvent(event, { key: ' ', code: 'Space', bubbles: true }),
+        );
+      }
+      useEditor.getState().patchParts(['block'], { name: 'Renamed after release' });
+    } finally {
+      performance.now = now;
+    }
+  }, point);
+  await expect
+    .poll(() =>
+      inStore(page, (state) => [
+        state.sculpt?.past.length,
+        state.temporaryOrbit,
+        state.scene.parts[0].name,
+      ]),
+    )
+    .toEqual([1, false, 'Renamed after release']);
+});
+
+test('runs a queued undo after saving a released stroke', async ({ page }) => {
+  await openSculpt(page);
+  const before = await mesh(page);
+  const point = await screen(page, [1, 0, 2]);
+  const downloading = page.waitForEvent('download');
+  await page.evaluate((point) => {
+    const canvas = document.querySelector('canvas')!;
+    const now = performance.now.bind(performance);
+    let elapsed = now();
+    performance.now = () => (elapsed += 8);
+    try {
+      const pen = {
+        clientX: point.x,
+        clientY: point.y,
+        pointerId: 29,
+        isPrimary: true,
+        pointerType: 'pen',
+        pressure: 0.8,
+        bubbles: true,
+      };
+      canvas.dispatchEvent(new PointerEvent('pointerdown', { ...pen, buttons: 1 }));
+      canvas.dispatchEvent(new PointerEvent('pointerup', pen));
+      document.querySelector<HTMLButtonElement>('button[aria-label="Save scene"]')!.click();
+      document.body.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'z',
+          code: 'KeyZ',
+          ctrlKey: !navigator.platform.includes('Mac'),
+          metaKey: navigator.platform.includes('Mac'),
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+    } finally {
+      performance.now = now;
+    }
+  }, point);
+  await downloading;
+  await expect.poll(() => inStore(page, (state) => state.sculpt?.future.length)).toBe(1);
+  expect(await mesh(page)).toEqual(before);
+});
+
 test('fills the path of a fast small-brush pen sweep in one undo step', async ({ page }) => {
   await openSculpt(page, {
     ...block,
