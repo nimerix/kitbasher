@@ -219,6 +219,48 @@ test('cancels a held queued press and preserves the released stroke through part
     .toEqual([1, false, 'Renamed after release']);
 });
 
+test('restores the committed mesh when a replayed preview is cancelled', async ({ page }) => {
+  await openSculpt(page);
+  const point = await screen(page, [1, 0, 2]);
+  await page.evaluate((point) => {
+    const canvas = document.querySelector('canvas')!;
+    const now = performance.now.bind(performance);
+    let elapsed = now();
+    performance.now = () => (elapsed += 8);
+    const pen = {
+      clientX: point.x,
+      clientY: point.y,
+      isPrimary: true,
+      pointerType: 'pen',
+      pressure: 0.8,
+      bubbles: true,
+    };
+    try {
+      canvas.dispatchEvent(new PointerEvent('pointerdown', { ...pen, pointerId: 40, buttons: 1 }));
+      canvas.dispatchEvent(new PointerEvent('pointerup', { ...pen, pointerId: 40 }));
+      canvas.dispatchEvent(new PointerEvent('pointerdown', { ...pen, pointerId: 41, buttons: 1 }));
+    } finally {
+      performance.now = now;
+    }
+  }, point);
+  const previewState = () =>
+    page.evaluate(async () => {
+      const urls = performance.getEntriesByType('resource').map((entry) => entry.name);
+      const { partMeshes } = await import(
+        urls.find((url) => /\/src\/xr\/part-meshes\.ts/.test(url))!
+      );
+      const { useEditor } = await import(urls.find((url) => /\/src\/core\/store\.ts/.test(url))!);
+      const state = useEditor.getState();
+      return {
+        strokes: state.sculpt?.past.length,
+        committed: partMeshes.get('block').geometry === state.scene.parts[0].geometry,
+      };
+    });
+  await expect.poll(previewState).toEqual({ strokes: 1, committed: false });
+  await page.keyboard.press('Escape');
+  await expect.poll(previewState).toEqual({ strokes: 1, committed: true });
+});
+
 test('runs a queued undo after saving a released stroke', async ({ page }) => {
   await openSculpt(page);
   const before = await mesh(page);
