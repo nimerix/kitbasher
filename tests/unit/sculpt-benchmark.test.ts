@@ -2,14 +2,7 @@ import { it, expect } from 'vitest';
 import { writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import {
-  DoubleSide,
-  Matrix4,
-  Mesh,
-  MeshBasicMaterial,
-  PlaneGeometry,
-  Raycaster,
-} from 'three';
+import { DoubleSide, Matrix4, Mesh, MeshBasicMaterial, PlaneGeometry, Raycaster } from 'three';
 import { MeshBVH } from 'three-mesh-bvh';
 import { SculptMesh } from '../../src/core/sculpt-mesh';
 
