@@ -90,6 +90,8 @@ const order = [
   'alignment',
   'alignment-tutorials',
   'contact-paint',
+  'warp',
+  'sculpt',
   'refine',
   'flush-fit',
   'anchors',

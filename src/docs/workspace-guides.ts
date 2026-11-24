@@ -745,6 +745,7 @@ export const workspaceGuides: DocArticle[] = [
         paragraphs: [
           'Ask the agent to call open_live_view. It opens a local, tokenized browser address for that server’s scene. Your ordinary app tab is a separate scene; save its assembly and ask the agent to open the file before sharing it.',
           'Each live tab has its own camera, selection, tools, picks, paint, and inspection view. Scene edits combine by part and property; later conflicting values win, then relationships are solved again. Your undo reverts your own changes, preserving values another participant changed afterward.',
+          'If the connection drops after a sculpt stroke, the live view checks the shared mesh when it reconnects. If another participant changed the target before your stroke arrived, the editor restores the confirmed scene and shows a notice. Inspect the part before making the stroke again.',
           'The live view has no normal local autosave. The scene lives in the agent’s server, so ask it to save or use Save scene in the tab. If the server ends, an open tab retains its own copy and can download it.',
         ],
       },

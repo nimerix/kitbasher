@@ -319,6 +319,112 @@ export const assemblyGuides: DocArticle[] = [
     related: ['tutorial-contact', 'alignment', 'flush-fit', 'planes', 'no-clip'],
   },
   {
+    id: 'warp',
+    title: 'Close a gap with Warp',
+    description: 'Bend a scanned part toward its neighbor using a grid and control points.',
+    group: 'Build & assemble',
+    icon: 'layers',
+    intro:
+      'Use Warp when the parts are in position but their surfaces leave a gap. You can bend just the seam or reshape the whole part.',
+    image: referenceImages.warp,
+    sections: [
+      {
+        id: 'region',
+        title: 'Choose where the part can bend',
+        steps: [
+          'Select a visible, unlocked part and press W to open Warp.',
+          'Choose Painted and brush over the surface that should bend. Its boundary stays fixed. Turn on Feather edge to let the bend taper into the surrounding surface.',
+          'For a bend across the entire part, choose Whole part. Leave Place points automatically on to start with handles spread across the surface.',
+          'Choose Lay grid. Use a coarse Density for broad bends or a finer grid for local adjustments.',
+        ],
+      },
+      {
+        id: 'handles',
+        title: 'Pull the surface into shape',
+        paragraphs: [
+          'Under Control points, choose Point and click the surface, or choose Line or Area and drag. A line or painted area moves as one handle. Drag a selected handle with the move arrows. Points you leave in place hold the surrounding surface.',
+          'Radius sets the reach of a handle. Falloff controls how the bend fades across that reach. Shift-click to select additional points, or use Distribute points to spread new handles over the region.',
+        ],
+      },
+      {
+        id: 'close-gap',
+        title: 'Fit and apply the seam',
+        steps: [
+          'Choose Close gap to pull the facing surface toward a nearby visible part. Overlap sets how far the surface enters its neighbor. For a manual fit, turn on Snap to neighbour and drag a point toward the seam.',
+          'Check Gap to neighbour and the markers along the seam. Adjust the handles and inspect any folded triangles before applying.',
+          'Use Undo to step back through your warp edits. Choose Apply to keep the resulting mesh as one scene undo step, or Cancel to discard the preview.',
+        ],
+      },
+    ],
+    related: ['sculpt', 'refine', 'flush-fit', 'inspection'],
+  },
+  {
+    id: 'sculpt',
+    title: 'Sculpt a part',
+    description:
+      'Shape a surface with a mouse or pen, protect fine details with a mask, and undo individual strokes.',
+    group: 'Build & assemble',
+    icon: 'paint',
+    intro:
+      'Select one visible, unlocked part and choose Sculpt in the toolbar. Start with Draw and drag on the part. Release to keep the stroke, or press Escape while dragging to discard it.',
+    image: referenceImages.sculpt,
+    sections: [
+      {
+        id: 'brushes',
+        title: 'Choose a brush',
+        table: {
+          headers: ['Brush', 'When to use it'],
+          rows: [
+            ['Draw', 'Raise the surface along a stroke. Hold Alt to carve into it.'],
+            [
+              'Clay Buildup',
+              'Layer broad strokes to build up a new form. Hold Alt to cut it back.',
+            ],
+            ['Inflate/Deflate', 'Swell a rounded feature, or hold Alt to shrink it.'],
+            ['Grab', 'Drag a patch of the surface to a new position.'],
+            [
+              'Smooth',
+              'Soften uneven areas. Hold Shift with a shaping brush to smooth temporarily.',
+            ],
+            ['Flatten', 'Level a patch of the surface.'],
+            [
+              'Crease',
+              'Cut a groove or hold Alt to raise a ridge. Adjust Pinch to tighten the crease.',
+            ],
+            ['Mask', 'Paint protection onto details you want to keep.'],
+          ],
+        },
+      },
+      {
+        id: 'stroke',
+        title: 'Control the stroke',
+        paragraphs: [
+          'Radius sets the brush size in millimeters. Strength controls the effect of each dab. Raise Detail for finer triangles under the brush. Turn on Local X symmetry to brush both sides at once. The mirror plane is at X = 0 in the part’s own coordinates.',
+          'Open Advanced brush settings to change how the stroke feels. Falloff controls the transition at the brush edge. Reduce Dab spacing for closer dabs or increase Stroke stabilization to steady the pointer path. Minimum edge size limits how small new edges can be.',
+          'With a pressure-sensitive pen, enable pressure for strength, radius, or both and adjust Pressure curve. For Draw, choose an Elliptical footprint to set roundness and rotation. A pen that reports tilt or twist can orient the ellipse as you draw. Use the pen eraser to carve with Draw or erase protection with Mask.',
+        ],
+      },
+      {
+        id: 'mask',
+        title: 'Protect an area with a mask',
+        steps: [
+          'Choose Mask and paint over the area to protect. Hold Alt to erase protection or Shift to soften the mask edge.',
+          'Switch back to a shaping brush and work beside the protected area. Show mask toggles the overlay while keeping the protection active.',
+          'Use Invert mask to swap the protected and exposed areas, or Clear mask to remove protection. The mask lasts for the active Sculpt session.',
+        ],
+      },
+      {
+        id: 'undo',
+        title: 'Undo a stroke and save the result',
+        paragraphs: [
+          'Each stroke that changes the surface commits on release. Undo restores the previous shape, including any triangles the brush added. Mask edits can also be undone during the Sculpt session.',
+          'History holds up to 120 changes. Large mesh edits can reach the memory limit sooner. Save a .kitbash scene to keep the sculpted surface after closing the workbench.',
+        ],
+      },
+    ],
+    related: ['warp', 'refine', 'saving'],
+  },
+  {
     id: 'refine',
     title: 'Refine edges and surfaces on a scan',
     description:
@@ -483,7 +589,7 @@ export const assemblyGuides: DocArticle[] = [
         ],
       },
     ],
-    related: ['contact-paint', 'parts', 'inspection', 'keyboard-shortcuts'],
+    related: ['sculpt', 'warp', 'contact-paint', 'parts', 'inspection', 'keyboard-shortcuts'],
   },
   {
     id: 'flush-fit',

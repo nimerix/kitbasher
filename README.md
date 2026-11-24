@@ -455,7 +455,8 @@ reshape a scan locally without leaving Kitbasher. Warp is desktop only.
 
 1. Select one visible, unlocked part and choose **Warp** in the toolbar, or press `W`.
 2. Choose the **Region**. With **Painted**, paint the area to bend with the usual surface
-   brush; the edge of the painted area stays exactly where it is. With nothing painted, or
+   brush. Its edge stays fixed unless you enable **Feather edge** to blend the bend into the
+   surrounding surface. With nothing painted, or
    with **Whole part**, every surface of the part can bend. Then choose **Lay grid**.
 3. A coarse grid appears over the region. **Density** sets how coarse it is: coarser grids
    bend broadly, finer grids bend locally. Changing Density or the region lays a new grid

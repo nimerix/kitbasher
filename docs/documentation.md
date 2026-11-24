@@ -11,8 +11,8 @@ The typed content lives in `src/docs/`:
 
 - `start-guides.ts`: first assembly, interface, imports, navigation, parts,
   workflows, and inspection.
-- `assembly-guides.ts`: transforms, alignment, contact paint, flush seams, anchors, pins,
-  joints, planes, No clip, and measurement.
+- `assembly-guides.ts`: transforms, alignment, contact paint, Warp, Sculpt, Refine, flush seams,
+  anchors, pins, joints, planes, No clip, and measurement.
 - `workspace-guides.ts`: saving, Drive, exports, appearance, preferences,
   performance, headset sessions, automation, and troubleshooting.
 - `content.ts`: navigation order, grouping, search, and the default keyboard

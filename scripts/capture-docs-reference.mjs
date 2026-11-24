@@ -179,6 +179,25 @@ try {
       { x: 760, y: 0, width: 680, height: 540 },
     );
   }
+  await capture(
+    'sculpt',
+    async (page) => {
+      await page.locator('.part-select[title="Torso shell"]').click();
+      await page
+        .getByRole('toolbar', { name: 'Assembly tools' })
+        .getByRole('button', { name: /^Sculpt\b/ })
+        .click();
+      await expect(page.getByRole('button', { name: 'Draw', exact: true })).toBeVisible();
+    },
+    right,
+  );
+  await capture('warp', async (page) => {
+    await page.locator('.part-select[title="Torso shell"]').click();
+    await page.keyboard.press('w');
+    await page.getByRole('radio', { name: 'Whole part' }).click();
+    await page.getByRole('button', { name: 'Lay grid' }).click();
+    await expect(page.getByRole('radio', { name: 'Point', exact: true })).toBeVisible();
+  });
   await capture('refine', async (page) => {
     // A synthetic scan: the softened block of the Refine end-to-end tests.
     await page.evaluate(async () => {
