@@ -30,10 +30,12 @@ under the tip, and act only when it belongs to the selected part. Resolve the mi
 nearby surface on that same part, including the far side when symmetry explicitly calls for it.
 If the mirrored and direct footprints overlap, apply at most one dab's effect per vertex.
 
-Proposed brushes are Draw, Grab, Smooth, Flatten, and Mask. Draw raises the surface or digs into it
-when inverted. Grab moves a patch with the pen. Smooth and Flatten use the local surface and
-follow the existing Refine behavior where it suits freehand strokes. Holding Shift temporarily
-switches to Smooth on the sculpting brushes. In Mask mode it temporarily softens the mask.
+The brush set includes Draw, Grab, Smooth, Flatten, Crease, and Mask. Draw raises the surface or
+digs into it when inverted. Grab moves a patch with the pen. Smooth and Flatten use the local
+surface and follow the existing Refine behavior where it suits freehand strokes. Crease pulls the
+surface toward the stroke path while cutting a groove. Invert the depth to form a sharp ridge.
+Holding Shift temporarily switches to Smooth on the sculpting brushes. In Mask mode it temporarily
+softens the mask.
 
 Strokes preview in the viewport and commit on release. One undo or redo covers deformation and
 all topology changes from that stroke. Escape, pointer cancellation, lost capture, blur, or an
@@ -54,6 +56,7 @@ reset to the defaults for the active brush. Preserve each brush's settings when 
 | Stroke | Dab spacing as a fraction of brush size and optional stroke stabilization. |
 | Pressure | Separate strength and radius toggles and a pressure response curve. |
 | Draw footprint | Round or elliptical, with roundness, rotation, and optional tilt or twist input. |
+| Crease | Pinch controls how tightly the brush draws the surface toward the stroke path. |
 | Detail limits | Minimum edge size bounds local refinement at the selected detail level. |
 
 Show controls only where the active brush uses them. Update the cursor when radius, footprint,
@@ -125,6 +128,8 @@ consistent configuration.
   that fully protected points keep their positions, partial protection scales the displacement,
   and new vertices inherit interpolated weights. Verify that advanced settings affect subsequent
   strokes, persist across brush switches, and reset to the active brush's defaults.
+- Verify that Crease forms a groove or an inverted ridge on coarse and dense meshes, respects
+  masking, and undoes its deformation and added topology together.
 - Profile input-to-preview latency and retained history memory on a coarse mesh and an approximately
   one-million-triangle scan. Use a recorded reference browser and machine. Aim for updates by
   the next frame on a 60 Hz display during sustained strokes. Record p95 and worst-case latency,
