@@ -51,14 +51,14 @@ with imported meshes. Later releases can address starter meshes, alphas, sculpt 
 Keep everyday controls visible and group advanced parameters in a collapsible section. Offer a
 reset to the defaults for the active brush. Preserve each brush's settings when switching brushes.
 
-| Group | Proposed controls |
-| --- | --- |
-| Falloff | Soft, linear, and hard profiles control how strength falls toward the edge. |
-| Stroke | Dab spacing as a fraction of brush size and optional stroke stabilization. |
-| Pressure | Separate strength and radius toggles and a pressure response curve. |
+| Group          | Proposed controls                                                                |
+| -------------- | -------------------------------------------------------------------------------- |
+| Falloff        | Soft, linear, and hard profiles control how strength falls toward the edge.      |
+| Stroke         | Dab spacing as a fraction of brush size and optional stroke stabilization.       |
+| Pressure       | Separate strength and radius toggles and a pressure response curve.              |
 | Draw footprint | Round or elliptical, with roundness, rotation, and optional tilt or twist input. |
-| Crease | Pinch controls how tightly the brush draws the surface toward the stroke path. |
-| Detail limits | Minimum edge size bounds local refinement at the selected detail level. |
+| Crease         | Pinch controls how tightly the brush draws the surface toward the stroke path.   |
+| Detail limits  | Minimum edge size bounds local refinement at the selected detail level.          |
 
 Show controls only where the active brush uses them. Update the cursor when radius, footprint,
 or symmetry changes. Apply parameter changes to subsequent strokes so the current stroke uses a
