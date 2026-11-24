@@ -1,5 +1,5 @@
 import { expect, test, type Page } from '@playwright/test';
-import { BoxGeometry } from 'three';
+import { BoxGeometry, PlaneGeometry } from 'three';
 import { serializeGeometry } from '../../src/core/geometry';
 import { fixture, inStore, openScene, screen } from './helpers/refine';
 import { failOnBrowserErrors } from './helpers/warp-grid';
@@ -113,6 +113,59 @@ test('commits a released stroke before a tool change in the same frame', async (
     useEditor.getState().setTool('select');
   }, point);
   expect((await mesh(page)).peak).toBeGreaterThan(before.peak);
+});
+
+test('fills the path of a fast small-brush pen sweep in one undo step', async ({ page }) => {
+  await openSculpt(page, {
+    ...block,
+    parts: [
+      {
+        ...block.parts[0],
+        geometry: serializeGeometry(new PlaneGeometry(8, 6, 160, 120).translate(0, 0, 2)),
+      },
+    ],
+  });
+  const radius = page.getByRole('spinbutton', { name: 'Radius', exact: true });
+  await radius.fill('0.12');
+  await radius.press('Enter');
+  const start = await screen(page, [-2, 0, 2]);
+  const end = await screen(page, [2, 0, 2]);
+  await page.evaluate(
+    ({ start, end }) => {
+      const canvas = document.querySelector('canvas')!;
+      const pen = {
+        pointerId: 17,
+        isPrimary: true,
+        pointerType: 'pen',
+        pressure: 0.8,
+        bubbles: true,
+      };
+      canvas.dispatchEvent(
+        new PointerEvent('pointerdown', { ...pen, clientX: start.x, clientY: start.y, buttons: 1 }),
+      );
+      canvas.dispatchEvent(
+        new PointerEvent('pointermove', { ...pen, clientX: end.x, clientY: end.y, buttons: 1 }),
+      );
+      canvas.dispatchEvent(
+        new PointerEvent('pointerup', { ...pen, clientX: end.x, clientY: end.y }),
+      );
+    },
+    { start, end },
+  );
+  await expect
+    .poll(() =>
+      inStore(page, (state) => {
+        const positions = state.scene.parts[0].geometry.getAttribute('position');
+        const covered = new Set<number>();
+        for (let i = 0; i < positions.count; i++) {
+          const x = positions.getX(i);
+          if (x >= -2 && x < 2 && positions.getZ(i) > 2 + 1e-5)
+            covered.add(Math.floor((x + 2) * 10));
+        }
+        return [covered.size, state.sculpt?.past.length];
+      }),
+    )
+    .toEqual([40, 1]);
 });
 
 test('draws into a coarse face with pen pressure and undoes topology with displacement', async ({

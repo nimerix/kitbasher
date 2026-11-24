@@ -2133,7 +2133,8 @@ export const useEditor = create<EditorState>((set, get) => ({
   indexingMeshes: 0,
   focusRequest: { id: 0, all: true },
   measurement: [],
-  select: (id, additive = false) =>
+  select: (id, additive = false) => {
+    finishReleasedSculpt();
     set((state) => ({
       selected: id
         ? additive
@@ -2142,7 +2143,8 @@ export const useEditor = create<EditorState>((set, get) => ({
             : [...state.selected, id]
           : [id]
         : [],
-    })),
+    }));
+  },
   selectAll: () => set((state) => ({ selected: state.scene.parts.map((part) => part.id) })),
   isolate: (ids) => set({ isolated: ids?.length ? ids : null }),
   toggleIsolation: () => {
@@ -2246,6 +2248,7 @@ export const useEditor = create<EditorState>((set, get) => ({
     })),
   closeContextMenu: () => set({ contextMenu: null }),
   setTool: (tool) => {
+    finishReleasedSculpt();
     const state = get();
     if (tool === 'warp' && state.tool === 'warp' && state.warp)
       set({ navigationMode: null, pivotPicking: false });
@@ -4956,8 +4959,14 @@ export const useEditor = create<EditorState>((set, get) => ({
       const next = name.trim() || 'Untitled assembly';
       return next === state.scene.name ? {} : changed(state, { ...state.scene, name: next });
     }),
-  undo: () => moveHistory('undo'),
-  redo: () => moveHistory('redo'),
+  undo: () => {
+    finishReleasedSculpt();
+    moveHistory('undo');
+  },
+  redo: () => {
+    finishReleasedSculpt();
+    moveHistory('redo');
+  },
   setView: (patch) => {
     if (patch.orbitSelection !== undefined) saveOrbitPreference(patch.orbitSelection);
     if (patch.partColors !== undefined) savePartColorMode(patch.partColors);
@@ -4990,6 +4999,16 @@ useEditor.subscribe((state, previous) => {
   if (state.toast && state.toast.id !== previous.toast?.id)
     recordNotification(state.toast.message, state.toast.kind);
 });
+
+let finishSculptStroke: (() => void) | null = null;
+
+export function useSculptStrokeFinisher(finish: typeof finishSculptStroke) {
+  finishSculptStroke = finish;
+}
+
+export function finishReleasedSculpt() {
+  finishSculptStroke?.();
+}
 
 let sharedSculptQueueGuard: ((geometry: BufferGeometry) => boolean) | null = null;
 

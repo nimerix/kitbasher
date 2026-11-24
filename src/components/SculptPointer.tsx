@@ -19,42 +19,13 @@ import { acceleratedRaycast } from 'three-mesh-bvh';
 import { clearSculptIncidence, SculptMesh, type SculptDab } from '../core/sculpt-mesh';
 import { triangleCount } from '../core/geometry';
 import { workerIndexTriangles } from '../core/spatial-index';
-import { useEditor } from '../core/store';
+import { useEditor, useSculptStrokeFinisher } from '../core/store';
 import type { Part, SculptureSettings } from '../core/types';
 import { partMeshes } from '../xr/part-meshes';
+import { SculptPath, type SculptSample as Sample } from '../core/sculpt-path';
 import { boundsEntry } from './RefinePointer';
 
-type Sample = Pick<
-  PointerEvent,
-  | 'clientX'
-  | 'clientY'
-  | 'pressure'
-  | 'pointerType'
-  | 'tiltX'
-  | 'tiltY'
-  | 'twist'
-  | 'shiftKey'
-  | 'altKey'
->;
 type Hit = Pick<SculptDab, 'point' | 'normal' | 'face'>;
-
-const maxQueuedDabs = 8;
-
-const lerp = (a: number, b: number, t: number) => a + (b - a) * t;
-
-function interpolate(a: Sample, b: Sample, t: number): Sample {
-  return {
-    pointerType: b.pointerType,
-    shiftKey: b.shiftKey,
-    altKey: b.altKey,
-    clientX: lerp(a.clientX, b.clientX, t),
-    clientY: lerp(a.clientY, b.clientY, t),
-    pressure: lerp(a.pressure, b.pressure, t),
-    tiltX: lerp(a.tiltX, b.tiltX, t),
-    tiltY: lerp(a.tiltY, b.tiltY, t),
-    twist: (a.twist + (((b.twist - a.twist + 540) % 360) - 180) * t + 360) % 360,
-  };
-}
 
 const visible = (mesh: Mesh) => {
   for (let object = mesh.parent; object; object = object.parent) if (!object.visible) return false;
@@ -99,11 +70,10 @@ interface Stroke {
   controlsEnabled: boolean;
   brush: SculptDab['brush'];
   eraser: boolean;
-  last: Sample;
   latest: Sample;
-  pending: Sample[];
+  path: SculptPath;
+  released: boolean;
   changed: boolean;
-  spacing: number;
   first: Hit;
   grabPoint: Vector3;
   grabMirror: Hit | null;
@@ -493,63 +463,27 @@ export function SculptPointer() {
             : undefined,
         }) || active.changed;
     };
+    const drain = (active: Stroke, until: number) => {
+      do {
+        const sample = active.path.next();
+        if (sample) apply(active, sample);
+      } while (active.path.pending && performance.now() < until);
+      if (active.released && !active.path.pending) detach(true);
+    };
+    const finishReleased = () => {
+      if (stroke?.released) drain(stroke, Infinity);
+    };
     const schedule = () => {
       if (frame) return;
       frame = requestAnimationFrame(() => {
         frame = 0;
-        const active = stroke;
-        if (active) {
-          const until = performance.now() + 6;
-          do {
-            const sample = active.pending.shift();
-            if (sample) apply(active, sample);
-          } while (active.pending.length && performance.now() < until);
-          if (active.pending.length) schedule();
-        }
+        if (stroke) drain(stroke, performance.now() + 6);
+        if (stroke?.path.pending) schedule();
         refresh();
       });
     };
-    const queue = (active: Stroke, sample: Sample) => {
-      active.pending.push(sample);
-      if (active.pending.length > maxQueuedDabs * 2) {
-        // Keep both endpoints and evenly thin old dabs when input outruns rendering.
-        const pending = active.pending;
-        active.pending = Array.from(
-          { length: maxQueuedDabs },
-          (_, i) => pending[Math.round((i * (pending.length - 1)) / (maxQueuedDabs - 1))],
-        );
-      }
-    };
-    const enqueue = (active: Stroke, incoming: Sample, final = false) => {
-      const sample = final
-        ? incoming
-        : interpolate(active.last, incoming, 1 - active.settings.stabilization * 0.85);
-      const distance = Math.hypot(
-        sample.clientX - active.last.clientX,
-        sample.clientY - active.last.clientY,
-      );
-      const scale = active.settings.pressureRadius
-        ? Math.max(0.08, pressure(sample, active.settings))
-        : 1;
-      const spacing = Math.max(0.5, active.spacing * scale);
-      const steps = Math.min(32, Math.floor(distance / spacing));
-      if (steps) {
-        const interval = Math.max(spacing, distance / 32);
-        for (let i = 1; i <= steps; i++)
-          queue(active, interpolate(active.last, sample, (interval * i) / distance));
-        active.last = active.pending.at(-1)!;
-        if (!final || distance - interval * steps <= 0.1) return;
-        queue(active, sample);
-      } else if (
-        final
-          ? distance > 0.1
-          : distance < 0.1 && Math.abs(sample.pressure - active.last.pressure) > 0.015
-      ) {
-        queue(active, sample);
-      } else return;
-      active.last = sample;
-    };
     const down = (event: PointerEvent) => {
+      finishReleased();
       const state = useEditor.getState();
       const sculpt = state.sculpt;
       if (stroke) {
@@ -626,11 +560,20 @@ export function SculptPointer() {
         grabMirror:
           brush === 'grab' && settings.symmetry ? mirror(hit, own, settings.radius) : null,
         applied: null,
-        last: event,
         latest: event,
-        pending: [event],
+        path: new SculptPath(
+          event,
+          (a, b) => {
+            const scale = settings.pressureRadius
+              ? Math.max(0.08, Math.min(pressure(a, settings), pressure(b, settings)))
+              : 1;
+            const footprint = settings.brush === 'draw' ? settings.aspect : 1;
+            return Math.max(0.025, radiusPixels * footprint * settings.spacing * scale);
+          },
+          settings.stabilization,
+        ),
         changed: false,
-        spacing: Math.max(0.75, radiusPixels * settings.spacing),
+        released: false,
       };
       if (controls) controls.enabled = false;
       own.geometry = draft.geometry;
@@ -641,19 +584,19 @@ export function SculptPointer() {
       if (stroke) {
         if (event.pointerId !== stroke.id) return;
         event.stopImmediatePropagation();
+        if (stroke.released) return;
         const events = event.getCoalescedEvents?.() ?? [];
         stroke.latest = events.at(-1) ?? event;
-        for (const sample of events.length ? events : [event]) enqueue(stroke, sample);
+        for (const sample of events.length ? events : [event]) stroke.path.push(sample);
       } else if (!canvas.contains(event.target as Node) || event.pointerType === 'touch') return;
       hover = event;
       schedule();
     };
     const release = (event: PointerEvent) => {
-      if (!stroke || event.pointerId !== stroke.id) return;
+      if (!stroke || stroke.released || event.pointerId !== stroke.id) return;
       event.stopImmediatePropagation();
       const { pressure, pointerType, tiltX, tiltY, twist } = stroke.latest;
-      enqueue(
-        stroke,
+      stroke.path.push(
         {
           clientX: event.clientX,
           clientY: event.clientY,
@@ -670,11 +613,13 @@ export function SculptPointer() {
       suppressClick = true;
       window.clearTimeout(clickTimer);
       clickTimer = window.setTimeout(() => (suppressClick = false), 300);
-      for (const sample of stroke.pending) apply(stroke, sample);
-      detach(true);
+      const active = stroke;
+      active.released = true;
+      drain(active, performance.now() + 6);
+      if (stroke) schedule();
     };
     const cancel = (event: PointerEvent) => {
-      if (stroke?.id === event.pointerId) detach(false);
+      if (stroke?.id === event.pointerId && !stroke.released) detach(false);
     };
     const escape = (event: KeyboardEvent) => {
       if (event.key !== 'Escape' || !stroke) return;
@@ -684,7 +629,7 @@ export function SculptPointer() {
     };
     const blur = () => {
       hover = null;
-      detach(false);
+      if (!stroke?.released) detach(false);
       refresh();
     };
     const leave = () => {
@@ -714,6 +659,7 @@ export function SculptPointer() {
       schedule();
     });
     prepare();
+    useSculptStrokeFinisher(finishReleased);
     canvas.addEventListener('pointerdown', down, true);
     canvas.addEventListener('lostpointercapture', cancel);
     canvas.addEventListener('pointerleave', leave);
@@ -725,6 +671,7 @@ export function SculptPointer() {
     window.addEventListener('blur', blur);
     return () => {
       unsubscribe();
+      useSculptStrokeFinisher(null);
       canvas.removeEventListener('pointerdown', down, true);
       canvas.removeEventListener('lostpointercapture', cancel);
       canvas.removeEventListener('pointerleave', leave);

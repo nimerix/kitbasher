@@ -4,7 +4,15 @@ import { nextIsolation } from './isolation';
 import { matchKeyAction } from './keybindings';
 import type { KeyActionId, KeyInput } from './keybindings';
 import { primaryShortcutText, usePreferences } from './preferences';
-import { canRedo, canUndo, refineEdited, useEditor, warpEdited, type WarpGizmo } from './store';
+import {
+  canRedo,
+  canUndo,
+  finishReleasedSculpt,
+  refineEdited,
+  useEditor,
+  warpEdited,
+  type WarpGizmo,
+} from './store';
 import {
   activeTransformTool,
   stepTransform,
@@ -14,6 +22,7 @@ import {
 import type { SurfacePoint } from './types';
 
 export async function saveCurrentScene() {
+  finishReleasedSculpt();
   if (useEditor.getState().driveFile) {
     if (!(await driveAutosave.flush())) useDrive.setState({ dialogOpen: true });
     return;
@@ -22,6 +31,7 @@ export async function saveCurrentScene() {
 }
 
 export async function downloadCurrentScene() {
+  finishReleasedSculpt();
   const state = useEditor.getState();
   if (state.busy) return;
   const { revision } = state;
@@ -293,7 +303,10 @@ export function editorCommands(context: CommandContext = {}) {
     ),
     export: command(
       'Export assembly…',
-      () => state.setModal('export'),
+      () => {
+        finishReleasedSculpt();
+        state.setModal('export');
+      },
       !!state.scene.parts.length,
       'export',
     ),
@@ -319,6 +332,7 @@ export function editorCommands(context: CommandContext = {}) {
 export type CommandId = keyof ReturnType<typeof editorCommands>;
 
 export function executeEditorCommand(id: CommandId, context: CommandContext = {}) {
+  finishReleasedSculpt();
   const command = editorCommands(context)[id];
   useEditor.getState().closeContextMenu();
   if (command.enabled) command.run();
