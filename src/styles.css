@@ -6696,7 +6696,8 @@ optgroup {
   gap: 3px;
 }
 .refine-ends select,
-.refine-controls .brush-radius > select {
+.refine-controls .brush-radius > select,
+.sculpt-controls .brush-radius > select {
   min-width: 0;
   padding: 6px;
   border: 1px solid var(--border);
@@ -6723,7 +6724,64 @@ optgroup {
 .refine-counts {
   margin: 12px 16px 0;
 }
-/* Narrower toolbars show Pin, Anchors, Joint, Warp and Refine as icons, so the strip still fits
+.sculpt-controls {
+  display: grid;
+  gap: 10px;
+  padding: 14px 16px;
+}
+.sculpt-brushes {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 5px;
+}
+.sculpt-brushes .button {
+  justify-content: center;
+  padding-inline: 6px;
+  white-space: normal;
+}
+.sculpt-brushes .button.active {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.sculpt-controls .field-help {
+  margin: 0;
+}
+.sculpt-check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 24px;
+  font-size: 11px;
+  color: var(--muted);
+}
+.sculpt-check input {
+  margin: 0;
+  accent-color: var(--accent);
+}
+.sculpt-mask-controls {
+  display: grid;
+  gap: 6px;
+  border-top: 1px solid var(--border);
+  padding-top: 8px;
+}
+.sculpt-mask-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.sculpt-advanced {
+  margin-inline: -16px;
+}
+.sculpt-advanced:not([open]) > summary > svg {
+  transform: rotate(-90deg);
+}
+.sculpt-advanced-fields {
+  display: grid;
+  gap: 8px;
+  padding-inline: 16px;
+}
+
+/* Narrower toolbars show secondary tools as icons, so the strip still fits
    on one row. Their names stay in the tooltip and for assistive technology. */
 @media (max-width: 1500px) {
   .toolbar-left .compact-tool {
@@ -6740,13 +6798,15 @@ optgroup {
 }
 @media (max-width: 1700px) {
   .toolbar-left .warp-tool,
-  .toolbar-left .refine-tool {
+  .toolbar-left .refine-tool,
+  .toolbar-left .sculpt-tool {
     position: relative;
   }
   .toolbar-left .warp-tool > span,
   .toolbar-left .warp-tool > kbd,
   .toolbar-left .refine-tool > span,
-  .toolbar-left .refine-tool > kbd {
+  .toolbar-left .refine-tool > kbd,
+  .toolbar-left .sculpt-tool > span {
     position: absolute;
     width: 1px;
     height: 1px;

@@ -294,6 +294,10 @@ export function useKeyboard(openScene: () => void, searchParts: () => void) {
             state.setNavigationMode(null);
             return;
           }
+          if (state.tool === 'sculpt') {
+            state.cancelSculptStroke();
+            return;
+          }
           // Otherwise Escape leaves the tool, as it does for Warp.
           if (state.tool === 'refine' && refineKey(state, 'cancel')) return;
           const wasSelecting = state.tool === 'select';

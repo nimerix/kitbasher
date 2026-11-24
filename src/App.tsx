@@ -15,6 +15,7 @@ import {
   BoxSelect,
   Crosshair,
   Paintbrush,
+  Brush,
   Pin,
   FilePlus2,
   FolderOpen,
@@ -504,6 +505,16 @@ function Toolbar({
           {keys.refine ? <Keyboard>{keys.refine}</Keyboard> : null}
         </button>
         <button
+          className={`tool-button sculpt-tool ${tool === 'sculpt' ? 'active' : ''}`}
+          title="Sculpt"
+          aria-label="Sculpt"
+          aria-pressed={tool === 'sculpt'}
+          onClick={() => useEditor.getState().setTool('sculpt')}
+        >
+          <Brush size={16} />
+          <span>Sculpt</span>
+        </button>
+        <button
           className={`tool-button compact-tool ${tool === 'joint' ? 'active' : ''}`}
           title={withShortcut('Create joint', keys.joint)}
           onClick={() => useEditor.getState().setTool('joint')}
@@ -844,7 +855,8 @@ export default function App() {
     };
   }, []);
   useEffect(() => {
-    if (['align', 'joint', 'anchors', 'pins', 'warp', 'refine'].includes(tool)) setRight(true);
+    if (['align', 'joint', 'anchors', 'pins', 'warp', 'refine', 'sculpt'].includes(tool))
+      setRight(true);
   }, [tool]);
   useEffect(() => {
     // Dropped files belong to one import dialog, not to the next one opened from a menu.

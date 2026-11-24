@@ -99,7 +99,16 @@ import type { RegionInput, RegionSolve } from './refine-region';
 import type { NavigationMode } from './navigation';
 import { createSample } from './sample';
 import { useXR } from './xr-session';
-import { trimHistory } from './history-budget';
+import { geometryBytes, historyBudgetBytes, trimHistory } from './history-budget';
+import {
+  appendSculptStep,
+  maskHistoryBytes,
+  sculptDefaults,
+  sculptHistoryBytes,
+  stepSculptSession,
+  type SculptSession,
+  type SculptStrokeCommit,
+} from './sculpt-session';
 import { captureComponents, instantiateComponents } from './clipboard';
 import type { ComponentClipboard } from './clipboard';
 import { referencePlanes, resolvePart } from './references';
@@ -185,6 +194,8 @@ import type {
   SurfacePair,
   SurfaceSide,
   Tool,
+  SculptBrush,
+  SculptureSettings,
   ViewSettings,
   Vec3,
 } from './types';
@@ -482,6 +493,7 @@ interface EditorState {
   warpPending: WarpRecovery | null;
   warpInFlight: WarpRecovery | null;
   refine: RefineSession | null;
+  sculpt: SculptSession | null;
   view: ViewSettings;
   /** Lighting for scenes that have none of their own. Kept in this browser. */
   defaultLighting: SceneLighting;
@@ -609,6 +621,13 @@ interface EditorState {
   retryWarp: () => void;
   settleWarp: (accepted: boolean, submittedOnly?: boolean) => void;
   /** Starts a session on the one selected part, or says why it cannot. */
+  startSculpt: () => boolean;
+  setSculptBrush: (brush: SculptBrush) => void;
+  setSculptSettings: (patch: Partial<Omit<SculptureSettings, 'brush'>>) => void;
+  resetSculptBrush: () => void;
+  cancelSculptStroke: () => void;
+  commitSculpt: (stroke: SculptStrokeCommit) => boolean;
+  changeSculptMask: (operation: 'invert' | 'clear') => void;
   startRefine: () => boolean;
   /** Ends the session without changing the part. It leaves the tool as it is. */
   cancelRefine: (notice?: string) => void;
@@ -763,6 +782,7 @@ const toolChange = (state: EditorState, tool: Tool): Partial<EditorState> => {
   const pair = mode === 'surface' ? emptySurfacePair() : null;
   return {
     tool,
+    sculpt: tool === 'sculpt' ? state.sculpt : null,
     pinPicking:
       tool === 'pins' && !state.scene.parts.find((p) => p.id === state.selected[0])?.pins?.length
         ? 'hard'
@@ -1865,7 +1885,12 @@ function appliedWarpGeometry(source: BufferGeometry, output: WarpOutput) {
   return geometry;
 }
 
-const changed = (state: EditorState, scene: SceneDocument, checkpoint = true) => {
+const changed = (
+  state: EditorState,
+  scene: SceneDocument,
+  checkpoint = true,
+  budget = historyBudgetBytes,
+) => {
   const base = committedScene(state);
   let past = checkpoint ? [...state.past.slice(-(historyLimit - 1)), base] : state.past;
   let notice = {};
@@ -1874,6 +1899,7 @@ const changed = (state: EditorState, scene: SceneDocument, checkpoint = true) =>
       past,
       [],
       [scene, ...(state.clipboard ? [{ name: '', parts: state.clipboard.parts, joints: [] }] : [])],
+      budget,
     );
     if (kept.trimmed) {
       past = kept.past;
@@ -1953,6 +1979,84 @@ const restoredIsolated = (state: EditorState, scene: SceneDocument) =>
     scene.parts.filter((part) => !state.scene.parts.some((p) => p.id === part.id)),
   );
 
+let sculptRevision = 0;
+const nextSculptRevision = () => ++sculptRevision;
+
+type HistoryDirection = 'undo' | 'redo';
+
+function historyScene(state: EditorState, direction: HistoryDirection) {
+  return direction === 'undo' ? state.past.at(-1) : state.future[0];
+}
+
+function restoreHistoryScene(
+  state: EditorState,
+  direction: HistoryDirection,
+  scene: SceneDocument,
+  sculpt: SculptSession | null = null,
+): Partial<EditorState> {
+  const undo = direction === 'undo';
+  return {
+    scene,
+    past: undo ? state.past.slice(0, -1) : [...state.past, state.scene],
+    future: undo ? [state.scene, ...state.future] : state.future.slice(1),
+    revision: state.revision + 1,
+    selected: state.selected.filter((id) => scene.parts.some((part) => part.id === id)),
+    ...restoredIsolated(state, scene),
+    operation: blankOperation(),
+    // Keep placement tools ready for another adjustment after undo.
+    tool:
+      sculpt || ['translate', 'rotate', 'scale', 'transform'].includes(state.tool)
+        ? state.tool
+        : 'select',
+    sculpt,
+    navigationMode: null,
+    pivotPicking: false,
+    painting: false,
+    paintHistory: [],
+    measurement: [],
+  };
+}
+
+function sculptHistoryStep(state: EditorState, direction: HistoryDirection) {
+  const { sculpt } = state;
+  if (!sculpt || sculpt.pending) return;
+  const undo = direction === 'undo';
+  const step = undo ? sculpt.past.at(-1) : sculpt.future[0];
+  if (!step || step.before.geometry === step.after.geometry || state.sharedHistory) return step;
+  const destination = (undo ? step.before : step.after).geometry;
+  const scene = historyScene(state, direction);
+  if (scene?.parts.some((part) => part.id === sculpt.partId && part.geometry.uuid === destination))
+    return step;
+}
+
+function moveHistory(direction: HistoryDirection) {
+  const state = useEditor.getState();
+  const { sculpt } = state;
+  const step = sculptHistoryStep(state, direction);
+  if (sculpt?.pending) return;
+  if (sculpt && step) {
+    const next = stepSculptSession(sculpt, direction, step);
+    next.revision = nextSculptRevision();
+    if (step.before.geometry === step.after.geometry) useEditor.setState({ sculpt: next });
+    else if (sharedHandlers) {
+      useEditor.setState({
+        sculpt: { ...sculpt, pending: { direction, step }, revision: next.revision },
+      });
+      sharedHandlers[direction]();
+    } else {
+      useEditor.setState(
+        restoreHistoryScene(state, direction, historyScene(state, direction)!, next),
+      );
+    }
+    return;
+  }
+  const scene = historyScene(state, direction);
+  if (sharedHandlers) {
+    if (sculpt) state.setTool('select');
+    sharedHandlers[direction]();
+  } else if (scene) useEditor.setState(restoreHistoryScene(state, direction, scene));
+}
+
 export const useEditor = create<EditorState>((set, get) => ({
   scene: initialScene,
   selected: liveSession ? [] : ['torso'],
@@ -1985,6 +2089,7 @@ export const useEditor = create<EditorState>((set, get) => ({
   warpPending: null,
   warpInFlight: null,
   refine: null,
+  sculpt: null,
   view: {
     inspection: {
       enabled: false,
@@ -2149,6 +2254,7 @@ export const useEditor = create<EditorState>((set, get) => ({
     else if (tool === 'refine' && state.tool === 'refine' && state.refine)
       set({ navigationMode: null, pivotPicking: false });
     else if (tool === 'refine') state.startRefine();
+    else if (tool === 'sculpt' && !state.sculpt) state.startSculpt();
     else set((state) => toolChange(state, tool));
   },
   addFitAnchor: (point) => {
@@ -3283,6 +3389,166 @@ export const useEditor = create<EditorState>((set, get) => ({
       'Your warp could not be combined with another edit. It is open again so you can apply it once more.',
       'info',
     );
+  },
+  startSculpt: () => {
+    const state = get();
+    if (useXR.getState().session) return false;
+    const part =
+      state.selected.length === 1
+        ? state.scene.parts.find((candidate) => candidate.id === state.selected[0])
+        : undefined;
+    if (!part?.visible || part.locked) {
+      state.notify('Select one visible, unlocked part to sculpt.', 'info');
+      return false;
+    }
+    if (
+      geometryBytes([part.geometry]) > sculptHistoryBytes ||
+      part.geometry.getAttribute('position').count * Float32Array.BYTES_PER_ELEMENT >
+        maskHistoryBytes
+    ) {
+      state.notify(`${part.name} is too large to sculpt with undo history.`, 'info');
+      return false;
+    }
+    const defaultRadius = fittedWarpBrushRadius(part);
+    set({
+      ...toolChange(state, 'sculpt'),
+      sculpt: {
+        partId: part.id,
+        settings: sculptDefaults('draw', defaultRadius),
+        byBrush: {},
+        defaultRadius,
+        mask: null,
+        revision: nextSculptRevision(),
+        past: [],
+        future: [],
+        pending: null,
+      },
+    });
+    return true;
+  },
+  setSculptBrush: (brush) =>
+    set(({ sculpt }) => {
+      if (!sculpt || brush === sculpt.settings.brush) return {};
+      const { maskVisible } = sculpt.settings;
+      const settings = sculpt.byBrush[brush] ?? sculptDefaults(brush, sculpt.defaultRadius);
+      return {
+        sculpt: {
+          ...sculpt,
+          settings: { ...settings, maskVisible },
+          byBrush: { ...sculpt.byBrush, [sculpt.settings.brush]: sculpt.settings },
+        },
+      };
+    }),
+  setSculptSettings: (patch) =>
+    set(({ sculpt }) =>
+      sculpt ? { sculpt: { ...sculpt, settings: { ...sculpt.settings, ...patch } } } : {},
+    ),
+  resetSculptBrush: () =>
+    set(({ sculpt }) =>
+      sculpt
+        ? {
+            sculpt: {
+              ...sculpt,
+              settings: sculptDefaults(
+                sculpt.settings.brush,
+                sculpt.defaultRadius,
+                sculpt.settings.maskVisible,
+              ),
+            },
+          }
+        : {},
+    ),
+  cancelSculptStroke: () =>
+    set(({ sculpt }) => (sculpt ? { sculpt: { ...sculpt, revision: nextSculptRevision() } } : {})),
+  commitSculpt: (stroke) => {
+    const state = get();
+    const { sculpt } = state;
+    const part = state.scene.parts.find((candidate) => candidate.id === stroke.partId);
+    if (
+      state.tool !== 'sculpt' ||
+      !sculpt ||
+      sculpt.pending ||
+      sculpt.partId !== stroke.partId ||
+      (stroke.revision !== undefined && stroke.revision !== sculpt.revision) ||
+      !part?.visible ||
+      part.locked ||
+      state.selected.length !== 1 ||
+      state.selected[0] !== part.id ||
+      part.geometry !== stroke.source ||
+      state.sceneEpoch !== stroke.epoch ||
+      !same(part.position, stroke.position) ||
+      !same(part.quaternion, stroke.quaternion) ||
+      !same(part.scale, stroke.scale)
+    )
+      return false;
+    const geometry = stroke.geometry ?? part.geometry;
+    if (stroke.mask && stroke.mask.length !== geometry.getAttribute('position').count) return false;
+    const mask = stroke.mask;
+    if (geometry === part.geometry && mask === sculpt.mask) return false;
+    if (
+      geometry !== part.geometry &&
+      (geometryBytes([geometry]) > sculptHistoryBytes ||
+        geometry.getAttribute('position').count * Float32Array.BYTES_PER_ELEMENT > maskHistoryBytes)
+    ) {
+      state.notify('This stroke exceeded the mesh size limit for Sculpt.', 'info');
+      return false;
+    }
+    const step = {
+      before: { geometry: part.geometry.uuid, mask: sculpt.mask },
+      after: { geometry: geometry.uuid, mask },
+    };
+    set({
+      ...(geometry === part.geometry
+        ? state.future.length
+          ? { future: [] }
+          : {}
+        : changed(
+            state,
+            {
+              ...state.scene,
+              parts: state.scene.parts.map((candidate) =>
+                candidate.id === part.id ? { ...part, geometry } : candidate,
+              ),
+            },
+            true,
+            sculptHistoryBytes,
+          )),
+      sculpt: {
+        ...sculpt,
+        revision: nextSculptRevision(),
+        mask,
+        past: appendSculptStep(sculpt.past, step),
+        future: [],
+      },
+    });
+    return true;
+  },
+  changeSculptMask: (operation) => {
+    const state = get();
+    const { sculpt } = state;
+    const part = sculpt && state.scene.parts.find((candidate) => candidate.id === sculpt.partId);
+    if (!sculpt || !part || (operation === 'clear' && !sculpt.mask)) return;
+    const mask =
+      operation === 'invert'
+        ? new Float32Array(part.geometry.getAttribute('position').count)
+        : null;
+    if (mask) {
+      const previous = sculpt.mask;
+      if (previous) {
+        for (let i = 0; i < mask.length; i++) mask[i] = 1 - previous[i];
+      } else mask.fill(1);
+    }
+    state.commitSculpt({
+      partId: part.id,
+      source: part.geometry,
+      epoch: state.sceneEpoch,
+      revision: sculpt.revision,
+      position: part.position,
+      quaternion: part.quaternion,
+      scale: part.scale,
+      geometry: null,
+      mask,
+    });
   },
   startRefine: () => {
     const state = get();
@@ -4645,6 +4911,7 @@ export const useEditor = create<EditorState>((set, get) => ({
       revision: state.revision + 1,
       savedRevision: recovered ? state.revision : state.revision + 1,
       tool: 'select',
+      sculpt: null,
       activeAnchor: null,
       activeLight: null,
       anchorPicking: false,
@@ -4686,59 +4953,8 @@ export const useEditor = create<EditorState>((set, get) => ({
       const next = name.trim() || 'Untitled assembly';
       return next === state.scene.name ? {} : changed(state, { ...state.scene, name: next });
     }),
-  undo: () =>
-    sharedHandlers
-      ? sharedHandlers.undo()
-      : set((state) =>
-          state.past.length
-            ? {
-                scene: state.past.at(-1)!,
-                past: state.past.slice(0, -1),
-                future: [state.scene, ...state.future],
-                revision: state.revision + 1,
-                selected: state.selected.filter((id) =>
-                  state.past.at(-1)!.parts.some((p) => p.id === id),
-                ),
-                ...restoredIsolated(state, state.past.at(-1)!),
-                operation: blankOperation(),
-                // Keep placement tools ready for another adjustment after undo.
-                tool: ['translate', 'rotate', 'scale', 'transform'].includes(state.tool)
-                  ? state.tool
-                  : 'select',
-                navigationMode: null,
-                pivotPicking: false,
-                painting: false,
-                paintHistory: [],
-                measurement: [],
-              }
-            : {},
-        ),
-  redo: () =>
-    sharedHandlers
-      ? sharedHandlers.redo()
-      : set((state) =>
-          state.future.length
-            ? {
-                scene: state.future[0],
-                past: [...state.past, state.scene],
-                future: state.future.slice(1),
-                revision: state.revision + 1,
-                selected: state.selected.filter((id) =>
-                  state.future[0].parts.some((p) => p.id === id),
-                ),
-                ...restoredIsolated(state, state.future[0]),
-                operation: blankOperation(),
-                tool: ['translate', 'rotate', 'scale', 'transform'].includes(state.tool)
-                  ? state.tool
-                  : 'select',
-                navigationMode: null,
-                pivotPicking: false,
-                painting: false,
-                paintHistory: [],
-                measurement: [],
-              }
-            : {},
-        ),
+  undo: () => moveHistory('undo'),
+  redo: () => moveHistory('redo'),
   setView: (patch) => {
     if (patch.orbitSelection !== undefined) saveOrbitPreference(patch.orbitSelection);
     if (patch.partColors !== undefined) savePartColorMode(patch.partColors);
@@ -4808,9 +5024,14 @@ export function warpBrushRadius(state: Pick<EditorState, 'scene' | 'warp' | 'war
 }
 
 export const canUndo = (state: EditorState) =>
-  state.sharedHistory ? state.sharedHistory.undo > 0 : state.past.length > 0;
+  !state.sculpt?.pending &&
+  (!!sculptHistoryStep(state, 'undo') ||
+    (state.sharedHistory ? state.sharedHistory.undo > 0 : state.past.length > 0));
 export const canRedo = (state: EditorState) =>
-  state.sharedHistory ? state.sharedHistory.redo > 0 : state.future.length > 0;
+  !state.sculpt?.pending &&
+  (!!sculptHistoryStep(state, 'redo') ||
+    (!state.sculpt?.past.length &&
+      (state.sharedHistory ? state.sharedHistory.redo > 0 : state.future.length > 0)));
 
 /** Preview poses never reach recovery, Drive, or other shared-session participants. */
 export const committedScene = (state: EditorState) => state.freeTransform?.baseline ?? state.scene;
@@ -6715,6 +6936,82 @@ function closesAs(segments: EdgeSegment[]) {
     ? first.points.length === 3
     : first.kind === 'spline' && samePoint(first.points[0], end);
 }
+
+// A refused shared edit restores the mask that belonged to the server's geometry.
+export function restoreSculptAfterRefusal(scene: SceneDocument, sculpt: SculptSession | null) {
+  if (!sculpt || useEditor.getState().sculpt?.partId !== sculpt.partId) return;
+  const geometry = scene.parts.find((part) => part.id === sculpt.partId)?.geometry.uuid;
+  const start = sculpt.past.findIndex(
+    (step) => step.before.geometry === geometry && step.after.geometry !== geometry,
+  );
+  if (start < 0) return;
+  useEditor.setState({
+    sculpt: {
+      ...sculpt,
+      mask: sculpt.past[start].before.mask,
+      past: sculpt.past.slice(0, start),
+      future: [],
+      pending: null,
+      revision: nextSculptRevision(),
+    },
+  });
+}
+
+export function stopSharedSculptHistory() {
+  const { sculpt } = useEditor.getState();
+  if (sculpt?.pending)
+    useEditor.setState({
+      sculpt: { ...sculpt, past: [], future: [], pending: null, revision: nextSculptRevision() },
+    });
+}
+
+useEditor.subscribe((state, previous) => {
+  const { sculpt } = state;
+  if (!sculpt) return;
+  if (
+    state.tool !== 'sculpt' ||
+    state.sceneEpoch !== previous.sceneEpoch ||
+    state.selected.length !== 1 ||
+    state.selected[0] !== sculpt.partId
+  ) {
+    useEditor.setState({ sculpt: null, ...(state.tool === 'sculpt' ? { tool: 'select' } : {}) });
+    return;
+  }
+  if (state.scene === previous.scene) return;
+  const part = state.scene.parts.find((candidate) => candidate.id === sculpt.partId);
+  if (!part?.visible || part.locked) {
+    useEditor.setState({ sculpt: null, tool: 'select' });
+    return;
+  }
+  const before = previous.scene.parts.find((candidate) => candidate.id === sculpt.partId);
+  if (!before) return;
+  const moved =
+    !same(part.position, before.position) ||
+    !same(part.quaternion, before.quaternion) ||
+    !same(part.scale, before.scale);
+  if (sculpt.pending) {
+    const { direction, step } = sculpt.pending;
+    if (part.geometry.uuid === (direction === 'undo' ? step.before : step.after).geometry) {
+      useEditor.setState({
+        sculpt: { ...stepSculptSession(sculpt, direction, step), revision: nextSculptRevision() },
+      });
+      return;
+    }
+  }
+  const replaced = part.geometry.uuid !== before.geometry.uuid;
+  if (replaced && sculpt.revision === previous.sculpt?.revision) {
+    useEditor.setState({
+      sculpt: {
+        ...sculpt,
+        mask: null,
+        past: [],
+        future: [],
+        pending: null,
+        revision: nextSculptRevision(),
+      },
+    });
+  } else if (moved) state.cancelSculptStroke();
+});
 
 // A refinement is built from one geometry of one scene at one pose. Undo, another editor,
 // opening a file or leaving the tool by any route ends the session.
