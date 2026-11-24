@@ -63,7 +63,6 @@ interface Stroke {
   epoch: number;
   revision: number;
   own: Mesh;
-  before: BufferGeometry;
   draft: SculptMesh;
   settings: SculptureSettings;
   controls: { enabled: boolean } | null;
@@ -416,7 +415,10 @@ export function SculptPointer() {
       if (!active.released && canvas.hasPointerCapture(active.id))
         canvas.releasePointerCapture(active.id);
       sculptPreviews.delete(active.own);
-      if (active.own.geometry === active.draft.geometry) active.own.geometry = active.before;
+      if (active.own.geometry === active.draft.geometry) {
+        const part = useEditor.getState().scene.parts.find(({ id }) => id === active.target.id);
+        active.own.geometry = part?.geometry ?? active.target.geometry;
+      }
       overlay.visible = false;
       if (overlay.geometry === active.draft.geometry) overlay.geometry = emptyOverlay;
       if (accept && active.changed) {
@@ -620,7 +622,6 @@ export function SculptPointer() {
         epoch: state.sceneEpoch,
         revision: sculpt.revision,
         own,
-        before: own.geometry,
         draft,
         controls,
         controlsEnabled: controls?.enabled ?? false,
