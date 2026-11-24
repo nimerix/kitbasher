@@ -7,7 +7,7 @@ import { primaryShortcutText, usePreferences } from './preferences';
 import {
   canRedo,
   canUndo,
-  finishReleasedSculpt,
+  afterReleasedSculpt,
   refineEdited,
   useEditor,
   warpEdited,
@@ -21,8 +21,19 @@ import {
 } from './transform-selection';
 import type { SurfacePoint } from './types';
 
+function waitForReleasedSculpt(run: () => Promise<void>) {
+  let resolveSave!: () => void;
+  let rejectSave!: (error: unknown) => void;
+  const saved = new Promise<void>((resolve, reject) => {
+    resolveSave = resolve;
+    rejectSave = reject;
+  });
+  if (afterReleasedSculpt(() => void run().then(resolveSave, rejectSave))) return saved;
+}
+
 export async function saveCurrentScene() {
-  finishReleasedSculpt();
+  const pending = waitForReleasedSculpt(saveCurrentScene);
+  if (pending) return pending;
   if (useEditor.getState().driveFile) {
     if (!(await driveAutosave.flush())) useDrive.setState({ dialogOpen: true });
     return;
@@ -31,7 +42,8 @@ export async function saveCurrentScene() {
 }
 
 export async function downloadCurrentScene() {
-  finishReleasedSculpt();
+  const pending = waitForReleasedSculpt(downloadCurrentScene);
+  if (pending) return pending;
   const state = useEditor.getState();
   if (state.busy) return;
   const { revision } = state;
@@ -304,8 +316,8 @@ export function editorCommands(context: CommandContext = {}) {
     export: command(
       'Export assembly…',
       () => {
-        finishReleasedSculpt();
-        state.setModal('export');
+        const open = () => useEditor.getState().setModal('export');
+        if (!afterReleasedSculpt(open)) open();
       },
       !!state.scene.parts.length,
       'export',
@@ -332,7 +344,7 @@ export function editorCommands(context: CommandContext = {}) {
 export type CommandId = keyof ReturnType<typeof editorCommands>;
 
 export function executeEditorCommand(id: CommandId, context: CommandContext = {}) {
-  finishReleasedSculpt();
+  if (afterReleasedSculpt(() => executeEditorCommand(id, context))) return;
   const command = editorCommands(context)[id];
   useEditor.getState().closeContextMenu();
   if (command.enabled) command.run();
