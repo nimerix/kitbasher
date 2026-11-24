@@ -2040,7 +2040,11 @@ function moveHistory(direction: HistoryDirection) {
     if (step.before.geometry === step.after.geometry) useEditor.setState({ sculpt: next });
     else if (sharedHandlers) {
       useEditor.setState({
-        sculpt: { ...sculpt, pending: { direction, step }, revision: next.revision },
+        sculpt: {
+          ...sculpt,
+          pending: { id: next.revision, direction, step },
+          revision: next.revision,
+        },
       });
       sharedHandlers[direction]();
     } else {
@@ -6972,12 +6976,17 @@ export function restoreSculptAfterRefusal(scene: SceneDocument, sculpt: SculptSe
   });
 }
 
-export function stopSharedSculptHistory() {
+export function stopSharedSculptHistory(applied = false, pendingId?: number | null) {
   const { sculpt } = useEditor.getState();
-  if (sculpt?.pending)
-    useEditor.setState({
-      sculpt: { ...sculpt, past: [], future: [], pending: null, revision: nextSculptRevision() },
-    });
+  if (!sculpt?.pending || (pendingId !== undefined && pendingId !== sculpt.pending.id)) return;
+  useEditor.setState({
+    sculpt: {
+      ...sculpt,
+      ...(!applied ? { past: [], future: [] } : {}),
+      pending: null,
+      revision: nextSculptRevision(),
+    },
+  });
 }
 
 useEditor.subscribe((state, previous) => {

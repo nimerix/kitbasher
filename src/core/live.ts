@@ -30,6 +30,11 @@ interface SculptEdit {
 
 type QueuedEdit = OrdinaryEdit | SculptEdit;
 
+interface HistoryRequest {
+  direction: 'undo' | 'redo';
+  sculpt: number | null;
+}
+
 function applyQueuedEdit(scene: SceneDocument, edit: QueuedEdit): SceneDocument {
   if (!('sculpt' in edit))
     return edit.replace ? edit.scene : mergeScenes(edit.before, edit.scene, scene);
@@ -96,7 +101,7 @@ export function joinLiveSession() {
   /** Mesh keys the server already holds. */
   const known = new Set<string>();
   const edits: QueuedEdit[] = [];
-  const requests: ('undo' | 'redo')[] = [];
+  const requests: HistoryRequest[] = [];
   /** The last scene the server sent. Unsent changes here are relative to it. */
   let confirmed: { version: number; epoch: number; scene: SceneDocument } | null = null;
   let latest: Message | null = null;
@@ -110,7 +115,7 @@ export function joinLiveSession() {
   let activeEdit: QueuedEdit | null = null;
   /** The version that holds this tab's last request. Nothing more is sent until it arrives. */
   let awaited = 0;
-  let awaitedSculptHistory = 0;
+  let awaitedHistory: { version: number; sculpt: number | null } | null = null;
 
   const notify = (message: string, kind: 'error' | 'info' = 'error') =>
     useEditor.getState().notify(message, kind);
@@ -227,9 +232,9 @@ export function joinLiveSession() {
     useEditor.setState({ liveStatus: 'connected', sharedHistory: { undo, redo } });
     const before = new Set(local.parts.map((part) => part.id));
     show(next);
-    if (awaitedSculptHistory && message.version >= awaitedSculptHistory) {
-      awaitedSculptHistory = 0;
-      stopSharedSculptHistory();
+    if (awaitedHistory && message.version >= awaitedHistory.version) {
+      stopSharedSculptHistory(true, awaitedHistory.sculpt);
+      awaitedHistory = null;
     }
     if (!replacing && (first || replaced)) useEditor.getState().settleWarp(true);
     const shown = useEditor.getState().scene;
@@ -291,6 +296,7 @@ export function joinLiveSession() {
   const lost = () => {
     if (closed) return;
     connected = false;
+    awaitedHistory = null;
     useSharedHistory(null);
     stopSharedSculptHistory();
     // While the agent is away, undo here covers only changes made in the meantime.
@@ -349,11 +355,11 @@ export function joinLiveSession() {
     }
   };
 
-  const sendHistory = async (direction: 'undo' | 'redo') => {
+  const sendHistory = async ({ direction, sculpt }: HistoryRequest) => {
     try {
       const response = await post(`live/${direction}`, { client });
       if (!response.ok) {
-        stopSharedSculptHistory();
+        stopSharedSculptHistory(false, sculpt);
         notify((await errorOf(response)) ?? `This could not be ${direction}ne.`);
         return;
       }
@@ -363,8 +369,9 @@ export function joinLiveSession() {
         empty?: boolean;
       };
       awaited = result.version;
-      if (result.changed && awaited > confirmed!.version) awaitedSculptHistory = awaited;
-      else stopSharedSculptHistory();
+      if (sculpt && result.changed && awaited > confirmed!.version)
+        awaitedHistory = { version: awaited, sculpt };
+      else stopSharedSculptHistory(result.changed, sculpt);
       if (!result.changed && !result.empty)
         notify(
           `Nothing to ${direction}: ${other} has since changed everything that step touched.`,
@@ -394,11 +401,17 @@ export function joinLiveSession() {
 
   const history = {
     undo: () => {
-      requests.push('undo');
+      requests.push({
+        direction: 'undo',
+        sculpt: useEditor.getState().sculpt?.pending?.id ?? null,
+      });
       void pump();
     },
     redo: () => {
-      requests.push('redo');
+      requests.push({
+        direction: 'redo',
+        sculpt: useEditor.getState().sculpt?.pending?.id ?? null,
+      });
       void pump();
     },
   };

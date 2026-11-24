@@ -53,7 +53,7 @@ export interface SculptSession {
   revision: number;
   past: SculptStep[];
   future: SculptStep[];
-  pending: { direction: 'undo' | 'redo'; step: SculptStep } | null;
+  pending: { id: number; direction: 'undo' | 'redo'; step: SculptStep } | null;
 }
 
 export function sculptDefaults(

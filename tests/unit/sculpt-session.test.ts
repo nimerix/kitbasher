@@ -4,6 +4,7 @@ import { EditConflict, SharedDocument } from '../../mcp/document';
 import type { SculptStrokeCommit } from '../../src/core/sculpt-session';
 import {
   restoreSculptAfterRefusal,
+  stopSharedSculptHistory,
   useEditor,
   useSharedHistory,
   useSharedSculptQueueGuard,
@@ -133,11 +134,24 @@ describe('sculpt session', () => {
     const initialMask = store().sculpt!.mask;
     expect(store().commitSculpt(stroke({ geometry, mask: null }))).toBe(true);
 
-    useEditor.setState({ sharedHistory: { undo: 1, redo: 0 } });
+    useEditor.setState({ sharedHistory: { undo: 2, redo: 0 } });
+    let ordinaryUndo = false;
     useSharedHistory({
-      undo: () => store().receiveScene(scene),
+      undo: () => {
+        if (ordinaryUndo) store().receiveScene(scene);
+        else {
+          const pending = store().sculpt!.pending!.id;
+          store().receiveScene({ ...next, name: 'Ordinary change reverted' });
+          stopSharedSculptHistory(true, pending);
+          ordinaryUndo = true;
+        }
+      },
       redo: () => store().receiveScene(next),
     });
+    store().undo();
+    expect(store().sculpt!.pending).toBeNull();
+    expect(store().sculpt!.past).toHaveLength(2);
+    expect(store().scene.parts[0].geometry).toBe(geometry);
     store().undo();
     expect(store().sculpt!.mask).toBe(initialMask);
     expect(store().scene.parts[0].geometry).toBe(part.geometry);
