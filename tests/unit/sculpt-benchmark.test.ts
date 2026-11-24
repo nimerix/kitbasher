@@ -12,6 +12,8 @@ import {
   Vector3,
 } from 'three';
 import { MeshBVH } from 'three-mesh-bvh';
+import { geometryBytes } from '../../src/core/history-budget';
+import { useEditor } from '../../src/core/store';
 import { SculptMesh } from '../../src/core/sculpt-mesh';
 
 const enabled = process.env.KITBASHER_SCULPT_BENCH;
@@ -143,4 +145,81 @@ it.skipIf(!enabled)('profiles cooperative wide dabs on a dense mesh', () => {
     join(tmpdir(), 'kitbasher-sculpt-wide.json'),
     JSON.stringify(measurements, null, 2),
   );
+});
+
+it.skipIf(!enabled)('profiles 120 consecutive committed sculpt strokes', () => {
+  const editor = useEditor.getState;
+  const original = editor();
+  const geometry = new PlaneGeometry(100, 100, 180, 180);
+  const durations: number[] = [];
+  try {
+    editor().setScene({
+      name: 'Benchmark',
+      joints: [],
+      parts: [
+        {
+          id: 'p',
+          name: 'Plane',
+          geometry,
+          position: [0, 0, 0],
+          quaternion: [0, 0, 0, 1],
+          scale: [1, 1, 1],
+          color: '#ffffff',
+          visible: true,
+          locked: false,
+          source: 'benchmark',
+        },
+      ],
+    });
+    editor().select('p');
+    expect(editor().startSculpt()).toBe(true);
+    for (let i = 0; i < 120; i++) {
+      const part = editor().scene.parts[0];
+      const commit = timed(() => {
+        const draft = new SculptMesh(part.geometry, new Matrix4());
+        const changed = draft.dab({
+          point: new Vector3(),
+          normal: new Vector3(0, 0, 1),
+          face: 32580,
+          radius: 1.5,
+          strength: 0.005,
+          detail: 0,
+          minEdge: 10,
+          brush: 'draw',
+          falloff: 'soft',
+        });
+        return (
+          changed &&
+          editor().commitSculpt({
+            ...part,
+            partId: part.id,
+            source: part.geometry,
+            epoch: editor().sceneEpoch,
+            geometry: draft.finish(),
+            mask: null,
+          })
+        );
+      });
+      expect(commit.result).toBe(true);
+      if (i >= 10) durations.push(commit.ms);
+    }
+    durations.sort((a, b) => a - b);
+    const history = editor().past.map((scene) => scene.parts[0].geometry);
+    writeFileSync(
+      join(tmpdir(), 'kitbasher-sculpt-history.json'),
+      JSON.stringify(
+        {
+          triangles: geometry.index!.count / 3,
+          historySteps: history.length,
+          historyArrayBytes: geometryBytes(history),
+          medianStrokeMs: durations[Math.floor(durations.length / 2)],
+          p95StrokeMs: durations[Math.ceil(durations.length * 0.95) - 1],
+        },
+        null,
+        2,
+      ),
+    );
+  } finally {
+    useEditor.setState(original);
+  }
 });

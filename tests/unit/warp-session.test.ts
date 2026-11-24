@@ -1257,7 +1257,7 @@ describe('warp points, close gap and apply', () => {
     move(addAt(partOf('a'), 0, 0).id, [0, 0, 2]);
     editor().applyWarp();
     const second = partOf('a').geometry;
-    for (let i = 0; i < 40; i++) editor().patchParts(['a'], { name: `Plate ${i}` });
+    for (let i = 0; i < 120; i++) editor().patchParts(['a'], { name: `Plate ${i}` });
     expect(source).toEqual([{ index: null, names: ['normal', 'position', 'uv'] }]);
     expect(second.index).toBe(index);
     expect(second.getAttribute('color')).toBe(color);

@@ -87,7 +87,7 @@ The server gives connecting agents these conventions, along with a suggested way
 | `get_scene`                                          | List parts with exact bounds, joints, constraints, and residuals                                                              |
 | `new_scene`, `open_scene`, `save_scene`              | Start, open, and save `.kitbash` scenes                                                                                       |
 | `export_scene`                                       | Write GLB, STL, 3MF, or a Blender package, chosen by file extension                                                           |
-| `undo`, `redo`                                       | Step through the most recent 40 changes                                                                                       |
+| `undo`, `redo`                                       | Step through up to 120 recent changes                                                                                       |
 | `open_live_view`                                     | Open the scene in the app, where you and the agent edit it together                                                           |
 
 ## Behavior

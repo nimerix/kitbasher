@@ -500,12 +500,8 @@ export function createServer(session = new Session(), live = new LiveView()) {
     ({ joints, plane_constraints }) => session.removeRelationships(joints, plane_constraints),
   );
 
-  tool(
-    'undo',
-    'Undoes the last scene change. The most recent 40 changes are kept.',
-    edits,
-    {},
-    () => session.undo(),
+  tool('undo', 'Undoes the last scene change. Up to 120 recent changes are kept.', edits, {}, () =>
+    session.undo(),
   );
 
   tool('redo', 'Redoes the last undone change.', edits, {}, () => session.redo());

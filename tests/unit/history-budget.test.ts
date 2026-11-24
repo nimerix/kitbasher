@@ -80,9 +80,9 @@ describe('history budget', () => {
   it('leaves history untouched for transform-only checkpoints', () => {
     const scene = sceneOf(new BoxGeometry(1, 1, 1));
     useEditor.getState().setScene(scene);
-    for (let i = 0; i < 41; i++) useEditor.getState().transform('p0', { position: [i + 1, 0, 0] });
+    for (let i = 0; i < 121; i++) useEditor.getState().transform('p0', { position: [i + 1, 0, 0] });
     const state = useEditor.getState();
-    expect(state.past.length).toBe(40);
+    expect(state.past.length).toBe(120);
     expect(state.historyTrimNotified).toBe(false);
     expect(state.toast).toBeNull();
   });
@@ -165,8 +165,7 @@ describe('history budget', () => {
       meshes: Map<string, BufferGeometry>;
       versions: Map<number, SceneDocument>;
     };
-    expect(doc.counts('agent').undo).toBeLessThan(6);
-    expect(doc.counts('agent').undo).toBeGreaterThanOrEqual(1);
+    expect(doc.counts('agent').undo).toBe(2);
     expect(doc.version).toBe(7);
     expect(internal.versions.has(7)).toBe(true);
     const reachable = new Set<string>();

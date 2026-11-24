@@ -955,7 +955,7 @@ remeasured. These limits were not measured in Firefox or Safari.
   translation; a single mate still allows planar sliding and twist.
 - Lighting is for viewing in the editor. A scene has at most 8 lights. Only directional
   lights that do not follow the camera cast shadows; point lights do not.
-- Undo history retains the most recent 40 changes in the current session.
+- Undo history retains up to 120 changes in the current session.
 
 ## Source
 
