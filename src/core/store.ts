@@ -3493,6 +3493,15 @@ export const useEditor = create<EditorState>((set, get) => ({
       state.notify('This stroke exceeded the mesh size limit for Sculpt.', 'info');
       return false;
     }
+    if (geometry !== part.geometry && sharedSculptQueueGuard && !sharedSculptQueueGuard(geometry)) {
+      state.notify(
+        state.liveStatus === 'disconnected'
+          ? 'Reconnect to the shared scene to commit sculpt strokes.'
+          : 'Wait for pending sculpt strokes to reach the shared scene.',
+        'info',
+      );
+      return false;
+    }
     const step = {
       before: { geometry: part.geometry.uuid, mask: sculpt.mask },
       after: { geometry: geometry.uuid, mask },
@@ -4987,6 +4996,12 @@ useEditor.subscribe((state, previous) => {
   if (state.toast && state.toast.id !== previous.toast?.id)
     recordNotification(state.toast.message, state.toast.kind);
 });
+
+let sharedSculptQueueGuard: ((geometry: BufferGeometry) => boolean) | null = null;
+
+export function useSharedSculptQueueGuard(guard: typeof sharedSculptQueueGuard) {
+  sharedSculptQueueGuard = guard;
+}
 
 let sharedHandlers: { undo: () => void; redo: () => void } | null = null;
 
