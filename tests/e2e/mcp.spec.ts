@@ -423,3 +423,75 @@ test('tabs and the agent edit one scene, each with its own view', async ({ brows
   expect(errors).toEqual([]);
   await context.close();
 });
+
+test('shared sculpt strokes keep their checkpoints and refuse a stale target pose', async ({
+  page,
+}) => {
+  await call('add_parts', {
+    parts: [{ id: 'block', name: 'Sculpt block', shapes: [{ type: 'box', size: [10, 8, 6] }] }],
+  });
+  const { url } = await call('open_live_view', { open_browser: false });
+  await page.goto(url);
+  await page.locator(part('Sculpt block')).click();
+  await page.keyboard.press('1');
+  await page.keyboard.press('Home');
+  await page.getByRole('button', { name: 'Sculpt', exact: true }).click();
+  const radius = page.getByRole('spinbutton', { name: 'Radius', exact: true });
+  await radius.fill('1.5');
+  await radius.press('Enter');
+
+  const canvas = await page.locator('canvas').boundingBox();
+  expect(canvas).not.toBeNull();
+  const x = canvas!.x + canvas!.width / 2;
+  const y = canvas!.y + canvas!.height / 2;
+  const editUrl = /\/live\/edit$/;
+  const ofSculpt = (request: { postDataJSON: () => { sculpt?: unknown } }) =>
+    !!request.postDataJSON().sculpt;
+
+  let unpause = () => {};
+  let blocked = new Promise<void>((resolve) => {
+    unpause = resolve;
+  });
+  let intercept = true;
+  await page.route(editUrl, async (route) => {
+    if (intercept && ofSculpt(route.request())) {
+      intercept = false;
+      await blocked;
+    }
+    await route.continue();
+  });
+
+  const first = page.waitForRequest((request) => editUrl.test(request.url()) && ofSculpt(request));
+  await page.mouse.click(x + 8, y - 7);
+  const firstRequest = await first;
+  await page.mouse.click(x + 16, y - 7);
+  const second = page.waitForResponse(
+    (response) =>
+      editUrl.test(response.url()) &&
+      response.request() !== firstRequest &&
+      ofSculpt(response.request()),
+  );
+  unpause();
+  const secondResponse = await second;
+  expect(secondResponse.status()).toBe(200);
+  expect(secondResponse.request().postDataJSON().sculpt.source).not.toEqual(
+    firstRequest.postDataJSON().sculpt.source,
+  );
+  expect(secondResponse.request().postDataJSON().checkpoint).toBe(true);
+
+  blocked = new Promise<void>((resolve) => {
+    unpause = resolve;
+  });
+  intercept = true;
+  const third = page.waitForRequest((request) => editUrl.test(request.url()) && ofSculpt(request));
+  await page.mouse.click(x + 24, y - 7);
+  const thirdRequest = await third;
+  await call('update_parts', { updates: [{ id: 'block', translate: [2, 0, 0] }] });
+  const refused = page.waitForResponse((response) => response.request() === thirdRequest);
+  unpause();
+  expect((await refused).status()).toBe(409);
+  await expect(
+    page.getByText(/sculpt target changed before the stroke reached the shared scene/i),
+  ).toBeVisible();
+  expect((await call('get_scene')).parts[0].position).toEqual([2, 0, 0]);
+});
