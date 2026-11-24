@@ -462,8 +462,11 @@ export function SculptPointer() {
           );
       active.work?.return(false);
       active.draft.geometry.dispose();
-      if (refused) cancelQueuedSculptActions('history');
-      flushSculptActions();
+      if (refused) {
+        cancelQueuedSculptActions('history');
+        // A shared update can interrupt this stroke from inside the store's subscribers.
+        queueMicrotask(flushSculptActions);
+      } else flushSculptActions();
       prepare();
       refresh();
     };
