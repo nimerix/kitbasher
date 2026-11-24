@@ -460,41 +460,64 @@ test('cancels a held press queued behind a busy save after the released stroke d
     .toEqual(['Queue settled', 1]);
 });
 
-test('takes the free-transform baseline after a released stroke commits', async ({ page }) => {
-  await openSculpt(page);
-  const before = await mesh(page);
-  const point = await screen(page, [1, 0, 2]);
-  await page.evaluate(async (point) => {
-    const urls = performance.getEntriesByType('resource').map((entry) => entry.name);
-    const { useEditor } = await import(urls.find((url) => /\/src\/core\/store\.ts/.test(url))!);
-    const now = performance.now.bind(performance);
-    let elapsed = now();
-    performance.now = () => (elapsed += 8);
-    try {
-      const canvas = document.querySelector('canvas')!;
-      const pen = {
-        clientX: point.x,
-        clientY: point.y,
-        pointerType: 'pen',
-        pointerId: 40,
-        isPrimary: true,
-        pressure: 0.8,
-        bubbles: true,
-      };
-      canvas.dispatchEvent(new PointerEvent('pointerdown', { ...pen, buttons: 1 }));
-      canvas.dispatchEvent(new PointerEvent('pointerup', pen));
-      useEditor.getState().beginFreeTransform('translate');
-    } finally {
-      performance.now = now;
-    }
-  }, point);
-  await expect.poll(() => inStore(page, (state) => Boolean(state.freeTransform))).toBe(true);
-  await expect.poll(async () => (await mesh(page)).triangles).toBeGreaterThan(before.triangles);
-  const sculpted = await mesh(page);
-  await page.keyboard.press('Escape');
-  await expect.poll(() => inStore(page, (state) => Boolean(state.freeTransform))).toBe(false);
-  expect(await mesh(page)).toEqual(sculpted);
-});
+for (const queueUndo of [false, true]) {
+  test(
+    queueUndo
+      ? 'runs Undo after Free Transform closes when both follow a released stroke'
+      : 'takes the free-transform baseline after a released stroke commits',
+    async ({ page }) => {
+      await openSculpt(page);
+      const before = await mesh(page);
+      const point = await screen(page, [1, 0, 2]);
+      await page.evaluate(
+        ({ point, queueUndo }) => {
+          const now = performance.now.bind(performance);
+          let elapsed = now();
+          performance.now = () => (elapsed += 8);
+          try {
+            const canvas = document.querySelector('canvas')!;
+            const pen = {
+              clientX: point.x,
+              clientY: point.y,
+              pointerType: 'pen',
+              pointerId: 40,
+              isPrimary: true,
+              pressure: 0.8,
+              bubbles: true,
+            };
+            canvas.dispatchEvent(new PointerEvent('pointerdown', { ...pen, buttons: 1 }));
+            canvas.dispatchEvent(new PointerEvent('pointerup', pen));
+            window.dispatchEvent(
+              new KeyboardEvent('keydown', { key: 'G', code: 'KeyG', shiftKey: true }),
+            );
+            if (queueUndo)
+              window.dispatchEvent(
+                new KeyboardEvent('keydown', { key: 'z', code: 'KeyZ', ctrlKey: true }),
+              );
+          } finally {
+            performance.now = now;
+          }
+        },
+        { point, queueUndo },
+      );
+      await expect(page.locator('.free-transform-prompt')).toBeVisible();
+      const sculpted = await mesh(page);
+      expect(sculpted.triangles).toBeGreaterThan(before.triangles);
+      await page.keyboard.press('Escape');
+      await expect.poll(() => inStore(page, (state) => Boolean(state.freeTransform))).toBe(false);
+      if (queueUndo) {
+        await expect.poll(() => mesh(page)).toEqual(before);
+        expect(await inStore(page, (state) => [state.past.length, state.future.length])).toEqual([
+          0, 1,
+        ]);
+        await page.keyboard.press('ControlOrMeta+Shift+Z');
+        await expect.poll(() => mesh(page)).toEqual(sculpted);
+      } else {
+        expect(await mesh(page)).toEqual(sculpted);
+      }
+    },
+  );
+}
 
 test('fills the path of a fast small-brush pen sweep in one undo step', async ({ page }) => {
   await openSculpt(page, {

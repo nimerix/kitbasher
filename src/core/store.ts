@@ -5011,6 +5011,9 @@ let sculptIsFinishing: (() => boolean) | null = null;
 const afterSculptActions: (() => void)[] = [];
 let runningSculptAction = false;
 
+// A Free Transform preview owns its baseline until the user confirms or cancels it.
+const blocksSculptActions = (state: EditorState) => !!(state.busy || state.freeTransform);
+
 export function setSculptCompletionGate(gate: typeof sculptIsFinishing) {
   sculptIsFinishing = gate;
   if (!gate && afterSculptActions.length) queueMicrotask(flushSculptActions);
@@ -5026,7 +5029,11 @@ export function flushSculptActions() {
   if (runningSculptAction) return;
   runningSculptAction = true;
   try {
-    while (afterSculptActions.length && !sculptIsFinishing?.() && !useEditor.getState().busy) {
+    while (
+      afterSculptActions.length &&
+      !sculptIsFinishing?.() &&
+      !blocksSculptActions(useEditor.getState())
+    ) {
       afterSculptActions.shift()!();
     }
   } finally {
@@ -5035,7 +5042,8 @@ export function flushSculptActions() {
 }
 
 useEditor.subscribe((state, previous) => {
-  if (previous.busy && !state.busy && afterSculptActions.length) queueMicrotask(flushSculptActions);
+  if (afterSculptActions.length && blocksSculptActions(previous) && !blocksSculptActions(state))
+    queueMicrotask(flushSculptActions);
 });
 
 let sharedSculptQueueGuard: ((geometry: BufferGeometry) => boolean) | null = null;
