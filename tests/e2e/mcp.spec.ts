@@ -579,3 +579,72 @@ test('an ordinary edit between queued strokes preserves a newer remote mesh', as
   expect((await call('get_scene')).name).toBe('Renamed while sculpting');
   expect(request.postDataJSON().scene.parts[0].geometry).toBe(remoteGeometry);
 });
+
+test('a remote mesh survives the delayed response for a single sculpt stroke', async ({ page }) => {
+  await call('add_parts', {
+    parts: [{ id: 'block', name: 'Sculpt block', shapes: [{ type: 'box', size: [10, 8, 6] }] }],
+  });
+  const { url } = await call('open_live_view', { open_browser: false });
+  await page.goto(url);
+  await page.locator(part('Sculpt block')).click();
+  await page.keyboard.press('1');
+  await page.keyboard.press('Home');
+  await page.getByRole('button', { name: 'Sculpt', exact: true }).click();
+  const radius = page.getByRole('spinbutton', { name: 'Radius', exact: true });
+  await radius.fill('1.5');
+  await radius.press('Enter');
+
+  const canvas = page.locator('canvas');
+  const box = (await canvas.boundingBox())!;
+  const triangles = page.locator('.scene-summary').getByText(/triangles$/);
+  const baseline = await triangles.innerText();
+  const editUrl = /\/live\/edit$/;
+  let finish = () => {};
+  const held = new Promise<void>((resolve) => {
+    finish = resolve;
+  });
+  let acceptedVersion = 0;
+  await page.route(editUrl, async (route) => {
+    const accepted = await route.fetch();
+    if (accepted.ok() && route.request().postDataJSON().sculpt) {
+      const { version } = await accepted.json();
+      acceptedVersion = version;
+      await held;
+    }
+    await route.fulfill({ response: accepted });
+  });
+
+  const sent = page.waitForRequest(
+    (request) => editUrl.test(request.url()) && !!request.postDataJSON().sculpt,
+  );
+  await page.mouse.click(box.x + box.width / 2 + 8, box.y + box.height / 2 - 7);
+  await page.mouse.move(box.x - 2, box.y + 2);
+  const request = await sent;
+  await expect.poll(() => acceptedVersion).toBeGreaterThan(0);
+  await expect(triangles).not.toHaveText(baseline);
+
+  const original = request.postDataJSON();
+  const remote = await page.request.post(request.url(), {
+    data: {
+      client: 'remote-editor',
+      base: acceptedVersion,
+      epoch: original.epoch,
+      checkpoint: true,
+      scene: {
+        ...original.scene,
+        parts: original.scene.parts.map((part: { id: string }) => ({
+          ...part,
+          ...(part.id === original.sculpt.partId
+            ? { geometry: original.sculpt.source, name: 'Restored block' }
+            : {}),
+        })),
+      },
+    },
+  });
+  expect(remote.ok()).toBe(true);
+  await expect(page.locator(part('Restored block'))).toBeVisible();
+  const completed = page.waitForResponse((response) => response.request() === request);
+  finish();
+  expect((await completed).ok()).toBe(true);
+  await expect(triangles).toHaveText(baseline);
+});
