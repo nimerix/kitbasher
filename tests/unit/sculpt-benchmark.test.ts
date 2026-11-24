@@ -2,7 +2,15 @@ import { it, expect } from 'vitest';
 import { writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { DoubleSide, Matrix4, Mesh, MeshBasicMaterial, PlaneGeometry, Raycaster } from 'three';
+import {
+  DoubleSide,
+  Matrix4,
+  Mesh,
+  MeshBasicMaterial,
+  PlaneGeometry,
+  Raycaster,
+  Vector3,
+} from 'three';
 import { MeshBVH } from 'three-mesh-bvh';
 import { SculptMesh } from '../../src/core/sculpt-mesh';
 
@@ -75,5 +83,64 @@ it.skipIf(!enabled)('profiles coarse and dense sculpt strokes', () => {
   writeFileSync(
     join(tmpdir(), 'kitbasher-sculpt-benchmark.json'),
     JSON.stringify(metrics, null, 2),
+  );
+});
+
+it.skipIf(!enabled)('profiles cooperative wide dabs on a dense mesh', () => {
+  const segments = 500;
+  const source = new PlaneGeometry(100, 100, segments, segments);
+  source.boundsTree = new MeshBVH(source, { indirect: true });
+  const measurements = [];
+  for (const brush of ['mask', 'draw'] as const) {
+    const draft = new SculptMesh(source, new Matrix4());
+    const preparation = timed(() => draft.prepare());
+    const job = draft.dabWork({
+      brush,
+      point: new Vector3(),
+      normal: new Vector3(0, 0, 1),
+      face: 2 * ((segments / 2) * segments + segments / 2),
+      radius: 80,
+      strength: 1,
+      detail: 0,
+      minEdge: 0.04,
+      falloff: 'hard',
+    });
+    let changed = false;
+    let done = false;
+    const slices: number[] = [];
+    while (!done) {
+      const { ms } = timed(() => {
+        const deadline = performance.now() + 6;
+        do {
+          const result = job.next();
+          if (result.done) {
+            done = true;
+            changed = result.value;
+          }
+        } while (!done && performance.now() < deadline);
+      });
+      slices.push(ms);
+    }
+    expect(changed).toBe(true);
+    expect(slices.length).toBeGreaterThan(1);
+    const committed = timed(() => draft.finish());
+    const sorted = [...slices].sort((a, b) => a - b);
+    measurements.push({
+      brush,
+      triangles: source.index!.count / 3,
+      prepareMs: preparation.ms,
+      totalDabMs: slices.reduce((sum, value) => sum + value, 0),
+      slices: slices.length,
+      sliceP95Ms: sorted[Math.ceil(sorted.length * 0.95) - 1],
+      sliceWorstMs: sorted.at(-1),
+      commitMs: committed.ms,
+    });
+    committed.result?.dispose();
+    draft.geometry.dispose();
+  }
+  source.dispose();
+  writeFileSync(
+    join(tmpdir(), 'kitbasher-sculpt-wide.json'),
+    JSON.stringify(measurements, null, 2),
   );
 });

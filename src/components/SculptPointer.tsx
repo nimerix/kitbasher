@@ -73,6 +73,7 @@ interface Stroke {
   latest: Sample;
   path: SculptPath;
   released: boolean;
+  work: Generator<void, boolean, void> | null;
   changed: boolean;
   first: Hit;
   grabPoint: Vector3;
@@ -334,6 +335,7 @@ export function SculptPointer() {
       overlay.visible = true;
     };
     const refresh = () => {
+      if (stroke?.work) return;
       const state = useEditor.getState();
       const sculpt = state.sculpt;
       const own = sculpt && partMeshes.get(sculpt.partId);
@@ -408,6 +410,7 @@ export function SculptPointer() {
             'Sculpt detail reached its limit. You can keep brushing at this density.',
             'info',
           );
+      active.work?.return(false);
       active.draft.geometry.dispose();
       prepare();
       refresh();
@@ -443,32 +446,40 @@ export function SculptPointer() {
         active.grabPoint.copy(point);
         if (twin) mirroredGrab = reflect(grab, active.own);
       }
-      active.changed =
-        active.draft.dab({
-          ...hit,
-          radius,
-          strength,
-          detail: s.detail,
-          minEdge: s.minEdge,
-          brush,
-          falloff: s.falloff,
-          inverted: active.eraser || sample.altKey,
-          pinch: s.pinch,
-          softenMask: brush === 'mask' && sample.shiftKey,
-          grab,
-          tangent,
-          aspect: brush === 'draw' ? s.aspect : 1,
-          mirror: twin
-            ? { ...twin, tangent: reflectedTangent(tangent, twin, active.own), grab: mirroredGrab }
-            : undefined,
-        }) || active.changed;
+      active.work = active.draft.dabWork({
+        ...hit,
+        radius,
+        strength,
+        detail: s.detail,
+        minEdge: s.minEdge,
+        brush,
+        falloff: s.falloff,
+        inverted: active.eraser || sample.altKey,
+        pinch: s.pinch,
+        softenMask: brush === 'mask' && sample.shiftKey,
+        grab,
+        tangent,
+        aspect: brush === 'draw' ? s.aspect : 1,
+        mirror: twin
+          ? { ...twin, tangent: reflectedTangent(tangent, twin, active.own), grab: mirroredGrab }
+          : undefined,
+      });
     };
     const drain = (active: Stroke, until: number) => {
       do {
-        const sample = active.path.next();
-        if (sample) apply(active, sample);
-      } while (active.path.pending && performance.now() < until);
-      if (active.released && !active.path.pending) detach(true);
+        if (active.work) {
+          const result = active.work.next();
+          if (result.done) {
+            active.changed ||= result.value;
+            active.work = null;
+          }
+        } else {
+          const sample = active.path.next();
+          if (!sample) break;
+          apply(active, sample);
+        }
+      } while ((active.work || active.path.pending) && performance.now() < until);
+      if (active.released && !active.work && !active.path.pending) detach(true);
     };
     const finishReleased = () => {
       if (stroke?.released) drain(stroke, Infinity);
@@ -478,7 +489,7 @@ export function SculptPointer() {
       frame = requestAnimationFrame(() => {
         frame = 0;
         if (stroke) drain(stroke, performance.now() + 6);
-        if (stroke?.path.pending) schedule();
+        if (stroke && (stroke.work || stroke.path.pending)) schedule();
         refresh();
       });
     };
@@ -574,6 +585,7 @@ export function SculptPointer() {
         ),
         changed: false,
         released: false,
+        work: null,
       };
       if (controls) controls.enabled = false;
       own.geometry = draft.geometry;
