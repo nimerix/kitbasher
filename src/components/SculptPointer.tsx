@@ -21,6 +21,7 @@ import { triangleCount } from '../core/geometry';
 import { workerIndexTriangles } from '../core/spatial-index';
 import {
   afterReleasedSculpt,
+  cancelQueuedSculptActions,
   flushSculptActions,
   setSculptCompletionGate,
   useEditor,
@@ -425,6 +426,7 @@ export function SculptPointer() {
       }
       overlay.visible = false;
       if (overlay.geometry === active.draft.geometry) overlay.geometry = emptyOverlay;
+      let refused = !accept && active.released;
       if (accept && active.changed) {
         const geometry = active.draft.finish();
         const grew =
@@ -446,8 +448,10 @@ export function SculptPointer() {
             geometry,
             mask: mask?.some((value) => value > 0) ? mask : null,
           })
-        )
+        ) {
           geometry?.dispose();
+          refused = true;
+        }
       }
       if (accept && active.draft.detailLimited)
         useEditor
@@ -458,6 +462,7 @@ export function SculptPointer() {
           );
       active.work?.return(false);
       active.draft.geometry.dispose();
+      if (refused) cancelQueuedSculptActions('history');
       flushSculptActions();
       prepare();
       refresh();

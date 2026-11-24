@@ -249,6 +249,7 @@ const historyLimit = 40;
 const gestureBudget = 12;
 
 interface FreeTransform {
+  id: string;
   mode: FreeTransformMode;
   axis: TransformAxis;
   baseline: SceneDocument;
@@ -4569,7 +4570,7 @@ export const useEditor = create<EditorState>((set, get) => ({
         : undefined;
     if (!warp) state.setTool(mode);
     set({
-      freeTransform: { mode, axis: null, baseline: get().scene, patches: [], warp },
+      freeTransform: { id: uid(), mode, axis: null, baseline: get().scene, patches: [], warp },
       contextMenu: null,
       temporaryOrbit: false,
     });
@@ -4614,7 +4615,7 @@ export const useEditor = create<EditorState>((set, get) => ({
         true,
       );
     set((state) => {
-      if (state.freeTransform?.baseline !== session.baseline) return {};
+      if (state.freeTransform?.id !== session.id) return {};
       const differs = state.scene.parts.some((part, i) => {
         const before = session.baseline.parts[i];
         return (
@@ -4967,10 +4968,10 @@ export const useEditor = create<EditorState>((set, get) => ({
       return next === state.scene.name ? {} : changed(state, { ...state.scene, name: next });
     }),
   undo: () => {
-    if (!afterReleasedSculpt(() => get().undo())) moveHistory('undo');
+    if (!afterReleasedSculpt(() => get().undo(), { history: true })) moveHistory('undo');
   },
   redo: () => {
-    if (!afterReleasedSculpt(() => get().redo())) moveHistory('redo');
+    if (!afterReleasedSculpt(() => get().redo(), { history: true })) moveHistory('redo');
   },
   setView: (patch) => {
     if (patch.explode !== undefined && afterReleasedSculpt(() => get().setView(patch))) return;
@@ -5008,7 +5009,8 @@ useEditor.subscribe((state, previous) => {
 
 // Editor commands can outlive the viewport tool that queued them.
 let sculptIsFinishing: (() => boolean) | null = null;
-const afterSculptActions: (() => void)[] = [];
+type SculptActionOptions = { history?: boolean; onCancel?: () => void };
+const afterSculptActions: (SculptActionOptions & { run: () => void })[] = [];
 let runningSculptAction = false;
 
 // A Free Transform preview owns its baseline until the user confirms or cancels it.
@@ -5019,10 +5021,17 @@ export function setSculptCompletionGate(gate: typeof sculptIsFinishing) {
   if (!gate && afterSculptActions.length) queueMicrotask(flushSculptActions);
 }
 
-export function afterReleasedSculpt(action: () => void): boolean {
+export function afterReleasedSculpt(run: () => void, options: SculptActionOptions = {}): boolean {
   if (!sculptIsFinishing?.() && (runningSculptAction || !afterSculptActions.length)) return false;
-  afterSculptActions.push(action);
+  afterSculptActions.push({ run, ...options });
   return true;
+}
+
+export function cancelQueuedSculptActions(scope: 'all' | 'history' = 'all') {
+  for (const action of afterSculptActions.splice(0)) {
+    if (scope === 'history' && !action.history) afterSculptActions.push(action);
+    else action.onCancel?.();
+  }
 }
 
 export function flushSculptActions() {
@@ -5034,7 +5043,7 @@ export function flushSculptActions() {
       !sculptIsFinishing?.() &&
       !blocksSculptActions(useEditor.getState())
     ) {
-      afterSculptActions.shift()!();
+      afterSculptActions.shift()!.run();
     }
   } finally {
     runningSculptAction = false;
@@ -5042,7 +5051,9 @@ export function flushSculptActions() {
 }
 
 useEditor.subscribe((state, previous) => {
-  if (afterSculptActions.length && blocksSculptActions(previous) && !blocksSculptActions(state))
+  if (!afterSculptActions.length) return;
+  if (state.sceneEpoch !== previous.sceneEpoch) cancelQueuedSculptActions();
+  else if (blocksSculptActions(previous) && !blocksSculptActions(state))
     queueMicrotask(flushSculptActions);
 });
 

@@ -9,6 +9,7 @@ import { expect, test } from '@playwright/test';
 import type { Page } from '@playwright/test';
 import { BoxGeometry, Mesh } from 'three';
 import { STLExporter } from 'three/addons/exporters/STLExporter.js';
+import { queueAfterPenRelease } from './helpers/sculpt';
 
 // These drive the bundle a client would really start, over real stdio, with the real app.
 let folder: string;
@@ -466,6 +467,81 @@ test('refusing an ordinary shared edit discards its queued undo', async ({ page 
   expect((await nextEdit).ok()).toBe(true);
   expect(undoRequests).toEqual([]);
 });
+
+for (const replaceScene of [false, true]) {
+  test(
+    replaceScene
+      ? 'discards commands from a queued preview when the shared scene is replaced'
+      : 'discards the queued Undo when a shared stroke refusal closes a preview',
+    async ({ page }) => {
+      await call('add_parts', {
+        parts: [{ id: 'block', name: 'Sculpt block', shapes: [{ type: 'box', size: [10, 8, 6] }] }],
+      });
+      const { url } = await call('open_live_view', { open_browser: false });
+      await page.goto(url);
+      const title = page.getByTitle('Rename assembly');
+      const originalName = 'Untitled assembly';
+      await expect(title).toHaveText(originalName);
+      const acceptedName = 'Accepted assembly name';
+      await title.click();
+      const field = page.getByRole('textbox', { name: 'Assembly name' });
+      await field.fill(acceptedName);
+      await field.press('Enter');
+      await expect(page.getByRole('button', { name: /^Undo \((⌘|Ctrl)\+Z\)$/ })).toBeEnabled();
+      await page.locator(part('Sculpt block')).click();
+      await page.keyboard.press('1');
+      await page.keyboard.press('Home');
+      await page.getByRole('button', { name: 'Sculpt', exact: true }).click();
+      const canvas = (await page.locator('canvas').boundingBox())!;
+      const point = { x: canvas.x + canvas.width / 2 + 8, y: canvas.y + canvas.height / 2 - 7 };
+
+      let rejectStroke = () => {};
+      const held = new Promise<void>((resolve) => {
+        rejectStroke = resolve;
+      });
+      const edit = /\/live\/edit$/;
+      await page.route(edit, async (route) => {
+        await held;
+        await route.fulfill({ status: 409, json: { error: 'Stroke refused for this test.' } });
+      });
+      let undoRequests = 0;
+      page.on('request', (request) => {
+        if (request.url().endsWith('/live/undo')) undoRequests++;
+      });
+      const submitted = page.waitForRequest(edit);
+      await queueAfterPenRelease(page, point, [
+        { key: 'G', code: 'KeyG', shiftKey: true },
+        { key: 'z', code: 'KeyZ', ctrlKey: true },
+        { key: 'F1', code: 'F1' },
+      ]);
+      expect((await submitted).postDataJSON().sculpt).toBeTruthy();
+      const prompt = page.locator('.free-transform-prompt');
+      const help = page.getByRole('dialog', { name: 'A workbench that gets out of your way.' });
+      await expect(prompt).toBeVisible();
+      if (replaceScene) {
+        await call('new_scene', { name: 'Replacement', discard_unsaved: true });
+        await expect(title).toHaveText('Replacement');
+        await expect(prompt).toHaveCount(0);
+      }
+      rejectStroke();
+      await expect(page.getByText(/stroke refused for this test/i)).toBeVisible();
+      await expect(prompt).toHaveCount(0);
+      if (replaceScene) {
+        await expect(help).toHaveCount(0);
+        expect(undoRequests).toBe(0);
+      } else {
+        // A later non-history command still runs after the refused stroke rolls back.
+        await expect(help).toBeVisible();
+        await expect(title).toHaveText(acceptedName);
+        expect(undoRequests).toBe(0);
+        await help.getByRole('button', { name: 'Close dialog', exact: true }).click();
+        await page.keyboard.press('ControlOrMeta+z');
+        await expect(title).toHaveText(originalName);
+        expect(undoRequests).toBe(1);
+      }
+    },
+  );
+}
 
 test('shared sculpt strokes keep their checkpoints and refuse a stale target pose', async ({
   page,
