@@ -22,7 +22,7 @@ interface OrdinaryEdit {
   scene: SceneDocument;
   checkpoint: boolean;
   replacementId?: string;
-  /** A retried Open must keep the epoch it was first submitted against. */
+  /** The shared epoch the user opened this scene from. */
   replacementEpoch?: number;
 }
 
@@ -109,7 +109,8 @@ const errorOf = async (response: Response) =>
  */
 export function joinLiveSession() {
   const client = tabId();
-  const source = new EventSource('live/events');
+  let source: EventSource;
+  let streamRetry: number | undefined;
   const meshes = new Map<string, BufferGeometry>();
   /** Mesh keys the server already holds. */
   const known = new Set<string>();
@@ -135,6 +136,7 @@ export function joinLiveSession() {
   let activeSculptObserved = false;
   let acceptedSculpt: { edit: SculptEdit; version: number; epoch: number } | null = null;
   let acceptedReplacement: { edit: OrdinaryEdit; version: number } | null = null;
+  let submittedReplacement: { id: string; epoch: number } | null = null;
   /** The version that holds this tab's last request. Nothing more is sent until it arrives. */
   let awaited = 0;
   let awaitedHistory: { version: number; sculpt: number | null } | null = null;
@@ -215,6 +217,7 @@ export function joinLiveSession() {
             : scene,
         checkpoint: replace || !!dirtyEdit?.checkpoint || state.past !== previous.past,
         replacementId: replace ? uid() : dirtyEdit?.replacementId,
+        replacementEpoch: replace ? confirmed.epoch : dirtyEdit?.replacementEpoch,
       };
     }
     void pump();
@@ -264,6 +267,19 @@ export function joinLiveSession() {
     if (acceptedReplacement && message.version >= acceptedReplacement.version)
       acceptedReplacement = null;
     const unsent = unsentEdits();
+    if (submittedReplacement && message.epoch !== submittedReplacement.epoch) {
+      // A second Open in this tab can be queued while its previous Open is still being confirmed.
+      if (message.replacementId === submittedReplacement.id) {
+        for (const edit of unsent)
+          if (
+            !('sculpt' in edit) &&
+            edit.replacementId &&
+            edit.replacementEpoch === submittedReplacement.epoch
+          )
+            edit.replacementEpoch = message.epoch;
+      }
+      submittedReplacement = null;
+    }
     if (!replaced && active && 'sculpt' in active) {
       const { sculpt, geometry } = active;
       if (
@@ -282,9 +298,7 @@ export function joinLiveSession() {
       !!acceptedReplacement ||
       unsent.some(
         (edit) =>
-          !('sculpt' in edit) &&
-          edit.replacementId &&
-          (edit.replacementEpoch ?? message.epoch) === message.epoch,
+          !('sculpt' in edit) && edit.replacementId && edit.replacementEpoch === message.epoch,
       );
     const changedScene = !replacing && (first || (replaced && !ownReplacement));
     let next = scene;
@@ -313,6 +327,8 @@ export function joinLiveSession() {
       scene,
     };
     const [undo, redo] = message.history[client] ?? [0, 0];
+    window.clearTimeout(streamRetry);
+    streamRetry = undefined;
     if (!connected) {
       connected = true;
       useSharedHistory(history);
@@ -371,17 +387,18 @@ export function joinLiveSession() {
   };
 
   /** The server's scene stands. Later changes here were built on the refused one, so they go too. */
-  const refused = (reason?: string) => {
+  const refused = (reason?: string, replacement = false) => {
     const { sculpt } = useEditor.getState();
     // Queued history requests refer to the discarded optimistic scene.
     requests.length = 0;
-    cancelQueuedSculptActions('history');
+    cancelQueuedSculptActions(replacement ? 'all' : 'history');
     stopSharedSculptHistory(true);
     edits.length = 0;
     dirtyEdit = null;
     if (confirmed) {
-      show(confirmed.scene);
-      restoreSculptAfterRefusal(confirmed.scene, sculpt);
+      if (replacement && sculpt) useEditor.setState({ tool: 'select', sculpt: null });
+      show(confirmed.scene, replacement);
+      if (!replacement) restoreSculptAfterRefusal(confirmed.scene, sculpt);
     }
     notify(
       `Your last change was undone because it could not be combined with ${other}'s.${reason ? ` ${reason}` : ''}`,
@@ -399,6 +416,18 @@ export function joinLiveSession() {
     useEditor.setState({ liveStatus: 'disconnected', sharedHistory: null, past: [], future: [] });
   };
 
+  const refreshStream = () => {
+    lost();
+    window.clearTimeout(streamRetry);
+    streamRetry = window.setTimeout(() => {
+      streamRetry = undefined;
+      source.close();
+      streamGeneration++;
+      latest = null;
+      openStream();
+    }, 300);
+  };
+
   const sendEdit = async (edit: QueuedEdit) => {
     // Keep the submitted draft separate from any warp applied while this edit is in flight.
     const base = confirmed!;
@@ -413,6 +442,21 @@ export function joinLiveSession() {
       !closed &&
       useEditor.getState().sceneEpoch === sceneEpoch &&
       (confirmed?.epoch === base.epoch || replacementObserved());
+    const observed = () => activeSculptObserved || replacementObserved();
+    const rejectEdit = (reason?: string) => {
+      if (observed()) return;
+      if (submittedReplacement?.id === replacementId && replacementId) submittedReplacement = null;
+      if (stillApplies()) refused(reason, !!replacement);
+    };
+    const recoverEdit = () => {
+      if (closed || observed() || confirmed?.epoch !== epoch) return;
+      if (stillApplies()) {
+        edits.unshift(edit);
+        if (!sculpt) useEditor.getState().retryWarp();
+      } else if (!replacementId || submittedReplacement?.id !== replacementId) return;
+      if (replacement || sculpt) refreshStream();
+      else lost();
+    };
     activeEdit = { edit, epoch: base.epoch, sceneEpoch };
     activeSculptObserved = false;
     if (!sculpt) useEditor.getState().submitWarp();
@@ -436,6 +480,7 @@ export function joinLiveSession() {
         meshes.set(key, geometry);
       }
       if (!stillApplies()) return;
+      if (replacementId) submittedReplacement = { id: replacementId, epoch };
       const response = await post('live/edit', {
         client,
         base: base.version,
@@ -450,7 +495,7 @@ export function joinLiveSession() {
         awaited = ((await response.json()) as { version: number }).version;
         if (!stillApplies()) return;
         if (!('sculpt' in edit)) {
-          if (replacementId && confirmed && confirmed.version < awaited)
+          if (replacementId && !replacementObserved() && confirmed && confirmed.version < awaited)
             acceptedReplacement = { edit, version: awaited };
           useEditor.getState().settleWarp(true, true);
         } else if (confirmed && confirmed.version >= awaited) {
@@ -459,20 +504,11 @@ export function joinLiveSession() {
         } else if (!activeSculptObserved && confirmed?.epoch === base.epoch) {
           acceptedSculpt = { edit, version: awaited, epoch: base.epoch };
         }
-      } else {
-        const reason = await errorOf(response);
-        if (stillApplies() && !replacementObserved()) refused(reason);
-      }
+      } else if ((replacement || sculpt) && response.status >= 500) recoverEdit();
+      else rejectEdit(await errorOf(response));
     } catch (error) {
-      if (!stillApplies() || replacementObserved()) return;
-      if (error instanceof Refusal) refused(error.message);
-      else {
-        // Retry an interrupted request unless the stream already confirmed the stroke.
-        if (!activeSculptObserved)
-          edits.unshift(replacement ? { ...replacement, replacementEpoch: epoch } : edit);
-        if (!sculpt) useEditor.getState().retryWarp();
-        lost();
-      }
+      if (error instanceof Refusal) rejectEdit(error.message);
+      else recoverEdit();
     } finally {
       activeEdit = null;
     }
@@ -545,24 +581,33 @@ export function joinLiveSession() {
   window.addEventListener('pointerdown', markViewMoved, { capture: true, once: true });
   window.addEventListener('wheel', markViewMoved, { capture: true, once: true, passive: true });
 
-  source.addEventListener('scene', (event) => {
-    latest = JSON.parse((event as MessageEvent<string>).data);
-    void receive();
-  });
-  // Sent only to tabs on the computer that holds the scene: how another device joins it.
-  source.addEventListener('share', (event) =>
-    useXR.setState({ sharing: JSON.parse((event as MessageEvent<string>).data) }),
-  );
-  // EventSource keeps retrying, so a server that is only briefly unreachable reconnects by itself.
-  source.onerror = () => {
-    streamGeneration++;
-    latest = null;
-    lost();
-  };
+  function openStream() {
+    const stream = new EventSource('live/events');
+    source = stream;
+    stream.addEventListener('scene', (event) => {
+      if (closed || source !== stream) return;
+      latest = JSON.parse((event as MessageEvent<string>).data);
+      void receive();
+    });
+    // Sent only to tabs on the computer that holds the scene: how another device joins it.
+    stream.addEventListener('share', (event) => {
+      if (!closed && source === stream)
+        useXR.setState({ sharing: JSON.parse((event as MessageEvent<string>).data) });
+    });
+    // EventSource reconnects automatically when the event stream itself fails.
+    stream.onerror = () => {
+      if (closed || source !== stream) return;
+      streamGeneration++;
+      latest = null;
+      lost();
+    };
+  }
+  openStream();
   useEditor.setState({ liveStatus: 'connecting' });
 
   return () => {
     closed = true;
+    window.clearTimeout(streamRetry);
     source.close();
     unsubscribe();
     useSharedSculptQueueGuard(null);

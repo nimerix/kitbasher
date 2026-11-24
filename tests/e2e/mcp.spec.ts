@@ -594,21 +594,29 @@ test('publishes Delete queued behind a stroke interrupted by a shared pose updat
   }
 });
 
-for (const replyOrder of ['HTTP first', 'stream first', 'stream then HTTP error'] as const) {
-  test(`keeps a stroke and queued Save when acknowledging a replacement with ${replyOrder}`, async ({
-    page,
-  }) => {
-    const holdResponse = replyOrder !== 'HTTP first';
+for (const replyOrder of [
+  'HTTP first',
+  'stream first',
+  'stream then HTTP error',
+  'HTTP error then refreshed stream',
+  'HTTP rejection',
+] as const) {
+  test(`keeps sculpt and Save scoped to the right scene with ${replyOrder}`, async ({ page }) => {
+    const holdResponse = replyOrder.startsWith('stream');
+    const httpError = replyOrder.includes('HTTP error');
+    const rejected = replyOrder === 'HTTP rejection';
     await page.addInitScript(() => {
       const NativeEventSource = window.EventSource;
+      let connections = 0;
       window.EventSource = class extends NativeEventSource {
         constructor(url: string | URL, init?: EventSourceInit) {
           super(url, init);
+          const initialStream = ++connections === 1;
           this.addEventListener('scene', (event) => {
             const { version } = JSON.parse(event.data);
             const { dataset } = document.documentElement;
             dataset.sharedVersion = String(version);
-            if (dataset.holdShared === '1') {
+            if (initialStream && dataset.holdShared === '1') {
               event.stopImmediatePropagation();
               window.addEventListener(
                 'release-shared-scene',
@@ -661,10 +669,15 @@ for (const replyOrder of ['HTTP first', 'stream first', 'stream then HTTP error'
     await page.route(edit, async (route) => {
       if (!route.request().postDataJSON().replace) return route.continue();
       await submitted;
+      if (rejected)
+        return route.fulfill({
+          status: 409,
+          json: { error: 'Replacement refused for this test.' },
+        });
       const response = await route.fetch();
       replacementVersion = (await response.json()).version;
       if (holdResponse) await answered;
-      if (replyOrder === 'stream then HTTP error')
+      if (httpError)
         await route.fulfill({ status: 502, json: { error: 'Replacement response was lost.' } });
       else await route.fulfill({ response });
     });
@@ -694,6 +707,16 @@ for (const replyOrder of ['HTTP first', 'stream first', 'stream then HTTP error'
     const prompt = page.locator('.free-transform-prompt');
     await expect(prompt).toBeVisible();
     const response = page.waitForResponse((result) => result.request() === original);
+    if (rejected) {
+      const download = page.waitForEvent('download', { timeout: 1500 }).catch(() => null);
+      submit();
+      expect((await response).status()).toBe(409);
+      await expect(page.locator(part('Old block'))).toBeVisible();
+      await expect(prompt).toHaveCount(0);
+      expect(await download).toBeNull();
+      geometry.dispose();
+      return;
+    }
     const acceptedStroke = page
       .waitForResponse(
         (result) => edit.test(result.url()) && !!result.request().postDataJSON().sculpt,
@@ -705,7 +728,7 @@ for (const replyOrder of ['HTTP first', 'stream first', 'stream then HTTP error'
         document.documentElement.dataset.holdShared = '1';
       });
     submit();
-    if (!holdResponse) expect((await response).ok()).toBe(true);
+    if (!holdResponse) expect((await response).status()).toBe(httpError ? 502 : 200);
     await expect.poll(() => replacementVersion).toBeGreaterThan(0);
     await expect(page.locator('html')).toHaveAttribute(
       'data-shared-version',
@@ -713,8 +736,8 @@ for (const replyOrder of ['HTTP first', 'stream first', 'stream then HTTP error'
     );
     if (holdResponse) {
       reply();
-      expect((await response).status()).toBe(replyOrder === 'stream then HTTP error' ? 502 : 200);
-    } else {
+      expect((await response).status()).toBe(httpError ? 502 : 200);
+    } else if (!httpError) {
       await page.evaluate(() => {
         delete document.documentElement.dataset.holdShared;
         window.dispatchEvent(new Event('release-shared-scene'));
@@ -731,6 +754,17 @@ for (const replyOrder of ['HTTP first', 'stream first', 'stream then HTTP error'
     expect(sculpted.index?.count ?? sculpted.getAttribute('position').count).toBeGreaterThan(36);
     geometry.dispose();
   });
+}
+
+async function openBlankSceneInTab(page: Page, name: string) {
+  await page.getByLabel('Open Kitbasher scene').setInputFiles({
+    name: 'opened.kitbash',
+    mimeType: 'application/json',
+    buffer: Buffer.from(
+      JSON.stringify({ format: 'kitbasher', version: 1, units: 'mm', name, parts: [], joints: [] }),
+    ),
+  });
+  await page.getByRole('button', { name: 'Open scene', exact: true }).click();
 }
 
 for (const loseReply of [false, true]) {
@@ -776,21 +810,7 @@ for (const loseReply of [false, true]) {
         }
       });
       const submitted = page.waitForRequest(edit);
-      await page.getByLabel('Open Kitbasher scene').setInputFiles({
-        name: 'opened.kitbash',
-        mimeType: 'application/json',
-        buffer: Buffer.from(
-          JSON.stringify({
-            format: 'kitbasher',
-            version: 1,
-            units: 'mm',
-            name: openedName,
-            parts: [],
-            joints: [],
-          }),
-        ),
-      });
-      await page.getByRole('button', { name: 'Open scene', exact: true }).click();
+      await openBlankSceneInTab(page, openedName);
       const request = await submitted;
       if (loseReply) {
         await expect(page.getByText(/Agent disconnected/)).toBeVisible();
@@ -816,6 +836,121 @@ for (const loseReply of [false, true]) {
       expect(replacements).toBe(1);
     },
   );
+}
+
+for (const fromSameTab of [false, true]) {
+  test(
+    fromSameTab
+      ? 'advances a queued second Open when this tab’s first Open is acknowledged'
+      : 'discards an unsent Open when another editor replaces its starting scene',
+    async ({ page }) => {
+      const { url } = await call('open_live_view', { open_browser: false });
+      await page.goto(url);
+      const title = page.getByTitle('Rename assembly');
+      await expect(title).toHaveText('Untitled assembly');
+      const rename = async (name: string) => {
+        await title.click();
+        const field = page.getByRole('textbox', { name: 'Assembly name' });
+        await field.fill(name);
+        await field.press('Enter');
+      };
+      let resume = () => {};
+      const held = new Promise<void>((resolve) => {
+        resume = resolve;
+      });
+      const edit = /\/live\/edit$/;
+      const requests: { replace: boolean; epoch: number }[] = [];
+      await page.route(edit, async (route) => {
+        requests.push(route.request().postDataJSON());
+        if (requests.length === 1) await held;
+        await route.continue();
+      });
+      const first = page.waitForRequest(edit);
+      if (fromSameTab) await openBlankSceneInTab(page, 'First Open');
+      else await rename('Pending rename');
+      await first;
+      await openBlankSceneInTab(page, 'Queued Open');
+      await expect(title).toHaveText('Queued Open');
+      if (fromSameTab) {
+        resume();
+        await expect.poll(async () => (await call('get_scene')).name).toBe('Queued Open');
+        expect(requests.map(({ epoch }) => epoch)).toEqual([
+          requests[0].epoch,
+          requests[0].epoch + 1,
+        ]);
+      } else {
+        await call('new_scene', { name: 'Remote Open', discard_unsaved: true });
+        await expect(title).toHaveText('Remote Open');
+        resume();
+        const renamed = page.waitForResponse(
+          (result) =>
+            edit.test(result.url()) && result.request().postDataJSON().scene.name === 'Newer edit',
+        );
+        await rename('Newer edit');
+        expect((await renamed).ok()).toBe(true);
+        expect((await call('get_scene')).name).toBe('Newer edit');
+        expect(requests.some(({ replace }) => replace)).toBe(false);
+      }
+    },
+  );
+}
+
+for (const dropResponse of [false, true]) {
+  test(`publishes the next shared stroke after a stream-confirmed stroke gets a ${dropResponse ? 'connection reset' : '502'}`, async ({
+    page,
+  }) => {
+    await page.addInitScript(() => {
+      const NativeEventSource = window.EventSource;
+      window.EventSource = class extends NativeEventSource {
+        constructor(url: string | URL, init?: EventSourceInit) {
+          super(url, init);
+          this.addEventListener('scene', (event) => {
+            document.documentElement.dataset.sharedVersion = String(JSON.parse(event.data).version);
+          });
+        }
+      };
+    });
+    await call('add_parts', {
+      parts: [{ id: 'block', name: 'Sculpt block', shapes: [{ type: 'box', size: [10, 8, 6] }] }],
+    });
+    const { url } = await call('open_live_view', { open_browser: false });
+    await page.goto(url);
+    await page.locator(part('Sculpt block')).click();
+    await page.keyboard.press('1');
+    await page.keyboard.press('Home');
+    await page.getByRole('button', { name: 'Sculpt', exact: true }).click();
+    const box = (await page.locator('canvas').boundingBox())!;
+    const point = { x: box.x + box.width / 2 + 8, y: box.y + box.height / 2 - 7 };
+    let settle = () => {};
+    const held = new Promise<void>((resolve) => {
+      settle = resolve;
+    });
+    const edit = /\/live\/edit$/;
+    let firstVersion = 0;
+    let strokes = 0;
+    await page.route(edit, async (route) => {
+      if (!route.request().postDataJSON().sculpt || ++strokes !== 1) return route.continue();
+      const response = await route.fetch();
+      expect(response.ok()).toBe(true);
+      firstVersion = (await response.json()).version;
+      await held;
+      if (dropResponse) await route.abort('connectionreset');
+      else await route.fulfill({ status: 502, json: { error: 'Stroke response was lost.' } });
+    });
+    await page.mouse.click(point.x, point.y);
+    await expect.poll(() => firstVersion).toBeGreaterThan(0);
+    await expect(page.locator('html')).toHaveAttribute('data-shared-version', String(firstVersion));
+    await page.mouse.click(point.x + 18, point.y);
+    const next = page.waitForResponse(
+      (result) =>
+        edit.test(result.url()) && result.ok() && !!result.request().postDataJSON().sculpt,
+      { timeout: 8000 },
+    );
+    settle();
+    expect((await next).ok()).toBe(true);
+    expect(strokes).toBe(2);
+    await expect(page.getByText('Shared with agent')).toBeVisible();
+  });
 }
 
 test('shared sculpt strokes keep their checkpoints and refuse a stale target pose', async ({
