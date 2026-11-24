@@ -100,13 +100,14 @@ export class SharedDocument {
   }
 
   apply(author: string, edit: Edit) {
+    if (edit.replace && edit.replacementId && this.replacementId === edit.replacementId)
+      return this.version;
+    if ((!edit.replace || edit.replacementId) && edit.epoch !== this.epoch)
+      throw new EditConflict('The scene was replaced while this change was being made.');
     if (edit.replace) {
-      if (edit.replacementId && this.replacementId === edit.replacementId) return this.version;
       this.replace(edit.scene, author, false, edit.replacementId);
       return this.version;
     }
-    if (edit.epoch !== this.epoch)
-      throw new EditConflict('The scene was replaced while this change was being made.');
     const base = this.versions.get(edit.base);
     if (!base)
       throw new EditConflict('This change was made on a version of the scene that is too old.');

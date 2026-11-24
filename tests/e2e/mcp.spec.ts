@@ -594,10 +594,11 @@ test('publishes Delete queued behind a stroke interrupted by a shared pose updat
   }
 });
 
-for (const holdResponse of [false, true]) {
-  test(`keeps a stroke and queued Save when the tab receives its own replacement ${holdResponse ? 'before' : 'after'} HTTP success`, async ({
+for (const replyOrder of ['HTTP first', 'stream first', 'stream then HTTP error'] as const) {
+  test(`keeps a stroke and queued Save when acknowledging a replacement with ${replyOrder}`, async ({
     page,
   }) => {
+    const holdResponse = replyOrder !== 'HTTP first';
     await page.addInitScript(() => {
       const NativeEventSource = window.EventSource;
       window.EventSource = class extends NativeEventSource {
@@ -663,7 +664,9 @@ for (const holdResponse of [false, true]) {
       const response = await route.fetch();
       replacementVersion = (await response.json()).version;
       if (holdResponse) await answered;
-      await route.fulfill({ response });
+      if (replyOrder === 'stream then HTTP error')
+        await route.fulfill({ status: 502, json: { error: 'Replacement response was lost.' } });
+      else await route.fulfill({ response });
     });
     await page.getByLabel('Open Kitbasher scene').setInputFiles({
       name: 'opened.kitbash',
@@ -710,7 +713,7 @@ for (const holdResponse of [false, true]) {
     );
     if (holdResponse) {
       reply();
-      expect((await response).ok()).toBe(true);
+      expect((await response).status()).toBe(replyOrder === 'stream then HTTP error' ? 502 : 200);
     } else {
       await page.evaluate(() => {
         delete document.documentElement.dataset.holdShared;
@@ -728,6 +731,91 @@ for (const holdResponse of [false, true]) {
     expect(sculpted.index?.count ?? sculpted.getAttribute('position').count).toBeGreaterThan(36);
     geometry.dispose();
   });
+}
+
+for (const loseReply of [false, true]) {
+  test(
+    loseReply
+      ? 'preserves the newer shared scene after a replacement loses both acknowledgments'
+      : 'rejects an in-flight Open after another editor replaces the shared scene',
+    async ({ page }) => {
+      const openedName = 'Opened by this tab';
+      if (loseReply)
+        await page.addInitScript((name) => {
+          const NativeEventSource = window.EventSource;
+          window.EventSource = class extends NativeEventSource {
+            constructor(url: string | URL, init?: EventSourceInit) {
+              super(url, init);
+              this.addEventListener('scene', (event) => {
+                if (JSON.parse(event.data).scene.name === name) event.stopImmediatePropagation();
+              });
+            }
+          };
+        }, openedName);
+      const { url } = await call('open_live_view', { open_browser: false });
+      await page.goto(url);
+      const title = page.getByTitle('Rename assembly');
+      await expect(title).toHaveText('Untitled assembly');
+
+      let resume = () => {};
+      const held = new Promise<void>((resolve) => {
+        resume = resolve;
+      });
+      const edit = /\/live\/edit$/;
+      let replacements = 0;
+      await page.route(edit, async (route) => {
+        if (!route.request().postDataJSON().replace || ++replacements !== 1)
+          return route.continue();
+        if (loseReply) {
+          const response = await route.fetch();
+          expect(response.ok()).toBe(true);
+          await route.abort('connectionreset');
+        } else {
+          await held;
+          await route.continue();
+        }
+      });
+      const submitted = page.waitForRequest(edit);
+      await page.getByLabel('Open Kitbasher scene').setInputFiles({
+        name: 'opened.kitbash',
+        mimeType: 'application/json',
+        buffer: Buffer.from(
+          JSON.stringify({
+            format: 'kitbasher',
+            version: 1,
+            units: 'mm',
+            name: openedName,
+            parts: [],
+            joints: [],
+          }),
+        ),
+      });
+      await page.getByRole('button', { name: 'Open scene', exact: true }).click();
+      const request = await submitted;
+      if (loseReply) {
+        await expect(page.getByText(/Agent disconnected/)).toBeVisible();
+        expect((await call('get_scene')).name).toBe(openedName);
+      }
+      const newer = 'Newer shared scene';
+      await call('new_scene', { name: newer, discard_unsaved: true });
+      await expect(title).toHaveText(newer);
+      if (!loseReply) {
+        const response = page.waitForResponse((result) => result.request() === request);
+        resume();
+        expect((await response).status()).toBe(409);
+      }
+      await title.click();
+      const field = page.getByRole('textbox', { name: 'Assembly name' });
+      await field.fill('Edit on the newer scene');
+      const renamed = page.waitForResponse(
+        (result) => edit.test(result.url()) && !result.request().postDataJSON().replace,
+      );
+      await field.press('Enter');
+      expect((await renamed).ok()).toBe(true);
+      expect((await call('get_scene')).name).toBe('Edit on the newer scene');
+      expect(replacements).toBe(1);
+    },
+  );
 }
 
 test('shared sculpt strokes keep their checkpoints and refuse a stale target pose', async ({
