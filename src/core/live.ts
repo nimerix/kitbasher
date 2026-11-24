@@ -307,13 +307,11 @@ export function joinLiveSession() {
   };
 
   /** The server's scene stands. Later changes here were built on the refused one, so they go too. */
-  const refused = (reason?: string, sculptStroke = false) => {
+  const refused = (reason?: string) => {
     const { sculpt } = useEditor.getState();
-    // History requests queued behind a refused stroke refer to the discarded optimistic scene.
-    if (sculptStroke) {
-      requests.length = 0;
-      stopSharedSculptHistory();
-    }
+    // Queued history requests refer to the discarded optimistic scene.
+    requests.length = 0;
+    stopSharedSculptHistory(true);
     edits.length = 0;
     dirtyEdit = null;
     if (confirmed) {
@@ -381,9 +379,9 @@ export function joinLiveSession() {
         } else if ('sculpt' in edit && !activeSculptObserved && confirmed?.epoch === base.epoch) {
           acceptedSculpt = { edit, version: awaited, epoch: base.epoch };
         }
-      } else refused(await errorOf(response), !!sculpt);
+      } else refused(await errorOf(response));
     } catch (error) {
-      if (error instanceof Refusal) refused(error.message, !!sculpt);
+      if (error instanceof Refusal) refused(error.message);
       else {
         // Retry an interrupted request unless the stream already confirmed the stroke.
         if (!activeSculptObserved) edits.unshift(edit);
