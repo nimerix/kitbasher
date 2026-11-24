@@ -204,7 +204,7 @@ test('cancels a held queued press and preserves the released stroke through part
         );
       }
       useEditor.getState().patchParts(['block'], { name: 'Renamed after release' });
-      useEditor.getState().setView({ explode: true });
+      useEditor.getState().setView({ explode: 50 });
     } finally {
       performance.now = now;
     }
@@ -218,7 +218,7 @@ test('cancels a held queued press and preserves the released stroke through part
         state.view.explode,
       ]),
     )
-    .toEqual([1, false, 'Renamed after release', true]);
+    .toEqual([1, false, 'Renamed after release', 50]);
 });
 
 test('restores the committed mesh when a replayed preview is cancelled', async ({ page }) => {
@@ -352,6 +352,51 @@ test('keeps Undo ahead of a mask edit queued behind Save', async ({ page }) => {
     .poll(() => inStore(page, (state) => state.sculpt?.mask?.every((weight) => weight === 1)))
     .toBe(true);
   expect(await mesh(page)).toEqual(before);
+});
+
+test('preserves Undo behind Save after leaving Sculpt', async ({ page }) => {
+  await openSculpt(page);
+  const before = await mesh(page);
+  const point = await screen(page, [1, 0, 2]);
+  const downloading = page.waitForEvent('download');
+  await page.evaluate(async (point) => {
+    const urls = performance.getEntriesByType('resource').map((entry) => entry.name);
+    const { useEditor } = await import(urls.find((url) => /\/src\/core\/store\.ts/.test(url))!);
+    const canvas = document.querySelector('canvas')!;
+    const now = performance.now.bind(performance);
+    let elapsed = now();
+    performance.now = () => (elapsed += 8);
+    try {
+      const pen = {
+        clientX: point.x,
+        clientY: point.y,
+        pointerId: 29,
+        isPrimary: true,
+        pointerType: 'pen',
+        pressure: 0.8,
+        bubbles: true,
+      };
+      canvas.dispatchEvent(new PointerEvent('pointerdown', { ...pen, buttons: 1 }));
+      canvas.dispatchEvent(new PointerEvent('pointerup', pen));
+      useEditor.getState().setTool('select');
+      document.querySelector<HTMLButtonElement>('button[aria-label="Save scene"]')!.click();
+      document.body.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'z',
+          code: 'KeyZ',
+          ctrlKey: !navigator.platform.includes('Mac'),
+          metaKey: navigator.platform.includes('Mac'),
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+    } finally {
+      performance.now = now;
+    }
+  }, point);
+  await downloading;
+  await expect.poll(() => inStore(page, (state) => state.tool)).toBe('select');
+  await expect.poll(() => mesh(page)).toEqual(before);
 });
 
 test('fills the path of a fast small-brush pen sweep in one undo step', async ({ page }) => {

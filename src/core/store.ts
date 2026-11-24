@@ -5005,15 +5005,37 @@ useEditor.subscribe((state, previous) => {
     recordNotification(state.toast.message, state.toast.kind);
 });
 
-let finishSculptStroke: ((action: () => void) => boolean) | null = null;
+// Editor commands can outlive the viewport tool that queued them.
+let sculptIsFinishing: (() => boolean) | null = null;
+const afterSculptActions: (() => void)[] = [];
+let runningSculptAction = false;
 
-export function useSculptStrokeFinisher(finish: typeof finishSculptStroke) {
-  finishSculptStroke = finish;
+export function setSculptCompletionGate(gate: typeof sculptIsFinishing) {
+  sculptIsFinishing = gate;
+  if (!gate && afterSculptActions.length) queueMicrotask(flushSculptActions);
 }
 
 export function afterReleasedSculpt(action: () => void): boolean {
-  return finishSculptStroke?.(action) ?? false;
+  if (!sculptIsFinishing?.() && (runningSculptAction || !afterSculptActions.length)) return false;
+  afterSculptActions.push(action);
+  return true;
 }
+
+export function flushSculptActions() {
+  if (runningSculptAction) return;
+  runningSculptAction = true;
+  try {
+    while (afterSculptActions.length && !sculptIsFinishing?.() && !useEditor.getState().busy) {
+      afterSculptActions.shift()!();
+    }
+  } finally {
+    runningSculptAction = false;
+  }
+}
+
+useEditor.subscribe((state, previous) => {
+  if (previous.busy && !state.busy && afterSculptActions.length) queueMicrotask(flushSculptActions);
+});
 
 let sharedSculptQueueGuard: ((geometry: BufferGeometry) => boolean) | null = null;
 
