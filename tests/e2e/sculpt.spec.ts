@@ -396,7 +396,104 @@ test('preserves Undo behind Save after leaving Sculpt', async ({ page }) => {
   }, point);
   await downloading;
   await expect.poll(() => inStore(page, (state) => state.tool)).toBe('select');
+  await expect.poll(() => inStore(page, (state) => state.future.length)).toBe(1);
   await expect.poll(() => mesh(page)).toEqual(before);
+});
+
+test('cancels a held press queued behind a busy save after the released stroke detaches', async ({
+  page,
+}) => {
+  await openSculpt(page);
+  const point = await screen(page, [1, 0, 2]);
+  await page.evaluate(async (point) => {
+    const urls = performance.getEntriesByType('resource').map((entry) => entry.name);
+    const { useEditor, afterReleasedSculpt } = await import(
+      urls.find((url) => /\/src\/core\/store\.ts/.test(url))!
+    );
+    const canvas = document.querySelector('canvas')!;
+    const now = performance.now.bind(performance);
+    let elapsed = now();
+    const pen = {
+      clientX: point.x,
+      clientY: point.y,
+      pointerType: 'pen',
+      isPrimary: true,
+      pressure: 0.8,
+      bubbles: true,
+    };
+    performance.now = () => (elapsed += 8);
+    try {
+      canvas.dispatchEvent(new PointerEvent('pointerdown', { ...pen, pointerId: 40, buttons: 1 }));
+      canvas.dispatchEvent(new PointerEvent('pointerup', { ...pen, pointerId: 40 }));
+      afterReleasedSculpt(() => useEditor.getState().setBusy('Preparing scene file…'));
+      canvas.dispatchEvent(new PointerEvent('pointerdown', { ...pen, pointerId: 41, buttons: 1 }));
+    } finally {
+      performance.now = now;
+    }
+  }, point);
+  await expect
+    .poll(() => inStore(page, (state) => [state.busy, state.sculpt?.past.length]))
+    .toEqual(['Preparing scene file…', 1]);
+  await page.keyboard.press('Escape');
+  await page.evaluate(async (point) => {
+    const urls = performance.getEntriesByType('resource').map((entry) => entry.name);
+    const { useEditor, afterReleasedSculpt } = await import(
+      urls.find((url) => /\/src\/core\/store\.ts/.test(url))!
+    );
+    document.querySelector('canvas')!.dispatchEvent(
+      new PointerEvent('pointerup', {
+        clientX: point.x,
+        clientY: point.y,
+        pointerType: 'pen',
+        pointerId: 41,
+        isPrimary: true,
+        bubbles: true,
+      }),
+    );
+    afterReleasedSculpt(() =>
+      useEditor.getState().patchParts(['block'], { name: 'Queue settled' }),
+    );
+    useEditor.getState().setBusy(null);
+  }, point);
+  await expect
+    .poll(() => inStore(page, (state) => [state.scene.parts[0].name, state.sculpt?.past.length]))
+    .toEqual(['Queue settled', 1]);
+});
+
+test('takes the free-transform baseline after a released stroke commits', async ({ page }) => {
+  await openSculpt(page);
+  const before = await mesh(page);
+  const point = await screen(page, [1, 0, 2]);
+  await page.evaluate(async (point) => {
+    const urls = performance.getEntriesByType('resource').map((entry) => entry.name);
+    const { useEditor } = await import(urls.find((url) => /\/src\/core\/store\.ts/.test(url))!);
+    const now = performance.now.bind(performance);
+    let elapsed = now();
+    performance.now = () => (elapsed += 8);
+    try {
+      const canvas = document.querySelector('canvas')!;
+      const pen = {
+        clientX: point.x,
+        clientY: point.y,
+        pointerType: 'pen',
+        pointerId: 40,
+        isPrimary: true,
+        pressure: 0.8,
+        bubbles: true,
+      };
+      canvas.dispatchEvent(new PointerEvent('pointerdown', { ...pen, buttons: 1 }));
+      canvas.dispatchEvent(new PointerEvent('pointerup', pen));
+      useEditor.getState().beginFreeTransform('translate');
+    } finally {
+      performance.now = now;
+    }
+  }, point);
+  await expect.poll(() => inStore(page, (state) => Boolean(state.freeTransform))).toBe(true);
+  await expect.poll(async () => (await mesh(page)).triangles).toBeGreaterThan(before.triangles);
+  const sculpted = await mesh(page);
+  await page.keyboard.press('Escape');
+  await expect.poll(() => inStore(page, (state) => Boolean(state.freeTransform))).toBe(false);
+  expect(await mesh(page)).toEqual(sculpted);
 });
 
 test('fills the path of a fast small-brush pen sweep in one undo step', async ({ page }) => {

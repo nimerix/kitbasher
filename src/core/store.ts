@@ -4551,6 +4551,7 @@ export const useEditor = create<EditorState>((set, get) => ({
       }),
     ),
   beginFreeTransform: (mode) => {
+    if (afterReleasedSculpt(() => get().beginFreeTransform(mode))) return false;
     const state = get();
     if (state.busy || state.modal || state.freeTransform) return false;
     const selection = transformSelection(
