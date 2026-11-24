@@ -241,7 +241,9 @@ export function joinLiveSession() {
     if (!replacing && (first || replaced)) {
       dirtyEdit = null;
       edits.length = 0;
-      if (replaced && useEditor.getState().sculpt) useEditor.getState().setTool('select');
+      // A released stroke still draining belongs to the previous scene.
+      if (replaced && useEditor.getState().sculpt)
+        useEditor.setState({ tool: 'select', sculpt: null });
     } else {
       const optimistic = acceptedSculpt?.edit ?? (activeSculptObserved ? null : activeEdit);
       const pending = optimistic ? [optimistic, ...unsent] : unsent;
