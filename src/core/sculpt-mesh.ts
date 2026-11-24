@@ -60,6 +60,7 @@ interface Incidence {
   representative: Uint32Array<ArrayBuffer>;
   faceStart: Uint32Array<ArrayBuffer>;
   incidentFaces: Uint32Array<ArrayBuffer>;
+  adjacent: Int32Array<ArrayBuffer>;
   edits: ReadonlyMap<number, ReadonlySet<number>>;
 }
 
@@ -101,7 +102,8 @@ function weldVertices(position: Attribute) {
   const bits = new Uint32Array(coordinate.buffer);
   function hash(value: number) {
     coordinate[0] = value || 0;
-    return Math.imul(bits[0], 0x45d9f3b) ^ bits[1];
+    const mixed = Math.imul(bits[0] ^ bits[1], 0x85ebca6b);
+    return mixed ^ (mixed >>> 16);
   }
   let count = 0;
   for (let vertex = 0; vertex < position.count; vertex++) {
@@ -140,22 +142,23 @@ function buildFaceIncidence(weldOf: Uint32Array, weldCount: number, corners: Arr
   return { faceStart, incidentFaces };
 }
 
-/** Two render vertices at the same point are a seam only when their faces share a valid edge. */
-function weldSeams(position: Attribute, corners: ArrayLike<number>) {
-  const { weldOf, representative } = weldVertices(position);
-  if (representative.length === position.count) return { weldOf, representative };
-  const duplicates = new Uint8Array(representative.length);
-  for (let vertex = 0; vertex < weldOf.length; vertex++)
-    if (representative[weldOf[vertex]] !== vertex) duplicates[weldOf[vertex]] = 1;
-  const { faceStart, incidentFaces } = buildFaceIncidence(weldOf, representative.length, corners);
-  const parent = Uint32Array.from(weldOf, (_weld, vertex) => vertex);
-  function root(vertex: number) {
-    while (parent[vertex] !== vertex) {
-      parent[vertex] = parent[parent[vertex]];
-      vertex = parent[vertex];
+/** Link corners through edges, then give each disconnected fan its own render vertex. */
+function weldSeams(position: Attribute, corners: Uint32Array) {
+  const { weldOf: coordinateOf, representative } = weldVertices(position);
+  const { faceStart, incidentFaces } = buildFaceIncidence(
+    coordinateOf,
+    representative.length,
+    corners,
+  );
+  const parent = Uint32Array.from(corners, (_vertex, corner) => corner);
+  function root(corner: number) {
+    while (parent[corner] !== corner) {
+      parent[corner] = parent[parent[corner]];
+      corner = parent[corner];
     }
-    return vertex;
+    return corner;
   }
+  const adjacent = new Int32Array(corners.length).fill(-1);
   const valid = new Uint8Array(corners.length / 3);
   const point = new Vector3(),
     left = new Vector3(),
@@ -173,56 +176,106 @@ function weldSeams(position: Attribute, corners: ArrayLike<number>) {
 
   for (let corner = 0; corner < corners.length; corner++) {
     const face = Math.floor(corner / 3);
+    const end = face * 3 + ((corner + 1) % 3);
     const u = corners[corner];
-    const v = corners[face * 3 + ((corner + 1) % 3)];
-    const a = weldOf[u],
-      b = weldOf[v];
-    if (a === b || !(duplicates[a] || duplicates[b])) continue;
+    const v = corners[end];
+    if (u === v) {
+      parent[root(end)] = root(corner);
+      continue;
+    }
+    const a = coordinateOf[u],
+      b = coordinateOf[v];
     // Looking up the smaller fan avoids walking a high-valence center for every spoke.
     const smaller = faceStart[a + 1] - faceStart[a] <= faceStart[b + 1] - faceStart[b] ? a : b;
-    const opposite = smaller === a ? b : a;
-    let match = -1;
+    let reverse = -1;
+    let matchCount = 0;
     let previous = -1;
     for (let i = faceStart[smaller]; i < faceStart[smaller + 1]; i++) {
       const neighbor = incidentFaces[i];
       if (neighbor === face || neighbor === previous) continue;
       previous = neighbor;
       const start = neighbor * 3;
-      if (
-        weldOf[corners[start]] !== opposite &&
-        weldOf[corners[start + 1]] !== opposite &&
-        weldOf[corners[start + 2]] !== opposite
-      )
-        continue;
-      if (match !== -1) {
-        match = -1; // Non-manifold edge.
-        break;
+      let shared = false;
+      for (let edge = 0; edge < 3; edge++) {
+        const p = start + edge;
+        const q = start + ((edge + 1) % 3);
+        if (coordinateOf[corners[p]] === b && coordinateOf[corners[q]] === a) {
+          shared = true;
+          reverse = p;
+          if (neighbor > face && corners[q] === u && corners[p] === v) {
+            parent[root(q)] = root(corner);
+            parent[root(p)] = root(end);
+          }
+        } else if (coordinateOf[corners[p]] === a && coordinateOf[corners[q]] === b) {
+          shared = true;
+          if (neighbor > face && corners[p] === u && corners[q] === v) {
+            parent[root(p)] = root(corner);
+            parent[root(q)] = root(end);
+          }
+        }
       }
-      match = neighbor;
+      if (shared) matchCount++;
     }
-    if (match <= face || !validTriangle(face) || !validTriangle(match)) continue;
-    for (let edge = 0; edge < 3; edge++) {
-      const reverseU = corners[match * 3 + ((edge + 1) % 3)];
-      const reverseV = corners[match * 3 + edge];
-      if (weldOf[reverseU] !== a || weldOf[reverseV] !== b) continue;
-      parent[root(reverseU)] = root(u);
-      parent[root(reverseV)] = root(v);
-      break;
+    const match = Math.floor(reverse / 3);
+    if (matchCount === 1 && a !== b && reverse !== -1) adjacent[corner] = reverse;
+    else if (matchCount > 1) adjacent[corner] = -2;
+    if (
+      a !== b &&
+      matchCount === 1 &&
+      match > face &&
+      (corners[reverse] !== v || corners[match * 3 + ((reverse + 1) % 3)] !== u) &&
+      validTriangle(face) &&
+      validTriangle(match)
+    ) {
+      parent[root(match * 3 + ((reverse + 1) % 3))] = root(corner);
+      parent[root(reverse)] = root(end);
     }
   }
 
-  const remap = new Int32Array(position.count).fill(-1);
-  const seamRepresentative = new Uint32Array(position.count);
-  let count = 0;
-  for (let vertex = 0; vertex < weldOf.length; vertex++) {
-    const united = root(vertex);
-    if (remap[united] === -1) {
-      remap[united] = count;
-      seamRepresentative[count++] = vertex;
+  const weldOf = new Uint32Array(position.count);
+  const weldByRoot = new Uint32Array(corners.length);
+  const used = new Uint8Array(position.count);
+  const fanRepresentative: number[] = [];
+  const copies: number[] = [];
+  const copyByFan = new Map<number, Map<number, number>>();
+  for (let corner = 0; corner < corners.length; corner++) {
+    const original = corners[corner];
+    const fan = root(corner);
+    if (!weldByRoot[fan]) {
+      weldByRoot[fan] = fanRepresentative.length + 1;
+      fanRepresentative.push(original);
     }
-    weldOf[vertex] = remap[united];
+    const weld = weldByRoot[fan] - 1;
+    if (!used[original]) {
+      used[original] = 1;
+      weldOf[original] = weld;
+    } else if (weldOf[original] !== weld) {
+      let byVertex = copyByFan.get(weld);
+      if (!byVertex) copyByFan.set(weld, (byVertex = new Map()));
+      let duplicate = byVertex.get(original);
+      if (duplicate === undefined) {
+        duplicate = position.count + copies.length;
+        copies.push(original);
+        byVertex.set(original, duplicate);
+        if (fanRepresentative[weld] === original) fanRepresentative[weld] = duplicate;
+      }
+      corners[corner] = duplicate;
+    }
   }
-  return { weldOf, representative: seamRepresentative.slice(0, count) };
+  for (let vertex = 0; vertex < weldOf.length; vertex++) {
+    if (used[vertex]) continue;
+    weldOf[vertex] = fanRepresentative.length;
+    fanRepresentative.push(vertex);
+  }
+  const vertices = copies.length ? resize(weldOf, position.count + copies.length) : weldOf;
+  for (const [weld, byVertex] of copyByFan)
+    for (const duplicate of byVertex.values()) vertices[duplicate] = weld;
+  return {
+    weldOf: vertices,
+    representative: Uint32Array.from(fanRepresentative),
+    adjacent,
+    copies,
+  };
 }
 
 function resize<T extends AttributeArray>(array: T, length: number): T {
@@ -273,10 +326,14 @@ class Footprint {
 
   overlaps(a: Vector3, b: Vector3, c: Vector3) {
     const triangle = this.triangle;
-    this.project(a, triangle.a);
-    this.project(b, triangle.b);
-    this.project(c, triangle.c);
-    return triangle.closestPointToPoint(origin, this.offset).lengthSq() < this.radius ** 2;
+    const squared = this.radius ** 2;
+    if (
+      this.project(a, triangle.a).lengthSq() < squared ||
+      this.project(b, triangle.b).lengthSq() < squared ||
+      this.project(c, triangle.c).lengthSq() < squared
+    )
+      return true;
+    return triangle.closestPointToPoint(origin, this.offset).lengthSq() < squared;
   }
 
   distance(point: Vector3) {
@@ -304,11 +361,14 @@ export class SculptMesh {
   private representative = new Uint32Array(0);
   private faceStart = new Uint32Array(0);
   private incidentFaces = new Uint32Array(0);
+  private adjacent = new Int32Array(0);
   private baseEdits: ReadonlyMap<number, ReadonlySet<number>> = new Map();
   private incidentEdits = new Map<number, Set<number>>();
   private readonly editedFaces = new Set<number>();
   private grabSamples: Map<number, SculptSample> | undefined;
   private changed = false;
+  private readonly facePoints = [new Vector3(), new Vector3(), new Vector3()];
+  private readonly faceEdges = [new Vector3(), new Vector3()];
 
   constructor(source: BufferGeometry, matrixWorld: Matrix4, mask?: Float32Array) {
     this.source = source;
@@ -344,7 +404,10 @@ export class SculptMesh {
   }
 
   getMask() {
-    return (this.geometry.getAttribute(maskName).array as Float32Array).slice(0, this.vertexCount);
+    return (this.geometry.getAttribute(maskName).array as Float32Array).slice(
+      0,
+      this.changed ? this.vertexCount : this.initialVertices,
+    );
   }
 
   /** Build or reuse incidence before pen-down when the controller has an idle opportunity. */
@@ -356,21 +419,25 @@ export class SculptMesh {
       cached.position === this.source.getAttribute('position') &&
       cached.index === this.source.index
     ) {
-      const { weldOf, representative, faceStart, incidentFaces, edits } = cached.incidence;
+      const { weldOf, representative, faceStart, incidentFaces, adjacent, edits } =
+        cached.incidence;
       this.weldOf = weldOf;
       this.representative = representative;
       this.weldCount = representative.length;
       this.faceStart = faceStart;
       this.incidentFaces = incidentFaces;
+      this.adjacent = adjacent;
       this.baseEdits = edits;
       return;
     }
     this.buildIncidence();
+    if (this.vertexCount !== this.initialVertices) return;
     rememberIncidence(this.source, {
       weldOf: this.weldOf,
       representative: this.representative,
       faceStart: this.faceStart,
       incidentFaces: this.incidentFaces,
+      adjacent: this.adjacent,
       edits: this.baseEdits,
     });
   }
@@ -481,12 +548,36 @@ export class SculptMesh {
   }
 
   private buildIncidence() {
-    const faces = this.geometry.index!.array.subarray(0, this.faceCount * 3);
-    const { weldOf, representative } = weldSeams(this.attribute('position'), faces);
-    this.weldOf = weldOf;
-    this.representative = representative;
+    const faces = (this.geometry.index!.array as Uint32Array).subarray(0, this.faceCount * 3);
+    const { weldOf, representative, adjacent, copies } = weldSeams(
+      this.attribute('position'),
+      faces,
+    );
+    if (copies.length) {
+      this.ensureCapacity(this.vertexCount + copies.length, this.faceCount);
+      for (const attribute of Object.values(this.geometry.attributes) as BufferAttribute[]) {
+        const { array, itemSize } = attribute;
+        for (let copy = 0; copy < copies.length; copy++) {
+          const source = copies[copy] * itemSize;
+          array.copyWithin((this.vertexCount + copy) * itemSize, source, source + itemSize);
+        }
+        attribute.needsUpdate = true;
+      }
+      this.vertexCount += copies.length;
+      this.syncCounts();
+      this.geometry.index!.needsUpdate = true;
+    }
+    const capacity = this.attribute('position').array.length / 3;
+    this.weldOf = capacity === weldOf.length ? weldOf : resize(weldOf, capacity);
+    this.representative =
+      capacity === weldOf.length ? representative : resize(representative, capacity);
+    this.adjacent = adjacent;
     this.weldCount = representative.length;
-    const { faceStart, incidentFaces } = buildFaceIncidence(weldOf, this.weldCount, faces);
+    const { faceStart, incidentFaces } = buildFaceIncidence(
+      weldOf,
+      this.weldCount,
+      this.geometry.index!.array.subarray(0, this.faceCount * 3),
+    );
     this.faceStart = faceStart;
     this.incidentFaces = incidentFaces;
   }
@@ -513,8 +604,9 @@ export class SculptMesh {
   }
 
   private maskAt(weld: number) {
-    let protection = 0;
     const attribute = this.attribute(maskName);
+    if (this.vertexCount === this.weldCount) return attribute.getX(this.representative[weld]);
+    let protection = 0;
     for (const face of this.incidence(weld)) {
       for (const vertex of this.face(face))
         if (this.weldOf[vertex] === weld) protection = Math.max(protection, attribute.getX(vertex));
@@ -579,11 +671,12 @@ export class SculptMesh {
   }
 
   private overlaps(id: number, footprint: Footprint) {
-    const vertices = this.face(id);
-    const a = this.worldAt(vertices[0]);
-    const b = this.worldAt(vertices[1]);
-    const c = this.worldAt(vertices[2]);
-    const normal = new Vector3().subVectors(b, a).cross(new Vector3().subVectors(c, a));
+    const index = this.geometry.index!.array;
+    const start = id * 3;
+    const a = this.worldAt(index[start], this.facePoints[0]);
+    const b = this.worldAt(index[start + 1], this.facePoints[1]);
+    const c = this.worldAt(index[start + 2], this.facePoints[2]);
+    const normal = this.faceEdges[0].subVectors(b, a).cross(this.faceEdges[1].subVectors(c, a));
     const facing = normal.dot(footprint.normal) * this.orientation;
     return Number.isFinite(facing) && facing > 0 && footprint.overlaps(a, b, c);
   }
@@ -592,22 +685,37 @@ export class SculptMesh {
     const faces = new Set<number>();
     const seed = footprint.hit.face;
     if (seed < 0 || seed >= this.faceCount || !Number.isInteger(seed)) return faces;
-    const visited = new Set<number>([seed]);
+    const visited = new Uint8Array(this.faceCount);
+    visited[seed] = 1;
     const queue = [seed];
+    const index = this.geometry.index!.array;
+    const weldOf = this.weldOf;
+    const enqueue = (neighbor: number) => {
+      if (visited[neighbor]) return;
+      visited[neighbor] = 1;
+      queue.push(neighbor);
+    };
     for (let i = 0; i < queue.length; i++) {
       const face = queue[i];
       if (!this.overlaps(face, footprint)) continue;
       faces.add(face);
-      const vertices = this.face(face);
+      const start = face * 3;
       for (let edge = 0; edge < 3; edge++) {
-        const a = this.weldOf[vertices[edge]];
-        const b = this.weldOf[vertices[(edge + 1) % 3]];
-        const incidents = this.splittableFaces(a, b);
-        if (incidents.length !== 2) continue;
-        for (const neighbor of incidents) {
-          if (visited.has(neighbor)) continue;
-          visited.add(neighbor);
-          queue.push(neighbor);
+        const a = weldOf[index[start + edge]];
+        const b = weldOf[index[start + ((edge + 1) % 3)]];
+        const reverse = this.adjacent[start + edge];
+        if (
+          reverse === undefined ||
+          reverse === -2 ||
+          this.incidentEdits.has(a) ||
+          this.baseEdits.has(a)
+        ) {
+          const incidents = this.splittableFaces(a, b);
+          if (incidents.length === 2) enqueue(incidents[0] === face ? incidents[1] : incidents[0]);
+        } else if (reverse >= 0) {
+          const neighbor = Math.floor(reverse / 3);
+          const end = neighbor * 3 + ((reverse + 1) % 3);
+          if (weldOf[index[reverse]] === b && weldOf[index[end]] === a) enqueue(neighbor);
         }
       }
     }
@@ -740,20 +848,34 @@ export class SculptMesh {
       settings.radius * MathUtils.lerp(0.95, 0.22, settings.detail),
     );
     const minEdgeSquared = (settings.minEdge ?? 0) ** 2;
-    const queue = [...new Set(brushes.flatMap(({ faces }) => [...faces]))];
+    const queue =
+      brushes.length === 1
+        ? [...brushes[0].faces]
+        : [...new Set(brushes.flatMap(({ faces }) => [...faces]))];
+    const edited = new Set<number>();
+    const points = [new Vector3(), new Vector3(), new Vector3()];
+    const targetSquared = target ** 2;
     for (let i = 0; i < queue.length; i++) {
       const id = queue[i];
-      const active = brushes.filter(
-        ({ faces, footprint }) => faces.has(id) && this.overlaps(id, footprint),
-      );
-      if (!active.length) continue;
+      if (
+        edited.has(id) &&
+        !brushes.some(({ faces, footprint }) => faces.has(id) && this.overlaps(id, footprint))
+      )
+        continue;
       const vertices = this.face(id);
-      const points = vertices.map((vertex) => this.worldAt(vertex));
-      const protectedFace =
+      for (let corner = 0; corner < 3; corner++) this.worldAt(vertices[corner], points[corner]);
+      if (
+        points[0].distanceToSquared(points[1]) <= targetSquared &&
+        points[1].distanceToSquared(points[2]) <= targetSquared &&
+        points[2].distanceToSquared(points[0]) <= targetSquared
+      )
+        continue;
+      if (
         settings.brush !== 'mask' &&
-        vertices.every((vertex) => this.maskAt(this.weldOf[vertex]) === 1);
-      if (protectedFace) continue;
-      let longest = target ** 2;
+        vertices.every((vertex) => this.maskAt(this.weldOf[vertex]) === 1)
+      )
+        continue;
+      let longest = targetSquared;
       let choice: { a: number; b: number; faces: number[] } | undefined;
       for (let edge = 0; edge < 3; edge++) {
         const next = (edge + 1) % 3;
@@ -790,11 +912,13 @@ export class SculptMesh {
       splits.push(split);
       for (const { id: parent, child } of split.faces) {
         for (const { faces } of brushes) if (faces.has(parent)) faces.add(child);
+        edited.add(parent);
+        edited.add(child);
         queue.push(parent, child);
       }
     }
     for (const { faces, footprint } of brushes)
-      for (const id of faces) if (!this.overlaps(id, footprint)) faces.delete(id);
+      for (const id of edited) if (faces.has(id) && !this.overlaps(id, footprint)) faces.delete(id);
     return splits;
   }
 
@@ -897,30 +1021,119 @@ export class SculptMesh {
   }
 
   private renderVertices(weld: number) {
+    if (this.vertexCount === this.weldCount) return [this.representative[weld]];
     const vertices = new Set<number>();
     for (const id of this.incidence(weld))
       for (const vertex of this.face(id)) if (this.weldOf[vertex] === weld) vertices.add(vertex);
     return vertices;
   }
 
-  private localFaceCross(id: number) {
-    const [ia, ib, ic] = this.face(id);
+  private localFaceCross(id: number, cross = new Vector3()) {
+    const index = this.geometry.index!.array;
+    const start = id * 3;
     const position = this.attribute('position');
-    const a = new Vector3().fromBufferAttribute(position, ia);
-    const cross = new Vector3()
-      .fromBufferAttribute(position, ib)
+    const a = this.facePoints[0].fromBufferAttribute(position, index[start]);
+    cross
+      .fromBufferAttribute(position, index[start + 1])
       .sub(a)
-      .cross(new Vector3().fromBufferAttribute(position, ic).sub(a));
+      .cross(this.facePoints[1].fromBufferAttribute(position, index[start + 2]).sub(a));
     return Number.isFinite(cross.lengthSq()) ? cross : cross.set(0, 0, 0);
   }
 
-  private deform(moves: Map<number, Vector3>) {
+  private applyMoves(moves: Map<number, Vector3>) {
     const position = this.attribute('position');
+    const bounds = this.geometry.boundingBox;
+    const sphere = this.geometry.boundingSphere;
+    let first = this.vertexCount;
+    let last = -1;
+    const batch = moves.size > 4096;
+    for (const [weld, local] of moves) {
+      for (const vertex of this.renderVertices(weld)) {
+        position.setXYZ(vertex, local.x, local.y, local.z);
+        if (batch) {
+          first = Math.min(first, vertex);
+          last = Math.max(last, vertex);
+        } else position.addUpdateRange(vertex * 3, 3);
+      }
+      bounds?.expandByPoint(local);
+      if (sphere) sphere.radius = Math.max(sphere.radius, local.distanceTo(sphere.center));
+    }
+    if (batch) position.addUpdateRange(first * 3, (last - first + 1) * 3);
+    position.needsUpdate = true;
+  }
+
+  /** Accumulate area-weighted render normals in flat buffers for widely affected surfaces. */
+  private deformDense(
+    moves: Map<number, Vector3>,
+    changedFaces: Set<number>,
+    output: BufferAttribute,
+  ) {
+    const index = this.geometry.index!.array;
+    const affected = new Uint8Array(this.vertexCount);
+    let first = this.vertexCount;
+    let last = -1;
+    for (const face of changedFaces) {
+      for (let corner = face * 3; corner < face * 3 + 3; corner++) {
+        const vertex = index[corner];
+        affected[vertex] = 1;
+        first = Math.min(first, vertex);
+        last = Math.max(last, vertex);
+      }
+    }
+    const size = (last - first + 1) * 3;
+    const faceCross = new Vector3();
+    const accumulate = () => {
+      const sums = new Float64Array(size);
+      for (let face = 0; face < this.faceCount; face++) {
+        const corner = face * 3;
+        const a = index[corner];
+        const b = index[corner + 1];
+        const c = index[corner + 2];
+        if (!(affected[a] || affected[b] || affected[c])) continue;
+        this.localFaceCross(face, faceCross);
+        // Repeated corners form a zero-area face and contribute nothing.
+        for (let offset = 0; offset < 3; offset++) {
+          const vertex = index[corner + offset];
+          if (!affected[vertex]) continue;
+          const component = (vertex - first) * 3;
+          sums[component] += faceCross.x;
+          sums[component + 1] += faceCross.y;
+          sums[component + 2] += faceCross.z;
+        }
+      }
+      return sums;
+    };
+    const before = accumulate();
+    this.applyMoves(moves);
+    const after = accumulate();
+    const previous = new Vector3();
+    const current = new Vector3();
+    const normal = new Vector3();
+    const rotate = new Quaternion();
+    for (let vertex = first; vertex <= last; vertex++) {
+      if (!affected[vertex]) continue;
+      const component = (vertex - first) * 3;
+      previous.fromArray(before, component);
+      current.fromArray(after, component);
+      if (!previous.lengthSq() || !current.lengthSq()) continue;
+      rotate.setFromUnitVectors(previous.normalize(), current.normalize());
+      normal.fromBufferAttribute(output, vertex).applyQuaternion(rotate).normalize();
+      output.setXYZ(vertex, normal.x, normal.y, normal.z);
+    }
+    output.addUpdateRange(first * 3, size);
+    output.needsUpdate = true;
+  }
+
+  private deform(moves: Map<number, Vector3>) {
     const outputNormals = this.geometry.getAttribute('normal') as BufferAttribute | undefined;
     const changedFaces = new Set<number>();
     for (const weld of moves.keys())
       for (const face of this.incidence(weld)) changedFaces.add(face);
     for (const face of changedFaces) this.editedFaces.add(face);
+    if (outputNormals && changedFaces.size > Math.max(4096, this.faceCount / 8)) {
+      this.deformDense(moves, changedFaces, outputNormals);
+      return;
+    }
     const normals = new Map<number, Vector3>();
     const renderFaces = new Map<number, Set<number>>();
     const faceBefore = new Map<number, Vector3>();
@@ -941,17 +1154,7 @@ export class SculptMesh {
         }
       }
     }
-    const bounds = this.geometry.boundingBox;
-    const sphere = this.geometry.boundingSphere;
-    for (const [weld, local] of moves) {
-      for (const vertex of this.renderVertices(weld)) {
-        position.setXYZ(vertex, local.x, local.y, local.z);
-        position.addUpdateRange(vertex * 3, 3);
-      }
-      bounds?.expandByPoint(local);
-      if (sphere) sphere.radius = Math.max(sphere.radius, local.distanceTo(sphere.center));
-    }
-    position.needsUpdate = true;
+    this.applyMoves(moves);
     if (outputNormals) {
       const after = new Map<number, Vector3>();
       const rotate = new Quaternion();
@@ -990,11 +1193,18 @@ export class SculptMesh {
       });
       splits = this.refine(settings, brushes);
       samples = new Map();
+      const visited = new Uint8Array(this.weldCount);
+      const index = this.geometry.index!.array;
+      const point = new Vector3();
       for (const { footprint, faces, mirrored } of brushes) {
+        const pass = mirrored ? 2 : 1;
         for (const face of faces) {
-          for (const vertex of this.face(face)) {
+          for (let i = face * 3; i < face * 3 + 3; i++) {
+            const vertex = index[i];
             const weld = this.weldOf[vertex];
-            const weight = this.weight(footprint, this.worldAt(vertex), settings);
+            if (visited[weld] === pass) continue;
+            visited[weld] = pass;
+            const weight = this.weight(footprint, this.worldAt(vertex, point), settings);
             if (weight > (samples.get(weld)?.weight ?? 0))
               samples.set(weld, { footprint, weight, mirrored });
           }
@@ -1056,15 +1266,22 @@ export class SculptMesh {
     if (moves.size) this.deform(moves);
     if (masks.size) {
       const mask = this.attribute(maskName);
+      const batch = masks.size > 4096;
+      let first = this.vertexCount;
+      let last = -1;
       for (const [weld, value] of masks) {
         for (const vertex of this.renderVertices(weld)) {
           mask.setX(vertex, value);
-          mask.addUpdateRange(vertex, 1);
+          if (batch) {
+            first = Math.min(first, vertex);
+            last = Math.max(last, vertex);
+          } else mask.addUpdateRange(vertex, 1);
         }
       }
+      if (batch) mask.addUpdateRange(first, last - first + 1);
       mask.needsUpdate = true;
     }
-    this.changed ||= moves.size > 0 || splits.length > 0;
+    this.changed ||= moves.size > 0 || this.vertexCount !== this.initialVertices;
     return true;
   }
 
@@ -1079,9 +1296,13 @@ export class SculptMesh {
     const dirtyBounds = new Box3();
     const sourcePosition = this.source.getAttribute('position');
     const point = new Vector3();
-    for (const face of this.editedFaces)
-      for (const vertex of this.face(face))
+    for (const face of this.editedFaces) {
+      for (let offset = 0; offset < 3; offset++) {
+        const corner = face * 3 + offset;
+        const vertex = this.source.index?.getX(corner) ?? corner;
         dirtyBounds.expandByPoint(point.fromBufferAttribute(sourcePosition, vertex));
+      }
+    }
     const nodes = new Set<number>();
     sourceTree.shapecast({
       intersectsBounds: (bounds, _leaf, _score, _depth, node) => {
@@ -1136,6 +1357,7 @@ export class SculptMesh {
             : this.representative.slice(0, this.weldCount),
         faceStart: this.faceStart,
         incidentFaces: this.incidentFaces,
+        adjacent: this.adjacent,
         edits: new Map([
           ...this.baseEdits,
           ...Array.from(this.incidentEdits, ([vertex, faces]) => [vertex, new Set(faces)] as const),

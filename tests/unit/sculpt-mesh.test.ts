@@ -56,6 +56,27 @@ describe('sculpt mesh', () => {
     for (let i = 0; i < positions.count; i++)
       expect(weights[i]).toBe(Math.hypot(positions.getX(i), positions.getY(i)) < 30 ? 1 : 0);
   });
+  it('updates area-weighted normals across a dense draw footprint', () => {
+    const source = new PlaneGeometry(20, 20, 80, 80);
+    const draft = new SculptMesh(source, identity);
+    expect(draft.dab(dab(new Vector3(), { face: 6480, radius: 8, minEdge: 100 }))).toBe(true);
+    const output = draft.finish()!;
+    const actual = output.getAttribute('normal');
+    const reference = output.clone();
+    reference.computeVertexNormals();
+    const expected = reference.getAttribute('normal');
+    const difference = new Vector3();
+    const normal = new Vector3();
+    let maxError = 0;
+    for (let vertex = 0; vertex < actual.count; vertex++) {
+      difference
+        .fromBufferAttribute(actual, vertex)
+        .sub(normal.fromBufferAttribute(expected, vertex));
+      maxError = Math.max(maxError, difference.length());
+    }
+    expect(maxError).toBeLessThan(1e-6);
+  });
+
   it('adds detail under a small dab in a coarse face, keeping original positions and winding', () => {
     const source = mesh([-4, -3, 0, 4, -3, 0, 0, 4, 0], [0, 1, 2]);
     const draft = new SculptMesh(source, identity);
@@ -148,6 +169,32 @@ describe('sculpt mesh', () => {
       const positions = draft.finish()!.getAttribute('position');
       expect(positions.getZ(0)).toBeGreaterThan(0);
       expect(positions.getZ(3)).toBe(0);
+    },
+  );
+
+  it.each(['draw', 'mask'] as const)(
+    'isolates a shared indexed corner during a %s dab',
+    (brush) => {
+      const source = mesh([0, 0, 0, 2, 0, 0, 0, 2, 0, -2, 0, 0, 0, -2, 0], [0, 1, 2, 0, 3, 4]);
+      source.addGroup(0, 3, 0);
+      source.addGroup(3, 3, 1);
+      source.setAttribute(
+        'color',
+        new BufferAttribute(Uint8Array.from([127, 0, 0, 0, 0]), 1, true),
+      );
+      const draft = new SculptMesh(source, identity, Float32Array.from([0.25, 0, 0, 0, 0]));
+      expect(draft.dab(dab(new Vector3(), { brush, minEdge: 100 }))).toBe(true);
+      const output = draft.finish()!;
+      const first = output.index!.getX(0);
+      const second = output.index!.getX(3);
+      expect(first).not.toBe(second);
+      expect(output.groups).toEqual(source.groups);
+      expect(output.getAttribute('color').array[second]).toBe(127);
+      expect(output.getAttribute('position').getZ(second)).toBe(0);
+      expect(draft.getMask()[second]).toBe(0.25);
+      if (brush === 'draw') expect(output.getAttribute('position').getZ(first)).toBeGreaterThan(0);
+      else expect(draft.getMask()[first]).toBe(1);
+      expect(Array.from(source.index!.array)).toEqual([0, 1, 2, 0, 3, 4]);
     },
   );
 
