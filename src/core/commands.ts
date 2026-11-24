@@ -343,8 +343,21 @@ export function editorCommands(context: CommandContext = {}) {
 
 export type CommandId = keyof ReturnType<typeof editorCommands>;
 
-export function executeEditorCommand(id: CommandId, context: CommandContext = {}) {
-  if (afterReleasedSculpt(() => executeEditorCommand(id, context))) return;
+export function executeEditorCommand(
+  id: CommandId,
+  context: CommandContext = {},
+  deferred = false,
+) {
+  if (afterReleasedSculpt(() => executeEditorCommand(id, context, true))) return;
+  const { busy, sceneEpoch } = useEditor.getState();
+  if (deferred && busy) {
+    const unsubscribe = useEditor.subscribe((state) => {
+      if (state.busy && state.sceneEpoch === sceneEpoch) return;
+      unsubscribe();
+      if (state.sceneEpoch === sceneEpoch) executeEditorCommand(id, context, true);
+    });
+    return;
+  }
   const command = editorCommands(context)[id];
   useEditor.getState().closeContextMenu();
   if (command.enabled) command.run();

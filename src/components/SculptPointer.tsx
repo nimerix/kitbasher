@@ -81,6 +81,13 @@ interface Stroke {
   applied: Sample | null;
 }
 
+const sculptPreviews = new WeakMap<Mesh, BufferGeometry>();
+
+export function restoreSculptPreview(mesh: Mesh) {
+  const preview = sculptPreviews.get(mesh);
+  if (preview) mesh.geometry = preview;
+}
+
 export function SculptPointer() {
   const get = useThree((s) => s.get);
   const invalidate = useThree((s) => s.invalidate);
@@ -408,6 +415,7 @@ export function SculptPointer() {
       if (active.controls) active.controls.enabled = active.controlsEnabled;
       if (!active.released && canvas.hasPointerCapture(active.id))
         canvas.releasePointerCapture(active.id);
+      sculptPreviews.delete(active.own);
       if (active.own.geometry === active.draft.geometry) active.own.geometry = active.before;
       overlay.visible = false;
       if (overlay.geometry === active.draft.geometry) overlay.geometry = emptyOverlay;
@@ -641,6 +649,7 @@ export function SculptPointer() {
         work: null,
       };
       if (controls) controls.enabled = false;
+      sculptPreviews.set(own, draft.geometry);
       own.geometry = draft.geometry;
       hover = event;
       schedule();
@@ -720,6 +729,7 @@ export function SculptPointer() {
       if (event.key !== 'Escape' || !stroke) return;
       event.preventDefault();
       event.stopImmediatePropagation();
+      if (queuedPointer) cancel(queuedPointer.down);
       if (!stroke.released) detach(false);
     };
     const blur = () => {

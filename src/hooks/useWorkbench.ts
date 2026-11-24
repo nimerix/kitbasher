@@ -348,11 +348,7 @@ export function useKeyboard(openScene: () => void, searchParts: () => void) {
     };
     const up = (event: KeyboardEvent) => {
       if (event.key === 'Shift') useEditor.setState({ precision: false });
-      if (
-        useEditor.getState().temporaryOrbit &&
-        orbitKey !== null &&
-        (event.code || keyName(event.key)) === orbitKey
-      ) {
+      if (orbitKey !== null && (event.code || keyName(event.key)) === orbitKey) {
         event.preventDefault();
         orbitKey = null;
         useEditor.setState({ temporaryOrbit: false });

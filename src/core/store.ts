@@ -4755,7 +4755,8 @@ export const useEditor = create<EditorState>((set, get) => ({
           ? { scene: { ...state.scene, parts } }
           : changed(state, { ...state.scene, parts }, checkpoint);
     }),
-  patchParts: (ids, patch, checkpoint = true) =>
+  patchParts: (ids, patch, checkpoint = true) => {
+    if (afterReleasedSculpt(() => get().patchParts(ids, patch, checkpoint))) return;
     set((state) => {
       const keys = Object.keys(patch) as (keyof Part)[];
       const differs = (part: Part) =>
@@ -4769,8 +4770,10 @@ export const useEditor = create<EditorState>((set, get) => ({
         },
         checkpoint,
       );
-    }),
+    });
+  },
   setDisplayColor: (ids, color, checkpoint = true) => {
+    if (afterReleasedSculpt(() => get().setDisplayColor(ids, color, checkpoint))) return;
     set((state) => {
       const targets = new Set(ids);
       if (
