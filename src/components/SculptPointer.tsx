@@ -724,11 +724,11 @@ export function SculptPointer() {
       if (stroke?.id === event.pointerId && !stroke.released) detach(false);
     };
     const escape = (event: KeyboardEvent) => {
-      if (event.key !== 'Escape' || !stroke) return;
+      if (event.key !== 'Escape' || (!stroke && !queuedPointer)) return;
       event.preventDefault();
       event.stopImmediatePropagation();
       if (queuedPointer) cancel(queuedPointer.down);
-      if (!stroke.released) detach(false);
+      if (stroke && !stroke.released) detach(false);
     };
     const blur = () => {
       hover = null;
