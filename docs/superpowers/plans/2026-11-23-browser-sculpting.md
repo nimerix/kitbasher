@@ -36,3 +36,13 @@ exceeded the 60 Hz frame budget on the tested fixtures.
 
 Run `KITBASHER_SCULPT_VIEWPORT_BENCH=1 npm run test:e2e -- tests/e2e/sculpt-benchmark.spec.ts` to
 repeat the viewport measurements.
+
+## Wide dab measurements
+
+A 500,000-triangle sheet with a full-footprint 80 mm brush took 213 ms of CPU work for Mask
+and 393 ms for Draw. The viewport spreads that work across frames. In the CPU probe, slices
+targeted 6 ms and measured 6.4 ms at p95, with a 9.4 ms worst slice. The Draw commit took
+19 ms. Preparing the first draft took 166 ms. These times exclude browser rendering.
+
+Run `KITBASHER_SCULPT_BENCH=1 npx vitest run tests/unit/sculpt-benchmark.test.ts` to repeat
+the wide dab measurements.

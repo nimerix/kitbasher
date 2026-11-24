@@ -86,6 +86,9 @@ function rememberIncidence(source: BufferGeometry, incidence: Incidence) {
   };
 }
 
+// Let the caller enforce a frame budget between batches on large footprints.
+const batchMask = 511;
+
 const maxSplitsPerDab = 192;
 /** Source meshes larger than this remain brushable at their available density. */
 const maxRefinedFaceCount = 1_200_000;
@@ -365,6 +368,8 @@ export class SculptMesh {
   private baseEdits: ReadonlyMap<number, ReadonlySet<number>> = new Map();
   private incidentEdits = new Map<number, Set<number>>();
   private readonly editedFaces = new Set<number>();
+  private readonly editedFaceBuckets = new Map<number, { bounds: Box3; faces: number[] }>();
+  private readonly editedPoint = new Vector3();
   private grabSamples: Map<number, SculptSample> | undefined;
   private changed = false;
   private readonly facePoints = [new Vector3(), new Vector3(), new Vector3()];
@@ -442,6 +447,20 @@ export class SculptMesh {
     });
   }
 
+  private trackEditedFace(face: number) {
+    const key = Math.floor(face / 128);
+    let bucket = this.editedFaceBuckets.get(key);
+    if (!bucket) this.editedFaceBuckets.set(key, (bucket = { bounds: new Box3(), faces: [] }));
+    if (!this.editedFaces.has(face)) {
+      this.editedFaces.add(face);
+      bucket.faces.push(face);
+    }
+    const position = this.attribute('position');
+    const index = this.geometry.index!.array;
+    for (let corner = face * 3; corner < face * 3 + 3; corner++)
+      bucket.bounds.expandByPoint(this.editedPoint.fromBufferAttribute(position, index[corner]));
+  }
+
   /** Unedited faces remain in the source index. Test edited faces at their live positions. */
   raycast(raycaster: Raycaster, mesh: Mesh, hits: Intersection[]) {
     const tree = this.source.boundsTree;
@@ -481,32 +500,35 @@ export class SculptMesh {
       b = new Vector3(),
       c = new Vector3(),
       point = new Vector3();
-    for (const faceIndex of this.editedFaces) {
-      const [ia, ib, ic] = this.face(faceIndex);
-      a.fromBufferAttribute(position, ia);
-      b.fromBufferAttribute(position, ib);
-      c.fromBufferAttribute(position, ic);
-      const contact =
-        side === BackSide
-          ? ray.intersectTriangle(c, b, a, true, point)
-          : ray.intersectTriangle(a, b, c, side === FrontSide, point);
-      if (!contact) continue;
-      point.applyMatrix4(world);
-      const distance = point.distanceTo(raycaster.ray.origin);
-      if (distance < raycaster.near || distance > raycaster.far) continue;
-      found.push({
-        distance,
-        point: point.clone(),
-        object: mesh,
-        faceIndex,
-        face: {
-          a: ia,
-          b: ib,
-          c: ic,
-          normal: Triangle.getNormal(a, b, c, new Vector3()),
-          materialIndex: 0,
-        },
-      });
+    for (const bucket of this.editedFaceBuckets.values()) {
+      if (!ray.intersectsBox(bucket.bounds)) continue;
+      for (const faceIndex of bucket.faces) {
+        const [ia, ib, ic] = this.face(faceIndex);
+        a.fromBufferAttribute(position, ia);
+        b.fromBufferAttribute(position, ib);
+        c.fromBufferAttribute(position, ic);
+        const contact =
+          side === BackSide
+            ? ray.intersectTriangle(c, b, a, true, point)
+            : ray.intersectTriangle(a, b, c, side === FrontSide, point);
+        if (!contact) continue;
+        point.applyMatrix4(world);
+        const distance = point.distanceTo(raycaster.ray.origin);
+        if (distance < raycaster.near || distance > raycaster.far) continue;
+        found.push({
+          distance,
+          point: point.clone(),
+          object: mesh,
+          faceIndex,
+          face: {
+            a: ia,
+            b: ib,
+            c: ic,
+            normal: Triangle.getNormal(a, b, c, new Vector3()),
+            materialIndex: 0,
+          },
+        });
+      }
     }
     found.sort((a, b) => a.distance - b.distance);
     hits.push(...(raycaster.firstHitOnly ? found.slice(0, 1) : found));
@@ -681,7 +703,7 @@ export class SculptMesh {
     return Number.isFinite(facing) && facing > 0 && footprint.overlaps(a, b, c);
   }
 
-  private patch(footprint: Footprint) {
+  private *patch(footprint: Footprint): Generator<void, Set<number>, void> {
     const faces = new Set<number>();
     const seed = footprint.hit.face;
     if (seed < 0 || seed >= this.faceCount || !Number.isInteger(seed)) return faces;
@@ -696,6 +718,7 @@ export class SculptMesh {
       queue.push(neighbor);
     };
     for (let i = 0; i < queue.length; i++) {
+      if (i && (i & batchMask) === 0) yield;
       const face = queue[i];
       if (!this.overlaps(face, footprint)) continue;
       faces.add(face);
@@ -841,7 +864,10 @@ export class SculptMesh {
     this.syncCounts();
   }
 
-  private refine(settings: SculptDab, brushes: { footprint: Footprint; faces: Set<number> }[]) {
+  private *refine(
+    settings: SculptDab,
+    brushes: { footprint: Footprint; faces: Set<number> }[],
+  ): Generator<void, Split[], void> {
     const splits: Split[] = [];
     const target = Math.max(
       settings.minEdge * 2,
@@ -856,6 +882,7 @@ export class SculptMesh {
     const points = [new Vector3(), new Vector3(), new Vector3()];
     const targetSquared = target ** 2;
     for (let i = 0; i < queue.length; i++) {
+      if (i && (i & batchMask) === 0) yield;
       const id = queue[i];
       if (
         edited.has(id) &&
@@ -1040,14 +1067,17 @@ export class SculptMesh {
     return Number.isFinite(cross.lengthSq()) ? cross : cross.set(0, 0, 0);
   }
 
-  private applyMoves(moves: Map<number, Vector3>) {
+  private *applyMoves(moves: Map<number, Vector3>): Generator<void, void, void> {
     const position = this.attribute('position');
     const bounds = this.geometry.boundingBox;
     const sphere = this.geometry.boundingSphere;
     let first = this.vertexCount;
     let last = -1;
     const batch = moves.size > 4096;
+    let count = 0;
     for (const [weld, local] of moves) {
+      if (count && (count & batchMask) === 0) yield;
+      count++;
       for (const vertex of this.renderVertices(weld)) {
         position.setXYZ(vertex, local.x, local.y, local.z);
         if (batch) {
@@ -1063,16 +1093,19 @@ export class SculptMesh {
   }
 
   /** Accumulate area-weighted render normals in flat buffers for widely affected surfaces. */
-  private deformDense(
+  private *deformDense(
     moves: Map<number, Vector3>,
     changedFaces: Set<number>,
     output: BufferAttribute,
-  ) {
+  ): Generator<void, void, void> {
     const index = this.geometry.index!.array;
     const affected = new Uint8Array(this.vertexCount);
     let first = this.vertexCount;
     let last = -1;
+    let count = 0;
     for (const face of changedFaces) {
+      if (count && (count & batchMask) === 0) yield;
+      count++;
       for (let corner = face * 3; corner < face * 3 + 3; corner++) {
         const vertex = index[corner];
         affected[vertex] = 1;
@@ -1082,9 +1115,10 @@ export class SculptMesh {
     }
     const size = (last - first + 1) * 3;
     const faceCross = new Vector3();
-    const accumulate = () => {
+    const accumulate = function* (this: SculptMesh): Generator<void, Float64Array, void> {
       const sums = new Float64Array(size);
       for (let face = 0; face < this.faceCount; face++) {
+        if (face && (face & batchMask) === 0) yield;
         const corner = face * 3;
         const a = index[corner];
         const b = index[corner + 1];
@@ -1103,14 +1137,15 @@ export class SculptMesh {
       }
       return sums;
     };
-    const before = accumulate();
-    this.applyMoves(moves);
-    const after = accumulate();
+    const before = yield* accumulate.call(this);
+    yield* this.applyMoves(moves);
+    const after = yield* accumulate.call(this);
     const previous = new Vector3();
     const current = new Vector3();
     const normal = new Vector3();
     const rotate = new Quaternion();
     for (let vertex = first; vertex <= last; vertex++) {
+      if (vertex !== first && (vertex & batchMask) === 0) yield;
       if (!affected[vertex]) continue;
       const component = (vertex - first) * 3;
       previous.fromArray(before, component);
@@ -1124,14 +1159,18 @@ export class SculptMesh {
     output.needsUpdate = true;
   }
 
-  private deform(moves: Map<number, Vector3>) {
+  private *deform(moves: Map<number, Vector3>): Generator<void, void, void> {
     const outputNormals = this.geometry.getAttribute('normal') as BufferAttribute | undefined;
     const changedFaces = new Set<number>();
-    for (const weld of moves.keys())
+    let count = 0;
+    for (const weld of moves.keys()) {
+      if (count && (count & batchMask) === 0) yield;
+      count++;
       for (const face of this.incidence(weld)) changedFaces.add(face);
-    for (const face of changedFaces) this.editedFaces.add(face);
+    }
     if (outputNormals && changedFaces.size > Math.max(4096, this.faceCount / 8)) {
-      this.deformDense(moves, changedFaces, outputNormals);
+      yield* this.deformDense(moves, changedFaces, outputNormals);
+      yield* this.trackEditedFaces(changedFaces);
       return;
     }
     const normals = new Map<number, Vector3>();
@@ -1139,6 +1178,7 @@ export class SculptMesh {
     const faceBefore = new Map<number, Vector3>();
     if (outputNormals) {
       for (const face of changedFaces) {
+        if ((count++ & batchMask) === 0) yield;
         for (const vertex of this.face(face)) {
           if (renderFaces.has(vertex)) continue;
           const fan = new Set<number>();
@@ -1154,12 +1194,13 @@ export class SculptMesh {
         }
       }
     }
-    this.applyMoves(moves);
+    yield* this.applyMoves(moves);
     if (outputNormals) {
       const after = new Map<number, Vector3>();
       const rotate = new Quaternion();
       const normal = new Vector3();
       for (const [vertex, fan] of renderFaces) {
+        if ((count++ & batchMask) === 0) yield;
         const current = new Vector3();
         for (const face of fan) {
           if (!after.has(face)) after.set(face, this.localFaceCross(face));
@@ -1174,9 +1215,27 @@ export class SculptMesh {
       }
       outputNormals.needsUpdate = true;
     }
+    yield* this.trackEditedFaces(changedFaces);
   }
 
-  dab(settings: SculptDab) {
+  private *trackEditedFaces(faces: Set<number>) {
+    let count = 0;
+    for (const face of faces) {
+      if (count && (count & batchMask) === 0) yield;
+      count++;
+      this.trackEditedFace(face);
+    }
+  }
+
+  dab(settings: SculptDab): boolean {
+    const work = this.dabWork(settings);
+    let result = work.next();
+    while (!result.done) result = work.next();
+    return result.value;
+  }
+
+  /** A cancellable draft operation. The source geometry remains immutable between batches. */
+  *dabWork(settings: SculptDab): Generator<void, boolean, void> {
     if (!(settings.radius > 0 && settings.strength > 0) || !this.orientation) return false;
     if (settings.brush !== 'grab') this.grabSamples = undefined;
     else if (!settings.grab?.lengthSq() && !settings.mirror?.grab?.lengthSq()) return false;
@@ -1184,14 +1243,17 @@ export class SculptMesh {
     const groupCount = this.geometry.groups.length;
     let samples = this.grabSamples;
     let splits: Split[] = [];
+    let count = 0;
     if (!samples) {
       const hits: SculptHit[] = [settings];
       if (settings.mirror) hits.push(settings.mirror);
-      const brushes = hits.map((hit, index) => {
+      const brushes = [];
+      for (const hit of hits) {
         const footprint = new Footprint(hit, settings.radius, settings.aspect ?? 1);
-        return { footprint, faces: this.patch(footprint), mirrored: index === 1 };
-      });
-      splits = this.refine(settings, brushes);
+        const faces = yield* this.patch(footprint);
+        brushes.push({ footprint, faces, mirrored: hit === settings.mirror });
+      }
+      splits = yield* this.refine(settings, brushes);
       samples = new Map();
       const visited = new Uint8Array(this.weldCount);
       const index = this.geometry.index!.array;
@@ -1199,6 +1261,8 @@ export class SculptMesh {
       for (const { footprint, faces, mirrored } of brushes) {
         const pass = mirrored ? 2 : 1;
         for (const face of faces) {
+          if (count && (count & batchMask) === 0) yield;
+          count++;
           for (let i = face * 3; i < face * 3 + 3; i++) {
             const vertex = index[i];
             const weld = this.weldOf[vertex];
@@ -1214,6 +1278,8 @@ export class SculptMesh {
     const moves = new Map<number, Vector3>();
     const masks = new Map<number, number>();
     for (const [weld, { footprint, weight, mirrored }] of samples) {
+      if (count && (count & batchMask) === 0) yield;
+      count++;
       const protection = this.maskAt(weld);
       const strength = Math.min(1, settings.strength) * weight;
       if (settings.brush === 'mask') {
@@ -1259,17 +1325,19 @@ export class SculptMesh {
       this.geometry.index!.needsUpdate = true;
       for (const split of splits)
         for (const { id, child } of split.faces) {
-          this.editedFaces.add(id);
-          this.editedFaces.add(child);
+          this.trackEditedFace(id);
+          this.trackEditedFace(child);
         }
     }
-    if (moves.size) this.deform(moves);
+    if (moves.size) yield* this.deform(moves);
     if (masks.size) {
       const mask = this.attribute(maskName);
       const batch = masks.size > 4096;
       let first = this.vertexCount;
       let last = -1;
       for (const [weld, value] of masks) {
+        if (count && (count & batchMask) === 0) yield;
+        count++;
         for (const vertex of this.renderVertices(weld)) {
           mask.setX(vertex, value);
           if (batch) {
@@ -1293,28 +1361,31 @@ export class SculptMesh {
       !this.editedFaces.size
     )
       return;
-    const dirtyBounds = new Box3();
-    const sourcePosition = this.source.getAttribute('position');
-    const point = new Vector3();
-    for (const face of this.editedFaces) {
-      for (let offset = 0; offset < 3; offset++) {
-        const corner = face * 3 + offset;
-        const vertex = this.source.index?.getX(corner) ?? corner;
-        dirtyBounds.expandByPoint(point.fromBufferAttribute(sourcePosition, vertex));
-      }
-    }
-    const nodes = new Set<number>();
-    sourceTree.shapecast({
-      intersectsBounds: (bounds, _leaf, _score, _depth, node) => {
-        if (!bounds.intersectsBox(dirtyBounds)) return false;
-        nodes.add(node);
-        return true;
-      },
-    });
     const data = MeshBVH.serialize(sourceTree, { cloneBuffers: false });
     const roots = data.roots.map((root) => root.slice(0));
     const tree = MeshBVH.deserialize({ ...data, roots }, geometry, { setIndex: false });
-    tree.refit(nodes);
+    if (this.editedFaces.size * 4 > this.faceCount) tree.refit();
+    else {
+      const dirtyBounds = new Box3();
+      const sourcePosition = this.source.getAttribute('position');
+      const point = new Vector3();
+      for (const face of this.editedFaces) {
+        for (let offset = 0; offset < 3; offset++) {
+          const corner = face * 3 + offset;
+          const vertex = this.source.index?.getX(corner) ?? corner;
+          dirtyBounds.expandByPoint(point.fromBufferAttribute(sourcePosition, vertex));
+        }
+      }
+      const nodes = new Set<number>();
+      sourceTree.shapecast({
+        intersectsBounds: (bounds, _leaf, _score, _depth, node) => {
+          if (!bounds.intersectsBox(dirtyBounds)) return false;
+          nodes.add(node);
+          return true;
+        },
+      });
+      tree.refit(nodes);
+    }
     geometry.boundsTree = tree;
   }
 
