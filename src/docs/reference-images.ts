@@ -2,6 +2,21 @@ import type { DocImage } from './types';
 
 /** Crops of the actual editor, captured by scripts/capture-docs-reference.mjs. */
 export const referenceImages = {
+  sculpt: {
+    src: './images/reference/sculpt.webp',
+    width: 760,
+    height: 800,
+    alt: 'Sculpt inspector with Draw selected, radius, strength and detail fields, symmetry, and mask controls.',
+    caption: 'Choose a brush in the inspector. Its settings appear below the brush buttons.',
+  },
+  warp: {
+    src: './images/reference/warp.webp',
+    width: 1440,
+    height: 1000,
+    alt: 'Scout torso selected with Warp control points on its surface and Point, Line and Area options in the inspector.',
+    caption:
+      'After you lay the grid, select a point on the surface or add a handle with Point, Line or Area.',
+  },
   fileMenu: {
     src: './images/reference/file-menu.webp',
     width: 760,

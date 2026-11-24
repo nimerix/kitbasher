@@ -20,6 +20,47 @@ export interface Release {
 // Newest first. Each title must be unique: it names the release's link.
 export const releases: Release[] = [
   {
+    date: '2026-11-24',
+    title: 'Longer undo history',
+    commit: 'e578cea',
+    changes: [
+      {
+        kind: 'improved',
+        text: 'Undo now keeps up to 120 changes, up from 40. Sculpt strokes share unchanged mesh data so more strokes fit in the available memory.',
+        guide: 'sculpt',
+      },
+    ],
+  },
+  {
+    date: '2026-11-24',
+    title: 'Shared scene reconnection',
+    commit: '367b020',
+    changes: [
+      {
+        kind: 'fixed',
+        text: 'When a shared scene loses its connection, the editor reconnects and checks which sculpt edits reached the scene before retrying.',
+        guide: 'automation',
+      },
+    ],
+  },
+  {
+    date: '2026-11-23',
+    title: 'Sculpt directly on a part',
+    commit: '35dab3f',
+    changes: [
+      {
+        kind: 'new',
+        text: 'Drag a brush to build up clay, carve a crease or pull a patch into shape. Sculpt adds triangles where the stroke needs detail. Each finished stroke is one undo step.',
+        guide: 'sculpt',
+      },
+      {
+        kind: 'new',
+        text: 'Paint a mask to protect nearby details, mirror strokes with Local X symmetry, or use pen pressure to vary brush strength and radius.',
+        guide: 'sculpt',
+      },
+    ],
+  },
+  {
     date: '2026-11-21',
     title: 'Refine edges and surfaces on scans',
     changes: [
@@ -37,10 +78,12 @@ export const releases: Release[] = [
       {
         kind: 'fixed',
         text: 'Long point pulls on flat surfaces have a smoother base, including at 0% falloff.',
+        guide: 'warp',
       },
       {
         kind: 'improved',
         text: 'Voxel remesh now uses a default resolution of 128 and goes up to 1024. Above 256 it fits each vertex to the original surface, so dense scans keep their detail.',
+        guide: 'performance',
       },
     ],
   },
@@ -71,6 +114,7 @@ export const releases: Release[] = [
       {
         kind: 'new',
         text: 'Draw a line or paint an area on the surface and move it as one handle, without a peak at each point.',
+        guide: 'warp',
       },
       {
         kind: 'improved',
@@ -122,6 +166,7 @@ export const releases: Release[] = [
       {
         kind: 'new',
         text: 'Warp deforms a painted region or a whole part with an adjustable grid of control points, then applies the result as one undo step.',
+        guide: 'warp',
       },
       {
         kind: 'new',

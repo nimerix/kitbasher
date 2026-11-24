@@ -31,6 +31,9 @@ export const startGuides: DocArticle[] = [
             ['Match a shaped interface', '3+ point fit or painted contact surfaces'],
             ['Make neighboring outer surfaces flush', 'Paint flush · across seams'],
             ['Keep a pose or mechanical relationship', 'Joints and retained plane constraints'],
+            ['Pull a scanned seam toward its neighbor', 'Warp → Close gap'],
+            ['Shape a detail by hand', 'Sculpt'],
+            ['Restore a rounded edge or uneven face', 'Refine'],
             ['Check a join before export', 'Measure, isolation, and Interference'],
           ],
         },
@@ -71,7 +74,7 @@ export const startGuides: DocArticle[] = [
         title: 'Know the workbench’s scope',
         paragraphs: [
           'Kitbasher runs in modern WebGL browsers on Windows, macOS, and Linux, with a responsive layout for smaller screens. Available memory and graphics capacity limit the size of a scene you can comfortably edit.',
-          'Import preserves geometry and vertex colors; textures, rigging, and animation are not retained. The workbench does not replace a sculpting package, a mesh-repair application, or a print slicer. In particular, a convincing visual fit does not by itself prove that a model is a closed printable solid.',
+          'Import preserves geometry and vertex colors; textures, rigging, and animation are not retained. Check the exported mesh in your slicer or mesh-repair tool before printing. Parts can look flush and still have open edges.',
         ],
       },
     ],
