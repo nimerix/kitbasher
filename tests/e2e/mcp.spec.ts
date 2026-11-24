@@ -424,6 +424,49 @@ test('tabs and the agent edit one scene, each with its own view', async ({ brows
   await context.close();
 });
 
+test('refusing an ordinary shared edit discards its queued undo', async ({ page }) => {
+  await call('add_parts', { parts: model });
+  const { url } = await call('open_live_view', { open_browser: false });
+  await page.goto(url);
+  await expect(page.getByText('Shared with agent')).toBeVisible();
+  const undo = page.getByRole('button', { name: /^Undo \((⌘|Ctrl)\+Z\)$/ });
+  const rename = async (name: string) => {
+    await page.getByTitle('Rename assembly').click();
+    const field = page.getByRole('textbox', { name: 'Assembly name' });
+    await field.fill(name);
+    await field.press('Enter');
+  };
+  await rename('Accepted assembly name');
+  await expect(undo).toBeEnabled();
+
+  let reject = () => {};
+  const held = new Promise<void>((resolve) => {
+    reject = resolve;
+  });
+  const edit = /\/live\/edit$/;
+  await page.route(edit, async (route) => {
+    await held;
+    await route.fulfill({ status: 409, json: { error: 'Edit refused for this test.' } });
+  });
+  const submitted = page.waitForRequest(edit);
+  await rename('Refused assembly name');
+  await submitted;
+  const undoRequests: string[] = [];
+  page.on('request', (request) => {
+    if (/\/live\/undo$/.test(request.url())) undoRequests.push(request.url());
+  });
+  await undo.click();
+  reject();
+  await expect(page.getByText(/edit refused for this test/i)).toBeVisible();
+  await expect(page.getByTitle('Rename assembly')).toHaveText('Accepted assembly name');
+
+  await page.unroute(edit);
+  const nextEdit = page.waitForResponse(edit);
+  await rename('New assembly name');
+  expect((await nextEdit).ok()).toBe(true);
+  expect(undoRequests).toEqual([]);
+});
+
 test('shared sculpt strokes keep their checkpoints and refuse a stale target pose', async ({
   page,
 }) => {
@@ -479,6 +522,13 @@ test('shared sculpt strokes keep their checkpoints and refuse a stale target pos
   );
   expect(secondResponse.request().postDataJSON().checkpoint).toBe(true);
 
+  // The stroke can change geometry through zero-valued weights, which it then discards.
+  const invertMask = page.getByRole('button', { name: 'Invert mask', exact: true });
+  const clearMask = page.getByRole('button', { name: 'Clear mask', exact: true });
+  await invertMask.click();
+  await invertMask.click();
+  await expect(clearMask).toBeEnabled();
+
   blocked = new Promise<void>((resolve) => {
     unpause = resolve;
   });
@@ -486,6 +536,7 @@ test('shared sculpt strokes keep their checkpoints and refuse a stale target pos
   const third = page.waitForRequest((request) => editUrl.test(request.url()) && ofSculpt(request));
   await page.mouse.click(x + 24, y - 7);
   const thirdRequest = await third;
+  await expect(clearMask).toBeDisabled();
   const extraUndo: string[] = [];
   page.on('request', (request) => {
     if (/\/live\/undo$/.test(request.url())) extraUndo.push(request.url());
@@ -498,6 +549,7 @@ test('shared sculpt strokes keep their checkpoints and refuse a stale target pos
   await expect(
     page.getByText(/sculpt target changed before the stroke reached the shared scene/i),
   ).toBeVisible();
+  await expect(clearMask).toBeEnabled();
   expect((await call('get_scene')).parts[0].position).toEqual([2, 0, 0]);
   expect(extraUndo).toEqual([]);
 });
