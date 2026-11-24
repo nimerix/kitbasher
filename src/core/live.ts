@@ -22,6 +22,8 @@ interface OrdinaryEdit {
   scene: SceneDocument;
   checkpoint: boolean;
   replacementId?: string;
+  /** A retried Open must keep the epoch it was first submitted against. */
+  replacementEpoch?: number;
 }
 
 interface SculptEdit {
@@ -276,7 +278,14 @@ export function joinLiveSession() {
       (message.epoch !== acceptedSculpt.epoch || message.version >= acceptedSculpt.version)
     )
       acceptedSculpt = null;
-    const replacing = !!acceptedReplacement || unsent.some(replacementIdOf);
+    const replacing =
+      !!acceptedReplacement ||
+      unsent.some(
+        (edit) =>
+          !('sculpt' in edit) &&
+          edit.replacementId &&
+          (edit.replacementEpoch ?? message.epoch) === message.epoch,
+      );
     const changedScene = !replacing && (first || (replaced && !ownReplacement));
     let next = scene;
     // Changes built on a replaced scene no longer apply, unless we will replace it ourselves.
@@ -395,7 +404,9 @@ export function joinLiveSession() {
     const base = confirmed!;
     const sculpt = 'sculpt' in edit ? edit.sculpt : undefined;
     const checkpoint = 'sculpt' in edit || edit.checkpoint;
-    const replacementId = replacementIdOf(edit);
+    const replacement = !('sculpt' in edit) && edit.replacementId ? edit : null;
+    const replacementId = replacement?.replacementId;
+    const epoch = replacement?.replacementEpoch ?? base.epoch;
     const sceneEpoch = useEditor.getState().sceneEpoch;
     const replacementObserved = () => !!replacementId && confirmed?.replacementId === replacementId;
     const stillApplies = () =>
@@ -406,7 +417,7 @@ export function joinLiveSession() {
     activeSculptObserved = false;
     if (!sculpt) useEditor.getState().submitWarp();
     try {
-      if (replacementObserved()) return;
+      if (replacementObserved() || epoch !== base.epoch) return;
       if ('sculpt' in edit) {
         const target = base.scene.parts.find((part) => part.id === edit.sculpt.partId);
         // A request can succeed even when the connection drops before its response arrives.
@@ -428,7 +439,7 @@ export function joinLiveSession() {
       const response = await post('live/edit', {
         client,
         base: base.version,
-        epoch: base.epoch,
+        epoch,
         checkpoint,
         replace: !!replacementId,
         replacementId,
@@ -450,14 +461,15 @@ export function joinLiveSession() {
         }
       } else {
         const reason = await errorOf(response);
-        if (stillApplies()) refused(reason);
+        if (stillApplies() && !replacementObserved()) refused(reason);
       }
     } catch (error) {
       if (!stillApplies() || replacementObserved()) return;
       if (error instanceof Refusal) refused(error.message);
       else {
         // Retry an interrupted request unless the stream already confirmed the stroke.
-        if (!activeSculptObserved) edits.unshift(edit);
+        if (!activeSculptObserved)
+          edits.unshift(replacement ? { ...replacement, replacementEpoch: epoch } : edit);
         if (!sculpt) useEditor.getState().retryWarp();
         lost();
       }
