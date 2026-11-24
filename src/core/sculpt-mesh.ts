@@ -72,6 +72,10 @@ let latestIncidence:
     }
   | undefined;
 
+export function clearSculptIncidence() {
+  latestIncidence = undefined;
+}
+
 function rememberIncidence(source: BufferGeometry, incidence: Incidence) {
   latestIncidence = {
     source: new WeakRef(source),
@@ -83,6 +87,9 @@ function rememberIncidence(source: BufferGeometry, incidence: Incidence) {
 
 const maxSplitsPerDab = 192;
 const maxFacesPerPatch = 8192;
+/** Source meshes larger than this remain brushable at their available density. */
+const maxRefinedFaceCount = 1_200_000;
+const inheritedFaceLimits = new WeakMap<BufferGeometry, number>();
 const maskName = 'sculptMask';
 
 /** Exact coincident vertices share connectivity without welding a nearby thin shell. */
@@ -120,6 +127,100 @@ function weldVertices(position: Attribute) {
     weldOf[vertex] = table[slot] - 1;
   }
   return { weldOf, representative: representative.slice(0, count) };
+}
+
+/** CSR incidence stays compact for indexed scans and for duplicated render vertices at seams. */
+function buildFaceIncidence(weldOf: Uint32Array, weldCount: number, corners: ArrayLike<number>) {
+  const faceStart = new Uint32Array(weldCount + 1);
+  for (let corner = 0; corner < corners.length; corner++) faceStart[weldOf[corners[corner]] + 1]++;
+  for (let weld = 0; weld < weldCount; weld++) faceStart[weld + 1] += faceStart[weld];
+  const next = faceStart.slice(0, -1);
+  const incidentFaces = new Uint32Array(corners.length);
+  for (let corner = 0; corner < corners.length; corner++)
+    incidentFaces[next[weldOf[corners[corner]]]++] = Math.floor(corner / 3);
+  return { faceStart, incidentFaces };
+}
+
+/** Two render vertices at the same point are a seam only when their faces share a valid edge. */
+function weldSeams(position: Attribute, corners: ArrayLike<number>) {
+  const { weldOf, representative } = weldVertices(position);
+  if (representative.length === position.count) return { weldOf, representative };
+  const duplicates = new Uint8Array(representative.length);
+  for (let vertex = 0; vertex < weldOf.length; vertex++)
+    if (representative[weldOf[vertex]] !== vertex) duplicates[weldOf[vertex]] = 1;
+  const { faceStart, incidentFaces } = buildFaceIncidence(weldOf, representative.length, corners);
+  const parent = Uint32Array.from(weldOf, (_weld, vertex) => vertex);
+  function root(vertex: number) {
+    while (parent[vertex] !== vertex) {
+      parent[vertex] = parent[parent[vertex]];
+      vertex = parent[vertex];
+    }
+    return vertex;
+  }
+  const valid = new Uint8Array(corners.length / 3);
+  const point = new Vector3(),
+    left = new Vector3(),
+    right = new Vector3();
+  function validTriangle(face: number) {
+    if (valid[face]) return valid[face] === 1;
+    const corner = face * 3;
+    point.fromBufferAttribute(position, corners[corner]);
+    left.fromBufferAttribute(position, corners[corner + 1]).sub(point);
+    right.fromBufferAttribute(position, corners[corner + 2]).sub(point);
+    const area = left.cross(right).lengthSq();
+    valid[face] = Number.isFinite(area) && area > 0 ? 1 : 2;
+    return valid[face] === 1;
+  }
+
+  for (let corner = 0; corner < corners.length; corner++) {
+    const face = Math.floor(corner / 3);
+    const u = corners[corner];
+    const v = corners[face * 3 + ((corner + 1) % 3)];
+    const a = weldOf[u],
+      b = weldOf[v];
+    if (a === b || !(duplicates[a] || duplicates[b])) continue;
+    let match = -1;
+    let previous = -1;
+    for (let i = faceStart[a]; i < faceStart[a + 1]; i++) {
+      const neighbor = incidentFaces[i];
+      if (neighbor === face || neighbor === previous) continue;
+      previous = neighbor;
+      const start = neighbor * 3;
+      if (
+        weldOf[corners[start]] !== b &&
+        weldOf[corners[start + 1]] !== b &&
+        weldOf[corners[start + 2]] !== b
+      )
+        continue;
+      if (match !== -1) {
+        match = -1; // Non-manifold edge.
+        break;
+      }
+      match = neighbor;
+    }
+    if (match <= face || !validTriangle(face) || !validTriangle(match)) continue;
+    for (let edge = 0; edge < 3; edge++) {
+      const reverseU = corners[match * 3 + ((edge + 1) % 3)];
+      const reverseV = corners[match * 3 + edge];
+      if (weldOf[reverseU] !== a || weldOf[reverseV] !== b) continue;
+      parent[root(reverseU)] = root(u);
+      parent[root(reverseV)] = root(v);
+      break;
+    }
+  }
+
+  const remap = new Int32Array(position.count).fill(-1);
+  const seamRepresentative = new Uint32Array(position.count);
+  let count = 0;
+  for (let vertex = 0; vertex < weldOf.length; vertex++) {
+    const united = root(vertex);
+    if (remap[united] === -1) {
+      remap[united] = count;
+      seamRepresentative[count++] = vertex;
+    }
+    weldOf[vertex] = remap[united];
+  }
+  return { weldOf, representative: seamRepresentative.slice(0, count) };
 }
 
 function resize<T extends AttributeArray>(array: T, length: number): T {
@@ -193,7 +294,7 @@ export class SculptMesh {
   private readonly source: BufferGeometry;
   private readonly initialVertices: number;
   private readonly initialFaces: number;
-  private readonly growthLimit: number;
+  private readonly faceLimit: number;
   private vertexCount: number;
   private faceCount: number;
   private weldCount = 0;
@@ -214,7 +315,10 @@ export class SculptMesh {
     this.orientation = Math.sign(matrixWorld.determinant());
     this.initialVertices = this.vertexCount = source.getAttribute('position').count;
     this.initialFaces = this.faceCount = Math.floor((source.index?.count ?? this.vertexCount) / 3);
-    this.growthLimit = Math.min(65_536, Math.max(4096, Math.ceil(this.initialFaces * 0.2)));
+    const localBudget = Math.min(65_536, Math.max(4096, Math.ceil(this.initialFaces * 0.2)));
+    this.faceLimit =
+      inheritedFaceLimits.get(source) ??
+      Math.min(maxRefinedFaceCount, this.initialFaces + localBudget);
     this.geometry.name = source.name;
     this.geometry.userData = { ...source.userData };
     for (const [name, attribute] of Object.entries(source.attributes))
@@ -375,24 +479,14 @@ export class SculptMesh {
   }
 
   private buildIncidence() {
-    const { weldOf, representative } = weldVertices(this.attribute('position'));
+    const faces = this.geometry.index!.array.subarray(0, this.faceCount * 3);
+    const { weldOf, representative } = weldSeams(this.attribute('position'), faces);
     this.weldOf = weldOf;
     this.representative = representative;
     this.weldCount = representative.length;
-    const faces = this.geometry.index!.array.subarray(0, this.faceCount * 3);
-    const starts = new Uint32Array(this.weldCount + 1);
-    for (const vertex of faces) {
-      const weld = weldOf[vertex];
-      starts[weld + 1]++;
-      // Use a referenced copy when a source contains an unused vertex at the same position.
-      representative[weld] = vertex;
-    }
-    for (let weld = 0; weld < this.weldCount; weld++) starts[weld + 1] += starts[weld];
-    const next = starts.slice(0, -1);
-    this.incidentFaces = new Uint32Array(faces.length);
-    for (let corner = 0; corner < faces.length; corner++)
-      this.incidentFaces[next[weldOf[faces[corner]]]++] = Math.floor(corner / 3);
-    this.faceStart = starts;
+    const { faceStart, incidentFaces } = buildFaceIncidence(weldOf, this.weldCount, faces);
+    this.faceStart = faceStart;
+    this.incidentFaces = incidentFaces;
   }
 
   private incidence(weld: number): Iterable<number> {
@@ -685,7 +779,7 @@ export class SculptMesh {
         choice = { a, b, faces };
       }
       if (!choice) continue;
-      if (this.faceCount + choice.faces.length > this.initialFaces + this.growthLimit) {
+      if (this.faceCount + choice.faces.length > this.faceLimit) {
         this.detailLimited = true;
         break;
       }
@@ -1027,6 +1121,7 @@ export class SculptMesh {
       geometry.boundingSphere = new Sphere(bounds.center.clone(), bounds.radius);
     }
     this.refitPicking(geometry);
+    inheritedFaceLimits.set(geometry, this.faceLimit);
     if (this.faceStart.length)
       rememberIncidence(geometry, {
         weldOf:

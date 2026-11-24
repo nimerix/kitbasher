@@ -115,6 +115,21 @@ describe('sculpt mesh', () => {
     expect([corners.getX(3), corners.getX(4), corners.getX(5)]).toEqual([3, 4, 5]);
   });
 
+  it.each([false, true])(
+    'keeps separate shells independent at a coincident corner (indexed: %s)',
+    (indexed) => {
+      const source = mesh(
+        [0, 0, 0, 2, 0, 0, 0, 2, 0, 0, 0, 0, -2, 0, 0, 0, -2, 0],
+        indexed ? [0, 1, 2, 3, 4, 5] : undefined,
+      );
+      const draft = new SculptMesh(source, identity);
+      expect(draft.dab(dab(new Vector3(), { minEdge: 100 }))).toBe(true);
+      const positions = draft.finish()!.getAttribute('position');
+      expect(positions.getZ(0)).toBeGreaterThan(0);
+      expect(positions.getZ(3)).toBe(0);
+    },
+  );
+
   it('reuses source ray acceleration and picks live triangle positions after splits', () => {
     const source = mesh([-4, -3, 0, 4, -3, 0, 0, 4, 0], [0, 1, 2]);
     source.boundsTree = new MeshBVH(source, { indirect: true, targetLeafSize: 1 });
@@ -236,5 +251,34 @@ describe('sculpt mesh', () => {
     );
     expect(changed).toBe(true);
     expect(draft.geometry.index!.count / 3).toBeLessThanOrEqual(1 + 2 * 192);
+  });
+
+  it('keeps the original growth budget across committed strokes', () => {
+    const positions: number[] = [];
+    const faces: number[] = [];
+    for (let i = 0; i < 60; i++) {
+      const x = i * 100;
+      positions.push(x - 20, -20, 0, x + 20, -20, 0, x, 20, 0);
+      faces.push(i * 3, i * 3 + 1, i * 3 + 2);
+    }
+    let source = mesh(positions, faces);
+    let limited = false;
+    for (let i = 0; i < 60 && !limited; i++) {
+      const draft = new SculptMesh(source, identity);
+      draft.dab(
+        dab(new Vector3(i * 100, 0, 0), {
+          brush: 'mask',
+          face: i,
+          radius: 5,
+          detail: 1,
+          minEdge: 0.01,
+        }),
+      );
+      const committed = draft.finish();
+      if (committed) source = committed;
+      limited = draft.detailLimited;
+    }
+    expect(limited).toBe(true);
+    expect(source.index!.count / 3).toBeLessThanOrEqual(60 + 4096);
   });
 });
