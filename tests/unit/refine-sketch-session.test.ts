@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import type { EdgeInput } from '../../src/core/refine-edge';
+import { nearestTriangle } from '../../src/core/refine-sketch';
 import type { GuidePoint } from '../../src/core/refine-band';
 import { useEditor } from '../../src/core/store';
 import type { Vec3 } from '../../src/core/types';
@@ -131,6 +132,31 @@ describe('point locks', () => {
     expect(Math.abs(p[2] - 0.2)).toBeLessThan(0.01);
     expect(offPlane(p)).toBeLessThan(1e-9);
     expect(pointOf(0, 1).lock).toEqual(lock);
+  });
+
+  it('keeps sketch locks and refreshes triangle seeds after a neighbouring cut', async () => {
+    setup([boxPart()], ['box']);
+    await ready();
+    topPlane();
+    for (const x of [-0.6, 0.7]) editor().addRefinePoint(at([x, 1.5, 1]));
+    const id = session().selected[0];
+    editor().lockRefinePoint(id, 0, 0, { kind: 'fixed' });
+    const before = guide(id);
+    editor().setRefineMode('brush');
+    editor().setRefineBrush({ kind: 'crease', strength: 1 });
+    editor().setRefineBrushRadius(0.4);
+    const crest = (x: number) => surfacePoint([x, 1.5 - 0.0879, 1 - 0.0879]);
+    editor().beginRefineStroke(crest(-1.5));
+    for (let x = -1.4; x <= 1.5; x += 0.1) editor().moveRefineStroke(crest(x));
+    editor().endRefineStroke();
+    expect(session().features.some((f) => f.state === 'accepted')).toBe(true);
+    const points = guide(id).segments[0].points;
+    expect(points.map((p) => p.position)).toEqual(before.segments[0].points.map((p) => p.position));
+    expect(points[0].lock).toEqual({ kind: 'fixed' });
+    for (const point of points)
+      expect(point.triangle).toBe(nearestTriangle(session().model!.mesh, point.position)!.triangle);
+    editor().undoRefine();
+    expect(guide(id)).toEqual(before);
   });
 
   it('keeps a fixed point where it is, until unlocked', async () => {

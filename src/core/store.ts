@@ -4416,7 +4416,10 @@ export const useEditor = create<EditorState>((set, get) => ({
     if (!stroke || !refine?.model) return;
     if (stroke.kind !== 'crease') {
       if (!stroke.moved) return;
-      commitRefine({ model: { ...stroke.model, mesh: stroke.mesh } });
+      commitRefine({
+        model: { ...stroke.model, mesh: stroke.mesh },
+        features: refine.features.map((f) => refreshSketchTriangles(f, stroke.mesh)),
+      });
       // Each dab only grew the bounds; they are measured afresh once the stroke ends.
       const { preview } = get().refine!;
       preview?.computeBoundingBox();
@@ -6698,6 +6701,35 @@ function wrotePositions(before: RefineMesh, after: RefineMesh, changed: Uint32Ar
   });
 }
 
+/** Keep sketch positions and constraints while a new working mesh changes their nearest faces. */
+function refreshSketchTriangles(feature: RefineFeature, mesh: RefineMesh): RefineFeature {
+  if (feature.state !== 'pending' || feature.feature.type !== 'edge') return feature;
+  const input = feature.feature.input;
+  if (
+    !input.plane &&
+    (input.position ?? 'along') === 'along' &&
+    !input.segments.some((s) => s.points.some((p) => p.lock))
+  )
+    return feature;
+  const placed = new Map<GuidePoint, GuidePoint>();
+  let changed = false;
+  const segments = input.segments.map((s) => ({
+    ...s,
+    points: s.points.map((p) => {
+      const known = placed.get(p);
+      if (known) return known;
+      const triangle = nearestTriangle(mesh, p.position)?.triangle ?? p.triangle;
+      const next = triangle === p.triangle ? p : { ...p, triangle };
+      if (next !== p) changed = true;
+      placed.set(p, next);
+      return next;
+    }),
+  }));
+  return changed
+    ? { ...feature, feature: { type: 'edge', input: { ...input, segments } } }
+    : feature;
+}
+
 /**
  * Bakes `targets`, pending features of `features`, into the working surface in list order as one
  * step. A feature that does not solve stays as it was and is reported. Changes nothing when none
@@ -6714,6 +6746,12 @@ function acceptFeatures(
   let folds = noFolds,
     skipped = noFolds;
   const byId = new Map(features.map((f) => [f.id, f]));
+  const sketchIds = features
+    .filter(
+      (f) =>
+        f.state === 'pending' && f.feature.type === 'edge' && (f.origin === 'hand' || f.edited),
+    )
+    .map((f) => f.id);
   const pass: { id: string; notice: string | null }[] = [];
   const unchanged = new Set<string>();
   let accepted = false;
@@ -6803,6 +6841,10 @@ function acceptFeatures(
       folds = union(folds, foldedTriangles(mesh, model.topology, model.mesh.position, changed));
       model = { ...model, mesh };
       byId.set(feature.id, { ...feature, state: 'accepted' });
+    }
+    for (const id of sketchIds) {
+      const pending = byId.get(id)!;
+      if (pending.state === 'pending') byId.set(id, refreshSketchTriangles(pending, model.mesh));
     }
     pass.push({ id: feature.id, notice: null });
     accepted = true;
