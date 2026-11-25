@@ -373,7 +373,7 @@ export const assemblyGuides: DocArticle[] = [
         id: 'brushes',
         title: 'Choose a brush',
         paragraphs: [
-          'To change the outline, use Grab. To build or cut relief, try Draw, Clay Buildup, Crease or Inflate/Deflate. Use Smooth for ripples, Flatten for a level patch, and Mask to protect a detail. Each example shows the same view before and after the stroke.',
+          'To change the outline, use Grab. To build or cut relief, try Draw, Clay Buildup, Crease, Ridge or Inflate/Deflate. Use Smooth for ripples, Flatten for a level patch, and Mask to protect a detail. Each illustrated example shows the same view before and after the stroke.',
         ],
       },
       {
@@ -454,6 +454,13 @@ export const assemblyGuides: DocArticle[] = [
           alt: 'Flat tile before Crease and a recessed diagonal groove afterward.',
           caption: 'The surface draws inward along the stroke.',
         },
+      },
+      {
+        id: 'ridge',
+        title: 'Ridge',
+        paragraphs: [
+          'Drag along an outer edge or where you want to raise a ridge. Increase Pinch to draw the surface closer to the stroke. Hold Alt to carve a groove.',
+        ],
       },
       {
         id: 'clay',

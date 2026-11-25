@@ -733,6 +733,47 @@ test('mask paint subdivides without displacement and restores weights with undo 
   expect(await weights()).toEqual(protection);
 });
 
+test('raises a ridge with a stroke and carves a groove with Alt', async ({ page }) => {
+  await openSculpt(page, {
+    ...block,
+    parts: [
+      {
+        ...block.parts[0],
+        geometry: serializeGeometry(new PlaneGeometry(8, 6, 40, 30).translate(0, 0, 2)),
+      },
+    ],
+  });
+  const ridge = page.getByRole('button', { name: 'Ridge', exact: true });
+  await ridge.click();
+  await expect(ridge).toHaveAttribute('aria-pressed', 'true');
+  await page.getByText('Advanced brush settings', { exact: true }).click();
+  await expect(page.getByRole('spinbutton', { name: 'Pinch' })).toHaveValue('0.5');
+
+  const before = await mesh(page);
+  const start = await screen(page, [-1, 0, 2]);
+  const end = await screen(page, [1, 0, 2]);
+  const drag = async () => {
+    await page.mouse.move(start.x, start.y);
+    await page.mouse.down();
+    await page.mouse.move(end.x, end.y, { steps: 8 });
+    await page.mouse.up();
+  };
+  await drag();
+  await expect.poll(async () => (await mesh(page)).peak).toBeGreaterThan(before.peak + 0.01);
+  await page.keyboard.press('ControlOrMeta+z');
+  await expect.poll(() => mesh(page)).toEqual(before);
+
+  await page.keyboard.down('Alt');
+  try {
+    await drag();
+  } finally {
+    await page.keyboard.up('Alt');
+  }
+  await expect
+    .poll(async () => (await mesh(page)).positions.some((z, i) => i % 3 === 2 && z < 1.99))
+    .toBe(true);
+});
+
 test('applies Clay Buildup and Inflate and keeps their falloff settings independent', async ({
   page,
 }) => {

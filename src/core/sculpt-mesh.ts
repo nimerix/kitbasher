@@ -1029,13 +1029,15 @@ export class SculptMesh {
           .clone()
           .multiplyScalar(sign * Math.min(layer, settings.radius * 0.22) * strength);
       }
-      case 'crease': {
+      case 'crease':
+      case 'ridge': {
         const toward = new Vector3().subVectors(hit.point, point);
         toward.addScaledVector(normal, -toward.dot(normal));
         if (hit.tangent) toward.addScaledVector(footprint.tangent, -toward.dot(footprint.tangent));
+        const direction = settings.brush === 'ridge' ? sign : -sign;
         return toward
           .multiplyScalar(MathUtils.clamp(settings.pinch ?? 0.5, 0, 1) * strength * 0.4)
-          .addScaledVector(normal, -sign * depth * 0.22);
+          .addScaledVector(normal, direction * depth * 0.22);
       }
       case 'smooth': {
         const neighbors = this.neighborsOf(weld, footprint);
