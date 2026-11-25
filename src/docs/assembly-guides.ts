@@ -742,11 +742,11 @@ export const assemblyGuides: DocArticle[] = [
         id: 'clean',
         title: 'Clean and sharpen a scan',
         paragraphs: [
-          'Clean treats the whole part, or a painted area, in one step, the way sharpening treats a photo: it removes scan noise, crisps softened edges, and makes recessed and raised detail deeper.',
+          'Clean treats the whole part, or a painted area, in one step, the way sharpening treats a photo: it removes scan noise, crisps softened edges, and makes recessed and raised detail deeper. Square goes further on parts built from flat faces: it rebuilds rounded edges where faces meet at about 90° as sharp corners.',
         ],
         steps: [
           'In Clean mode, choose Whole part or Painted area under Area. For Painted area, paint where to clean.',
-          'Set Smooth, Sharpen, and Depth. Size is automatic; turn off Automatic size to set it in mm.',
+          'Set Smooth, Sharpen, Depth, and Square. Size is automatic; turn off Automatic size to set it in mm.',
           'Choose Clean surface. Progress shows in the panel, and the Cancel button below it stops the clean.',
           'Compare the result with Ctrl/⌘ + Z and Ctrl/⌘ + Shift + Z. To try other settings, undo, change them, and clean again. Choose Apply to keep the result.',
         ],
@@ -766,14 +766,18 @@ export const assemblyGuides: DocArticle[] = [
               'Makes recesses deeper and raised detail higher, up to Size across. 100% doubles their relief; detail within the scan’s noise is left as it is.',
             ],
             [
+              'Square',
+              'Rebuilds rounded edges where two flat faces meet at about 90°, outside and inside, as sharp corners, and box corners where three meet. The edge is cut into the mesh, so it runs along triangle edges. 100% makes the corner sharp; lower values move the rounding part of the way. It is off by default.',
+            ],
+            [
               'Size',
-              'The widest feature Depth deepens. Raise it for larger recesses, such as an eye socket or a panel line.',
+              'The widest feature Depth deepens and the widest rounding Square rebuilds. Raise it for larger recesses, such as an eye socket or a panel line, or for wider roundings.',
             ],
           ],
         },
         note: {
           title: 'What Clean keeps',
-          text: 'A painted area eases into the surface around it, and nothing outside it moves. Edges the tool has rebuilt and open borders stay where they are. Where moving a vertex would fold a triangle over, it moves less, and the app says how many vertices it held back. Along an edge it sharpens, Clean can turn triangles so the edge runs along them instead of zigzagging across them. The number of triangles stays the same. A clean is one session undo step. On a very large part it can take a while: a 700,000-triangle scan takes several seconds.',
+          text: 'A painted area eases into the surface around it, and nothing outside it moves. Edges the tool has rebuilt and open borders stay where they are. Where moving a vertex would fold a triangle over, it moves less, and the app says how many vertices it held back. Along an edge it sharpens, Clean can turn triangles so the edge runs along them instead of zigzagging across them. Without Square the number of triangles stays the same; Square adds triangles along the edges it cuts, keeps those edges sharp in later steps as it keeps rebuilt edges, and the app says when it finds no rounded corner to square. A clean is one session undo step. On a very large part it can take a while: a 700,000-triangle scan takes several seconds, and nearly twice as long with Square.',
         },
       },
       {
@@ -790,6 +794,7 @@ export const assemblyGuides: DocArticle[] = [
         title: 'Getting good results',
         bullets: [
           'Clean gives the most on soft, noisy scans. Start from the default settings and raise one setting at a time: high Sharpen and Depth together can make a noisy area rough.',
+          'Use Square on parts built from flat faces, or paint the area to square. On rounded shapes such as faces, skulls or cables it can cut ledges where faces happen to meet near 90°. Where a face is only a few triangles wide, the scan has too little to fit, and Square leaves the edge rounded or eases off along it.',
           'Restore edges before smoothing or flattening across them. Smoothing or flattening across an edge that has not been rebuilt can soften it further; rebuilt edges are held.',
           'On a plate with rivets, use a painted region with Flatten and Keep detail rather than the Flatten brush. The brush can flatten rivets, and clipping one can leave a step at its rim.',
           'A guide needs surface on both sides to work with. Lay it along the rounded edge itself or close beside it. A line laid along an edge that clearly curves follows the curve instead of cutting straight across it. If the tool says no edge was found, move the guide onto the rounding or change Width. A lip or rib rounded right over, with no flat top left, has no edge for the tool to find.',
