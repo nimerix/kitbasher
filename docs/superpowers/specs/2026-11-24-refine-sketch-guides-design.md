@@ -182,8 +182,7 @@ as today and the status line says which setting to change.
   coordinates.
 - **Kinds:** Parallel, Perpendicular, Collinear, Equal (length of two lines, or radius of two
   arcs), Tangent (a line and an arc, or two arcs, that share a point), Concentric (two arcs),
-  Horizontal and Vertical (a line along `u` or `v`; between two points, Align), and Fixed (Lock
-  > Fixed).
+  Horizontal and Vertical (a line along `u` or `v`; between two points, Align), and Fixed (the point menu's Lock, Fixed).
 - **Adding one:** right-click a segment's guide line for the segment menu, Constrain, pick the
   kind, then click the other segment. Horizontal and Vertical on a line need no second click.
   From a point menu, Constrain applies to the two segments meeting there with no second click.
