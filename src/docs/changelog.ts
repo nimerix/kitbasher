@@ -21,6 +21,17 @@ export interface Release {
 export const releases: Release[] = [
   {
     date: '2026-11-24',
+    title: 'Crease finds the edge',
+    changes: [
+      {
+        kind: 'improved',
+        text: 'The Refine Crease brush finds the rounded edge under a rough stroke, drawn on the rounding or beside it on either face. It fits the edge as lines and arcs, with sharp corners where the edge turns, and a stroke that comes back to its start closes the guide.',
+        guide: 'refine',
+      },
+    ],
+  },
+  {
+    date: '2026-11-24',
     title: 'Guides you can place exactly',
     changes: [
       {
