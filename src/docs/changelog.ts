@@ -25,7 +25,7 @@ export const releases: Release[] = [
     changes: [
       {
         kind: 'improved',
-        text: 'A Refine edge guide is now the edge itself. Position, Fit, Use guide path and Wall angle say where the guide lies on a rounded edge and how far the result may move to fit the scan. Choose Along with Automatic fit for the earlier behaviour.',
+        text: 'A Refine edge guide is now the edge itself. Position, Fit, Use guide path and Wall angle say where the guide lies on a rounded edge and how far the result may move to fit the scan. Width follows the guide’s edge around narrow slots. Choose Along with Automatic fit and Use guide path off for the earlier behaviour.',
         guide: 'refine',
       },
       {
@@ -35,7 +35,7 @@ export const releases: Release[] = [
       },
       {
         kind: 'new',
-        text: 'Constrain segments of a guide on a plane as in a CAD sketch: parallel, perpendicular, collinear, equal, tangent, concentric, horizontal and vertical. Conflicting constraints are refused.',
+        text: 'Constrain segments of a guide on a plane as in a CAD sketch: parallel, perpendicular, collinear, equal, tangent, concentric, horizontal and vertical. The guide stays in place if moving it to another plane would break a lock or constraint.',
         guide: 'refine',
       },
     ],
