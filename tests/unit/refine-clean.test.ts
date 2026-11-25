@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { Matrix4 } from 'three';
 import {
+  type CleanResult,
   type CleanSettings,
   autoCleanSize,
   cleanDefaults,
@@ -14,10 +15,10 @@ import { cleanRefineJob } from '../../src/core/refine-job';
 import { type RefineMesh, buildTopology, weldedCorner } from '../../src/core/refine-mesh';
 import { autoRule, cleanDepthMax, cleanSizeRange } from '../../src/components/refine-panel';
 import { closedMesh, modelOf } from '../helpers/refine';
-import { heightField, rivetedPlate, softBox } from '../helpers/soft-edges';
+import { heightField, rippledSphere, rivetedPlate, softBox, softStep } from '../helpers/soft-edges';
 
 type Model = ReturnType<typeof modelOf>;
-const off: CleanSettings = { smooth: 0, sharpen: 0, depth: 0, size: null };
+const off: CleanSettings = { smooth: 0, sharpen: 0, depth: 0, square: 0, size: null };
 
 /** The model's mesh with a clean applied: new positions and corners, and the result. */
 function cleaned(
@@ -324,5 +325,225 @@ describe('refine clean', () => {
     expect(autoRule('size', { step: 0.06, noise: 0.01 })).toBe(autoCleanSize(0.06));
     expect(cleanDepthMax).toBe(maxCleanDepth);
     expect(cleanSizeRange).toEqual({ min: minCleanSize, max: maxCleanSize });
+  });
+});
+
+/** The mesh a clean left, cut or not, with the source triangle each of its triangles came from. */
+function after(model: Model, result: CleanResult) {
+  if (!result.mesh) {
+    const { mesh } = cleanedMesh(model, result);
+    return { mesh, parent: (t: number) => t };
+  }
+  const parents = new Map<number, number>();
+  for (let i = 0; i < result.split.length; i += 2)
+    parents.set(result.split[i], result.split[i + 1]);
+  return { mesh: result.mesh, parent: (t: number) => parents.get(t) ?? t };
+}
+
+function cleanedMesh(model: Model, result: CleanResult) {
+  const position = model.mesh.position.slice();
+  result.moved.forEach((v, i) => {
+    for (let a = 0; a < 3; a++) position[v * 3 + a] = result.position[i * 3 + a];
+  });
+  const corners = model.mesh.corners.slice();
+  result.triangles.forEach((t, i) => corners.set(result.corners.subarray(i * 3, i * 3 + 3), t * 3));
+  return { mesh: { ...model.mesh, position, corners } as RefineMesh };
+}
+
+/** Triangles that face against the source triangle they came from. */
+function turned(model: Model, result: CleanResult) {
+  const { mesh, parent } = after(model, result);
+  let count = 0;
+  for (let t = 0; t < mesh.triangleCount; t++) {
+    const was = cross(model.mesh, parent(t)),
+      now = cross(mesh, t);
+    if (was[0] * now[0] + was[1] * now[1] + was[2] * now[2] <= 0) count++;
+  }
+  return count;
+}
+
+/** The L profile softStep rounds: its distance in x and y from a point, and its corners. */
+const profile = [
+  [-2, -1.5],
+  [2, -1.5],
+  [2, 0],
+  [0, 0],
+  [0, 1.5],
+  [-2, 1.5],
+];
+function fromProfile(x: number, y: number) {
+  let best = Infinity;
+  profile.forEach(([ax, ay], i) => {
+    const [bx, by] = profile[(i + 1) % profile.length];
+    const dx = bx - ax,
+      dy = by - ay;
+    const t = Math.max(0, Math.min(1, ((x - ax) * dx + (y - ay) * dy) / (dx * dx + dy * dy)));
+    best = Math.min(best, Math.hypot(x - ax - t * dx, y - ay - t * dy));
+  });
+  return best;
+}
+
+/** Furthest any vertex in the middle of the extrusion lies from the sharp profile, and how near
+ * a vertex comes to each of the two given corners. */
+function squareness(mesh: RefineMesh, corners: number[][]) {
+  let worst = 0;
+  const nearest = corners.map(() => Infinity);
+  const p = mesh.position;
+  for (let v = 0; v < mesh.weldedCount; v++) {
+    if (Math.abs(p[v * 3 + 2]) > 1) continue;
+    worst = Math.max(worst, fromProfile(p[v * 3], p[v * 3 + 1]));
+    corners.forEach(([x, y], i) => {
+      nearest[i] = Math.min(nearest[i], Math.hypot(p[v * 3] - x, p[v * 3 + 1] - y));
+    });
+  }
+  return { worst, nearest };
+}
+
+describe('refine clean square', () => {
+  // An outside corner of the L and its one inside corner.
+  const corners = [
+    [2, 0],
+    [0, 0],
+  ];
+
+  it('rebuilds rounded edges outside and inside as sharp corners', () => {
+    const model = modelOf(softStep(0.3, { ripple: 0 }));
+    const before = squareness(model.mesh, corners);
+    expect(before.worst).toBeGreaterThan(0.08);
+    const result = cleanSurface(model.mesh, model.topology, model.noise, model.step, {
+      ...off,
+      smooth: 0.5,
+      square: 1,
+      triangles: null,
+    });
+    expect(result.mesh).not.toBeNull();
+    expect(result.squared).toBeGreaterThan(0);
+    const { mesh } = after(model, result);
+    expect(mesh.triangleCount).toBeGreaterThan(model.mesh.triangleCount);
+    const now = squareness(mesh, corners);
+    expect(now.worst).toBeLessThan(0.015);
+    for (const [i, distance] of now.nearest.entries()) {
+      expect(before.nearest[i]).toBeGreaterThan(0.1);
+      expect(distance).toBeLessThan(0.01);
+    }
+    expect(closedMesh(mesh)).toBe(true);
+    expect(result.topology).toEqual(buildTopology(mesh));
+    expect(turned(model, result)).toBe(0);
+    // The new edges are creases, so later steps hold them and shading keeps them sharp.
+    let creased = 0;
+    for (let v = 0; v < mesh.weldedCount; v++) creased += mesh.crease[v];
+    expect(creased).toBe(result.squared);
+  });
+
+  it('squares a box, edges and corners', () => {
+    const half = [1.5, 1, 1];
+    const model = modelOf(softBox(half as [number, number, number], 0.25, { ripple: 0 }));
+    const result = cleanSurface(model.mesh, model.topology, model.noise, model.step, {
+      ...off,
+      smooth: 0.5,
+      square: 1,
+      triangles: null,
+    });
+    const { mesh } = after(model, result);
+    const p = mesh.position;
+    // Distance from the sharp box's surface, and how near a vertex comes to each corner.
+    let worst = 0;
+    const nearest = new Array(8).fill(Infinity);
+    for (let v = 0; v < mesh.weldedCount; v++) {
+      const q = [0, 1, 2].map((a) => Math.abs(p[v * 3 + a]) - half[a]);
+      const outside = Math.hypot(...q.map((x) => Math.max(x, 0)));
+      worst = Math.max(worst, Math.abs(outside + Math.min(Math.max(...q), 0)));
+      for (let c = 0; c < 8; c++) {
+        const corner = [0, 1, 2].map((a) => (c & (1 << a) ? half[a] : -half[a]));
+        nearest[c] = Math.min(
+          nearest[c],
+          Math.hypot(...[0, 1, 2].map((a) => p[v * 3 + a] - corner[a])),
+        );
+      }
+    }
+    expect(worst).toBeLessThan(0.03);
+    for (const distance of nearest) expect(distance).toBeLessThan(0.05);
+    expect(closedMesh(mesh)).toBe(true);
+    expect(turned(model, result)).toBe(0);
+  });
+
+  it('leaves a part with no faces meeting at 90 degrees as it is', () => {
+    const model = modelOf(rippledSphere(1, { ripple: 0 }));
+    const result = cleanSurface(model.mesh, model.topology, model.noise, model.step, {
+      ...off,
+      square: 1,
+      triangles: null,
+    });
+    expect(result.mesh).toBeNull();
+    expect(result.squared).toBe(0);
+    expect(result.moved).toHaveLength(0);
+  });
+
+  it('squares a mirrored part the same way', () => {
+    const model = modelOf(softStep(0.3, { ripple: 0 }), new Matrix4().makeScale(-1, 1, 1));
+    const result = cleanSurface(model.mesh, model.topology, model.noise, model.step, {
+      ...off,
+      smooth: 0.5,
+      square: 1,
+      triangles: null,
+    });
+    const { mesh } = after(model, result);
+    const mirrored = { ...mesh, position: mesh.position.map((x, i) => (i % 3 === 0 ? -x : x)) };
+    expect(squareness(mirrored, corners).worst).toBeLessThan(0.015);
+    expect(turned(model, result)).toBe(0);
+  });
+
+  it('squares only the painted area', () => {
+    const model = modelOf(softStep(0.3, { ripple: 0 }));
+    const { mesh: source } = model;
+    const painted: number[] = [];
+    for (let t = 0; t < source.triangleCount; t++) {
+      let z = 0;
+      for (let k = 0; k < 3; k++)
+        z += source.position[weldedCorner(source, t, k as 0 | 1 | 2) * 3 + 2];
+      if (z / 3 > 0) painted.push(t);
+    }
+    const inPaint = new Set<number>();
+    for (const t of painted)
+      for (let k = 0; k < 3; k++) inPaint.add(weldedCorner(source, t, k as 0 | 1 | 2));
+    const result = cleanSurface(model.mesh, model.topology, model.noise, model.step, {
+      ...off,
+      smooth: 0.5,
+      square: 1,
+      triangles: Uint32Array.from(painted),
+    });
+    const { mesh } = after(model, result);
+    for (let v = 0; v < source.weldedCount; v++)
+      if (!inPaint.has(v))
+        for (let a = 0; a < 3; a++)
+          expect(mesh.position[v * 3 + a]).toBe(source.position[v * 3 + a]);
+    // The painted half is square, the rest as rounded as it was.
+    let paintedWorst = 0,
+      restWorst = 0;
+    for (let v = 0; v < mesh.weldedCount; v++) {
+      const z = mesh.position[v * 3 + 2];
+      const d = fromProfile(mesh.position[v * 3], mesh.position[v * 3 + 1]);
+      if (z > 0.5 && z < 1.5) paintedWorst = Math.max(paintedWorst, d);
+      if (z < -0.5 && z > -1.5) restWorst = Math.max(restWorst, d);
+    }
+    expect(paintedWorst).toBeLessThan(0.015);
+    expect(restWorst).toBeGreaterThan(0.08);
+  });
+
+  it('runs as a job the same as in-thread', async () => {
+    const model = modelOf(softStep(0.3, { ripple: 0 }));
+    const input = { ...cleanDefaults, square: 1, triangles: null };
+    const direct = cleanSurface(model.mesh, model.topology, model.noise, model.step, input);
+    const progress: number[] = [];
+    const job = await cleanRefineJob(model, input, new AbortController().signal, (f) =>
+      progress.push(f),
+    );
+    expect(progress.at(-1)).toBe(1);
+    expect(progress.every((f, i) => i === 0 || f >= progress[i - 1])).toBe(true);
+    expect(job.mesh!.position).toEqual(direct.mesh!.position);
+    expect(job.mesh!.corners).toEqual(direct.mesh!.corners);
+    expect(job.mesh!.crease).toEqual(direct.mesh!.crease);
+    expect(job.split).toEqual(direct.split);
+    expect(job.topology).toEqual(direct.topology);
   });
 });

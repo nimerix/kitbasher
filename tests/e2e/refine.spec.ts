@@ -1745,3 +1745,33 @@ test('cleans the whole part, steps back, then cleans a painted area and applies'
   await expect.poll(async () => (await partMesh(page)).sum).not.toBe(original.sum);
   expect((await partMesh(page)).source).toBe(`Refine · ${original.source}`);
 });
+
+test('squares the rounded edges of a plate and applies', async ({ page }) => {
+  await openRefine(page, { scene: plateFixture, view: '7' });
+  const original = await partMesh(page);
+  await page.getByRole('radio', { name: 'Clean', exact: true }).click();
+  const setting = async (name: string, percent: number) => {
+    const field = page.getByRole('spinbutton', { name, exact: true });
+    await field.fill(String(percent));
+    await field.press('Enter');
+  };
+  const triangles = () => inStore(page, (s) => s.refine!.model!.mesh.triangleCount);
+  const before = await triangles();
+  await setting('Sharpen', 0);
+  await setting('Depth', 0);
+  await setting('Square', 100);
+  await expect
+    .poll(() => inStore(page, (s) => s.refine!.clean))
+    .toMatchObject({ smooth: 0.5, sharpen: 0, depth: 0, square: 1 });
+  await page.getByRole('button', { name: 'Clean surface' }).click();
+  await expect.poll(() => inStore(page, (s) => s.refine!.clean.running)).toBe(false);
+  // The rebuilt corners are cut into the surface along their new edges.
+  expect(await steps(page)).toEqual({ undo: 1, redo: 0 });
+  expect(await triangles()).toBeGreaterThan(before);
+  await undo(page);
+  expect(await triangles()).toBe(before);
+  await redo(page);
+  await expect.poll(triangles).toBeGreaterThan(before);
+  await page.getByRole('button', { name: 'Apply' }).click();
+  await expect.poll(async () => (await partMesh(page)).sum).not.toBe(original.sum);
+});
