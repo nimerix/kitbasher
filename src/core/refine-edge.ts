@@ -777,6 +777,7 @@ interface Part {
   /** The guide's points as placed, and the guide drawn through them. */
   points: GuidePoint[];
   drawn: EdgeCurve;
+  carried?: EdgeCurve;
   guide: GuideSettings;
   /** The side that is the surface; the other is the wall. */
   surface: number;
@@ -1082,7 +1083,8 @@ function settle(part: Part): EdgeRefusal | null {
     kind = fit.kind;
     return fit.curve;
   };
-  if (position === 'top' || position === 'bottom')
+  if (part.carried && reach === 0) curve = part.carried;
+  else if (position === 'top' || position === 'bottom')
     curve = guide.path
       ? shifted(drawnKind, part.points, drawn, meet.points, Infinity, edge)
       : fitted(meet.points);
@@ -1177,11 +1179,18 @@ function solvePart(
   guide: GuideSettings,
   carried?: EdgeCurve,
 ): Part | EdgeRefusal {
+  const seeds = readFrom(mesh, topology, points, guide);
+  if (guide.position === 'corner' && guide.fit !== null) {
+    const depths = seeds.map((seed, i) =>
+      Math.hypot(...seed.position.map((x, a) => x - points[i].position[a])),
+    );
+    if (median(depths) - guide.fit > deepestEdge * width) return 'fit';
+  }
   const band = buildBand(
     mesh,
     topology,
     kind,
-    readFrom(mesh, topology, points, guide),
+    seeds,
     width,
     noise,
     known,
@@ -1230,11 +1239,21 @@ function solvePart(
           edge,
         ),
     guide,
+    carried,
     surface: guide.legacy ? 0 : surfaceSide(band, flanks, guide.reference),
   };
   if (guide.legacy) return part;
   const refusal = settle(part);
   if (refusal) return refusal;
+  // Beyond the rebuild depth the scan cannot supply a corner at this offset.
+  if (guide.position === 'corner' && guide.fit !== null) {
+    const distances = [];
+    for (let k = 0; k < part.curve.points.length; k += 3) {
+      const [x, y, z] = part.curve.points.subarray(k, k + 3);
+      distances.push(find(x, y, z).distance);
+    }
+    if (median(distances) > deepestEdge * band.width) return 'fit';
+  }
   if (!carried && (guide.position === 'top' || guide.position === 'bottom'))
     return solvePart(mesh, topology, kind, points, width, noise, known, guide, part.curve);
   return part;
@@ -1365,8 +1384,11 @@ function clearCorners(parts: Part[], joints: GuideJoint[], noise: number) {
 
 /** Settles each changed part again from its scan flanks. False when one no longer settles. */
 function resolveParts(parts: Part[], changed: Set<number>) {
-  for (const i of changed) if (settle(parts[i])) return false;
-  return true;
+  for (const i of changed) {
+    const reason = settle(parts[i]);
+    if (reason) return reason;
+  }
+  return null;
 }
 
 /** Length of a curve, the closing span included when it is closed. */
@@ -1629,8 +1651,10 @@ export function solveEdge(
     parts.push(part);
   }
   const n = parts.length;
-  if (n > 1 && !clearCorners(parts, joints, noise)) return refuse('edge');
-  if (n > 1 && !shareFlanks(parts, closed, noise)) return refuse('edge');
+  if (n > 1) {
+    const reason = clearCorners(parts, joints, noise) ?? shareFlanks(parts, closed, noise);
+    if (reason) return refuse(reason);
+  }
   const edge = median(parts.map((part) => part.edge));
 
   let curve: EdgeCurve;
@@ -1686,18 +1710,14 @@ export function solveEdge(
   }
 
   // Joining segments and refitting a clamped set of samples can both exceed the requested Fit.
-  if (
-    !guide.legacy &&
-    guide.fit !== null &&
-    (guide.position === 'corner' || guide.position === 'along')
-  ) {
+  if (!guide.legacy) {
     const near = new Float64Array(3);
-    const limit = guide.fit + 1e-6;
     for (let k = 0; k < curve.points.length; k += 3) {
       const [x, y, z] = curve.points.subarray(k, k + 3);
       if (
         !parts.some((part) => {
-          closestOnCurve(part.drawn, x, y, z, near);
+          const limit = (guide.fit ?? Math.max(0.35, 6 * part.edge)) + 1e-6;
+          closestOnCurve(part.carried ?? part.drawn, x, y, z, near);
           return Math.hypot(x - near[0], y - near[1], z - near[2]) <= limit;
         })
       )

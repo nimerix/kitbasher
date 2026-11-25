@@ -184,6 +184,26 @@ describe('Fit', () => {
     return Math.hypot(p[0], p[1]);
   };
 
+  it('names Fit when the guide is too far above the scan to rebuild', () => {
+    const r = outcome(
+      model,
+      lineGuide(model, [0, 0.34], [0, 0.34], { position: 'corner', fit: 0, path: true }),
+    );
+    expect(r.why).toBe('fit');
+  });
+
+  it('measures Width from the placed guide even when Fit moves the edge', () => {
+    const r = outcome(
+      model,
+      lineGuide(model, [-0.2, 0], [-0.2, 0], { position: 'corner', fit: 0.3, path: true }),
+    );
+    const band = r.solve!.bands[0];
+    for (const v of band.vertices) {
+      const [x, y] = model.mesh.position.subarray(v * 3, v * 3 + 2);
+      expect(Math.hypot(x + 0.2, y)).toBeLessThanOrEqual(band.width + 1e-8);
+    }
+  });
+
   it('keeps the edge on the guide at 0', () => expect(off(0)).toBeCloseTo(0.2, 6));
   it('moves it to the corner when Fit reaches it', () => expect(off(0.3)).toBeLessThan(0.01));
   it('moves it no farther than Fit', () => expect(off(0.1)).toBeCloseTo(0.1, 3));
@@ -191,6 +211,21 @@ describe('Fit', () => {
 
 describe('Use guide path', () => {
   const model = corner(0.15);
+
+  it('keeps a carried arc in its original plane', () => {
+    const model = modelOf(slottedPlate(0.35, 0.15, { ...scan, step: 0.035 }));
+    const guide = slotGuide(model, { position: 'top', usePlane: false, closed: false, joints: [] });
+    const y = 1.015;
+    const points = [
+      [1.5, y, -0.5],
+      [2, y, 0],
+      [1.5, y, 0.5],
+    ].map((p) => at(model, p as Vec3));
+    const r = outcome(model, { ...guide, segments: [{ kind: 'arc', points }] });
+    expect(r.solve, String(r.why)).not.toBeNull();
+    const p = r.solve!.curve.points;
+    for (let k = 1; k < p.length; k += 3) expect(p[k]).toBeCloseTo(y, 9);
+  });
 
   it('keeps a line straight and parallel to itself', () => {
     // A guide on the rounding, a little askew to the edge.

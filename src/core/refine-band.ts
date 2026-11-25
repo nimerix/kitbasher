@@ -374,6 +374,7 @@ function gather(
   points: GuidePoint[],
   widthFor: (edge: number) => number,
   noise: number,
+  limit?: { curve: EdgeCurve; width: number },
 ) {
   const { position } = mesh;
   const { neighbourStart, neighbours } = topology;
@@ -386,6 +387,7 @@ function gather(
     segment: number[] = [],
     open: boolean[] = [],
     seed: boolean[] = [];
+  const permitted: boolean[] = [];
   const p = drawn.points,
     last = p.length / 3 - 1;
   const startTangent = new Float64Array(3),
@@ -421,6 +423,10 @@ function gather(
           0;
       inside = !before && !after;
     }
+    if (limit) {
+      closestOnCurve(limit.curve, x, y, z, at);
+      permitted.push(Math.hypot(x - at[0], y - at[1], z - at[2]) <= limit.width);
+    }
     const k = welded.length;
     slots.set(v, k);
     welded.push(v);
@@ -438,7 +444,7 @@ function gather(
   for (const point of points)
     for (const corner of [0, 1, 2] as const) {
       const k = measure(weldedCorner(mesh, point.triangle, corner), unset);
-      if (!seed[k]) {
+      if (!seed[k] && (!limit || permitted[k])) {
         seed[k] = true;
         queue.push(k);
       }
@@ -467,7 +473,13 @@ function gather(
     for (let j = neighbourStart[v]; j < neighbourStart[v + 1]; j++) {
       const k = measure(neighbours[j], segment[queue[q]]);
       const reach = ownEdge(neighbours[j]);
-      if (seed[k] || distance[k] >= reach + 3 * noise || lateral(k) >= reach) continue;
+      if (
+        (limit && !permitted[k]) ||
+        seed[k] ||
+        distance[k] >= reach + 3 * noise ||
+        lateral(k) >= reach
+      )
+        continue;
       seed[k] = true;
       queue.push(k);
     }
@@ -493,6 +505,7 @@ function gather(
     const v = welded[k];
     for (let j = neighbourStart[v]; j < neighbourStart[v + 1]; j++) {
       const w = measure(neighbours[j], segment[k]);
+      if (limit && !permitted[w]) continue;
       if (!seed[w] && (distance[w] > width || !open[w])) continue;
       const d = gOf(k) + length3(position, v, welded[w]);
       if (d > width) continue;
@@ -1149,6 +1162,7 @@ function classifyOriented(
   width: number | null,
   noise: number,
   away = 0,
+  widthEdge?: EdgeCurve,
 ) {
   const clicked = localEdge(mesh, topology, points);
   if (points.length < 2 || !(clicked > 0)) return null;
@@ -1180,6 +1194,7 @@ function classifyOriented(
         reachOf(edge) + seedStart * edge + spanOf(edge),
       ),
     noise,
+    widthEdge && width !== null ? { curve: widthEdge, width } : undefined,
   );
   const { vertices, edge } = band;
   const count = vertices.length;
@@ -1729,19 +1744,12 @@ function classifyOriented(
   // start to the first of its end, its slice's last vertex and the width, is flankRun edges long. A
   // cap past `gathered` is held to it, since vertices within the cap of the solved edge may lie
   // outside the gather.
-  const result = (cap: number, widthEdge?: EdgeCurve): EdgeBand | null => {
+  const result = (cap: number): EdgeBand | null => {
     const width = Math.min(cap, widthEdge ? band.width : gathered);
     const keep: number[] = [];
     const counts = [0, 0];
     for (let i = 0; i < count; i++) {
-      if (widthEdge) {
-        const v = vertices[i] * 3;
-        closestOnCurve(widthEdge, position[v], position[v + 1], position[v + 2], at);
-        if (
-          Math.hypot(position[v] - at[0], position[v + 1] - at[1], position[v + 2] - at[2]) > width
-        )
-          continue;
-      } else if (Math.abs(heldO[i]) > width) continue;
+      if (!widthEdge && Math.abs(heldO[i]) > width) continue;
       keep.push(i);
       if (runZone[i] === BandZone.Left || runZone[i] === BandZone.Right) counts[runZone[i] - 1]++;
     }
@@ -1826,22 +1834,23 @@ function classify(
   points: GuidePoint[],
   width: number | null,
   noise: number,
+  widthEdge?: EdgeCurve,
 ) {
   if (points.length < 2) return null;
   const backward = drawnBackward(points);
   const oriented = backward ? [...points].reverse() : points;
-  let found = classifyOriented(mesh, topology, kind, oriented, width, noise);
+  let found = classifyOriented(mesh, topology, kind, oriented, width, noise, 0, widthEdge);
   // Where the solved edge strays past reach of the guide, a band reaching `width` from it there is
   // gathered once more, as far as the edge strayed. Should it stray further on that reading, the
   // band holds to what that gather covers. Should that reading show no edge, the first one stands,
   // and the band holds to what the first gather covers.
-  if (found && width !== null && width > found.gathered)
+  if (!widthEdge && found && width !== null && width > found.gathered)
     found = classifyOriented(mesh, topology, kind, oriented, width, noise, found.strayed) ?? found;
   if (!found || !backward) return found;
   return {
     ...found,
-    result: (cap: number, widthEdge?: EdgeCurve) => {
-      const band = found.result(cap, widthEdge);
+    result: (cap: number) => {
+      const band = found.result(cap);
       return band && mirrored(band);
     },
   };
@@ -1869,11 +1878,13 @@ export function buildBand(
   known?: BandClassification | null,
   widthEdge?: EdgeCurve,
 ): EdgeBand | null {
+  if (widthEdge)
+    return classify(mesh, topology, kind, points, width, noise, widthEdge)?.result(width) ?? null;
   const found =
     (known && width <= known.gathered
       ? known
       : classify(mesh, topology, kind, points, width, noise)) ?? known;
-  return found?.result(width, widthEdge) ?? null;
+  return found?.result(width) ?? null;
 }
 
 /**
