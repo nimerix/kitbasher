@@ -11,15 +11,15 @@ import {
   minCleanSize,
 } from '../../src/core/refine-clean';
 import { cleanRefineJob } from '../../src/core/refine-job';
-import { weldedCorner } from '../../src/core/refine-mesh';
+import { type RefineMesh, buildTopology, weldedCorner } from '../../src/core/refine-mesh';
 import { autoRule, cleanDepthMax, cleanSizeRange } from '../../src/components/refine-panel';
-import { modelOf } from '../helpers/refine';
+import { closedMesh, modelOf } from '../helpers/refine';
 import { heightField, rivetedPlate, softBox } from '../helpers/soft-edges';
 
 type Model = ReturnType<typeof modelOf>;
 const off: CleanSettings = { smooth: 0, sharpen: 0, depth: 0, size: null };
 
-/** The model's positions with a clean applied, and the result. */
+/** The model's mesh with a clean applied: new positions and corners, and the result. */
 function cleaned(
   model: Model,
   settings: Partial<CleanSettings>,
@@ -34,7 +34,10 @@ function cleaned(
   result.moved.forEach((v, i) => {
     for (let a = 0; a < 3; a++) position[v * 3 + a] = result.position[i * 3 + a];
   });
-  return { position, result };
+  const corners = model.mesh.corners.slice();
+  result.triangles.forEach((t, i) => corners.set(result.corners.subarray(i * 3, i * 3 + 3), t * 3));
+  const mesh: RefineMesh = { ...model.mesh, position, corners };
+  return { position, corners, mesh, result };
 }
 
 /** Each rivet's height over the plate top (y = 0.5), and the RMS height of the plate far from them. */
@@ -72,21 +75,58 @@ function stepWidth(position: Float64Array, height: number) {
   return xs[Math.floor(xs.length * 0.95)] - xs[Math.floor(xs.length * 0.05)];
 }
 
-/** Triangles whose normal turns more than 90 degrees between two position arrays. */
-function turnedOver(model: Model, before: Float64Array, after: Float64Array) {
-  const cross = (p: Float64Array, t: number) => {
-    const [a, b, c] = [0, 1, 2].map((k) => weldedCorner(model.mesh, t, k as 0 | 1 | 2) * 3);
-    const u = [0, 1, 2].map((i) => p[b + i] - p[a + i]),
-      w = [0, 1, 2].map((i) => p[c + i] - p[a + i]);
-    return [u[1] * w[2] - u[2] * w[1], u[2] * w[0] - u[0] * w[2], u[0] * w[1] - u[1] * w[0]];
-  };
+/** A triangle's normal times twice its area. */
+function cross(mesh: RefineMesh, t: number) {
+  const p = mesh.position;
+  const [a, b, c] = [0, 1, 2].map((k) => weldedCorner(mesh, t, k as 0 | 1 | 2) * 3);
+  const u = [0, 1, 2].map((i) => p[b + i] - p[a + i]),
+    w = [0, 1, 2].map((i) => p[c + i] - p[a + i]);
+  return [u[1] * w[2] - u[2] * w[1], u[2] * w[0] - u[0] * w[2], u[0] * w[1] - u[1] * w[0]];
+}
+
+/**
+ * Triangles of `after` facing away from the source surface around them: the sum of the source
+ * normals of the triangles around their corners.
+ */
+function inverted(model: Model, after: RefineMesh) {
+  const { mesh, topology } = model;
+  const source = Array.from({ length: mesh.triangleCount }, (_, t) => cross(mesh, t));
   let count = 0;
-  for (let t = 0; t < model.mesh.triangleCount; t++) {
-    const m = cross(before, t),
-      n = cross(after, t);
-    if (m[0] * n[0] + m[1] * n[1] + m[2] * n[2] <= 0) count++;
+  for (let t = 0; t < after.triangleCount; t++) {
+    const reference = [0, 0, 0];
+    for (let k = 0; k < 3; k++) {
+      const v = weldedCorner(after, t, k as 0 | 1 | 2);
+      for (let i = topology.triangleStart[v]; i < topology.triangleStart[v + 1]; i++)
+        source[topology.trianglesOf[i]].forEach((x, a) => (reference[a] += x));
+    }
+    const n = cross(after, t);
+    if (n[0] * reference[0] + n[1] * reference[1] + n[2] * reference[2] <= 0) count++;
   }
   return count;
+}
+
+/** Sum over interior edges of length times the angle between their two triangles' normals. */
+function bending(mesh: RefineMesh) {
+  const first = new Map<string, number>();
+  let sum = 0;
+  for (let t = 0; t < mesh.triangleCount; t++)
+    for (let k = 0; k < 3; k++) {
+      const a = weldedCorner(mesh, t, k as 0 | 1 | 2),
+        b = weldedCorner(mesh, t, ((k + 1) % 3) as 0 | 1 | 2);
+      const key = a < b ? `${a},${b}` : `${b},${a}`;
+      const other = first.get(key);
+      if (other === undefined) {
+        first.set(key, t);
+        continue;
+      }
+      const [m, n] = [cross(mesh, t), cross(mesh, other)];
+      const cos = (m[0] * n[0] + m[1] * n[1] + m[2] * n[2]) / (Math.hypot(...m) * Math.hypot(...n));
+      const p = mesh.position;
+      sum +=
+        Math.hypot(p[a * 3] - p[b * 3], p[a * 3 + 1] - p[b * 3 + 1], p[a * 3 + 2] - p[b * 3 + 2]) *
+        Math.acos(Math.max(-1, Math.min(1, cos)));
+    }
+  return sum;
 }
 
 describe('refine clean', () => {
@@ -139,21 +179,22 @@ describe('refine clean', () => {
     const model = modelOf(geometry, new Matrix4().makeScale(-1, 2, 1));
     const flipped = rivets.map((r) => ({ x: -r.x, z: r.z }));
     const before = plate(model.mesh.position, flipped, 0.5, 2);
-    const { position } = cleaned(model, { depth: 1 });
+    const { position, mesh } = cleaned(model, { ...cleanDefaults, depth: 1 });
     expect(plate(position, flipped, 0.5, 2).peak).toBeGreaterThan(1.05 * before.peak);
-    expect(turnedOver(model, model.mesh.position, position)).toBe(0);
+    expect(inverted(model, mesh)).toBe(0);
   });
 
   it('turns no triangle over at the strongest settings', () => {
     for (const geometry of [rivetedPlate().geometry, softBox([2, 1.5, 1], 0.2)]) {
       const model = modelOf(geometry);
-      const { position } = cleaned(model, {
+      const { mesh } = cleaned(model, {
         smooth: 1,
         sharpen: 1,
         depth: maxCleanDepth,
         size: maxCleanSize,
       });
-      expect(turnedOver(model, model.mesh.position, position)).toBe(0);
+      expect(inverted(model, mesh)).toBe(0);
+      expect(closedMesh(mesh)).toBe(true);
     }
   });
 
@@ -193,6 +234,10 @@ describe('refine clean', () => {
       expect(inside.has(v)).toBe(true);
       expect(border.has(v)).toBe(false);
     }
+    // Only triangles between moved vertices turn.
+    const moved = new Set(result.moved);
+    for (let i = 0; i < result.corners.length; i++)
+      expect(moved.has(mesh.weldOf[result.corners[i]])).toBe(true);
     // Everything else keeps its exact position.
     for (let v = 0; v < mesh.weldedCount; v++)
       if (!inside.has(v) || border.has(v))
@@ -216,6 +261,22 @@ describe('refine clean', () => {
     const { result } = cleaned(model, { ...cleanDefaults, depth: 2 });
     expect(result.moved.length).toBeGreaterThan(0);
     for (const v of result.moved) expect(held.has(v)).toBe(false);
+  });
+
+  it('turns triangles to follow a sharpened edge, keeping the mesh closed', () => {
+    for (const indexed of [false, true]) {
+      const model = modelOf(softBox([2, 1.5, 1], 0.12, { indexed }));
+      const { mesh, result } = cleaned(model, { smooth: 0.5, sharpen: 1 });
+      expect(result.triangles.length).toBeGreaterThan(0);
+      expect(closedMesh(mesh)).toBe(true);
+      expect(result.topology).toEqual(buildTopology(mesh));
+      expect(inverted(model, mesh)).toBe(0);
+      // The turned triangles bend the surface less than the old ones at the same positions.
+      expect(bending(mesh)).toBeLessThan(bending({ ...mesh, corners: model.mesh.corners }));
+      // Each corner keeps a geometry vertex of its own welded vertex.
+      const before = new Set(model.mesh.corners);
+      for (const g of result.corners) expect(before.has(g)).toBe(true);
+    }
   });
 
   it('changes nothing when every setting is off', () => {
@@ -250,6 +311,8 @@ describe('refine clean', () => {
     );
     expect(job.moved).toEqual(direct.moved);
     expect(job.position).toEqual(direct.position);
+    expect(job.corners).toEqual(direct.corners);
+    expect(job.topology).toEqual(direct.topology);
     expect(progress.at(-1)).toBe(1);
     expect(progress.every((f, i) => i === 0 || f >= progress[i - 1])).toBe(true);
   });

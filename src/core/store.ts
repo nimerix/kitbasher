@@ -4681,13 +4681,15 @@ export const useEditor = create<EditorState>((set, get) => ({
     }
     // A stroke or drag under way began on the surface this replaces.
     discardRefineStroke();
-    const mesh = cloneRefineMesh(model.mesh, false);
-    const { moved, position } = result;
+    const { moved, position, triangles, corners, topology } = result;
+    // Triangles turned to follow a sharpened edge take new corners and the topology made for them.
+    const mesh = cloneRefineMesh(model.mesh, triangles.length > 0);
+    triangles.forEach((t, i) => mesh.corners.set(corners.subarray(i * 3, i * 3 + 3), t * 3));
     for (let i = 0; i < moved.length; i++)
       moveVertex(mesh, moved[i], position[i * 3], position[i * 3 + 1], position[i * 3 + 2]);
     const latest = get().refine!;
     commitRefine({
-      model: { ...model, mesh },
+      model: { ...model, mesh, topology: topology ?? model.topology },
       features: latest.features.map((f) => refreshSketchTriangles(f, mesh)),
     });
     if (result.held) get().notify(heldNotice(result.held), 'info');

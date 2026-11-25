@@ -19,7 +19,7 @@ import { dismissNotification, requestTaskCancellation, useActivity } from '../..
 import { editorCommands, undoTarget } from '../../src/core/commands';
 import { partMatrix, triangleCount } from '../../src/core/geometry';
 import { detectDefaults } from '../../src/core/refine-detect';
-import { writeRefinedGeometry } from '../../src/core/refine-mesh';
+import { buildTopology, writeRefinedGeometry } from '../../src/core/refine-mesh';
 import { fitCurve, GuideLengthError, type EdgeCurve } from '../../src/core/refine-curve';
 import type { GuidePoint } from '../../src/core/refine-band';
 import type { RefineProposal } from '../../src/core/refine-detect';
@@ -47,7 +47,14 @@ import {
 } from '../../src/core/store';
 import { useXR } from '../../src/core/xr-session';
 import type { Joint, Part } from '../../src/core/types';
-import { changedVertices, closed, edgeNeighbours, modelOf, splitEdge } from '../helpers/refine';
+import {
+  changedVertices,
+  closed,
+  closedMesh,
+  edgeNeighbours,
+  modelOf,
+  splitEdge,
+} from '../helpers/refine';
 import {
   alongPreset,
   boxPart,
@@ -1108,12 +1115,14 @@ describe('refine clean', () => {
     expect(session().undo.length).toBe(undo + 1);
     const { mesh } = session().model!;
     expect(mesh.position).not.toEqual(position);
-    expect(mesh.corners).toBe(start.mesh.corners);
-    expect(session().model!.topology).toBe(start.topology);
+    // Triangles turned to follow the sharpened edges come with the topology made for them.
+    expect(mesh.corners).not.toEqual(start.mesh.corners);
+    expect(closedMesh(mesh)).toBe(true);
+    expect(session().model!.topology).toEqual(buildTopology(mesh));
     expect(refineEdited(session())).toBe(true);
     expect(differingAttributes(session().preview!, fresh())).toEqual([]);
     editor().undoRefine();
-    expect(session().model!.mesh.position).toEqual(position);
+    expect(session().model).toBe(start);
     expect(differingAttributes(session().preview!, fresh())).toEqual([]);
     editor().redoRefine();
     const cleaned = fresh();
