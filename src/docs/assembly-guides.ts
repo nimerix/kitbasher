@@ -521,11 +521,11 @@ export const assemblyGuides: DocArticle[] = [
     id: 'refine',
     title: 'Refine edges and surfaces on a scan',
     description:
-      'Rebuild softened edges, clean up painted areas, and review proposed fixes on a scanned part.',
+      'Rebuild softened edges, clean up painted areas or the whole part, and review proposed fixes on a scanned part.',
     group: 'Build & assemble',
     icon: 'zap',
     intro:
-      'A scan of a small part often rounds off edges that should be sharp and leaves ripples on faces that should be flat or round. Refine rebuilds an edge from a guide you lay along it, treats a painted area so it is smooth, flat or a true shape and can keep rivets and other detail, and offers brushes for local fixes. Review a selected guide or region on the part, accept the ones you want, and choose Apply to save the session’s working surface to the part.',
+      'A scan of a small part often rounds off edges that should be sharp and leaves ripples on faces that should be flat or round. Refine rebuilds an edge from a guide you lay along it, treats a painted area so it is smooth, flat or a true shape and can keep rivets and other detail, offers brushes for local fixes, and cleans the whole part at once, the way sharpening cleans up a photo. Review a selected guide or region on the part, accept the ones you want, and choose Apply to save the session’s working surface to the part.',
     image: referenceImages.refine,
     sections: [
       {
@@ -537,7 +537,7 @@ export const assemblyGuides: DocArticle[] = [
         steps: [
           'Select one visible, unlocked part and press E, or choose Refine (the sparkles button) in the toolbar.',
           'Wait while the panel shows Preparing the surface…',
-          'Choose a mode: Edge, Region, Brush, or Detect.',
+          'Choose a mode: Edge, Region, Brush, Detect, or Clean.',
         ],
         note: {
           title: 'What the settings change',
@@ -739,11 +739,49 @@ export const assemblyGuides: DocArticle[] = [
         },
       },
       {
+        id: 'clean',
+        title: 'Clean and sharpen a scan',
+        paragraphs: [
+          'Clean treats the whole part, or a painted area, in one step, the way sharpening treats a photo: it removes scan noise, crisps softened edges, and makes recessed and raised detail deeper.',
+        ],
+        steps: [
+          'In Clean mode, choose Whole part or Painted area under Area. For Painted area, paint where to clean.',
+          'Set Smooth, Sharpen, and Depth. Size is automatic; turn off Automatic size to set it in mm.',
+          'Choose Clean surface. Progress shows in the panel, and the Cancel button below it stops the clean.',
+          'Compare the result with Ctrl/⌘ + Z and Ctrl/⌘ + Shift + Z. To try other settings, undo, change them, and clean again. Choose Apply to keep the result.',
+        ],
+        table: {
+          headers: ['Setting', 'Result'],
+          rows: [
+            [
+              'Smooth',
+              'Removes noise and small unevenness while keeping edges. Higher values also soften gentle edges and remove more small detail.',
+            ],
+            [
+              'Sharpen',
+              'Narrows softened edges and corners so they turn more crisply. It also brings out any ripple that Smooth leaves.',
+            ],
+            [
+              'Depth',
+              'Makes recesses deeper and raised detail higher, up to Size across. 100% doubles their relief; detail within the scan’s noise is left as it is.',
+            ],
+            [
+              'Size',
+              'The widest feature Depth deepens. Raise it for larger recesses, such as an eye socket or a panel line.',
+            ],
+          ],
+        },
+        note: {
+          title: 'What Clean keeps',
+          text: 'A painted area eases into the surface around it, and nothing outside it moves. Edges the tool has rebuilt and open borders stay where they are. Where moving a vertex would fold a triangle over, it moves less, and the app says how many vertices it held back. A clean is one session undo step. On a very large part it can take a while: a 700,000-triangle scan takes several seconds.',
+        },
+      },
+      {
         id: 'apply-or-cancel',
         title: 'Apply or cancel',
         paragraphs: [
-          'While the tool is open, Ctrl/⌘ + Z and Ctrl/⌘ + Shift + Z undo and redo session steps, such as placing or dragging guide points, painting, accepting, and strokes that change the surface. These shortcuts use session history first. Changing a setting is not a step. Pressing Esc, or switching to another window, during a brush stroke or a drag of a guide point discards that stroke or drag, leaving nothing to undo.',
-          'Apply saves the working surface to the part as one undo step in the scene. It becomes available once you have accepted a feature or made a stroke that changed the surface. Pins, anchors, joints, and other parts are not modified, and Refine stays open so you can continue.',
+          'While the tool is open, Ctrl/⌘ + Z and Ctrl/⌘ + Shift + Z undo and redo session steps, such as placing or dragging guide points, painting, accepting, strokes that change the surface, and cleaning. These shortcuts use session history first. Changing a setting is not a step. Pressing Esc, or switching to another window, during a brush stroke or a drag of a guide point discards that stroke or drag, leaving nothing to undo.',
+          'Apply saves the working surface to the part as one undo step in the scene. It becomes available once you have accepted a feature, made a stroke that changed the surface, or cleaned it. Pins, anchors, joints, and other parts are not modified, and Refine stays open so you can continue.',
           'Cancel discards the work you have not applied and leaves the tool. When Esc has nothing else to end, such as a stroke, a drag, an unfinished guide, or a waiting Crease guide, it returns to Select, unless the session holds work. Then Esc stays in Refine and the status line shows Apply to keep your changes, or Cancel to discard them. Leaving Refine another way, such as choosing another tool, discards this session. If you leave that way while the session holds work you made, such as accepted changes, guides you drew, proposals you edited, or paint, the app shows Refinement discarded. Use Apply to keep it. Cancel shows no notice. Changes you applied earlier stay on the part.',
         ],
       },
@@ -751,6 +789,7 @@ export const assemblyGuides: DocArticle[] = [
         id: 'good-results',
         title: 'Getting good results',
         bullets: [
+          'Clean gives the most on soft, noisy scans. Start from the default settings and raise one setting at a time: high Sharpen and Depth together can make a noisy area rough.',
           'Restore edges before smoothing or flattening across them. Smoothing or flattening across an edge that has not been rebuilt can soften it further; rebuilt edges are held.',
           'On a plate with rivets, use a painted region with Flatten and Keep detail rather than the Flatten brush. The brush can flatten rivets, and clipping one can leave a step at its rim.',
           'A guide needs surface on both sides to work with. Lay it along the rounded edge itself or close beside it. A line laid along an edge that clearly curves follows the curve instead of cutting straight across it. If the tool says no edge was found, move the guide onto the rounding or change Width. A lip or rib rounded right over, with no flat top left, has no edge for the tool to find.',

@@ -20,6 +20,17 @@ export interface Release {
 // Newest first. Each title must be unique: it names the release's link.
 export const releases: Release[] = [
   {
+    date: '2026-11-25',
+    title: 'Clean and sharpen scans',
+    changes: [
+      {
+        kind: 'new',
+        text: 'Refine has a Clean mode that treats the whole part, or a painted area, the way sharpening treats a photo. Smooth removes scan noise while keeping edges, Sharpen makes softened edges turn more crisply, and Depth makes recessed and raised detail deeper, up to a Size you can set.',
+        guide: 'refine',
+      },
+    ],
+  },
+  {
     date: '2026-11-24',
     title: 'Crease finds the edge',
     changes: [
