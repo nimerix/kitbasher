@@ -136,7 +136,7 @@ const fitPoints = 1024;
 /** Robust scale of a residual per unit of median absolute residual. */
 const madScale = 1.4826;
 /** Widest width `estimateWidth` returns, mm, unless the edge cannot be read within it. */
-const widestEstimate = 1;
+export const widestEstimate = 1;
 const unset = -1;
 
 /** Min-heap of (distance, index) pairs on typed arrays that grow as needed. */
