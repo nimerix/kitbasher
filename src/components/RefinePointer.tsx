@@ -25,7 +25,7 @@ import {
 } from '../core/store';
 import type { GuidePoint } from '../core/refine-band';
 import { drawnCurve } from '../core/refine-curve';
-import { lineNearRay, nearestOnSurface, pointAt, rayOnPlane } from '../core/refine-sketch';
+import { lineNearRay, pointAt, rayOnPlane } from '../core/refine-sketch';
 import type { RefineMesh } from '../core/refine-mesh';
 import type { RefineBrush } from '../core/refine-brush';
 import { prepareEditedForPicking } from '../core/bvh';
@@ -1022,9 +1022,8 @@ export function RefinePointerController({ pressed }: { pressed: () => boolean })
       const position =
         lock?.kind === 'line' ? lineNearRay(lock, o, dir) : rayOnPlane(plane!, o, dir);
       if (!position) return null;
-      const { mesh, topology } = refine.model;
-      const near = nearestOnSurface(mesh, topology, { triangle: d.current.triangle, position });
-      return { triangle: near.triangle, position, ...(lock ? { lock } : {}) };
+      const point = pointAt(refine.model.mesh, position);
+      return point && { ...point, ...(lock ? { lock } : {}) };
     };
 
     /** Moves the dragged point to the model surface under the sample, or along its lock. */
@@ -1495,7 +1494,7 @@ export function RefinePointerController({ pressed }: { pressed: () => boolean })
       aimAt(x, y);
       const { origin, direction } = raycaster.ray;
       const at = rayOnPlane(plane, origin.toArray(), direction.toArray());
-      const point = at && pointAt(refine.model.mesh, refine.model.topology, at);
+      const point = at && pointAt(refine.model.mesh, at);
       if (point) state.addRefinePoint(point);
       return true;
     };

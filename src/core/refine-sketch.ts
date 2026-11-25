@@ -1,3 +1,5 @@
+import { BufferAttribute, BufferGeometry, Vector3 } from 'three';
+import { MeshBVH } from 'three-mesh-bvh';
 import type { GuidePoint } from './refine-band';
 import { type RefineMesh, type RefineTopology, weldedCorner } from './refine-mesh';
 import type { Vec3 } from './types';
@@ -275,105 +277,32 @@ export function heldPoint(
   return [p[0], p[1], p[2]];
 }
 
-/** A uniform grid of each triangle's centroid, for the triangle nearest a point. */
-interface TriangleGrid {
-  cell: number;
-  min: Vec3;
-  cells: Map<number, number[]>;
-  /** Largest distance from a triangle's centroid to its corners. */
-  reach: number;
-}
-const grids = new WeakMap<object, TriangleGrid>();
+const trees = new WeakMap<RefineMesh, MeshBVH>();
 
-function gridOf(mesh: RefineMesh): TriangleGrid {
-  const known = grids.get(mesh.position);
-  if (known) return known;
-  const { position, triangleCount } = mesh;
-  const min: Vec3 = [Infinity, Infinity, Infinity],
-    max: Vec3 = [-Infinity, -Infinity, -Infinity];
-  for (let v = 0; v < mesh.weldedCount; v++)
-    for (let a = 0; a < 3; a++) {
-      min[a] = Math.min(min[a], position[v * 3 + a]);
-      max[a] = Math.max(max[a], position[v * 3 + a]);
-    }
-  const size = Math.max(max[0] - min[0], max[1] - min[1], max[2] - min[2], 1e-6);
-  const cell = Math.max(size / 256, Math.cbrt((size * size * size) / Math.max(1, triangleCount)));
-  const cells = new Map<number, number[]>();
-  let reach = 0;
-  for (let t = 0; t < triangleCount; t++) {
-    const c = [0, 0, 0];
-    const corners = ([0, 1, 2] as const).map((k) => weldedCorner(mesh, t, k) * 3);
-    for (const w of corners) for (let a = 0; a < 3; a++) c[a] += position[w + a] / 3;
-    for (const w of corners)
-      reach = Math.max(
-        reach,
-        Math.hypot(position[w] - c[0], position[w + 1] - c[1], position[w + 2] - c[2]),
-      );
-    const key = keyOf(
-      Math.floor((c[0] - min[0]) / cell),
-      Math.floor((c[1] - min[1]) / cell),
-      Math.floor((c[2] - min[2]) / cell),
-    );
-    const list = cells.get(key);
-    if (list) list.push(t);
-    else cells.set(key, [t]);
-  }
-  const grid = { cell, min, cells, reach };
-  grids.set(mesh.position, grid);
-  return grid;
-}
-/** Rings of cells searched before a point is taken to be far from the part. */
-const nearRings = 8;
-const keyOf = (i: number, j: number, k: number) => (i * 73856093) ^ (j * 19349663) ^ (k * 83492791);
-
-/**
- * The surface point nearest `p` and its triangle, over the whole mesh: the triangles whose centroids
- * lie in rings of grid cells about it, until no nearer one can remain, then refined over its
- * neighbours. Null on an empty mesh.
- */
-export function nearestTriangle(
-  mesh: RefineMesh,
-  topology: RefineTopology,
-  p: ArrayLike<number>,
-): GuidePoint | null {
+/** Closest triangle on the immutable session model, including across separate shells. */
+export function nearestTriangle(mesh: RefineMesh, p: ArrayLike<number>): GuidePoint | null {
   if (!mesh.triangleCount) return null;
-  const grid = gridOf(mesh);
-  const { cell, min, cells, reach } = grid;
-  const { position } = mesh;
-  const at = [0, 1, 2].map((a) => Math.floor((p[a] - min[a]) / cell));
-  let best = -1,
-    nearest = Infinity;
-  const corner = (t: number, k: 0 | 1 | 2) => {
-    const w = weldedCorner(mesh, t, k) * 3;
-    return position.subarray(w, w + 3);
-  };
-  const consider = (t: number) => {
-    const q = closestOnTriangle(p, corner(t, 0), corner(t, 1), corner(t, 2));
-    const d = Math.hypot(q[0] - p[0], q[1] - p[1], q[2] - p[2]);
-    if (d < nearest || (d === nearest && t < best)) [nearest, best] = [d, t];
-  };
-  for (let r = 0; ; r++) {
-    // Every triangle with a point within `nearest` has its centroid within nearest + reach.
-    if (best >= 0 && (r - 1) * cell > nearest + reach) break;
-    if (best < 0 && r > nearRings) {
-      // Far from the part: every triangle, once.
-      for (let t = 0; t < mesh.triangleCount; t++) consider(t);
-      break;
-    }
-    for (let i = -r; i <= r; i++)
-      for (let j = -r; j <= r; j++)
-        for (let k = -r; k <= r; k++) {
-          if (Math.max(Math.abs(i), Math.abs(j), Math.abs(k)) !== r) continue;
-          for (const t of cells.get(keyOf(at[0] + i, at[1] + j, at[2] + k)) ?? []) consider(t);
-        }
+  let tree = trees.get(mesh);
+  if (!tree) {
+    const geometry = new BufferGeometry();
+    geometry.setAttribute('position', new BufferAttribute(mesh.position, 3));
+    const corners = mesh.corners.subarray(0, mesh.triangleCount * 3);
+    geometry.setIndex(
+      new BufferAttribute(
+        corners.map((i) => mesh.weldOf[i]),
+        1,
+      ),
+    );
+    tree = new MeshBVH(geometry, { indirect: true });
+    trees.set(mesh, tree);
   }
-  if (best < 0) return null;
-  return nearestOnSurface(mesh, topology, { triangle: best, position: [p[0], p[1], p[2]] });
+  const hit = tree.closestPointToPoint(new Vector3(p[0], p[1], p[2]));
+  return hit && { triangle: hit.faceIndex, position: hit.point.toArray() };
 }
 
 /** A guide point at `p` itself, on the triangle nearest it. */
-export function pointAt(mesh: RefineMesh, topology: RefineTopology, p: ArrayLike<number>) {
-  const found = nearestTriangle(mesh, topology, p);
+export function pointAt(mesh: RefineMesh, p: ArrayLike<number>) {
+  const found = nearestTriangle(mesh, p);
   return found && { triangle: found.triangle, position: [p[0], p[1], p[2]] as Vec3 };
 }
 
