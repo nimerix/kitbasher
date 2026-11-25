@@ -1088,6 +1088,124 @@ describe('refine detection', () => {
   });
 });
 
+describe('refine clean', () => {
+  const cleanTask = () =>
+    useActivity.getState().tasks.find((t) => t.title === 'Cleaning the surface')!;
+
+  it('cleans the whole working surface as one undo step', async () => {
+    setup([boxPart()], ['box']);
+    await ready();
+    editor().setRefineMode('clean');
+    expect(paintingRefine(editor())).toBe(false);
+    const start = session().model!;
+    const position = start.mesh.position.slice();
+    const undo = session().undo.length;
+    const cleaning = editor().cleanRefine();
+    expect(session().clean.running).toBe(true);
+    await cleaning;
+    expect(session().clean.running).toBe(false);
+    expect(cleanTask().status).toBe('completed');
+    expect(session().undo.length).toBe(undo + 1);
+    const { mesh } = session().model!;
+    expect(mesh.position).not.toEqual(position);
+    expect(mesh.corners).toBe(start.mesh.corners);
+    expect(session().model!.topology).toBe(start.topology);
+    expect(refineEdited(session())).toBe(true);
+    expect(differingAttributes(session().preview!, fresh())).toEqual([]);
+    editor().undoRefine();
+    expect(session().model!.mesh.position).toEqual(position);
+    expect(differingAttributes(session().preview!, fresh())).toEqual([]);
+    editor().redoRefine();
+    const cleaned = fresh();
+    expect(editor().applyRefine()).toBe(true);
+    expect(differingAttributes(editor().scene.parts[0].geometry, cleaned)).toEqual([]);
+    expect(closed(editor().scene.parts[0].geometry)).toBe(true);
+    await vi.waitFor(() => expect(session().stage).toBe('ready'));
+    expect(session().mode).toBe('clean');
+  });
+
+  it('cleans only a painted area, and nothing before one is painted', async () => {
+    setup([boxPart()], ['box']);
+    await ready();
+    editor().setRefineMode('clean');
+    editor().setRefineClean({ where: 'painted' });
+    expect(paintingRefine(editor())).toBe(true);
+    const model = session().model;
+    await editor().cleanRefine();
+    expect(session().model).toBe(model);
+    paint([[0.3, 1.5, 0.2]]);
+    const painted = new Set<number>();
+    const { mesh } = session().model!;
+    for (const t of session().triangles)
+      for (let k = 0; k < 3; k++) painted.add(mesh.weldOf[mesh.corners[t * 3 + k]]);
+    expect(painted.size).toBeGreaterThan(0);
+    await editor().cleanRefine();
+    const after = session().model!.mesh;
+    let moved = 0;
+    for (let v = 0; v < after.weldedCount; v++) {
+      const same = [0, 1, 2].every((a) => after.position[v * 3 + a] === mesh.position[v * 3 + a]);
+      if (same) continue;
+      moved++;
+      expect(painted.has(v)).toBe(true);
+    }
+    expect(moved).toBeGreaterThan(0);
+  });
+
+  it('says so when the settings leave the surface as it is', async () => {
+    setup([boxPart()], ['box']);
+    await ready();
+    editor().setRefineMode('clean');
+    editor().setRefineClean({ smooth: 0, sharpen: 0, depth: 0 });
+    const model = session().model;
+    await editor().cleanRefine();
+    expect(session().model).toBe(model);
+    expect(toast()).toBe('These settings leave the surface as it is.');
+  });
+
+  it('drops a clean that finished after the model changed', async () => {
+    setup([boxPart()], ['box']);
+    await ready();
+    editor().setRefineMode('clean');
+    const cleaning = editor().cleanRefine();
+    commitRefine({ model: movedModel(session().model!, topVertices(), [0, 0.01, 0]) });
+    const model = session().model;
+    await cleaning;
+    expect(session().model).toBe(model);
+    expect(toast()).toBe('The surface changed, so cleaning was stopped.');
+    expect(session().clean.running).toBe(false);
+  });
+
+  it('stops a running clean and its worker on cancel', async () => {
+    setup([boxPart()], ['box']);
+    await ready();
+    editor().setRefineMode('clean');
+    const terminate = vi.fn();
+    class StuckWorker {
+      onmessage = null;
+      onerror = null;
+      onmessageerror = null;
+      postMessage() {}
+      terminate = terminate;
+    }
+    vi.stubGlobal('Worker', StuckWorker);
+    const model = session().model;
+    try {
+      const cleaning = editor().cleanRefine();
+      expect(session().clean.running).toBe(true);
+      expect(heldRefineState()).toContain('clean');
+      editor().cancelRefineClean();
+      await cleaning;
+    } finally {
+      vi.unstubAllGlobals();
+    }
+    expect(terminate).toHaveBeenCalled();
+    expect(session().clean.running).toBe(false);
+    expect(session().model).toBe(model);
+    expect(cleanTask().status).toBe('cancelled');
+    expect(heldRefineState()).toEqual([]);
+  });
+});
+
 describe('refine lifecycle edges', () => {
   const preparing = () =>
     useActivity.getState().tasks.filter((t) => t.title === 'Preparing to refine');

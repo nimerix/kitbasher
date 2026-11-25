@@ -653,6 +653,8 @@ function refineHints(mode: RefineMode | 'building', smaller: string, larger: str
       return `Drag across the surface.${smaller && larger ? ` ${smaller} and ${larger} change the brush size.` : ''}`;
     case 'detect':
       return 'Find edges and surfaces, then accept the proposals you want.';
+    case 'clean':
+      return 'Clean the whole part, or paint the area to clean. Undo steps back.';
   }
 }
 
