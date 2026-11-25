@@ -38,6 +38,12 @@ export function setup(
   return scene;
 }
 
+/**
+ * Today's solve for hand-placed guides: the guide marks the rounding and the edge is where the two
+ * faces meet, as Detect and the crease brush solve.
+ */
+export const alongPreset = { position: 'along', fit: null, path: false } as const;
+
 /** Chooses the tool and waits for the session's model. */
 export async function ready() {
   editor().setTool('refine');

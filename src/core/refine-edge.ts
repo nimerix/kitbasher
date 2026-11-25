@@ -17,6 +17,7 @@ import {
   type GuideKind,
   closestOnCurve,
   curveTangent,
+  drawnCurve,
   fitCurve,
   joinCurves,
 } from './refine-curve';
@@ -32,6 +33,7 @@ import {
   vertexNormal,
   weldedCorner,
 } from './refine-mesh';
+import { type SketchPlane, bestPlaneNormal, nearestOnSurface } from './refine-sketch';
 import type { Vec3 } from './types';
 
 export interface Flank {
@@ -59,7 +61,32 @@ export interface EdgeInput {
    * surface past the end. Ignored on a closed path.
    */
   ends?: [EdgeEnd | null, EdgeEnd | null];
+  /**
+   * Where the guide lies on the rounded edge of the scan; absent is `along`, today's solve, where the
+   * edge is where the two faces meet.
+   */
+  position?: EdgePosition;
+  /** How far, mm, the solved edge may move off the guide's edge; null or absent is today's reach. */
+  fit?: number | null;
+  /** Keep the guide's shape: any move is one offset per segment. Absent is off. */
+  path?: boolean;
+  /** Degrees between the surface and the wall; null or absent reads it from the scan. */
+  wallAngle?: number | null;
+  /** The sketch plane the guide's points lie on. */
+  plane?: SketchPlane | null;
+  /** Take the surface from the plane, not the scan. Only read with a plane. */
+  usePlane?: boolean;
 }
+/**
+ * Where a guide lies relative to the rounded edge on the scan: on the sharp edge itself, where the
+ * rounding starts on the surface, where it ends on the wall, or somewhere on it.
+ */
+export type EdgePosition = 'corner' | 'top' | 'bottom' | 'along';
+/**
+ * Why `solveEdge` refused: no edge under the guide; no wall it could fit; a wall more than
+ * `wallTolerance` degrees off the wall angle; or a width that leaves no usable core.
+ */
+export type EdgeRefusal = 'edge' | 'wall' | 'angle' | 'width';
 /** How the sharpness ends at an open guide's end: tapered along the edge, or held to the end. */
 export type EdgeEnd = 'taper' | 'hold';
 export interface EdgeSolve {
@@ -733,12 +760,374 @@ interface Part {
   kind: GuideKind;
   band: EdgeBand;
   edge: number;
+  /** The flanks the edge is rebuilt onto: the scan's, or as the guide's settings make them. */
   flanks: [Flank, Flank];
+  /** The flanks as read from the scan, which shared and cleared refits change. */
+  scan: [Flank, Flank];
   meet: { points: Float64Array; angles: number[] };
   curve: EdgeCurve;
   samples: (FlankSample | null)[];
   controls: number;
+  /** The guide's points as placed, and the guide drawn through them. */
+  points: GuidePoint[];
+  drawn: EdgeCurve;
+  guide: GuideSettings;
+  /** The side that is the surface; the other is the wall. */
+  surface: number;
 }
+
+/** A guide's solve settings, resolved. */
+interface GuideSettings {
+  /** No setting differs from today's solve, which then runs exactly as it did. */
+  legacy: boolean;
+  position: EdgePosition;
+  fit: number | null;
+  path: boolean;
+  wallAngle: number | null;
+  /** The plane taken as the surface, when Use guide plane is on. */
+  plane: SketchPlane | null;
+  /** The normal the surface is told from the wall by: the plane's, or the guide's best-fit plane's. */
+  reference: Vec3 | null;
+  /** The plane as a flank, one per orientation, so segments that share it share one flank. */
+  planeFlanks: Map<number, Flank>;
+}
+
+/** Most degrees a wall read from the scan may lie off a set wall angle. */
+export const wallTolerance = 5;
+
+/** The guide's settings, resolved from `input`. */
+function settingsOf(input: EdgeInput): GuideSettings {
+  const plane = input.plane && input.usePlane !== false ? input.plane : null;
+  const position = input.position ?? 'along';
+  const fit = input.fit ?? null;
+  const path = !!input.path;
+  const wallAngle = input.wallAngle ?? null;
+  const flat = input.segments.flatMap((segment) => segment.points.flatMap((p) => p.position));
+  return {
+    legacy: position === 'along' && fit === null && !path && wallAngle === null && !plane,
+    position,
+    fit,
+    path,
+    wallAngle,
+    plane,
+    reference: input.plane?.normal ?? bestPlaneNormal(flat),
+    planeFlanks: new Map(),
+  };
+}
+
+/** A plane through `point` with unit `normal` as a flank, positive on the normal's side. */
+function planeFlank(point: ArrayLike<number>, normal: ArrayLike<number>): Flank {
+  const [px, py, pz] = [point[0], point[1], point[2]];
+  const [nx, ny, nz] = [normal[0], normal[1], normal[2]];
+  const signed = (x: number, y: number, z: number) => (x - px) * nx + (y - py) * ny + (z - pz) * nz;
+  return {
+    kind: 'plane',
+    signed,
+    distance: (x, y, z) => Math.abs(signed(x, y, z)),
+    project: (x, y, z, out) => {
+      const d = signed(x, y, z);
+      out[0] = x - d * nx;
+      out[1] = y - d * ny;
+      out[2] = z - d * nz;
+    },
+  };
+}
+
+/**
+ * The surface swept by a straight line about an axis through `centre` along unit `axis`: in the
+ * half-plane of each point it is the line through (radius, 0) with unit normal `normal`, as
+ * (radial, axial). A cylinder when the normal is radial, a cone otherwise.
+ */
+function revolvedFlank(
+  centre: ArrayLike<number>,
+  axis: ArrayLike<number>,
+  radius: number,
+  normal: [number, number],
+): Flank {
+  const d = [0, 0, 0],
+    e = [0, 0, 0];
+  const read = (x: number, y: number, z: number) => {
+    d[0] = x - centre[0];
+    d[1] = y - centre[1];
+    d[2] = z - centre[2];
+    const h = dot(d, axis);
+    for (let a = 0; a < 3; a++) e[a] = d[a] - h * axis[a];
+    const rho = Math.hypot(e[0], e[1], e[2]);
+    for (let a = 0; a < 3; a++) e[a] = rho > 0 ? e[a] / rho : 0;
+    return (rho - radius) * normal[0] + h * normal[1];
+  };
+  return {
+    kind: normal[1] === 0 ? 'cylinder' : 'cone',
+    signed: read,
+    distance: (x, y, z) => Math.abs(read(x, y, z)),
+    project: (x, y, z, out) => {
+      const s = read(x, y, z);
+      out[0] = x - s * (normal[0] * e[0] + normal[1] * axis[0]);
+      out[1] = y - s * (normal[0] * e[1] + normal[1] * axis[1]);
+      out[2] = z - s * (normal[0] * e[2] + normal[1] * axis[2]);
+    },
+  };
+}
+
+/** `v` with its part along unit `t` taken out, made unit; null when nothing is left. */
+function across(v: number[], t: number[]) {
+  const k = dot(v, t);
+  const w = [v[0] - k * t[0], v[1] - k * t[1], v[2] - k * t[2]];
+  return Math.hypot(w[0], w[1], w[2]) > 1e-6 ? unit(w) : null;
+}
+
+/** The median of each of `values`' `width` components. */
+function medianOf(values: number[][], width: number) {
+  return Array.from({ length: width }, (_, k) => median(values.map((v) => v[k])));
+}
+
+/**
+ * The wall's unit normal, given the surface's and the scan wall's (both across the edge): at
+ * `angle` degrees between surface and wall, on the side of the surface's normal the scan's wall
+ * lies, or the scan's own without an angle. `turn` turns a vector a quarter about the edge.
+ */
+function wallNormal(
+  surface: number[],
+  scan: number[],
+  angle: number | null,
+  turn: (v: number[]) => number[],
+) {
+  if (angle === null) return scan;
+  const theta = ((180 - angle) * Math.PI) / 180;
+  const b = turn(surface);
+  const [c, s] = [Math.cos(theta), Math.sin(theta)];
+  const options = [1, -1].map((sign) => surface.map((x, k) => c * x + sign * s * b[k]));
+  // Vectors of either 2 or 3 components.
+  const along = (v: number[]) => v.reduce((sum, x, k) => sum + x * scan[k], 0);
+  return along(options[0]) >= along(options[1]) ? options[0] : options[1];
+}
+
+/**
+ * The wall through a line or arc edge `curve`: a plane through a line, or a surface swept about an
+ * arc's axis, at `angle` to the surface, or at the scan wall's own angle without one. Null where
+ * the scan's wall runs along the edge.
+ */
+function wallThrough(
+  kind: GuideKind,
+  curve: EdgeCurve,
+  surface: Flank,
+  scan: Flank,
+  angle: number | null,
+): Flank | null {
+  const p = curve.points,
+    n = p.length / 3;
+  const point = (k: number): Vec3 => [p[k * 3], p[k * 3 + 1], p[k * 3 + 2]];
+  const circle = kind === 'arc' && n >= 3 ? circleOf(point(0), point(n >> 1), point(n - 1)) : null;
+  if (!circle) {
+    const [a, b] = [point(0), point(n - 1)];
+    const t = unit([b[0] - a[0], b[1] - a[1], b[2] - a[2]]);
+    const middle = [0, 1, 2].map((k) => (a[k] + b[k]) / 2);
+    const ns = across(unit(gradient(surface, middle)), t);
+    const ws = across(unit(gradient(scan, middle)), t);
+    if (!ns || !ws) return null;
+    return planeFlank(middle, unit(wallNormal(ns, ws, angle, (v) => crossOf(t, v))));
+  }
+  const { centre, radius, u, v } = circle;
+  const axis = crossOf(u, v);
+  const ns = [0, 0],
+    ws = [0, 0];
+  for (let j = 0; j <= 8; j++) {
+    const q = point(Math.round(((n - 1) * j) / 8));
+    const e = across([q[0] - centre[0], q[1] - centre[1], q[2] - centre[2]], axis);
+    if (!e) continue;
+    const [gs, gw] = [unit(gradient(surface, q)), unit(gradient(scan, q))];
+    ns[0] += dot(gs, e);
+    ns[1] += dot(gs, axis);
+    ws[0] += dot(gw, e);
+    ws[1] += dot(gw, axis);
+  }
+  const [sl, wl] = [Math.hypot(ns[0], ns[1]), Math.hypot(ws[0], ws[1])];
+  if (!(sl > 1e-6) || !(wl > 1e-6)) return null;
+  const normal = wallNormal([ns[0] / sl, ns[1] / sl], [ws[0] / wl, ws[1] / wl], angle, (w) => [
+    -w[1],
+    w[0],
+  ]);
+  const length = Math.hypot(normal[0], normal[1]);
+  return revolvedFlank(centre, axis, radius, [normal[0] / length, normal[1] / length]);
+}
+
+/**
+ * The guide moved by one offset toward the points where the faces meet, `meet` (xyz), at most
+ * `limit` mm: a line along itself, an arc radially and along its axis so it keeps its centre's axis,
+ * a spline as a whole. The offset is the median of the meet's offsets from the guide.
+ */
+function shifted(
+  kind: GuideKind,
+  points: GuidePoint[],
+  drawn: EdgeCurve,
+  meet: Float64Array,
+  limit: number,
+  edge: number,
+): EdgeCurve {
+  const ps = points.map((p) => [...p.position]);
+  const flat = () => ps.flat();
+  if (!(limit > 0) || meet.length < 3) return drawnCurve(kind, flat(), edge);
+  const count = meet.length / 3;
+  const m = (k: number) => [meet[k * 3], meet[k * 3 + 1], meet[k * 3 + 2]];
+  const clamp = (o: number[]) => {
+    const length = Math.hypot(...o);
+    return length > limit ? o.map((x) => (x * limit) / length) : o;
+  };
+  const circle =
+    kind === 'arc' && ps.length >= 3
+      ? circleOf(ps[0] as Vec3, ps[ps.length >> 1] as Vec3, ps[ps.length - 1] as Vec3)
+      : null;
+  if (circle) {
+    const { centre, radius, u, v } = circle;
+    const axis = crossOf(u, v);
+    const offsets: number[][] = [];
+    for (let k = 0; k < count; k++) {
+      const d = m(k).map((x, a) => x - centre[a]);
+      const h = dot(d, axis);
+      offsets.push([Math.hypot(...d.map((x, a) => x - h * axis[a])) - radius, h]);
+    }
+    const [radial, along] = clamp(medianOf(offsets, 2));
+    for (const p of ps) {
+      const d = p.map((x, a) => x - centre[a]);
+      const h = dot(d, axis);
+      const e = unit(d.map((x, a) => x - h * axis[a]));
+      for (let a = 0; a < 3; a++)
+        p[a] = centre[a] + (h + along) * axis[a] + (radius + radial) * e[a];
+    }
+    return drawnCurve(kind, flat(), edge);
+  }
+  const at = new Float64Array(3);
+  const offsets: number[][] = [];
+  const [a, b] = [ps[0], ps[ps.length - 1]];
+  const t = unit(b.map((x, k) => x - a[k]));
+  for (let k = 0; k < count; k++) {
+    const q = m(k);
+    if (kind === 'spline') {
+      onCurve(drawn, q[0], q[1], q[2], at);
+      offsets.push(q.map((x, c) => x - at[c]));
+    } else {
+      const d = q.map((x, c) => x - a[c]);
+      const along = dot(d, t);
+      offsets.push(d.map((x, c) => x - along * t[c]));
+    }
+  }
+  const o = clamp(medianOf(offsets, 3));
+  for (const p of ps) for (let c = 0; c < 3; c++) p[c] += o[c];
+  return drawnCurve(kind, flat(), edge);
+}
+
+/** Each of `meet` (xyz) moved back toward its nearest point of `drawn` to lie within `limit` of it. */
+function heldTo(drawn: EdgeCurve, meet: Float64Array, limit: number) {
+  const out = new Float64Array(meet.length);
+  const at = new Float64Array(3);
+  for (let k = 0; k < meet.length; k += 3) {
+    onCurve(drawn, meet[k], meet[k + 1], meet[k + 2], at);
+    const d = [meet[k] - at[0], meet[k + 1] - at[1], meet[k + 2] - at[2]];
+    const length = Math.hypot(d[0], d[1], d[2]);
+    const f = length > limit ? limit / length : 1;
+    for (let a = 0; a < 3; a++) out[k + a] = at[a] + d[a] * f;
+  }
+  return out;
+}
+
+/**
+ * Makes the part's flanks and edge from its scan flanks and its guide's settings. Today's solve:
+ * where the scan's flanks meet, fitted as the guide's kind. Otherwise: the sketch plane taken as the
+ * surface (Use guide plane); the guide's edge, Corner the guide, Top or Bottom the guide carried onto
+ * where the faces meet, Along the guide; that edge moved toward where they meet by at most Fit, by
+ * one offset with Use guide path; then, for a line or an arc away from Along or with a wall angle,
+ * the wall built through the edge. Returns why it cannot, or null.
+ */
+function settle(part: Part): EdgeRefusal | null {
+  const { band, edge, guide, drawnKind, controls } = part;
+  const flanks: [Flank, Flank] = [part.scan[0], part.scan[1]];
+  if (guide.legacy) {
+    const meet = meetFlanks(band, flanks);
+    if (meet.angles.length < 2 || median(meet.angles) < minBandAngle) return 'edge';
+    const fitted = fitMeet(drawnKind, band.drawn, meet.points, controls, edge);
+    Object.assign(part, { flanks, meet, curve: fitted.curve, kind: fitted.kind });
+    return null;
+  }
+  const [s, w] = [part.surface, 1 - part.surface];
+  const { position, plane } = guide;
+  const drawn = part.drawn;
+  if (plane) {
+    const middle = new Float64Array(3);
+    curveAt(drawn, curveLength(drawn) / 2, middle);
+    const mid = [middle[0], middle[1], middle[2]];
+    const sign = dot(plane.normal, gradient(part.scan[s], mid)) >= 0 ? 1 : -1;
+    const normal = plane.normal.map((x) => sign * x);
+    if (position === 'corner' || position === 'top') {
+      let flank = guide.planeFlanks.get(sign);
+      if (!flank) guide.planeFlanks.set(sign, (flank = planeFlank(plane.origin, normal)));
+      flanks[s] = flank;
+    } else {
+      const foot = new Float64Array(3);
+      part.scan[s].project(mid[0], mid[1], mid[2], foot);
+      flanks[s] = planeFlank(foot, normal);
+    }
+  }
+  const meet = meetFlanks(band, flanks);
+  if (meet.angles.length < 2) return 'wall';
+  const reach = guide.fit ?? Math.max(0.35, 6 * edge);
+  let curve: EdgeCurve;
+  let kind = drawnKind;
+  const fitted = (points: Float64Array) => {
+    const fit = fitMeet(drawnKind, band.drawn, points, controls, edge);
+    kind = fit.kind;
+    return fit.curve;
+  };
+  if (position === 'top' || position === 'bottom')
+    curve = guide.path
+      ? shifted(drawnKind, part.points, drawn, meet.points, Infinity, edge)
+      : fitted(meet.points);
+  else
+    curve = guide.path
+      ? shifted(drawnKind, part.points, drawn, meet.points, reach, edge)
+      : fitted(heldTo(drawn, meet.points, reach));
+  if ((position !== 'along' || guide.wallAngle !== null) && kind !== 'spline') {
+    const wall = wallThrough(kind, curve, flanks[s], part.scan[w], guide.wallAngle);
+    if (!wall) return 'wall';
+    flanks[w] = wall;
+  } else if (guide.wallAngle !== null) {
+    const off = Math.abs(180 - median(meet.angles) - guide.wallAngle);
+    if (off > wallTolerance) return 'angle';
+  }
+  const settled = meetFlanks(band, flanks);
+  Object.assign(part, {
+    flanks,
+    curve,
+    kind,
+    meet: settled.angles.length >= 2 ? settled : meet,
+  });
+  return null;
+}
+
+/**
+ * Which side of a part is the surface: with a reference normal, the side whose normal at the guide's
+ * middle lies nearer it, either way; without one, the side with more flank vertices, Left on a tie.
+ */
+function surfaceSide(band: EdgeBand, scan: [Flank, Flank], reference: Vec3 | null) {
+  if (reference) {
+    const middle = new Float64Array(3);
+    curveAt(band.drawn, curveLength(band.drawn) / 2, middle);
+    const p = [middle[0], middle[1], middle[2]];
+    const [a, b] = scan.map((flank) => Math.abs(dot(unit(gradient(flank, p)), reference)));
+    return a >= b ? 0 : 1;
+  }
+  let left = 0,
+    right = 0;
+  for (const zone of band.foundZone)
+    if (zone === BandZone.Left) left++;
+    else if (zone === BandZone.Right) right++;
+  return left >= right ? 0 : 1;
+}
+
+/**
+ * Exported for the tests: which flank of a part is the surface, 0 (Left) or 1 (Right), as the solve
+ * tells them apart.
+ */
+export const surfaceOf = surfaceSide;
 
 /**
  * Neighbouring flanks are one surface when one fit takes each one's refit vertices within its own
@@ -756,7 +1145,21 @@ const pathSnaps = [0.25, 0.15, 0.05];
 /** A sharp joint's corner reaches this many band widths from the joint. */
 const jointReach = 2;
 
-/** The segment solved as Task 7's single edge, or null when it shows no edge. */
+/**
+ * The points a guide's band is read from: a guide placed off the surface, as on the corner a
+ * rounding cuts off, reads it from the surface under it, since read from the air above an edge's
+ * crest the band cannot tell its sides. Today's solve reads the points as placed.
+ */
+function readFrom(
+  mesh: RefineMesh,
+  topology: RefineTopology,
+  points: GuidePoint[],
+  guide: GuideSettings,
+) {
+  return guide.legacy ? points : points.map((p) => nearestOnSurface(mesh, topology, p));
+}
+
+/** The segment solved as Task 7's single edge, or why it cannot be. */
 function solvePart(
   mesh: RefineMesh,
   topology: RefineTopology,
@@ -765,16 +1168,25 @@ function solvePart(
   width: number,
   noise: number,
   known: BandClassification | null,
-): Part | null {
-  const band = buildBand(mesh, topology, kind, points, width, noise, known);
-  if (!band) return null;
+  guide: GuideSettings,
+): Part | EdgeRefusal {
+  const band = buildBand(
+    mesh,
+    topology,
+    kind,
+    readFrom(mesh, topology, points, guide),
+    width,
+    noise,
+    known,
+  );
+  if (!band) return 'edge';
   const edge = bandEdgeLength(mesh, topology, band);
   const solved = unbiasedFlanks(mesh, topology, band, kind, points.length, noise, edge);
-  if (!solved) return null;
+  if (!solved) return 'edge';
   // The band is built about the guide as drawn; from here on the segment is the kind its edge was
   // fitted as, an arc where a Line guide lies along an edge that curves.
   const { flanks, meet, curve, samples, kind: fitted } = solved;
-  if (median(meet.angles) < minBandAngle) return null;
+  if (median(meet.angles) < minBandAngle) return 'edge';
   // An edge that lies farther from the surface than half the band's width, as at a fin whose faces
   // nearly meet, cannot be reached by moving the band's vertices.
   const members = Array.from({ length: band.vertices.length }, (_, i) => i);
@@ -782,18 +1194,31 @@ function solvePart(
   const depths: number[] = [];
   for (let k = 0; k < meet.points.length; k += 3)
     depths.push(find(meet.points[k], meet.points[k + 1], meet.points[k + 2]).distance);
-  if (median(depths) > deepestEdge * band.width) return null;
-  return {
+  if (median(depths) > deepestEdge * band.width) return 'edge';
+  const part: Part = {
     drawnKind: kind,
     kind: fitted,
     band,
     edge,
     flanks,
+    scan: [flanks[0], flanks[1]],
     meet,
     curve,
     samples,
     controls: points.length,
+    points,
+    drawn: guide.legacy
+      ? band.drawn
+      : drawnCurve(
+          kind,
+          points.flatMap((p) => p.position),
+          edge,
+        ),
+    guide,
+    surface: guide.legacy ? 0 : surfaceSide(band, flanks, guide.reference),
   };
+  if (guide.legacy) return part;
+  return settle(part) ?? part;
 }
 
 /** True when `sample` lies within tolerance of `flank`: `sameShare` within 3 local, mean within local. */
@@ -862,7 +1287,7 @@ function shareFlanks(parts: Part[], closed: boolean, noise: number) {
       const flank = group.length > 1 && fitTogether(parts, group, s, noise);
       if (!flank) continue;
       for (const i of group) {
-        parts[i].flanks[s] = flank;
+        parts[i].scan[s] = flank;
         changed.add(i);
       }
     }
@@ -885,7 +1310,7 @@ function clearCorners(parts: Part[], joints: GuideJoint[], noise: number) {
     const [a, b] = [parts[i].curve.points, parts[j].curve.points];
     const point = [0, 1, 2].map((c) => (a[a.length - 3 + c] + b[c]) / 2);
     for (const side of [0, 1]) {
-      const [f, g] = [parts[i].flanks[side], parts[j].flanks[side]];
+      const [f, g] = [parts[i].scan[side], parts[j].scan[side]];
       const [u, v] = [unit(gradient(f, point)), unit(gradient(g, point))];
       if ((Math.acos(Math.min(1, Math.abs(dot(u, v)))) * 180) / Math.PI < minBandAngle) continue;
       far.push({ part: i, side, from: g, reach: cornerClear * parts[j].band.soft });
@@ -912,29 +1337,16 @@ function clearCorners(parts: Part[], joints: GuideJoint[], noise: number) {
       });
       const shape = fitShape(points, normals, sample.kind, noise);
       if (!shape?.within) continue;
-      part.flanks[side] = shapeFlank(shape.shape);
+      part.scan[side] = shapeFlank(shape.shape);
       part.samples[side] = { points, normals, kind: sample.kind };
       changed.add(index);
     }
   return resolveParts(parts, changed);
 }
 
-/** Solves again where the flanks of each changed part meet. False when they no longer do. */
+/** Settles each changed part again from its scan flanks. False when one no longer settles. */
 function resolveParts(parts: Part[], changed: Set<number>) {
-  for (const i of changed) {
-    const part = parts[i];
-    part.meet = meetFlanks(part.band, part.flanks);
-    if (part.meet.angles.length < 2 || median(part.meet.angles) < minBandAngle) return false;
-    const fitted = fitMeet(
-      part.drawnKind,
-      part.band.drawn,
-      part.meet.points,
-      part.controls,
-      part.edge,
-    );
-    part.curve = fitted.curve;
-    part.kind = fitted.kind;
-  }
+  for (const i of changed) if (settle(parts[i])) return false;
   return true;
 }
 
@@ -1157,8 +1569,15 @@ export function solveEdge(
   topology: RefineTopology,
   input: EdgeInput,
   noise: number,
+  why?: { reason: EdgeRefusal | null },
 ): EdgeSolve | null {
+  const refuse = (reason: EdgeRefusal) => {
+    if (why) why.reason = reason;
+    return null;
+  };
+  if (why) why.reason = null;
   const { closed } = input;
+  const guide = settingsOf(input);
   const count = input.segments.length;
   if (!count || input.joints.length !== (closed ? count : count - 1)) return null;
   const circle = closed && count === 1;
@@ -1171,8 +1590,14 @@ export function solveEdge(
   if (width === null) {
     width = 0;
     for (const [i, { kind, points }] of segments.entries()) {
-      const estimate = estimateBand(mesh, topology, kind, points, noise);
-      if (!(estimate.width > 0)) return null;
+      const estimate = estimateBand(
+        mesh,
+        topology,
+        kind,
+        readFrom(mesh, topology, points, guide),
+        noise,
+      );
+      if (!(estimate.width > 0)) return refuse('edge');
       width = Math.max(width, estimate.width);
       known[i] = estimate.found;
     }
@@ -1180,13 +1605,13 @@ export function solveEdge(
   if (!(width > 0)) return null;
   const parts: Part[] = [];
   for (const [i, { kind, points }] of segments.entries()) {
-    const part = solvePart(mesh, topology, kind, points, width, noise, known[i]);
-    if (!part) return null;
+    const part = solvePart(mesh, topology, kind, points, width, noise, known[i], guide);
+    if (typeof part === 'string') return refuse(part);
     parts.push(part);
   }
   const n = parts.length;
-  if (n > 1 && !clearCorners(parts, joints, noise)) return null;
-  if (n > 1 && !shareFlanks(parts, closed, noise)) return null;
+  if (n > 1 && !clearCorners(parts, joints, noise)) return refuse('edge');
+  if (n > 1 && !shareFlanks(parts, closed, noise)) return refuse('edge');
   const edge = median(parts.map((part) => part.edge));
 
   let curve: EdgeCurve;
@@ -1196,9 +1621,12 @@ export function solveEdge(
     curve = parts[0].curve;
     bounds = [0, curveLength(curve)];
   } else if (circle) {
+    // Today's solve fits the circle where the faces meet; with settings, through the parts' edges.
     curve = fitCurve(
       'arc',
-      Float64Array.from(parts.flatMap((part) => [...part.meet.points])),
+      Float64Array.from(
+        parts.flatMap((part) => [...(guide.legacy ? part.meet.points : part.curve.points)]),
+      ),
       3,
       edge,
     );
@@ -1264,7 +1692,7 @@ export function solveEdge(
   const frame = frameOf(mesh, topology, solve);
   const surfaces = surfacesOf(mesh, topology, solve, frame);
   const weights = frameWeights(mesh, topology, solve, frame, surfaces);
-  return usableCore(mesh, solve, frame, weights, surfaces) ? solve : null;
+  return usableCore(mesh, solve, frame, weights, surfaces) ? solve : refuse('width');
 }
 
 /** A joint of a solved path. */
