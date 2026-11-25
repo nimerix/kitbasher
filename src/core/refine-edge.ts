@@ -9,6 +9,7 @@ import {
   buildBand,
   estimateBand,
   minBandAngle,
+  widestEstimate,
 } from './refine-band';
 import { type CutResult, cutAlongField } from './refine-cut';
 import { type Shape, type ShapeKind, fitShape, projectToShape, shapeDistance } from './refine-fit';
@@ -1645,10 +1646,28 @@ export function solveEdge(
   }
   if (!(width > 0)) return null;
   const parts: Part[] = [];
-  for (const [i, { kind, points }] of segments.entries()) {
-    const part = solvePart(mesh, topology, kind, points, width, noise, known[i], guide);
-    if (typeof part === 'string') return refuse(part);
-    parts.push(part);
+  // Automatic width starts with the scan estimate. A guide-centred band may need more
+  // room to read both faces inside that width, especially on a densely sampled fillet.
+  for (;;) {
+    let failure: EdgeRefusal | null = null;
+    for (const [i, { kind, points }] of segments.entries()) {
+      const part = solvePart(mesh, topology, kind, points, width, noise, known[i], guide);
+      if (typeof part === 'string') {
+        failure = part;
+        break;
+      }
+      parts.push(part);
+    }
+    if (!failure) break;
+    if (
+      failure !== 'edge' ||
+      input.width !== null ||
+      guide.position === 'along' ||
+      width >= widestEstimate
+    )
+      return refuse(failure);
+    parts.length = 0;
+    width = Math.min(widestEstimate, 1.5 * width);
   }
   const n = parts.length;
   if (n > 1) {
