@@ -10,6 +10,7 @@ const brushes: Record<SculptBrush, string> = {
   smooth: 'Smooth',
   flatten: 'Flatten',
   crease: 'Crease',
+  ridge: 'Ridge',
   clay: 'Clay Buildup',
   inflate: 'Inflate/Deflate',
   mask: 'Mask',
@@ -106,7 +107,9 @@ export function SculptControls() {
         {brush === 'mask'
           ? 'Drag to paint protection. Hold Alt to erase or Shift to soften.'
           : 'Drag on the part to sculpt. Hold Shift to smooth.'}
-        {['draw', 'crease', 'clay', 'inflate'].includes(brush) ? ' Hold Alt to invert.' : ''}
+        {['draw', 'crease', 'ridge', 'clay', 'inflate'].includes(brush)
+          ? ' Hold Alt to invert.'
+          : ''}
       </p>
       <div className="sculpt-mask-controls" role="group" aria-label="Sculpt mask">
         <label className="sculpt-check">
@@ -256,7 +259,7 @@ export function SculptControls() {
               )}
             </>
           )}
-          {brush === 'crease' && (
+          {(brush === 'crease' || brush === 'ridge') && (
             <NumberSetting
               label="Pinch"
               value={settings.pinch}

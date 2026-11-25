@@ -481,7 +481,7 @@ export function SculptPointer() {
       if (!(strength > 0)) return;
       const radius = s.radius * (s.pressureRadius ? Math.max(0.08, p) : 1);
       let angle = footprint(s, sample);
-      if (brush === 'crease' && active.applied) {
+      if ((brush === 'crease' || brush === 'ridge') && active.applied) {
         const dx = sample.clientX - active.applied.clientX;
         const dy = active.applied.clientY - sample.clientY;
         if (dx || dy) angle = Math.atan2(dy, dx);

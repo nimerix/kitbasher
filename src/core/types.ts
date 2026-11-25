@@ -20,7 +20,7 @@ export type Tool =
   | 'sculpt';
 
 export type SculptBrush =
-  'draw' | 'grab' | 'smooth' | 'flatten' | 'crease' | 'clay' | 'inflate' | 'mask';
+  'draw' | 'grab' | 'smooth' | 'flatten' | 'crease' | 'ridge' | 'clay' | 'inflate' | 'mask';
 
 export interface SculptureSettings {
   brush: SculptBrush;

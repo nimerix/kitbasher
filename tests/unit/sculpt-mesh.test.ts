@@ -271,24 +271,27 @@ describe('sculpt mesh', () => {
     expect(paint.getMask()).toHaveLength(painted.getAttribute('position').count);
   });
 
-  it('cuts a pinched groove and uses inverted depth for a pinched ridge', () => {
+  it('pinches Crease and Ridge in opposite depth directions and inverts each brush', () => {
     const source = mesh([0, 0, 0, 0.5, 0, 0, 0, 0.5, 0], [0, 1, 2]);
     const settings = dab(new Vector3(), {
-      brush: 'crease',
       pinch: 1,
       tangent: new Vector3(0, 1, 0),
       minEdge: 100,
     });
-    const groove = new SculptMesh(source, identity);
-    const ridge = new SculptMesh(source, identity);
-    expect(groove.dab(settings)).toBe(true);
-    expect(ridge.dab({ ...settings, inverted: true })).toBe(true);
-    const cut = groove.finish()!.getAttribute('position');
-    const raised = ridge.finish()!.getAttribute('position');
-    expect(cut.getX(1)).toBeLessThan(0.5);
-    expect(raised.getX(1)).toBe(cut.getX(1));
-    expect(cut.getZ(0)).toBeLessThan(0);
-    expect(raised.getZ(0)).toBe(-cut.getZ(0));
+    const positions = (brush: 'crease' | 'ridge', inverted = false) => {
+      const draft = new SculptMesh(source, identity);
+      expect(draft.dab({ ...settings, brush, inverted })).toBe(true);
+      return draft.finish()!.getAttribute('position');
+    };
+
+    const groove = positions('crease');
+    const ridge = positions('ridge');
+    expect(groove.getX(1)).toBeLessThan(0.5);
+    expect(ridge.getX(1)).toBe(groove.getX(1));
+    expect(groove.getZ(0)).toBeLessThan(0);
+    expect(ridge.getZ(0)).toBe(-groove.getZ(0));
+    expect(ridge.array).toEqual(positions('crease', true).array);
+    expect(groove.array).toEqual(positions('ridge', true).array);
   });
 
   it('builds clay toward a surface plane and inflates using an individual vertex normal', () => {

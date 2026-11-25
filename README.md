@@ -495,8 +495,9 @@ your drag, and the surface updates when you release.
 
 Select a visible, unlocked part and choose **Sculpt**. Draw builds or removes material, Clay
 Buildup layers broad strokes, and Inflate/Deflate changes the volume of rounded details. Grab
-moves a patch, Crease sharpens a groove or ridge, and Smooth and Flatten clean up the surface.
-The brush adds mesh detail locally as needed. Adjust **Detail** to change the density.
+moves a patch, Crease carves a groove, Ridge raises and pinches an edge, and Smooth and Flatten
+clean up the surface. The brush adds mesh detail locally as needed. Adjust **Detail** to change
+the density.
 
 - Hold **Alt** to invert an applicable brush and **Shift** for temporary smoothing.
 - Use **Mask** to protect areas. Hold **Alt** to erase protection or **Shift** to soften it.
