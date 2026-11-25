@@ -27,11 +27,12 @@ import {
   Trash2,
   UnlockKeyhole,
 } from 'lucide-react';
+import { contactBrush, activeBrush } from '../core/editor-brush';
 import { editorCommands, executeEditorCommand } from '../core/commands';
 import type { CommandContext, CommandId } from '../core/commands';
 import { useEditor } from '../core/store';
 import type { EditorContextMenu as MenuLocation } from '../core/store';
-import { SurfaceBrushControls } from './SurfaceBrushControls';
+import { BrushSettings } from './BrushSettings';
 
 const icons = {
   copy: Copy,
@@ -77,6 +78,8 @@ function OpenContextMenu({
 }) {
   const state = useEditor();
   const brush = location.kind === 'brush';
+  const brushTitle =
+    activeBrush(state) === contactBrush ? 'Paint brush settings' : 'Brush settings';
   const menu = useRef<HTMLDivElement>(null);
   const previousFocus = useRef(document.activeElement as HTMLElement | null);
   const typeahead = useRef({ query: '', time: 0 });
@@ -181,7 +184,7 @@ function OpenContextMenu({
       ref={menu}
       className={`editor-context-menu ${brush ? 'brush-context-menu' : ''}`}
       role={brush ? 'dialog' : 'menu'}
-      aria-label={brush ? 'Paint brush settings' : 'Component actions'}
+      aria-label={brush ? brushTitle : 'Component actions'}
       tabIndex={-1}
       style={position}
       onContextMenu={(event) => event.preventDefault()}
@@ -258,10 +261,10 @@ function OpenContextMenu({
       {brush ? (
         <>
           <div className="context-heading">
-            <span>Paint brush settings</span>
+            <span>{brushTitle}</span>
             <small>Right-click to adjust · Right-drag to pan</small>
           </div>
-          <SurfaceBrushControls />
+          <BrushSettings />
           <button className="button secondary full-width" onClick={() => close(true)}>
             Done
           </button>

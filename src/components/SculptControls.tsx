@@ -1,4 +1,5 @@
 import { ChevronDown } from 'lucide-react';
+import { BrushSettings } from './BrushSettings';
 import { useEditor } from '../core/store';
 import type { SculptBrush, SculptureSettings } from '../core/types';
 import { NumericInput } from './ui';
@@ -76,15 +77,7 @@ export function SculptControls() {
           </button>
         ))}
       </div>
-      <NumberSetting
-        label="Radius"
-        value={settings.radius}
-        min={0.01}
-        max={1000}
-        step={0.1}
-        unit="mm"
-        onChange={(value) => patch('radius', value)}
-      />
+      <BrushSettings label="Radius" />
       <NumberSetting
         label="Strength"
         value={settings.strength}
