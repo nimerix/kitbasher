@@ -50,6 +50,7 @@ import {
   Undo2,
   X,
 } from 'lucide-react';
+import { activeBrush } from './core/editor-brush';
 import {
   liveHost,
   liveSession,
@@ -925,11 +926,7 @@ export default function App() {
           return;
         }
         const state = useEditor.getState();
-        if (
-          event.target instanceof HTMLCanvasElement &&
-          state.tool === 'align' &&
-          state.operation.mode === 'surface'
-        ) {
+        if (event.target instanceof HTMLCanvasElement && activeBrush(state)) {
           event.preventDefault();
           event.stopPropagation();
           state.openContextMenu({ x: event.clientX, y: event.clientY, kind: 'brush' });
@@ -951,12 +948,7 @@ export default function App() {
         state.openContextMenu({
           x: event.clientX,
           y: event.clientY,
-          kind:
-            target.closest('.viewport') &&
-            state.tool === 'align' &&
-            state.operation.mode === 'surface'
-              ? 'brush'
-              : undefined,
+          kind: target.closest('.viewport') && activeBrush(state) ? 'brush' : undefined,
           ...(partId ? { partId } : {}),
         });
       }}

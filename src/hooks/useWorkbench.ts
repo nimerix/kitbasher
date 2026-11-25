@@ -1,18 +1,13 @@
 import { useEffect, useRef } from 'react';
+import { activeBrush } from '../core/editor-brush';
 import { joinLiveSession } from '../core/live';
 import {
   afterReleasedSculpt,
   committedScene,
   chosenRefinePoint,
-  brushingRefine,
   drawingRefineGuide,
   liveSession,
-  paintingRefine,
-  paintingWarpArea,
-  paintingWarpRegion,
-  refineBrushRadius,
   useEditor,
-  warpBrushRadius,
   refineHoldsWork,
 } from '../core/store';
 import { readRecovery, saveRecovery } from '../core/recovery';
@@ -199,15 +194,12 @@ export function useKeyboard(openScene: () => void, searchParts: () => void) {
       const key = event.key.toLowerCase();
       if (key === 'contextmenu' || (key === 'f10' && event.shiftKey)) {
         event.preventDefault();
-        state.openContextMenu(
-          keyboardContextMenu(target, state.tool === 'align' && state.operation.mode === 'surface'),
-        );
+        state.openContextMenu(keyboardContextMenu(target, !!activeBrush(state)));
         return;
       }
       if (!action || inMenu) return;
       // Auto-repeat would flicker toggles such as P, O, H, and 5. Only brush sizing repeats.
       if (event.repeat && !actionRepeats(action)) return;
-      const paintingSurface = state.tool === 'align' && state.operation.mode === 'surface';
       const transformTools = {
         move: 'translate',
         rotate: 'rotate',
@@ -241,22 +233,10 @@ export function useKeyboard(openScene: () => void, searchParts: () => void) {
           return;
         case 'brushSmaller':
         case 'brushLarger': {
-          const warping = paintingWarpRegion(state) || paintingWarpArea(state);
-          const refining = paintingRefine(state) || brushingRefine(state);
-          if (!paintingSurface && !warping && !refining) return;
+          const brush = activeBrush(state);
+          if (!brush) return;
           event.preventDefault();
-          const radius = Number(
-            (
-              (warping
-                ? warpBrushRadius(state)
-                : refining
-                  ? refineBrushRadius(state)
-                  : state.brushRadius) * (action === 'brushSmaller' ? 0.8 : 1.25)
-            ).toFixed(2),
-          );
-          if (warping) state.setWarpBrushRadius(radius);
-          else if (refining) state.setRefineBrushRadius(radius);
-          else state.setBrush({ radius });
+          brush.resize(state, action === 'brushSmaller' ? 0.8 : 1.25);
           return;
         }
         case 'orbitTool':

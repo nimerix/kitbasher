@@ -2,7 +2,7 @@ import type { CSSProperties } from 'react';
 import { ArrowRight, Check, Plus, X } from 'lucide-react';
 import { useEditor } from '../core/store';
 import { contactColors, completedSurfacePairs } from '../core/surfaces';
-import { SurfaceBrushControls } from './SurfaceBrushControls';
+import { BrushSettings } from './BrushSettings';
 import { planeKindLabels } from '../core/plane-constraints';
 import type { SurfaceMethod } from '../core/types';
 import { alignmentPartIds } from '../core/alignment-visibility';
@@ -60,7 +60,7 @@ export function SurfacePaintControls({
             : 'Paint one or more pairs of planar areas to orient the parts using fitted planes.'}{' '}
         Each patch grows as one connected surface; start a new pair for a separate area.
       </p>
-      <SurfaceBrushControls />
+      <BrushSettings />
       <div className="surface-pair-list">
         {op.surfacePairs.map((pair, i) => (
           <div

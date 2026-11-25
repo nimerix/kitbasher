@@ -1,4 +1,5 @@
 import { Quaternion, Vector3 } from 'three';
+import { contactBrush } from '../core/editor-brush';
 import { isJointConnected } from '../core/constraints';
 import { poseAtPivot, quat, worldPoint } from '../core/geometry';
 import { hiddenByIsolation } from '../core/isolation';
@@ -491,7 +492,7 @@ export function xrAdjust(
   if (mode === 'context' && state.tool === 'align') {
     if (state.operation.mode === 'surface') {
       if (axis === 'y') {
-        state.setBrush({ radius: state.brushRadius * Math.exp(step) });
+        contactBrush.setRadius(state, contactBrush.radius(state) * Math.exp(step));
         return useEditor.getState().brushRadius !== state.brushRadius;
       }
       if (state.operation.surfaceMethod === 'angle') {

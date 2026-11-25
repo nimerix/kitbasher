@@ -4,6 +4,7 @@ import { OrbitControls } from '@react-three/drei';
 import type { OrbitControls as OrbitControlsImpl } from 'three-stdlib';
 import { MOUSE, Quaternion, TOUCH, Vector3 } from 'three';
 import { ArrowDown, ArrowLeft, ArrowRight, ArrowUp, Crosshair, Hand, Orbit, X } from 'lucide-react';
+import { activeBrush } from '../core/editor-brush';
 import { sceneBounds } from '../core/geometry';
 import { hasAlignmentView, partDisplay } from '../core/alignment-visibility';
 import {
@@ -15,7 +16,7 @@ import {
   viewDirections,
 } from '../core/navigation';
 import type { CameraDirection, CameraStep } from '../core/navigation';
-import { brushingRefine, paintingRefine, paintingWarpRegion, useEditor } from '../core/store';
+import { useEditor } from '../core/store';
 import { usePreferences, useShortcut, withShortcut } from '../core/preferences';
 import { clampPendingZoom, wheelZoom, zoomGlideStep } from '../core/zoom';
 import { IconButton } from './ui';
@@ -30,14 +31,7 @@ const drawnSelection = (state: Editor) =>
 const initialOrbitTarget: [number, number, number] = [0, 54, 0];
 /** Whether a left drag paints with a surface brush rather than moving the camera. */
 const brushOwnsLeftDrag = (state: Editor) =>
-  ((state.tool === 'align' && state.operation.mode === 'surface') ||
-    state.tool === 'sculpt' ||
-    paintingWarpRegion(state) ||
-    paintingRefine(state) ||
-    brushingRefine(state)) &&
-  !state.navigationMode &&
-  !state.temporaryOrbit &&
-  !state.pivotPicking;
+  !!activeBrush(state) && !state.navigationMode && !state.temporaryOrbit && !state.pivotPicking;
 
 export function CameraRig() {
   const freeTransform = useEditor((state) => !!state.freeTransform);

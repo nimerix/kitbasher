@@ -28,7 +28,7 @@ import type { Part } from '../core/types';
 import { warpDensityNodes } from '../core/warp-grid';
 import { fadeWidth, handleGuides } from '../core/warp-handles';
 import { featherWarning } from '../core/warp-model';
-import { SurfaceBrushControls } from './SurfaceBrushControls';
+import { BrushSettings } from './BrushSettings';
 import { TransformAdjustments } from './TransformAdjustments';
 import { LogRangeInput, NumericInput, RadioGroup, Section } from './ui';
 
@@ -284,11 +284,8 @@ const addHelp = {
 } as const;
 
 /** What a press on the surface makes, and for an area, Warp's brush size. */
-function AddControls({ part }: { part: Part | undefined }) {
+function AddControls() {
   const mode = useEditor((s) => s.warpAdd);
-  const radius = useEditor(warpBrushRadius);
-  const range = fittedSizeRange(part ? partSize(part) : 0);
-  const setRadius = (value: number) => useEditor.getState().setWarpBrushRadius(value);
   return (
     <div className="warp-add">
       <RadioGroup
@@ -303,30 +300,7 @@ function AddControls({ part }: { part: Part | undefined }) {
         onChange={(value) => useEditor.getState().setWarpAdd(value)}
       />
       <p className="anchor-help">{addHelp[mode]}</p>
-      {mode === 'area' ? (
-        <>
-          <label className="brush-radius">
-            <span>Brush radius</span>
-            <NumericInput
-              label="Brush radius"
-              value={radius}
-              min={0.05}
-              max={100}
-              step={0.1}
-              onCommit={setRadius}
-            />
-            <small>mm</small>
-          </label>
-          <LogRangeInput
-            className="brush-radius-slider"
-            label="Brush radius slider"
-            value={radius}
-            min={range.min}
-            max={range.max}
-            onChange={setRadius}
-          />
-        </>
-      ) : null}
+      {mode === 'area' ? <BrushSettings /> : null}
     </div>
   );
 }
@@ -412,13 +386,6 @@ export function WarpControls() {
     );
   if (warp.stage === 'region') {
     const painted = warp.region === 'painted';
-    const brush = part
-      ? {
-          radius: warpBrushRadius,
-          range: fittedSizeRange(partSize(part)),
-          set: useEditor.getState().setWarpBrushRadius,
-        }
-      : undefined;
     return (
       <div className="warp-controls">
         <Section title="Region">
@@ -442,7 +409,7 @@ export function WarpControls() {
           />
           {painted ? (
             <>
-              <SurfaceBrushControls fitted={brush} />
+              <BrushSettings />
               <p className="anchor-help" role="status">
                 {warp.faces.length
                   ? `${warp.faces.length.toLocaleString()} triangles painted.`
@@ -560,7 +527,7 @@ export function WarpControls() {
       </Section>
       {building ? null : (
         <Section title="Control points">
-          <AddControls part={part} />
+          <AddControls />
           <p className="anchor-help">
             {warp.points.length
               ? `${warp.points.length} ${warp.points.length === 1 ? 'point' : 'points'}, ${selected} selected. Shift+click a point to add it to the selection. Delete removes the selected points.`
