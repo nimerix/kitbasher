@@ -114,7 +114,6 @@ import {
   type SketchPlane,
   heldPoint,
   lineThrough,
-  nearestOnSurface,
   nearestTriangle,
   ontoPlane,
   planeOfFace,
@@ -3950,11 +3949,9 @@ export const useEditor = create<EditorState>((set, get) => ({
     // A locked point slides along its line, a point of a guide on a plane in the plane.
     const held = heldPoint(old.lock, input.plane, old.position, asked.position);
     const moved = held.some((x, k) => x !== asked.position[k]);
-    const { mesh, topology } = refine.model!;
+    const { mesh } = refine.model!;
     const point: GuidePoint = {
-      triangle: moved
-        ? nearestOnSurface(mesh, topology, { triangle: asked.triangle, position: held }).triangle
-        : asked.triangle,
+      triangle: moved ? (nearestTriangle(mesh, held) ?? asked).triangle : asked.triangle,
       position: held,
       ...(old.lock ? { lock: old.lock } : {}),
     };
@@ -4194,7 +4191,7 @@ export const useEditor = create<EditorState>((set, get) => ({
           )
         : lock;
     if (lock && !held) return get().notify(acrossPlaneNotice, 'info');
-    const { mesh, topology } = refine.model!;
+    const { mesh } = refine.model!;
     const position = held ? heldPoint(held, plane, old.position, old.position) : old.position;
     const { lock: _, ...bare } = old;
     const point: GuidePoint = {
@@ -4203,7 +4200,7 @@ export const useEditor = create<EditorState>((set, get) => ({
       triangle:
         position === old.position
           ? old.triangle
-          : nearestOnSurface(mesh, topology, { triangle: old.triangle, position }).triangle,
+          : (nearestTriangle(mesh, position) ?? old).triangle,
       ...(held ? { lock: held } : {}),
     };
     const placed = input.segments.map((s) => ({
@@ -7304,11 +7301,11 @@ export function refineDrawingPlane(refine: RefineSession) {
 function onPlane(refine: RefineSession, plane: SketchPlane, point: GuidePoint): GuidePoint {
   const position = ontoPlane(plane, point.position);
   if (position.every((x, k) => x === point.position[k])) return point;
-  const { mesh, topology } = refine.model!;
+  const { mesh } = refine.model!;
   return {
     ...point,
     position,
-    triangle: (nearestTriangle(mesh, topology, position) ?? point).triangle,
+    triangle: (nearestTriangle(mesh, position) ?? point).triangle,
   };
 }
 
@@ -7363,11 +7360,11 @@ function guideOnPlane(refine: RefineSession, input: EdgeInput, plane: SketchPlan
  * where it lands; null when they cannot all hold.
  */
 function constrained(refine: RefineSession, input: EdgeInput, request: SolveRequest) {
-  const { mesh, topology } = refine.model!;
+  const { mesh } = refine.model!;
   return solvedSegments(input, request, (from, position) => ({
     ...from,
     position,
-    triangle: nearestOnSurface(mesh, topology, { triangle: from.triangle, position }).triangle,
+    triangle: (nearestTriangle(mesh, position) ?? from).triangle,
   }));
 }
 

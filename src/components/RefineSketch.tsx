@@ -13,12 +13,7 @@ import {
   Vector3,
 } from 'three';
 import type { EdgeInput } from '../core/refine-edge';
-import {
-  nearestOnSurface,
-  planeCoordinates,
-  planePoint,
-  type SketchPlane,
-} from '../core/refine-sketch';
+import { pointAt, planeCoordinates, planePoint, type SketchPlane } from '../core/refine-sketch';
 import { chosenRefinePoint, useEditor, type RefineSession } from '../core/store';
 import { ManagedTransformControls } from './ManagedTransformControls';
 import { constraintLabels, type GuideConstraint } from '../core/refine-constraints';
@@ -245,7 +240,6 @@ function PointWidget({ refine, onPress }: { refine: RefineSession; onPress: () =
     <PointWidgetFor
       target={chosen}
       position={point.position}
-      triangle={point.triangle}
       plane={input.plane ?? null}
       line={point.lock?.kind === 'line' ? point.lock.direction : null}
       onPress={onPress}
@@ -256,20 +250,18 @@ function PointWidget({ refine, onPress }: { refine: RefineSession; onPress: () =
 function PointWidgetFor({
   target,
   position,
-  triangle,
   plane,
   line,
   onPress,
 }: {
   target: { feature: string; segment: number; index: number };
   position: number[];
-  triangle: number;
   plane: SketchPlane | null;
   line: number[] | null;
   onPress: () => void;
 }) {
   const proxy = useMemo(() => new Object3D(), []);
-  const drag = useRef<{ began: boolean; triangle: number } | null>(null);
+  const drag = useRef<{ began: boolean } | null>(null);
   const [version, setVersion] = useState(0);
   const getRoot = useThree((s) => s.get),
     invalidate = useThree((s) => s.invalidate);
@@ -336,28 +328,19 @@ function PointWidgetFor({
         onMouseDown={() => {
           onPress();
           useEditor.getState().beginRefineDrag();
-          drag.current = { began: false, triangle };
+          drag.current = { began: false };
         }}
         onObjectChange={() => {
           const current = drag.current;
           const model = useEditor.getState().refine?.model;
           if (!current || !model) return;
           const at = proxy.position.toArray();
-          const near = nearestOnSurface(model.mesh, model.topology, {
-            triangle: current.triangle,
-            position: at,
-          });
+          const point = pointAt(model.mesh, at);
+          if (!point) return;
           useEditor
             .getState()
-            .moveRefinePoint(
-              target.feature,
-              target.segment,
-              target.index,
-              { triangle: near.triangle, position: at },
-              !current.began,
-            );
+            .moveRefinePoint(target.feature, target.segment, target.index, point, !current.began);
           current.began = true;
-          current.triangle = near.triangle;
         }}
       />
     </>
