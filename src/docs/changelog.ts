@@ -28,6 +28,11 @@ export const releases: Release[] = [
         text: 'Refine has a Clean mode that treats the whole part, or a painted area, the way sharpening treats a photo. Smooth removes scan noise while keeping edges, Sharpen makes softened edges turn more crisply, and Depth makes recessed and raised detail deeper, up to a Size you can set.',
         guide: 'refine',
       },
+      {
+        kind: 'new',
+        text: 'Clean can square corners: Square rebuilds rounded edges where faces meet at about 90°, outside and inside, as sharp corners, and box corners where three faces meet.',
+        guide: 'refine',
+      },
     ],
   },
   {
