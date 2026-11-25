@@ -1,9 +1,11 @@
-import type { GuidePoint } from './refine-band';
+import { type GuidePoint, localEdge } from './refine-band';
 import type { EdgeInput } from './refine-edge';
 import { fitShape } from './refine-fit';
 import { type RefineMesh, type RefineTopology, moveVertex, vertexNormal } from './refine-mesh';
 import { nextMark, slotsFor, verticesUnderBrush, walkUnderBrush } from './refine-paint';
+import { nearestOnSurface } from './refine-sketch';
 import { smoothScale, smoothTargets } from './refine-smooth';
+import { fitTrace, traceScatter, traceStroke } from './refine-trace';
 import type { Vec3 } from './types';
 
 export type RefineBrush = 'crease' | 'flatten' | 'smooth';
@@ -20,8 +22,14 @@ export interface Dab {
 const collapse = 1e-3;
 /** Times a vertex's move is halved for a triangle it would fold or collapse before it is dropped. */
 const halvings = 6;
-/** Most points a crease stroke's guide may have. */
-const maximumGuidePoints = 32;
+/**
+ * A traced edge's points are fitted within this many times the scan's noise, a quarter edge, or this
+ * many times their own scatter, whichever is most.
+ */
+const traceNoise = 2.5;
+const traceScatterTimes = 2;
+/** A stroke closes when it comes back within a radius of its start after this many radii. */
+const closeLength = 6;
 
 /**
  * Projects the vertices under the brush onto local quadric fits of the surface (`smoothTargets`),
@@ -101,10 +109,18 @@ export function flattenDab(mesh: RefineMesh, topology: RefineTopology, dab: Dab)
 }
 
 /**
- * A freehand stroke as a spline guide: jitter removed, width = radius. Null for a stroke shorter
- * than the radius.
+ * A freehand stroke as a guide on the rounded edge beside it. The stroke's first pass is smoothed,
+ * then traced onto the middle of the rounding within reach of the brush (`edgeUnderStroke`), so the
+ * stroke may run on either flank or on the rounding itself. The traced edge is fitted with lines and
+ * arcs where they hold, splines where they do not, and corners where it turns sharply
+ * (`fitTrace`). A stroke that ends near where it started closes the guide. Where too little of the
+ * stroke finds an edge, the smoothed stroke itself is the guide. Width = radius. Null for a stroke
+ * shorter than the radius.
  */
 export function creaseInput(
+  mesh: RefineMesh,
+  topology: RefineTopology,
+  noise: number,
   stroke: GuidePoint[],
   radius: number,
   strength: number,
@@ -121,46 +137,77 @@ export function creaseInput(
   const along = whole.subarray(0, count);
   const length = along[count - 1];
   if (!(length >= radius)) return null;
-  // Resampled every radius, each sample a local straight-line fit to the stroke within a radius.
-  const samples = Math.ceil(length / radius);
-  const smooth: Vec3[] = [];
-  for (let j = 0; j <= samples; j++)
-    smooth.push(lineFitAt(pass, along, (j * length) / samples, radius));
-  const stations = [0];
-  for (let j = 1; j <= samples; j++) {
-    const a = smooth[j - 1],
-      b = smooth[j];
-    stations.push(stations[j - 1] + Math.hypot(b[0] - a[0], b[1] - a[1], b[2] - a[2]));
-  }
-  const total = stations[samples];
-  const points = Math.min(maximumGuidePoints, Math.ceil(length / (4 * radius)) + 3);
-  const guide: GuidePoint[] = [];
-  let j = 0,
-    nearest = 0;
-  for (let k = 0; k < points; k++) {
-    const s = (k * total) / (points - 1);
-    while (j < samples - 1 && stations[j + 1] < s) j++;
-    const span = stations[j + 1] - stations[j];
-    const t = span > 0 ? Math.min(1, Math.max(0, (s - stations[j]) / span)) : 0;
-    const position = [0, 1, 2].map(
-      (a) => smooth[j][a] + t * (smooth[j + 1][a] - smooth[j][a]),
-    ) as Vec3;
-    // The stroke's own triangle at the same fraction of its length seeds the solve there.
-    const raw = total > 0 ? (s / total) * length : 0;
-    while (
-      nearest < count - 1 &&
-      Math.abs(along[nearest + 1] - raw) <= Math.abs(along[nearest] - raw)
-    )
+  const step = localEdge(mesh, topology, pass) || radius / 10;
+  // Evenly spaced, each a local straight-line fit to the stroke within a radius, on the stroke's
+  // own triangle at the same station.
+  const samples = Math.max(2, Math.ceil(length / Math.min(radius, Math.max(radius / 3, step))));
+  let path: GuidePoint[] = [];
+  let nearest = 0;
+  for (let j = 0; j <= samples; j++) {
+    const s = (j * length) / samples;
+    while (nearest < count - 1 && Math.abs(along[nearest + 1] - s) <= Math.abs(along[nearest] - s))
       nearest++;
-    guide.push({ triangle: pass[nearest].triangle, position });
+    path.push({ triangle: pass[nearest].triangle, position: lineFitAt(pass, along, s, radius) });
   }
+  const end = closingPoint(path, radius);
+  const closed = end > 0;
+  if (closed) path = path.slice(0, end);
+  const found = traceStroke(mesh, topology, path, radius, step);
+  const edge = found.length ? found : path;
+  const points = edge.map((p) => p.position);
+  const traced = fitTrace(
+    points,
+    closed,
+    Math.max(traceNoise * noise, step / 4, traceScatterTimes * traceScatter(points)),
+    radius,
+  );
+  if (!traced) return null;
+  // Each control onto the surface, searched from the traced point nearest it.
+  const onSurface = (p: Vec3): GuidePoint => {
+    let seed = edge[0],
+      closest = Infinity;
+    for (const q of edge) {
+      const d = Math.hypot(q.position[0] - p[0], q.position[1] - p[1], q.position[2] - p[2]);
+      if (d < closest) {
+        closest = d;
+        seed = q;
+      }
+    }
+    return nearestOnSurface(mesh, topology, { triangle: seed.triangle, position: p });
+  };
   return {
-    segments: [{ kind: 'spline', points: guide }],
-    joints: [],
-    closed: false,
+    segments: traced.segments.map(({ kind, points }) => ({
+      kind,
+      points: points.map(onSurface),
+    })),
+    joints: traced.joints,
+    closed: traced.closed,
     width: radius,
     strength,
   };
+}
+
+/**
+ * Where a stroke that comes back round to its start closes: the index of its point nearest the
+ * start, among those at least `closeLength` radii along, when that is within a radius of it; else 0.
+ */
+function closingPoint(path: GuidePoint[], radius: number) {
+  const start = path[0].position;
+  let travelled = 0,
+    best = 0,
+    closest = radius;
+  for (let i = 1; i < path.length; i++) {
+    const a = path[i - 1].position,
+      b = path[i].position;
+    travelled += Math.hypot(b[0] - a[0], b[1] - a[1], b[2] - a[2]);
+    if (travelled < closeLength * radius) continue;
+    const d = Math.hypot(b[0] - start[0], b[1] - start[1], b[2] - start[2]);
+    if (d < closest) {
+      closest = d;
+      best = i;
+    }
+  }
+  return best;
 }
 
 /**

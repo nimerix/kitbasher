@@ -72,7 +72,7 @@ function crossInto(mesh: RefineMesh, t: number, out: Float64Array) {
 const norm = (x: number, y: number, z = 0) => Math.sqrt(x * x + y * y + z * z);
 
 /** Growable binary min-heap of (key, value) pairs. */
-class Heap {
+export class Heap {
   keys: number[] = [];
   values: number[] = [];
   get size() {

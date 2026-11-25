@@ -4426,14 +4426,21 @@ export const useEditor = create<EditorState>((set, get) => ({
       preview?.computeBoundingSphere();
       return;
     }
-    const input = refineCode!.brush.creaseInput(stroke.points, stroke.radius, stroke.strength);
+    const { model } = refine;
+    const input = refineCode!.brush.creaseInput(
+      model.mesh,
+      model.topology,
+      model.noise,
+      stroke.points,
+      stroke.radius,
+      stroke.strength,
+    );
     if (!input) {
       get().notify(noEdgeNotice, 'info');
       return;
     }
     // The brush is the guide's width. Where the rounding is wider, the solver's own width would
     // reach past the brush, so that guide waits, previewed, for the user to accept it.
-    const { model } = refine;
     const feature = (guide: EdgeInput): RefineFeature => ({
       id: uid(),
       state: 'pending',
