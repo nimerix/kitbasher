@@ -49,6 +49,8 @@ const panelView = (refine: RefineSession | null) =>
     features: refine.features,
     selected: refine.selected,
     chosenPoint: refine.chosenPoint,
+    planes: refine.planes,
+    picking: refine.picking,
     edge: refine.edge,
     region: refine.region,
     brush: refine.brush,
@@ -428,8 +430,47 @@ function EdgeControls({ view, targets, owned }: ModeProps) {
       .map(({ id, feature, edited }) => ({ id, feature, edited }));
     return () => editor().restoreRefineFeatures(saved);
   };
+  const planeIds = inputs.length
+    ? shared(
+        inputs.map((i) => i.plane?.id ?? 'none'),
+        'none',
+      )
+    : { value: view.edge.plane ?? 'none', mixed: false };
+  const choosePlane = (choice: string) => {
+    if (choice === 'points' || choice === 'face')
+      return editor().startRefinePicking({
+        kind: 'plane',
+        from: choice,
+        points: [],
+        lock: targets.length === 1 ? targets[0].id : null,
+      });
+    editor().setRefinePlane(choice === 'none' ? null : choice);
+  };
   return (
     <>
+      <Picking view={view} />
+      <div className="refine-choice">
+        <span>Plane</span>
+        <select
+          aria-label="Plane"
+          value={planeIds.mixed ? 'mixed' : planeIds.value}
+          onChange={(event) => choosePlane(event.target.value)}
+        >
+          {planeIds.mixed ? (
+            <option value="mixed" disabled>
+              Mixed
+            </option>
+          ) : null}
+          <option value="none">None</option>
+          {view.planes.map((plane) => (
+            <option key={plane.id} value={plane.id}>
+              {plane.name}
+            </option>
+          ))}
+          <option value="points">New plane from 3 points</option>
+          <option value="face">New plane from a face</option>
+        </select>
+      </div>
       <Choice
         label="Guide"
         value={view.edge.kind}
@@ -569,6 +610,33 @@ function EdgeControls({ view, targets, owned }: ModeProps) {
       <RemovePoint view={view} />
       <FeatureActions targets={targets} />
     </>
+  );
+}
+
+/** What the session waits for while it waits for picks, with a way out. */
+function Picking({ view }: Pick<ModeProps, 'view'>) {
+  const picking = view.picking;
+  if (!picking) return null;
+  const wanted = picking.kind === 'line' ? 2 : picking.from === 'face' ? 1 : 3;
+  const what =
+    picking.kind === 'line'
+      ? 'Click 2 points, on the part or on guide points, for the line.'
+      : picking.from === 'face'
+        ? 'Click a flat face of the part for the plane.'
+        : 'Click 3 points on the part for the plane.';
+  return (
+    <div className="refine-picking">
+      <p className="anchor-help" role="status">
+        {what} {wanted > 1 ? `${picking.points.length} of ${wanted} picked.` : null}
+      </p>
+      <button
+        type="button"
+        className="button secondary full-width"
+        onClick={() => editor().cancelRefinePicking()}
+      >
+        Cancel
+      </button>
+    </div>
   );
 }
 

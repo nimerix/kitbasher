@@ -1236,7 +1236,11 @@ function Scene({
           <WarpStrokeController pressed={gizmoWasPressed} />
           {refineSession ? (
             <Suspense fallback={null}>
-              <RefineOverlay />
+              <RefineOverlay
+                onPress={() => {
+                  gizmoPressed = true;
+                }}
+              />
             </Suspense>
           ) : null}
           <RefinePointerController pressed={gizmoWasPressed} />

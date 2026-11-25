@@ -7,11 +7,14 @@ import {
 } from './refine-curve';
 import { type Shape, type ShapeKind, fitAuto, fitShape, shapeDistance } from './refine-fit';
 import { type RefineMesh, type RefineTopology, vertexNormal, weldedCorner } from './refine-mesh';
+import type { PointLock } from './refine-sketch';
 import type { Vec3 } from './types';
 
 export interface GuidePoint {
   triangle: number;
   position: Vec3;
+  /** How the user locked the point; the solve never reads it. */
+  lock?: PointLock;
 }
 export const enum BandZone {
   Soft = 0,

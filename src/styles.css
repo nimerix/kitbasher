@@ -4934,6 +4934,11 @@ optgroup {
 .context-action.danger:not(:disabled) svg {
   color: inherit;
 }
+.context-label {
+  padding: 2px 9px;
+  color: var(--muted);
+  font-size: 10px;
+}
 .context-separator {
   height: 1px;
   margin: 5px 3px;

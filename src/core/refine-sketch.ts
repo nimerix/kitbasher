@@ -91,7 +91,8 @@ export function rayOnPlane(
 
 /**
  * The normal of the plane that best fits `points` (xyz), or null when they lie near one line: the
- * smallest spread is the normal's when the middle spread is at least a tenth of the largest.
+ * normal is the axis of least spread, given a middle spread of at least a tenth of the largest, in
+ * standard deviation.
  */
 export function bestPlaneNormal(points: ArrayLike<number>): Vec3 | null {
   const n = points.length / 3;
@@ -221,4 +222,244 @@ export function nearestOnSurface(
     ring = next;
   }
   return best;
+}
+
+/** How a guide point is held: sliding along a line through `origin` along unit `direction`, or fixed. */
+export type PointLock = { kind: 'line'; origin: Vec3; direction: Vec3 } | { kind: 'fixed' };
+
+/** The point of the line nearest `p`. */
+export function ontoLine(lock: Extract<PointLock, { kind: 'line' }>, p: ArrayLike<number>): Vec3 {
+  const { origin: o, direction: d } = lock;
+  const t = (p[0] - o[0]) * d[0] + (p[1] - o[1]) * d[1] + (p[2] - o[2]) * d[2];
+  return [o[0] + t * d[0], o[1] + t * d[1], o[2] + t * d[2]];
+}
+
+/** The line lock through two points, or null when they coincide. */
+export function lineThrough(a: ArrayLike<number>, b: ArrayLike<number>): PointLock | null {
+  const d = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+  if (!(Math.hypot(d[0], d[1], d[2]) > 1e-9)) return null;
+  return { kind: 'line', origin: [a[0], a[1], a[2]], direction: unit(d) };
+}
+
+/** The point of the line nearest a ray: where the ray passes closest to it. */
+export function lineNearRay(
+  lock: Extract<PointLock, { kind: 'line' }>,
+  origin: ArrayLike<number>,
+  direction: ArrayLike<number>,
+): Vec3 {
+  const { origin: o, direction: d } = lock;
+  const w = [o[0] - origin[0], o[1] - origin[1], o[2] - origin[2]];
+  const b = dot(d, direction),
+    c = dot(direction, direction),
+    e = dot(d, w),
+    f = dot(direction, w);
+  const denominator = c - b * b;
+  // Along the ray's direction the line has no nearest point; it stays at its origin.
+  const t = Math.abs(denominator) < 1e-12 ? 0 : (b * f - c * e) / denominator;
+  return [o[0] + t * d[0], o[1] + t * d[1], o[2] + t * d[2]];
+}
+
+/**
+ * Where a guide point asked to go to `p` may go: nowhere for a fixed point, the nearest point of its
+ * line, else of its guide's plane, else `p`. A line lock on a guide with a plane is in that plane.
+ */
+export function heldPoint(
+  lock: PointLock | undefined,
+  plane: SketchPlane | null | undefined,
+  from: Vec3,
+  p: ArrayLike<number>,
+): Vec3 {
+  if (lock?.kind === 'fixed') return from;
+  if (lock?.kind === 'line') return ontoLine(lock, p);
+  if (plane) return ontoPlane(plane, p);
+  return [p[0], p[1], p[2]];
+}
+
+/** A uniform grid of each triangle's centroid, for the triangle nearest a point. */
+interface TriangleGrid {
+  cell: number;
+  min: Vec3;
+  cells: Map<number, number[]>;
+  /** Largest distance from a triangle's centroid to its corners. */
+  reach: number;
+}
+const grids = new WeakMap<object, TriangleGrid>();
+
+function gridOf(mesh: RefineMesh): TriangleGrid {
+  const known = grids.get(mesh.position);
+  if (known) return known;
+  const { position, triangleCount } = mesh;
+  const min: Vec3 = [Infinity, Infinity, Infinity],
+    max: Vec3 = [-Infinity, -Infinity, -Infinity];
+  for (let v = 0; v < mesh.weldedCount; v++)
+    for (let a = 0; a < 3; a++) {
+      min[a] = Math.min(min[a], position[v * 3 + a]);
+      max[a] = Math.max(max[a], position[v * 3 + a]);
+    }
+  const size = Math.max(max[0] - min[0], max[1] - min[1], max[2] - min[2], 1e-6);
+  const cell = Math.max(size / 256, Math.cbrt((size * size * size) / Math.max(1, triangleCount)));
+  const cells = new Map<number, number[]>();
+  let reach = 0;
+  for (let t = 0; t < triangleCount; t++) {
+    const c = [0, 0, 0];
+    const corners = ([0, 1, 2] as const).map((k) => weldedCorner(mesh, t, k) * 3);
+    for (const w of corners) for (let a = 0; a < 3; a++) c[a] += position[w + a] / 3;
+    for (const w of corners)
+      reach = Math.max(
+        reach,
+        Math.hypot(position[w] - c[0], position[w + 1] - c[1], position[w + 2] - c[2]),
+      );
+    const key = keyOf(
+      Math.floor((c[0] - min[0]) / cell),
+      Math.floor((c[1] - min[1]) / cell),
+      Math.floor((c[2] - min[2]) / cell),
+    );
+    const list = cells.get(key);
+    if (list) list.push(t);
+    else cells.set(key, [t]);
+  }
+  const grid = { cell, min, cells, reach };
+  grids.set(mesh.position, grid);
+  return grid;
+}
+/** Rings of cells searched before a point is taken to be far from the part. */
+const nearRings = 8;
+const keyOf = (i: number, j: number, k: number) => (i * 73856093) ^ (j * 19349663) ^ (k * 83492791);
+
+/**
+ * The surface point nearest `p` and its triangle, over the whole mesh: the triangles whose centroids
+ * lie in rings of grid cells about it, until no nearer one can remain, then refined over its
+ * neighbours. Null on an empty mesh.
+ */
+export function nearestTriangle(
+  mesh: RefineMesh,
+  topology: RefineTopology,
+  p: ArrayLike<number>,
+): GuidePoint | null {
+  if (!mesh.triangleCount) return null;
+  const grid = gridOf(mesh);
+  const { cell, min, cells, reach } = grid;
+  const { position } = mesh;
+  const at = [0, 1, 2].map((a) => Math.floor((p[a] - min[a]) / cell));
+  let best = -1,
+    nearest = Infinity;
+  const corner = (t: number, k: 0 | 1 | 2) => {
+    const w = weldedCorner(mesh, t, k) * 3;
+    return position.subarray(w, w + 3);
+  };
+  const consider = (t: number) => {
+    const q = closestOnTriangle(p, corner(t, 0), corner(t, 1), corner(t, 2));
+    const d = Math.hypot(q[0] - p[0], q[1] - p[1], q[2] - p[2]);
+    if (d < nearest || (d === nearest && t < best)) [nearest, best] = [d, t];
+  };
+  for (let r = 0; ; r++) {
+    // Every triangle with a point within `nearest` has its centroid within nearest + reach.
+    if (best >= 0 && (r - 1) * cell > nearest + reach) break;
+    if (best < 0 && r > nearRings) {
+      // Far from the part: every triangle, once.
+      for (let t = 0; t < mesh.triangleCount; t++) consider(t);
+      break;
+    }
+    for (let i = -r; i <= r; i++)
+      for (let j = -r; j <= r; j++)
+        for (let k = -r; k <= r; k++) {
+          if (Math.max(Math.abs(i), Math.abs(j), Math.abs(k)) !== r) continue;
+          for (const t of cells.get(keyOf(at[0] + i, at[1] + j, at[2] + k)) ?? []) consider(t);
+        }
+  }
+  if (best < 0) return null;
+  return nearestOnSurface(mesh, topology, { triangle: best, position: [p[0], p[1], p[2]] });
+}
+
+/** A guide point at `p` itself, on the triangle nearest it. */
+export function pointAt(mesh: RefineMesh, topology: RefineTopology, p: ArrayLike<number>) {
+  const found = nearestTriangle(mesh, topology, p);
+  return found && { triangle: found.triangle, position: [p[0], p[1], p[2]] as Vec3 };
+}
+
+/**
+ * The plane fitted to the surface within `radius` of a clicked point, over the triangles joined to
+ * the clicked one: through their area-weighted centroid, with the normal of least spread facing as
+ * the clicked triangle does, and `u` along the spread's longest axis. Null where the surface there
+ * is not flat to a tenth of the radius.
+ */
+export function planeOfFace(
+  mesh: RefineMesh,
+  topology: RefineTopology,
+  point: GuidePoint,
+  radius: number,
+  id: string,
+  name: string,
+): SketchPlane | null {
+  const { position } = mesh;
+  const p = point.position;
+  const seen = new Set<number>([point.triangle]);
+  const queue = [point.triangle];
+  const flat: number[] = [];
+  for (let q = 0; q < queue.length; q++) {
+    const t = queue[q];
+    const corners = ([0, 1, 2] as const).map((k) => weldedCorner(mesh, t, k));
+    for (const w of corners) flat.push(position[w * 3], position[w * 3 + 1], position[w * 3 + 2]);
+    for (const w of corners) {
+      if (
+        Math.hypot(position[w * 3] - p[0], position[w * 3 + 1] - p[1], position[w * 3 + 2] - p[2]) >
+        radius
+      )
+        continue;
+      for (let i = topology.triangleStart[w]; i < topology.triangleStart[w + 1]; i++) {
+        const u = topology.trianglesOf[i];
+        if (!seen.has(u)) {
+          seen.add(u);
+          queue.push(u);
+        }
+      }
+    }
+  }
+  const normal = bestPlaneNormal(flat);
+  if (!normal) return null;
+  const n = flat.length / 3;
+  const c = [0, 0, 0];
+  for (let i = 0; i < n; i++) for (let a = 0; a < 3; a++) c[a] += flat[i * 3 + a] / n;
+  let off = 0;
+  for (let i = 0; i < n; i++)
+    off = Math.max(
+      off,
+      Math.abs(
+        dot(
+          [0, 1, 2].map((a) => flat[i * 3 + a] - c[a]),
+          normal,
+        ),
+      ),
+    );
+  if (off > radius / 10) return null;
+  // The clicked triangle's own facing.
+  const [a, b, d] = ([0, 1, 2] as const).map((k) => {
+    const w = weldedCorner(mesh, point.triangle, k) * 3;
+    return [position[w], position[w + 1], position[w + 2]];
+  });
+  const facing = cross(
+    [b[0] - a[0], b[1] - a[1], b[2] - a[2]],
+    [d[0] - a[0], d[1] - a[1], d[2] - a[2]],
+  );
+  const sign = dot(facing, normal) * (mesh.flipped ? -1 : 1) >= 0 ? 1 : -1;
+  const oriented = normal.map((x) => x * sign);
+  // The longest spread in the plane.
+  let along: number[] = [1, 0, 0],
+    widest = -1;
+  for (let k = 0; k < 18; k++) {
+    const angle = (k * Math.PI) / 18;
+    const helper = Math.abs(oriented[0]) < 0.9 ? [1, 0, 0] : [0, 1, 0];
+    const e1 = unit(cross(oriented, helper));
+    const e2 = cross(oriented, e1);
+    const axis = e1.map((x, i) => Math.cos(angle) * x + Math.sin(angle) * e2[i]);
+    let spread = 0;
+    for (let i = 0; i < n; i++)
+      spread +=
+        dot(
+          [0, 1, 2].map((a) => flat[i * 3 + a] - c[a]),
+          axis,
+        ) ** 2;
+    if (spread > widest) [widest, along] = [spread, axis];
+  }
+  return planeOf(id, name, c, oriented, along);
 }

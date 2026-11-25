@@ -33,6 +33,7 @@ import {
 import { contactColors } from '../core/surfaces';
 import type { Part } from '../core/types';
 import { refineCurves, refineHandles, type RefineHandle } from './RefinePointer';
+import { RefineSketch } from './RefineSketch';
 import { warpRegionColor } from './SurfacePainter';
 import { surfacePoints } from './surface-points';
 import { closedColor, foldColor } from './WarpOverlay';
@@ -583,7 +584,7 @@ const Handles = memo(function Handles({
  * accepted, dashed while pending), the selected edge's band, painted triangles, pending regions
  * with the selected one's kept detail outlined, and triangles an accept folded or could not cut.
  */
-export function RefineOverlay() {
+export function RefineOverlay({ onPress }: { onPress: () => void }) {
   const refine = useEditor((s) =>
     s.tool === 'refine' && s.refine?.stage === 'ready' ? s.refine : null,
   );
@@ -664,6 +665,7 @@ export function RefineOverlay() {
         chosenPoint={refine.chosenPoint}
         model={refine.model}
       />
+      <RefineSketch refine={refine} onPress={onPress} />
     </>
   );
 }

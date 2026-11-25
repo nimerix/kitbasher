@@ -101,6 +101,17 @@ import {
   writeRefinedGeometry,
 } from './refine-mesh';
 import type { RefineModel } from './refine-model';
+import {
+  type PointLock,
+  type SketchPlane,
+  heldPoint,
+  lineThrough,
+  nearestOnSurface,
+  nearestTriangle,
+  ontoPlane,
+  planeOfFace,
+  planeThrough,
+} from './refine-sketch';
 import { patchRefinedGeometry, patchRefinedVertices } from './refine-preview';
 import type { RegionInput, RegionSolve } from './refine-region';
 import type { NavigationMode } from './navigation';
@@ -223,6 +234,8 @@ export interface EditorContextMenu {
   kind?: 'brush';
   partId?: string;
   point?: SurfacePoint;
+  /** A Refine guide point: the menu is that point's. */
+  refinePoint?: RefinePointSelection;
 }
 type Toast = { id: string; message: string; kind: 'success' | 'error' | 'info' };
 const emptySurfacePair = (): SurfacePair => ({ id: uid(), source: null, target: null });
@@ -415,12 +428,20 @@ export interface RefineStep {
   triangles: number[];
   /** Whether the selected guide's last spline segment still took points. */
   drawing: boolean;
+  planes: SketchPlane[];
 }
-interface RefinePointSelection {
+export interface RefinePointSelection {
   feature: string;
   segment: number;
   index: number;
 }
+/**
+ * Clicks the session waits for: points for a new plane (three, or one on a flat face), after which
+ * the guide `lock` is put on it when set; or two points for a guide point's line lock.
+ */
+export type RefinePicking =
+  | { kind: 'plane'; from: 'points' | 'face'; points: Vec3[]; lock: string | null }
+  | { kind: 'line'; point: RefinePointSelection; points: Vec3[] };
 export interface RefineSession {
   id: string;
   partId: string;
@@ -445,6 +466,10 @@ export interface RefineSession {
   chosenPoint: RefinePointSelection | null;
   /** Painted triangles of the working surface: the region being made, or where Detect looks. */
   triangles: number[];
+  /** The session's sketch planes, in the order they were made. */
+  planes: SketchPlane[];
+  /** Clicks the session waits for, or null. Never in a step. */
+  picking: RefinePicking | null;
   edge: {
     kind: GuideKind;
     width: number | null;
@@ -462,6 +487,8 @@ export interface RefineSession {
     wallAngle: number | null;
     /** Whether a guide on a sketch plane takes its surface from the plane. */
     usePlane: boolean;
+    /** The id of the plane the next guide is drawn on, or null. */
+    plane: string | null;
   };
   region: Omit<RegionInput, 'triangles'>;
   brush: { kind: RefineBrush; strength: number };
@@ -705,6 +732,25 @@ interface EditorState {
     begin?: boolean,
   ) => void;
   removeRefinePoint: (feature: string, segment: number, index: number) => void;
+  /** Starts waiting for clicks on the part or on guide points, for a new plane or a line lock. */
+  startRefinePicking: (picking: RefinePicking) => void;
+  cancelRefinePicking: () => void;
+  /** One click of the picking under way, on the part or on a guide point. */
+  pickRefine: (point: GuidePoint) => void;
+  /**
+   * The plane, by id, of the selected pending edges, their points projected onto it, or of the next
+   * guide when none is selected. Null takes them off their plane.
+   */
+  setRefinePlane: (plane: string | null) => void;
+  /** Puts a guide on a plane, its points projected onto it, or takes it off with null. */
+  setRefineGuidePlane: (feature: string, plane: string | null) => void;
+  /** Locks a guide point, and every copy of it, to a line or in place; null unlocks it. */
+  lockRefinePoint: (
+    feature: string,
+    segment: number,
+    index: number,
+    lock: PointLock | null,
+  ) => void;
   clickRefinePoint: (feature: string, segment: number, index: number) => void;
   clearChosenRefinePoint: () => void;
   removeChosenRefinePoint: () => void;
@@ -3720,7 +3766,8 @@ export const useEditor = create<EditorState>((set, get) => ({
     const { refine } = get();
     if (!refine) return;
     refineDrag = null;
-    const { kind, joint, ...feature } = options;
+    // The next guide's plane is chosen with setRefinePlane, which projects a guide's points.
+    const { kind, joint, plane: _, ...feature } = options;
     const next = { ...(kind ? { kind } : {}), ...(joint ? { joint } : {}) };
     const touched = Object.keys(feature).length > 0 || Object.keys(each).length > 0;
     const features = touched
@@ -3790,11 +3837,14 @@ export const useEditor = create<EditorState>((set, get) => ({
         },
       });
   },
-  addRefinePoint: (point, close = false) => {
+  addRefinePoint: (placed, close = false) => {
     const refine = readyRefine();
     if (!refine || refine.mode !== 'edge') return;
     const { edge } = refine;
     const guide = drawnGuide(refine);
+    // A guide on a plane keeps its points in it.
+    const plane = guide ? guide.feature.input.plane : nextPlane(refine);
+    const point = plane ? onPlane(refine, plane, placed) : placed;
     if (!guide) {
       if (close) return;
       const feature: RefineFeature = {
@@ -3815,6 +3865,7 @@ export const useEditor = create<EditorState>((set, get) => ({
             path: edge.path,
             wallAngle: edge.wallAngle,
             usePlane: edge.usePlane,
+            ...(plane ? { plane } : {}),
           },
         },
       };
@@ -3862,13 +3913,24 @@ export const useEditor = create<EditorState>((set, get) => ({
       drawing,
     });
   },
-  moveRefinePoint: (id, segment, index, point, begin) => {
+  moveRefinePoint: (id, segment, index, asked, begin) => {
     const refine = readyRefine();
     const feature = refine?.features.find((f) => f.id === id);
     if (!refine || feature?.state !== 'pending' || feature.feature.type !== 'edge') return;
     const input = feature.feature.input;
     const old = input.segments[segment]?.points[index];
-    if (!old) return;
+    if (!old || old.lock?.kind === 'fixed') return;
+    // A locked point slides along its line, a point of a guide on a plane in the plane.
+    const held = heldPoint(old.lock, input.plane, old.position, asked.position);
+    const moved = held.some((x, k) => x !== asked.position[k]);
+    const { mesh, topology } = refine.model!;
+    const point: GuidePoint = {
+      triangle: moved
+        ? nearestOnSurface(mesh, topology, { triangle: asked.triangle, position: held }).triangle
+        : asked.triangle,
+      position: held,
+      ...(old.lock ? { lock: old.lock } : {}),
+    };
     // A point two segments share, or the closing point, moves in both.
     const segments = input.segments.map((s) => ({
       ...s,
@@ -3892,7 +3954,8 @@ export const useEditor = create<EditorState>((set, get) => ({
         draftStatus,
       };
       const built = builtDraft;
-      commitRefine({ features });
+      // The chosen point stays chosen, so its move widget stays with it.
+      commitRefine({ features, chosenPoint: refine.chosenPoint });
       refineDrag = {
         id,
         feature,
@@ -3941,6 +4004,134 @@ export const useEditor = create<EditorState>((set, get) => ({
             drawing: false,
           },
     );
+  },
+  startRefinePicking: (picking) => {
+    const refine = readyRefine();
+    if (!refine) return;
+    refineDrag = null;
+    set({ refine: { ...refine, picking, mode: 'edge' } });
+  },
+  cancelRefinePicking: () => {
+    const { refine } = get();
+    if (refine?.picking) set({ refine: { ...refine, picking: null } });
+  },
+  pickRefine: (point) => {
+    const refine = readyRefine();
+    const picking = refine?.picking;
+    if (!refine || !picking) return;
+    const points = [...picking.points, point.position];
+    const { mesh, topology, step } = refine.model!;
+    if (picking.kind === 'line') {
+      if (points.length < 2) {
+        set({ refine: { ...refine, picking: { ...picking, points } } });
+        return;
+      }
+      const lock = lineThrough(points[0], points[1]);
+      set({ refine: { ...refine, picking: null } });
+      if (!lock) return get().notify(samePointsNotice, 'info');
+      const { feature, segment, index } = picking.point;
+      get().lockRefinePoint(feature, segment, index, lock);
+      return;
+    }
+    const wanted = picking.from === 'face' ? 1 : 3;
+    if (points.length < wanted) {
+      set({ refine: { ...refine, picking: { ...picking, points } } });
+      return;
+    }
+    const id = uid();
+    const name = `Plane ${refine.planes.length + 1}`;
+    const plane =
+      picking.from === 'face'
+        ? planeOfFace(mesh, topology, point, Math.max(0.5, 8 * step), id, name)
+        : planeThrough(id, name, points[0], points[1], points[2]);
+    if (!plane) {
+      set({ refine: { ...refine, picking: null } });
+      get().notify(picking.from === 'face' ? curvedFaceNotice : collinearNotice, 'info');
+      return;
+    }
+    const planes = [...refine.planes, plane];
+    const lock = refine.features.find((f) => f.id === picking.lock);
+    if (lock?.state === 'pending' && lock.feature.type === 'edge') {
+      const input = guideOnPlane(refine, lock.feature.input, plane);
+      commitRefine({
+        planes,
+        picking: null,
+        features: withProposal(refine, lock.id, { type: 'edge', input }),
+      });
+      return;
+    }
+    commitRefine({ planes, picking: null, edge: { ...refine.edge, plane: id } });
+  },
+  setRefinePlane: (id) => {
+    const refine = readyRefine();
+    if (!refine) return;
+    refineDrag = null;
+    const plane = id === null ? null : refine.planes.find((p) => p.id === id);
+    if (plane === undefined) return;
+    const features = updateSelected(refine, (proposal) =>
+      proposal.type === 'edge'
+        ? { type: 'edge', input: guideOnPlane(refine, proposal.input, plane) }
+        : null,
+    );
+    if (features === refine.features) {
+      set({ refine: { ...refine, edge: { ...refine.edge, plane: id } } });
+      return;
+    }
+    commitRefine({ features, chosenPoint: refine.chosenPoint });
+  },
+  setRefineGuidePlane: (featureId, id) => {
+    const refine = readyRefine();
+    const feature = refine?.features.find((f) => f.id === featureId);
+    if (!refine || feature?.state !== 'pending' || feature.feature.type !== 'edge') return;
+    const plane = id === null ? null : refine.planes.find((p) => p.id === id);
+    if (plane === undefined) return;
+    const input = guideOnPlane(refine, feature.feature.input, plane);
+    commitRefine({
+      features: withProposal(refine, featureId, { type: 'edge', input }),
+      chosenPoint: refine.chosenPoint,
+    });
+  },
+  lockRefinePoint: (featureId, segment, index, lock) => {
+    const refine = readyRefine();
+    const feature = refine?.features.find((f) => f.id === featureId);
+    if (!refine || feature?.state !== 'pending' || feature.feature.type !== 'edge') return;
+    const input = feature.feature.input;
+    const old = input.segments[segment]?.points[index];
+    if (!old) return;
+    // A line lock on a guide on a plane lies in the plane.
+    const plane = input.plane;
+    const held =
+      lock?.kind === 'line' && plane
+        ? lineThrough(
+            ontoPlane(plane, lock.origin),
+            ontoPlane(plane, [
+              lock.origin[0] + lock.direction[0],
+              lock.origin[1] + lock.direction[1],
+              lock.origin[2] + lock.direction[2],
+            ]),
+          )
+        : lock;
+    if (lock && !held) return get().notify(acrossPlaneNotice, 'info');
+    const { mesh, topology } = refine.model!;
+    const position = held ? heldPoint(held, plane, old.position, old.position) : old.position;
+    const { lock: _, ...bare } = old;
+    const point: GuidePoint = {
+      ...bare,
+      position,
+      triangle:
+        position === old.position
+          ? old.triangle
+          : nearestOnSurface(mesh, topology, { triangle: old.triangle, position }).triangle,
+      ...(held ? { lock: held } : {}),
+    };
+    const segments = input.segments.map((s) => ({
+      ...s,
+      points: s.points.map((p) => (samePoint(p, old) ? point : p)),
+    }));
+    commitRefine({
+      features: withProposal(refine, featureId, { type: 'edge', input: { ...input, segments } }),
+      chosenPoint: refine.chosenPoint,
+    });
   },
   finishRefineGuide: () => {
     refineDrag = null;
@@ -5758,6 +5949,8 @@ const newRefineSession = (part: Part, epoch: number): RefineSession => ({
   selected: [],
   chosenPoint: null,
   triangles: [],
+  planes: [],
+  picking: null,
   edge: {
     kind: 'line',
     width: null,
@@ -5765,6 +5958,7 @@ const newRefineSession = (part: Part, epoch: number): RefineSession => ({
     strength: 1,
     ends: [null, null],
     ...handGuideDefaults,
+    plane: null,
   },
   region: {
     treatment: 'smooth',
@@ -5984,12 +6178,14 @@ const refineStep = ({
   selected,
   triangles,
   drawing,
+  planes,
 }: RefineSession): RefineStep => ({
   model: model!,
   features,
   selected,
   triangles,
   drawing,
+  planes,
 });
 
 /**
@@ -6846,11 +7042,21 @@ function shareCrease(mesh: RefineMesh, before: RefineMesh) {
 }
 
 /** What undo and redo reset: none of it is recorded in a step. */
-const unsteppedRefine = { draft: null, folds: noFolds, skipped: noFolds, chosenPoint: null };
+const unsteppedRefine = {
+  draft: null,
+  folds: noFolds,
+  skipped: noFolds,
+  chosenPoint: null,
+  picking: null,
+};
 
 const noEdgeNotice =
   'No edge found under this guide. Move it onto the rounded edge or change Width.';
 const longGuideNotice = 'This guide is too long for this mesh. Try a shorter guide.';
+const samePointsNotice = 'Pick two different points for the line.';
+const collinearNotice = 'These points are in a line. Pick three points that make a triangle.';
+const curvedFaceNotice = 'This surface is not flat here. Click a flat face, or pick 3 points.';
+const acrossPlaneNotice = 'This line runs across the guide plane. Pick two points along it.';
 const noWallNotice =
   'No wall found beside this guide. Set Position to Along, or turn off Use guide plane.';
 const wallAngleNotice =
@@ -6933,6 +7139,64 @@ const solvable = (input: EdgeInput) =>
 
 const samePoint = (a: GuidePoint, b: GuidePoint) =>
   a.triangle === b.triangle && a.position.every((x, k) => x === b.position[k]);
+
+/** The plane the next new guide is drawn on, or null. */
+function nextPlane(refine: RefineSession) {
+  return refine.planes.find((p) => p.id === refine.edge.plane) ?? null;
+}
+
+/** The plane a click in Edge mode places its point on: the drawn guide's, or the next guide's. */
+export function refineDrawingPlane(refine: RefineSession) {
+  if (refine.mode !== 'edge') return null;
+  const guide = drawnGuide(refine);
+  return guide ? (guide.feature.input.plane ?? null) : nextPlane(refine);
+}
+
+/** `point` projected onto `plane`, on the triangle nearest where it lands. */
+function onPlane(refine: RefineSession, plane: SketchPlane, point: GuidePoint): GuidePoint {
+  const position = ontoPlane(plane, point.position);
+  if (position.every((x, k) => x === point.position[k])) return point;
+  const { mesh, topology } = refine.model!;
+  return {
+    ...point,
+    position,
+    triangle: (nearestTriangle(mesh, topology, position) ?? point).triangle,
+  };
+}
+
+/**
+ * The guide on `plane`, every point projected onto it and on the triangle nearest where it lands, a
+ * point's line lock taken into the plane; null takes it off its plane and leaves its points.
+ */
+function guideOnPlane(refine: RefineSession, input: EdgeInput, plane: SketchPlane | null) {
+  if (!plane) {
+    const { plane: _, ...rest } = input;
+    return rest;
+  }
+  const moved = new Map<GuidePoint, GuidePoint>();
+  const segments = input.segments.map((s) => ({
+    ...s,
+    points: s.points.map((p) => {
+      const same = [...moved.keys()].find((q) => samePoint(q, p));
+      if (same) return moved.get(same)!;
+      let point = onPlane(refine, plane, p);
+      if (p.lock?.kind === 'line') {
+        const { direction: d, origin: o } = p.lock;
+        const lock = lineThrough(
+          ontoPlane(plane, o),
+          ontoPlane(plane, [o[0] + d[0], o[1] + d[1], o[2] + d[2]]),
+        );
+        const { lock: _, ...bare } = point;
+        point = lock
+          ? { ...bare, lock, position: heldPoint(lock, plane, point.position, point.position) }
+          : bare;
+      }
+      moved.set(p, point);
+      return point;
+    }),
+  }));
+  return { ...input, segments, plane };
+}
 
 /** The guide new points extend: the one selected feature when it is an open pending edge. */
 function drawnGuide(refine: RefineSession) {

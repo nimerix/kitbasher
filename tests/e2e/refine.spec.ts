@@ -840,6 +840,7 @@ test('settings with no matching selection go to the next guide and region', asyn
       path: true,
       wallAngle: null,
       usePlane: true,
+      plane: null,
     });
   // Two arcs: three clicks, then two more.
   for (const x of [-3, -2, -1, 0, 1]) await clickSurface(page, crest(x));
@@ -1446,4 +1447,145 @@ test('the Refine indexing status distinguishes the gestures that wait from click
   await expect(page.locator('.status-context')).toHaveText(
     'Preparing a dense mesh. Strokes, paint and handle drags wait. Single clicks still work.',
   );
+});
+
+/** The first guide's point `index` of segment `segment`, with its lock and the guide's plane. */
+const guidePoint = (page: Page, segment = 0, index = 0) =>
+  inEditor(
+    page,
+    (store, [segment, index]) => {
+      const f = store.useEditor.getState().refine!.features[0];
+      if (f?.feature.type !== 'edge') return null;
+      const { plane, segments } = f.feature.input;
+      const point = segments[segment].points[index];
+      const offPlane = plane
+        ? Math.abs(
+            [0, 1, 2].reduce(
+              (sum, a) => sum + (point.position[a] - plane.origin[a]) * plane.normal[a],
+              0,
+            ),
+          )
+        : null;
+      return { position: point.position, lock: point.lock ?? null, offPlane };
+    },
+    [segment, index],
+  );
+
+/** Screen position of the move widget's u arrow, once the overlay has drawn it. */
+async function uArrow(page: Page) {
+  const read = () =>
+    page.evaluate(async () => {
+      interface Projected {
+        x: number;
+        y: number;
+      }
+      interface Arrow {
+        name: string;
+        matrixWorld: unknown;
+        geometry: {
+          computeBoundingSphere(): void;
+          boundingSphere: {
+            center: { clone(): { applyMatrix4(m: unknown): { project(c: unknown): Projected } } };
+          };
+        };
+      }
+      interface Node {
+        type: string;
+        picker?: { translate: { children: Arrow[] } };
+      }
+      const url = performance
+        .getEntriesByType('resource')
+        .map((entry) => entry.name)
+        .find((url) => url.includes('/@react-three_fiber.js'))!;
+      const root = (await import(url))._roots
+        .get(document.querySelector('canvas'))
+        .store.getState();
+      const gizmos: Node[] = [];
+      root.scene.traverse((o: Node) => {
+        if (o.type === 'TransformControlsGizmo') gizmos.push(o);
+      });
+      const arrow = gizmos[0]?.picker?.translate.children.find((c) => c.name === 'X');
+      if (!arrow) return null;
+      arrow.geometry.computeBoundingSphere();
+      const ndc = arrow.geometry.boundingSphere.center
+        .clone()
+        .applyMatrix4(arrow.matrixWorld)
+        .project(root.camera);
+      const box = document.querySelector('canvas')!.getBoundingClientRect();
+      return {
+        x: box.x + ((ndc.x + 1) * box.width) / 2,
+        y: box.y + ((1 - ndc.y) * box.height) / 2,
+      };
+    });
+  await expect.poll(read, { timeout: 15000 }).not.toBeNull();
+  return (await read())!;
+}
+
+/** A plane through three clicks on the block's top face, seen from above. */
+async function topPlane(page: Page) {
+  await page.getByRole('combobox', { name: 'Plane' }).selectOption('points');
+  await expect(page.getByText('Click 3 points on the part for the plane.')).toBeVisible();
+  for (const p of [
+    [-2, half[1], -1],
+    [2, half[1], -1],
+    [0, half[1], 1],
+  ] as Vec3[])
+    await clickSurface(page, p);
+  await expect.poll(() => inStore(page, (s) => s.refine!.planes.length)).toBe(1);
+}
+
+test('right-click on a guide point opens its menu, which fixes it', async ({ page }) => {
+  await openRefine(page);
+  await clickSurface(page, crest(-3));
+  await clickSurface(page, crest(3));
+  await expect(page.getByText('0 accepted · 1 proposed')).toBeVisible();
+  const spot = await screen(page, (await guidePoint(page, 0, 1))!.position);
+  await page.mouse.click(spot.x, spot.y, { button: 'right' });
+  const menu = page.getByRole('menu', { name: 'Guide point actions' });
+  await expect(menu).toBeVisible();
+  await expect(menu.getByRole('menuitem', { name: 'Unlock' })).toBeDisabled();
+  await menu.getByRole('menuitem', { name: 'Fixed' }).click();
+  await expect(menu).toBeHidden();
+  await expect.poll(async () => (await guidePoint(page, 0, 1))?.lock).toEqual({ kind: 'fixed' });
+});
+
+test('the move widget moves a point on a plane, and it stays in the plane', async ({ page }) => {
+  await openRefine(page, { view: '7' });
+  await topPlane(page);
+  for (const p of [
+    [-1, half[1], 0],
+    [1, half[1], 0],
+  ] as Vec3[])
+    await clickSurface(page, p);
+  await expect(page.getByText('0 accepted · 1 proposed')).toBeVisible();
+  const before = (await guidePoint(page, 0, 1))!;
+  expect(before.offPlane).toBeLessThan(1e-9);
+  // A click on the point chooses it and shows its widget.
+  const spot = await screen(page, before.position);
+  await page.mouse.click(spot.x, spot.y);
+  await expect.poll(() => inStore(page, (s) => s.refine!.chosenPoint?.index)).toBe(1);
+  // The u arrow of the widget, where the gizmo drew it, toward the camera.
+  const grip = await uArrow(page);
+  const undo = await inStore(page, (s) => s.refine!.undo.length);
+  await page.mouse.move(grip.x, grip.y);
+  await page.mouse.down();
+  // Along the arrow, away from the point.
+  const away = Math.sign(grip.x - spot.x) || 1;
+  await page.mouse.move(grip.x + 30 * away, grip.y, { steps: 6 });
+  await page.mouse.move(grip.x + 60 * away, grip.y, { steps: 6 });
+  await page.mouse.up();
+  const after = (await guidePoint(page, 0, 1))!;
+  expect(Math.abs(after.position[0] - before.position[0])).toBeGreaterThan(0.1);
+  expect(Math.abs(after.position[2] - before.position[2])).toBeLessThan(0.05);
+  expect(after.offPlane).toBeLessThan(1e-9);
+  // One drag is one step.
+  expect(await inStore(page, (s) => s.refine!.undo.length)).toBe(undo + 1);
+  expect(
+    await inStore(
+      page,
+      (s) =>
+        s.refine!.features[0].feature.type === 'edge' &&
+        s.refine!.features[0].feature.input.segments[0].points.length,
+    ),
+  ).toBe(2);
 });
