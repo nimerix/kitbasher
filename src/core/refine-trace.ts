@@ -37,6 +37,8 @@ const flankSpread = 25;
 const backAngle = 120;
 /** Degrees the edge turns within a brush radius to count as a corner. */
 const cornerTurn = 40;
+/** Most vertices read across one slice. */
+const sliceVertices = 600;
 /** Point spacings a corner or the shortest piece spans at the least. */
 const scaleSpacings = 4;
 /** Degrees between two pieces' directions where they meet within which the joint is smooth. */
@@ -221,7 +223,7 @@ export function edgeUnderStroke(
   const { position } = mesh;
   const { neighbourStart, neighbours } = topology;
   const { vertex: stamp, mark } = nextMark(mesh, topology);
-  const best = new Map<number, number>();
+  const best = new Float64Array(mesh.weldedCount).fill(Infinity);
   const heap = new Heap();
   for (const { triangle } of path)
     for (const k of [0, 1, 2] as const) {
@@ -233,8 +235,8 @@ export function edgeUnderStroke(
         position[v * 3 + 1],
         position[v * 3 + 2],
       ).distance;
-      if ((best.get(v) ?? Infinity) <= d) continue;
-      best.set(v, d);
+      if (best[v] <= d) continue;
+      best[v] = d;
       heap.push(d, v);
     }
   const read: number[] = [];
@@ -245,24 +247,37 @@ export function edgeUnderStroke(
   while (heap.size) {
     const v = heap.pop();
     const d = heap.top;
-    if (stamp[v] === mark || d > best.get(v)!) continue;
+    if (stamp[v] === mark || d > best[v]) continue;
     stamp[v] = mark;
     if (d > reach) break;
-    const p = position.subarray(v * 3, v * 3 + 3);
-    const near = nearestOnPath(at, s, p[0], p[1], p[2]);
+    const px = position[v * 3],
+      py = position[v * 3 + 1],
+      pz = position[v * 3 + 2];
+    const near = nearestOnPath(at, s, px, py, pz);
     if (near.beyond > half) continue;
     vertexNormal(mesh, topology, v, normal);
     if (dot(normal, facing[near.index]) < back) continue;
+    const { foot, index } = near;
+    const side =
+      (px - foot[0]) * across[index][0] +
+      (py - foot[1]) * across[index][1] +
+      (pz - foot[2]) * across[index][2];
     read.push(v);
     station.push(near.station);
-    offset.push(dot(sub(p, near.foot), across[near.index]) < 0 ? -d : d);
+    offset.push(side < 0 ? -d : d);
     normals.push(normal[0], normal[1], normal[2]);
     for (let j = neighbourStart[v]; j < neighbourStart[v + 1]; j++) {
       const w = neighbours[j];
       if (stamp[w] === mark) continue;
-      const e = d + length(sub(position.subarray(w * 3, w * 3 + 3), p));
-      if (e > reach || (best.get(w) ?? Infinity) <= e) continue;
-      best.set(w, e);
+      const e =
+        d +
+        Math.sqrt(
+          (position[w * 3] - px) ** 2 +
+            (position[w * 3 + 1] - py) ** 2 +
+            (position[w * 3 + 2] - pz) ** 2,
+        );
+      if (e > reach || best[w] <= e) continue;
+      best[w] = e;
       heap.push(e, w);
     }
   }
@@ -273,8 +288,13 @@ export function edgeUnderStroke(
   const window = Math.max(radius / 2, 3 * step);
   const grid = Math.max(step / 2, window / 16);
   for (let i = 0; i < count; i++) {
-    const slice = order.slice(firstAt(sorted, s[i] - half), firstAt(sorted, s[i] + half));
-    if (slice.length < 6) continue;
+    const lowest = firstAt(sorted, s[i] - half),
+      highest = firstAt(sorted, s[i] + half);
+    if (highest - lowest < 6) continue;
+    // On a dense mesh, an even share of the slice's vertices is plenty to read.
+    const every = Math.max(1, Math.ceil((highest - lowest) / sliceVertices));
+    const slice: number[] = [];
+    for (let j = lowest; j < highest; j += every) slice.push(order[j]);
     // The slice's mean normal across the path, and the direction across it.
     const t = tangent[i];
     const mean: Vec3 = [0, 0, 0];
