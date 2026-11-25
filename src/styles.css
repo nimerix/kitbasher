@@ -4934,6 +4934,41 @@ optgroup {
 .context-action.danger:not(:disabled) svg {
   color: inherit;
 }
+.context-hint {
+  margin: 0;
+  padding: 2px 9px 4px;
+  color: var(--muted);
+  font-size: 10px;
+}
+.constraint-glyph {
+  display: inline-flex;
+  justify-content: center;
+  width: 14px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1;
+}
+.refine-constraint-icons {
+  display: flex;
+  gap: 2px;
+  pointer-events: auto;
+  transform: translate(8px, 8px);
+}
+.refine-constraint-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 3px;
+  border-radius: 3px;
+  border: 1px solid var(--border);
+  background: var(--panel);
+  color: var(--text);
+  font-size: 11px;
+  line-height: 1;
+  cursor: context-menu;
+}
 .context-label {
   padding: 2px 9px;
   color: var(--muted);

@@ -102,6 +102,14 @@ import {
 } from './refine-mesh';
 import type { RefineModel } from './refine-model';
 import {
+  type GuideConstraint,
+  type LineKind,
+  type PairKind,
+  type SolveRequest,
+  constraintRefusal,
+  solvedSegments,
+} from './refine-constraints';
+import {
   type PointLock,
   type SketchPlane,
   heldPoint,
@@ -236,6 +244,10 @@ export interface EditorContextMenu {
   point?: SurfacePoint;
   /** A Refine guide point: the menu is that point's. */
   refinePoint?: RefinePointSelection;
+  /** A segment of a Refine guide: the menu is that segment's. */
+  refineSegment?: { feature: string; segment: number };
+  /** A constraint of a Refine guide: the menu is that constraint's. */
+  refineConstraint?: { feature: string; id: string };
 }
 type Toast = { id: string; message: string; kind: 'success' | 'error' | 'info' };
 const emptySurfacePair = (): SurfacePair => ({ id: uid(), source: null, target: null });
@@ -407,6 +419,7 @@ interface WarpRecovery {
 }
 
 export type RefineMode = 'edge' | 'region' | 'brush' | 'detect';
+type DistributiveOmit<T, K extends PropertyKey> = T extends unknown ? Omit<T, K> : never;
 export interface RefineFeature {
   id: string;
   state: 'pending' | 'accepted';
@@ -441,7 +454,14 @@ export interface RefinePointSelection {
  */
 export type RefinePicking =
   | { kind: 'plane'; from: 'points' | 'face'; points: Vec3[]; lock: string | null }
-  | { kind: 'line'; point: RefinePointSelection; points: Vec3[] };
+  | { kind: 'line'; point: RefinePointSelection; points: Vec3[] }
+  | { kind: 'align'; axis: LineKind; point: RefinePointSelection; points: Vec3[] }
+  | { kind: 'constrain'; constraint: PairKind; feature: string; segment: number; points: Vec3[] };
+/** What a pick landed on, besides its point: a guide point, or a guide's segment. */
+export interface RefinePickTarget {
+  point?: RefinePointSelection;
+  segment?: { feature: string; segment: number };
+}
 export interface RefineSession {
   id: string;
   partId: string;
@@ -735,8 +755,15 @@ interface EditorState {
   /** Starts waiting for clicks on the part or on guide points, for a new plane or a line lock. */
   startRefinePicking: (picking: RefinePicking) => void;
   cancelRefinePicking: () => void;
-  /** One click of the picking under way, on the part or on a guide point. */
-  pickRefine: (point: GuidePoint) => void;
+  /** One click of the picking under way, on the part, a guide point or a guide's segment. */
+  pickRefine: (point: GuidePoint, on?: RefinePickTarget) => void;
+  /** Adds a constraint to a guide on a plane, or says why it cannot hold and changes nothing. */
+  addRefineConstraint: (
+    feature: string,
+    constraint: DistributiveOmit<GuideConstraint, 'id'>,
+    hold?: GuidePoint[],
+  ) => boolean;
+  removeRefineConstraint: (feature: string, id: string) => void;
   /**
    * The plane, by id, of the selected pending edges, their points projected onto it, or of the next
    * guide when none is selected. Null takes them off their plane.
@@ -3931,11 +3958,15 @@ export const useEditor = create<EditorState>((set, get) => ({
       position: held,
       ...(old.lock ? { lock: old.lock } : {}),
     };
-    // A point two segments share, or the closing point, moves in both.
-    const segments = input.segments.map((s) => ({
-      ...s,
-      points: s.points.map((p) => (samePoint(p, old) ? point : p)),
-    }));
+    // A point two segments share, or the closing point, moves in both; with constraints the rest
+    // of the guide moves with it as little as they allow, and where they cannot follow it stops.
+    const segments = input.constraints?.length
+      ? constrained(refine, input, { moved: { point: old, target: point.position } })
+      : input.segments.map((s) => ({
+          ...s,
+          points: s.points.map((p) => (samePoint(p, old) ? point : p)),
+        }));
+    if (!segments) return;
     const features = withProposal(refine, id, { type: 'edge', input: { ...input, segments } });
     const key = `${refine.id} ${id} ${segment} ${index}`;
     // One step per drag: further moves of the point just moved, with nothing between, extend it.
@@ -3994,7 +4025,10 @@ export const useEditor = create<EditorState>((set, get) => ({
     const feature = refine?.features.find((f) => f.id === id);
     if (!refine || feature?.state !== 'pending' || feature.feature.type !== 'edge') return;
     if (!feature.feature.input.segments[segment]?.points[index]) return;
-    const input = withoutPoint(feature.feature.input, segment, index);
+    const input = withConstraints(
+      feature.feature.input,
+      withoutPoint(feature.feature.input, segment, index),
+    );
     commitRefine(
       input
         ? { features: withProposal(refine, id, { type: 'edge', input }) }
@@ -4015,10 +4049,42 @@ export const useEditor = create<EditorState>((set, get) => ({
     const { refine } = get();
     if (refine?.picking) set({ refine: { ...refine, picking: null } });
   },
-  pickRefine: (point) => {
+  pickRefine: (point, on = {}) => {
     const refine = readyRefine();
     const picking = refine?.picking;
     if (!refine || !picking) return;
+    if (picking.kind === 'align') {
+      const other = on.point;
+      if (other?.feature !== picking.point.feature)
+        return get().notify('Click another point of the same guide to align with.', 'info');
+      set({ refine: { ...refine, picking: null } });
+      const guide = edgeOf(refine, other.feature);
+      const held = guide?.segments[other.segment]?.points[other.index];
+      get().addRefineConstraint(
+        other.feature,
+        {
+          kind: 'align',
+          axis: picking.axis,
+          points: [
+            { segment: picking.point.segment, index: picking.point.index },
+            { segment: other.segment, index: other.index },
+          ],
+        },
+        held ? [held] : [],
+      );
+      return;
+    }
+    if (picking.kind === 'constrain') {
+      const other = on.segment;
+      if (other?.feature !== picking.feature)
+        return get().notify('Click another segment of the same guide.', 'info');
+      set({ refine: { ...refine, picking: null } });
+      get().addRefineConstraint(picking.feature, {
+        kind: picking.constraint,
+        segments: [picking.segment, other.segment],
+      });
+      return;
+    }
     const points = [...picking.points, point.position];
     const { mesh, topology, step } = refine.model!;
     if (picking.kind === 'line') {
@@ -4124,12 +4190,54 @@ export const useEditor = create<EditorState>((set, get) => ({
           : nearestOnSurface(mesh, topology, { triangle: old.triangle, position }).triangle,
       ...(held ? { lock: held } : {}),
     };
-    const segments = input.segments.map((s) => ({
+    const placed = input.segments.map((s) => ({
       ...s,
       points: s.points.map((p) => (samePoint(p, old) ? point : p)),
     }));
+    const segments = input.constraints?.length
+      ? constrained(refine, { ...input, segments: placed }, { heavy: [point] })
+      : placed;
+    if (!segments) return get().notify(conflictNotice, 'info');
     commitRefine({
       features: withProposal(refine, featureId, { type: 'edge', input: { ...input, segments } }),
+      chosenPoint: refine.chosenPoint,
+    });
+  },
+  addRefineConstraint: (featureId, asked, hold = []) => {
+    const refine = readyRefine();
+    const feature = refine?.features.find((f) => f.id === featureId);
+    if (!refine || feature?.state !== 'pending' || feature.feature.type !== 'edge') return false;
+    const input = feature.feature.input;
+    const constraint = { ...asked, id: uid() } as GuideConstraint;
+    const refusal = constraintRefusal(input, constraint);
+    if (refusal) {
+      get().notify(refusal, 'info');
+      return false;
+    }
+    const constraints = [...(input.constraints ?? []), constraint];
+    const segments = constrained(refine, { ...input, constraints }, { heavy: hold });
+    if (!segments) {
+      get().notify(conflictNotice, 'info');
+      return false;
+    }
+    commitRefine({
+      features: withProposal(refine, featureId, {
+        type: 'edge',
+        input: { ...input, segments, constraints },
+      }),
+      chosenPoint: refine.chosenPoint,
+    });
+    return true;
+  },
+  removeRefineConstraint: (featureId, id) => {
+    const refine = readyRefine();
+    const feature = refine?.features.find((f) => f.id === featureId);
+    if (!refine || feature?.state !== 'pending' || feature.feature.type !== 'edge') return;
+    const input = feature.feature.input;
+    const constraints = (input.constraints ?? []).filter((c) => c.id !== id);
+    if (constraints.length === input.constraints?.length) return;
+    commitRefine({
+      features: withProposal(refine, featureId, { type: 'edge', input: { ...input, constraints } }),
       chosenPoint: refine.chosenPoint,
     });
   },
@@ -7054,6 +7162,7 @@ const noEdgeNotice =
   'No edge found under this guide. Move it onto the rounded edge or change Width.';
 const longGuideNotice = 'This guide is too long for this mesh. Try a shorter guide.';
 const samePointsNotice = 'Pick two different points for the line.';
+const conflictNotice = "This conflicts with the guide's other constraints. Nothing was changed.";
 const collinearNotice = 'These points are in a line. Pick three points that make a triangle.';
 const curvedFaceNotice = 'This surface is not flat here. Click a flat face, or pick 3 points.';
 const acrossPlaneNotice = 'This line runs across the guide plane. Pick two points along it.';
@@ -7169,8 +7278,9 @@ function onPlane(refine: RefineSession, plane: SketchPlane, point: GuidePoint): 
  * point's line lock taken into the plane; null takes it off its plane and leaves its points.
  */
 function guideOnPlane(refine: RefineSession, input: EdgeInput, plane: SketchPlane | null) {
+  // Constraints hold only in a plane: off one, they go.
   if (!plane) {
-    const { plane: _, ...rest } = input;
+    const { plane: _, constraints: __, ...rest } = input;
     return rest;
   }
   const moved = new Map<GuidePoint, GuidePoint>();
@@ -7195,7 +7305,34 @@ function guideOnPlane(refine: RefineSession, input: EdgeInput, plane: SketchPlan
       return point;
     }),
   }));
-  return { ...input, segments, plane };
+  const placed = { ...input, segments, plane };
+  if (!input.constraints?.length) return placed;
+  // On a new plane the constraints hold again, or the guide keeps its points and loses them.
+  const solved = constrained(refine, placed, {});
+  if (solved) return { ...placed, segments: solved };
+  const { constraints: _, ...rest } = placed;
+  return rest;
+}
+
+/**
+ * The guide's segments solved so every constraint holds, each moved point on the triangle nearest
+ * where it lands; null when they cannot all hold.
+ */
+function constrained(refine: RefineSession, input: EdgeInput, request: SolveRequest) {
+  const { mesh, topology } = refine.model!;
+  return solvedSegments(input, request, (from, position) => ({
+    ...from,
+    position,
+    triangle: nearestOnSurface(mesh, topology, { triangle: from.triangle, position }).triangle,
+  }));
+}
+
+/** The pending edge's input, or null. */
+function edgeOf(refine: RefineSession, id: string) {
+  const feature = refine.features.find((f) => f.id === id);
+  return feature?.state === 'pending' && feature.feature.type === 'edge'
+    ? feature.feature.input
+    : null;
 }
 
 /** The guide new points extend: the one selected feature when it is an open pending edge. */
@@ -7265,6 +7402,41 @@ export function refinePointRemovable(refine: PointSelectionState) {
   const guide = selectedEdge(refine, point.feature)!;
   const next = withoutPoint(guide, point.segment, point.index);
   return next !== null && solvable(next);
+}
+
+/**
+ * `after`, the guide `before` changed, with the constraints of `before` whose segments and points it
+ * still has, unchanged, renumbered; the others go.
+ */
+function withConstraints(before: EdgeInput, after: EdgeInput | null): EdgeInput | null {
+  if (!after || !before.constraints?.length) return after;
+  const segmentOf = (i: number) => {
+    const old = before.segments[i];
+    return after.segments.findIndex(
+      (s) =>
+        s.kind === old.kind &&
+        s.points.length === old.points.length &&
+        s.points.every((p, k) => samePoint(p, old.points[k])),
+    );
+  };
+  const pointOf = (segment: number, index: number) => {
+    const old = before.segments[segment].points[index];
+    for (const [s, { points }] of after.segments.entries()) {
+      const k = points.findIndex((p) => samePoint(p, old));
+      if (k >= 0) return { segment: s, index: k };
+    }
+    return null;
+  };
+  const constraints = before.constraints.flatMap((c): GuideConstraint[] => {
+    if (c.kind === 'align') {
+      const points = c.points.map((r) => pointOf(r.segment, r.index));
+      return points[0] && points[1] ? [{ ...c, points: [points[0], points[1]] }] : [];
+    }
+    const segments = c.segments.map(segmentOf);
+    if (segments.some((i) => i < 0)) return [];
+    return [{ ...c, segments } as GuideConstraint];
+  });
+  return { ...after, constraints };
 }
 
 /**

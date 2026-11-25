@@ -1589,3 +1589,63 @@ test('the move widget moves a point on a plane, and it stays in the plane', asyn
     ),
   ).toBe(2);
 });
+
+test('a Parallel constraint holds through a drag, and its icon deletes it', async ({ page }) => {
+  await openRefine(page, { view: '7' });
+  await topPlane(page);
+  const y = half[1];
+  const [a, b, c, d]: Vec3[] = [
+    [-1, y, 1],
+    [-1, y, -1],
+    [1, y, -1],
+    [1.3, y, 1.1],
+  ];
+  for (const p of [a, b, c, d]) await clickSurface(page, p);
+  await expect(page.getByText('0 accepted · 1 proposed')).toBeVisible();
+  // The first line's menu, then Parallel, then a click on the third line.
+  const first = await screen(page, [-1, y, 0]);
+  await page.mouse.click(first.x, first.y, { button: 'right' });
+  const menu = page.getByRole('menu', { name: 'Guide segment actions' });
+  await expect(menu).toBeVisible();
+  await menu.getByRole('menuitem', { name: 'Parallel' }).click();
+  await expect(page.getByText('Click the other segment of the guide.')).toBeVisible();
+  await clickSurface(page, [(c[0] + d[0]) / 2, y, (c[2] + d[2]) / 2]);
+  const parallelism = () =>
+    inStore(page, (s) => {
+      const f = s.refine!.features[0];
+      if (f.feature.type !== 'edge') return null;
+      const { segments, constraints } = f.feature.input;
+      const dir = (i: number) => {
+        const [p, q] = segments[i].points.map((point) => point.position);
+        const v = [0, 1, 2].map((k) => q[k] - p[k]);
+        const l = Math.hypot(...v);
+        return v.map((x) => x / l);
+      };
+      const [u, w] = [dir(0), dir(2)];
+      const cross = Math.hypot(
+        u[1] * w[2] - u[2] * w[1],
+        u[2] * w[0] - u[0] * w[2],
+        u[0] * w[1] - u[1] * w[0],
+      );
+      return { kinds: (constraints ?? []).map((k) => k.kind), cross };
+    });
+  await expect.poll(async () => (await parallelism())?.kinds).toEqual(['parallel']);
+  expect((await parallelism())!.cross).toBeLessThan(1e-6);
+  // Dragging the last point keeps the lines parallel.
+  const before = (await guidePoint(page, 2, 1))!.position;
+  await drag(page, [d, [1.8, y, 0.4]]);
+  const after = (await guidePoint(page, 2, 1))!;
+  expect(Math.hypot(after.position[0] - before[0], after.position[2] - before[2])).toBeGreaterThan(
+    0.1,
+  );
+  expect(after.offPlane).toBeLessThan(1e-9);
+  expect((await parallelism())!.cross).toBeLessThan(1e-6);
+  // Its icon's menu deletes it.
+  const icon = page.getByRole('img', { name: 'Parallel constraint' });
+  await expect(icon).toBeVisible({ timeout: 15000 });
+  await icon.click({ button: 'right' });
+  const iconMenu = page.getByRole('menu', { name: 'Constraint actions' });
+  await expect(iconMenu).toBeVisible();
+  await iconMenu.getByRole('menuitem', { name: 'Delete constraint' }).click();
+  await expect.poll(async () => (await parallelism())?.kinds).toEqual([]);
+});

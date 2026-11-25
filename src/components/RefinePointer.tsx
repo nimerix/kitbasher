@@ -24,6 +24,7 @@ import {
   type RefineSession,
 } from '../core/store';
 import type { GuidePoint } from '../core/refine-band';
+import { drawnCurve } from '../core/refine-curve';
 import { lineNearRay, nearestOnSurface, pointAt, rayOnPlane } from '../core/refine-sketch';
 import type { RefineMesh } from '../core/refine-mesh';
 import type { RefineBrush } from '../core/refine-brush';
@@ -761,6 +762,45 @@ export function RefinePointerController({ pressed }: { pressed: () => boolean })
       );
     };
 
+    /**
+     * The segment of a guide drawn as handles whose drawn line passes within reach of a client
+     * position on screen, nearest first; null when none does.
+     */
+    const segmentAt = (refine: RefineSession, x: number, y: number) => {
+      const { camera } = get();
+      const rect = canvas().getBoundingClientRect();
+      const ids = new Set(refineHandles(refine).map((h) => h.feature));
+      type Found = { feature: string; segment: number };
+      let best = null as Found | null,
+        nearest = proposalPick * proposalPick;
+      for (const f of refine.features) {
+        if (!ids.has(f.id) || f.feature.type !== 'edge') continue;
+        f.feature.input.segments.forEach((segment, index) => {
+          if (segment.points.length < 2) return;
+          const curve = drawnCurve(
+            segment.kind,
+            segment.points.flatMap((p) => p.position),
+            refine.model?.step ?? 0.05,
+            64,
+          );
+          let previous: readonly [number, number] | null = null;
+          for (let i = 0; i < curve.points.length; i += 3) {
+            const spot = toScreen(
+              camera,
+              rect,
+              ...(curve.points.subarray(i, i + 3) as unknown as [number, number, number]),
+            );
+            if (spot && previous) {
+              const [d] = segmentDistance(x, y, previous[0], previous[1], spot[0], spot[1]);
+              if (d <= nearest) [nearest, best] = [d, { feature: f.id, segment: index }];
+            }
+            previous = spot;
+          }
+        });
+      }
+      return best;
+    };
+
     /** The pending edge whose visible drawn curve passes within reach of a client position. */
     const proposalAt = (refine: RefineSession, x: number, y: number) => {
       const { camera } = get();
@@ -1439,9 +1479,15 @@ export function RefinePointerController({ pressed }: { pressed: () => boolean })
       const { clientX: x, clientY: y } = event;
       if (refine.picking) {
         const handle = handleAt(refine, x, y, false);
+        const segment = handle ? null : segmentAt(refine, x, y);
         aimAt(x, y);
         const point = handle ? handle.point : modelHitOnRay(refine.partId);
-        if (point) state.pickRefine(point);
+        const on = handle
+          ? { point: { feature: handle.feature, segment: handle.segment, index: handle.index } }
+          : segment
+            ? { segment }
+            : {};
+        if (point || segment) state.pickRefine(point ?? { triangle: 0, position: [0, 0, 0] }, on);
         return true;
       }
       const plane = refineDrawingPlane(refine);
@@ -1469,15 +1515,18 @@ export function RefinePointerController({ pressed }: { pressed: () => boolean })
       )
         return;
       const handle = handleAt(refine, event.clientX, event.clientY, false);
-      if (!handle) return;
+      const line = handle ? null : segmentAt(refine, event.clientX, event.clientY);
+      if (!handle && !line) return;
       event.preventDefault();
       event.stopImmediatePropagation();
-      const { feature, segment, index } = handle;
+      const feature = handle?.feature ?? line!.feature;
       if (!refine.selected.includes(feature)) state.selectRefine([feature]);
       state.openContextMenu({
         x: event.clientX,
         y: event.clientY,
-        refinePoint: { feature, segment, index },
+        ...(handle
+          ? { refinePoint: { feature, segment: handle.segment, index: handle.index } }
+          : { refineSegment: line! }),
       });
     };
 
