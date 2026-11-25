@@ -21,6 +21,27 @@ export interface Release {
 export const releases: Release[] = [
   {
     date: '2026-11-24',
+    title: 'Guides you can place exactly',
+    changes: [
+      {
+        kind: 'improved',
+        text: 'A Refine edge guide is now the edge itself. Position, Fit, Use guide path and Wall angle say where the guide lies on a rounded edge and how far the result may move to fit the scan. Choose Along with Automatic fit for the earlier behaviour.',
+        guide: 'refine',
+      },
+      {
+        kind: 'new',
+        text: 'Draw guides on sketch planes made from 3 points or a flat face. Lock points to a plane or a line or fix them, move them with a widget, and right-click a point for Lock, Align, Constrain and Delete.',
+        guide: 'refine',
+      },
+      {
+        kind: 'new',
+        text: 'Constrain segments of a guide on a plane as in a CAD sketch: parallel, perpendicular, collinear, equal, tangent, concentric, horizontal and vertical. Conflicting constraints are refused.',
+        guide: 'refine',
+      },
+    ],
+  },
+  {
+    date: '2026-11-24',
     title: 'Longer undo history',
     commit: 'e578cea',
     changes: [

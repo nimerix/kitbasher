@@ -541,11 +541,11 @@ export const assemblyGuides: DocArticle[] = [
         id: 'guide-an-edge',
         title: 'Guide an edge',
         paragraphs: [
-          'A guide marks a softened edge for the tool to rebuild. Lay it along the rounding itself or close beside it.',
+          'A guide is the edge you want: place it where the sharp edge is, or should be, and the tool rebuilds the surfaces on either side to meet in it. Position, Fit and the other settings below say how much of the answer comes from the guide and how much from the scan.',
         ],
         steps: [
           'In Edge mode, choose Line, Arc, or Spline under Guide.',
-          'Click points on the rounded edge. A line takes two points and an arc three. For a spline, place at least two points, then press Enter to finish it.',
+          'Click points along the edge. A line takes two points and an arc three. For a spline, place at least two points, then press Enter to finish it. To place points exactly, draw on a sketch plane (see Draw on a sketch plane).',
           'Review the preview while the guide is selected. The solved edge is dashed, and the area the guide affects is tinted.',
           'Press Enter or choose Accept to keep the edge, or choose Dismiss to discard it. Accept keeps the change in this session, and the edge is then drawn along the mesh edges that were cut. The preview shows the fit, not the cut. If the edge was cut in more than one piece, the breaks are marked and the panel says so, for example The edge was cut in 3 pieces. Undo to adjust the guide, or keep it.',
           'Choose Apply to save the accepted changes to the part.',
@@ -556,12 +556,94 @@ export const assemblyGuides: DocArticle[] = [
         },
       },
       {
+        id: 'guide-settings',
+        title: 'Say where the guide lies',
+        paragraphs: [
+          'The Edge panel sets these for each selected guide, or for the next guide when none is selected. The two faces either side of the edge are the surface and the wall. On a sketch plane the surface is the face nearer to parallel with the plane; otherwise it is the face nearer to parallel with the plane the guide’s points lie in, or, for a single straight guide, the face with more of the scan.',
+        ],
+        table: {
+          headers: ['Setting', 'Effect'],
+          rows: [
+            [
+              'Position',
+              'Where the guide lies on the rounded edge. Corner: the guide is the sharp edge itself, even where it runs in the air over the rounding. Top: the guide lies on the surface where the rounding starts. Bottom: it lies on the wall where the rounding ends. Along: it lies somewhere on the rounding, and the edge is where the two faces meet. The result is always a sharp edge.',
+            ],
+            [
+              'Fit',
+              'How far, in mm, the edge may move off the guide to fit the scan. At 0 the edge is exactly the guide (Corner), or the guide carried across the rounding (Top, Bottom). Automatic fit reaches as far as the rounding, as Detect and the Crease brush do.',
+            ],
+            [
+              'Use guide path',
+              'Keeps the guide’s shape. A line stays a line in its direction, an arc keeps its axis, and a spline keeps its shape; any move is one offset for the whole segment. Off, each place along the edge moves on its own and the segment is fitted again.',
+            ],
+            [
+              'Use guide plane',
+              'For a guide on a sketch plane. With Corner or Top the surface is the plane itself; with Bottom or Along it is fitted from the scan, parallel to the plane.',
+            ],
+            [
+              'Wall angle',
+              'The angle between the surface and the wall: 90 for a square edge, outside or at the rim of a slot. Automatic reads it from the scan. A set angle builds a straight wall as a plane through the edge, and an arc’s wall round the arc’s axis.',
+            ],
+          ],
+        },
+        note: {
+          title: 'Today’s solve',
+          text: 'New guides start at Corner, Fit 0 and Use guide path on, so the guide is the edge. For a guide that only marks a rounded edge, choose Along, turn on Automatic fit and turn off Use guide path. When a guide’s settings cannot hold, it is refused and the notice says what to change, for example No wall found beside this guide. Set Position to Along, or turn off Use guide plane.',
+        },
+      },
+      {
+        id: 'sketch-planes',
+        title: 'Draw on a sketch plane',
+        paragraphs: [
+          'A sketch plane holds a guide’s points in one flat plane, so a point can sit on the true corner of a rounded edge, off the scan. Planes last until you choose Apply or Cancel, and making one is a step you can undo.',
+          'While a guide on a plane is selected, its plane shows as a faint grid round it, with its u axis in red and its v axis in green.',
+        ],
+        steps: [
+          'In the Edge panel, open Plane and choose New plane from 3 points, then click three points on the part; or choose New plane from a face, then click a flat face. The first two of three points set the plane’s u axis.',
+          'The new plane, Plane 1 and so on, is chosen for the next guide. Choose None to draw on the part again.',
+          'Click to place points. Each lands where the pointer’s line of sight meets the plane, also where it misses the part.',
+        ],
+        note: {
+          title: 'Moving a guide onto a plane',
+          text: 'With guides selected, choosing a plane under Plane moves their points onto it. Lock in a point’s menu does the same for that point’s guide. Press Esc to stop picking points for a plane.',
+        },
+      },
+      {
+        id: 'point-locks',
+        title: 'Lock, move and align points',
+        paragraphs: [
+          'Right-click a guide point for its menu. Lock puts the guide on a plane (To Plane 1, or To a new plane), slides the point along a line through two points you click on the part or on guide points (To a line), or holds it still (Fixed). Unlock clears the point’s own lock. Align, on a guide on a plane, moves the point level with another point you click: Horizontal takes that point’s v, Vertical its u, and the two stay aligned. Constrain adds a constraint between the two segments that meet at the point. Delete removes the point, as Remove point does.',
+          'Click a point to choose it: a move widget appears on it. A free point has arrows along the world axes; a point on a plane has arrows along u and v and a square that moves it in the plane; a point on a line has one arrow along the line; a fixed point has none. Dragging the point itself slides it over the part, on its plane, or along its line. Each drag is one undo step, and Esc during a drag puts the point back.',
+        ],
+      },
+      {
+        id: 'constraints',
+        title: 'Constrain segments',
+        paragraphs: [
+          'On a guide on a sketch plane, constraints hold its segments in relation to each other, as in a CAD sketch. Right-click a segment’s line, choose a constraint, then click the other segment. Horizontal and Vertical apply to the line at once. From a point’s menu, Constrain applies to the two segments meeting there.',
+          'Whenever a point moves, the guide is solved again: the moved point follows the pointer, the rest move as little as they can, and every constraint holds. Where a drag cannot be followed the point stops. A constraint that conflicts with the others is refused and nothing changes.',
+          'Each constraint shows a small symbol beside its segment or point, and a fixed point shows an anchor. Right-click a symbol to delete its constraint. Constraints are part of undo, and taking a guide off its plane removes them.',
+        ],
+        table: {
+          headers: ['Constraint', 'Holds'],
+          rows: [
+            ['Parallel ∥, Perpendicular ⊥', 'Two lines at that angle.'],
+            ['Collinear ⋯', 'Two lines on one straight line.'],
+            ['Equal =', 'Two lines of one length, or two arcs of one radius.'],
+            ['Tangent ⌒', 'A line and an arc, or two arcs, that meet, smoothly.'],
+            ['Concentric ◎', 'Two arcs about one centre.'],
+            ['Horizontal H, Vertical V', 'A line along the plane’s u or v axis.'],
+            ['Align ⇹', 'A point level with another, from the point menu.'],
+          ],
+        },
+      },
+      {
         id: 'adjust-a-guide',
         title: 'Shape and adjust a guide',
         paragraphs: [
           'With one open pending guide selected, finish its current segment, pressing Enter for a spline. Click farther along the edge to start the next segment. Guide and Joints set how the next segment is drawn. The panel shows Applies to the next segment. Joints sets whether each new joint is Sharp, a corner, or Smooth.',
           'Click the first handle of the selected open guide to close it. A single line cannot close. A three-point arc can close directly, and a spline you are still drawing can close after three points. On a multi-segment path, the starting point can finish the segment you are still drawing. If Refine needs to add a closing segment to a finished path, choose Line or Spline under Guide. Press Esc while placing an unfinished guide to discard it.',
-          'Drag the points of a selected guide along the surface to adjust it. The preview updates when the pointer rests and when you let go, and Accept waits for it. Each completed drag that moves a handle is one undo step. Click a point of a selected guide to choose it; the chosen point is highlighted. Clicking the first point of an open guide that can close closes it instead. Remove point, Delete, or Backspace removes the chosen point when the guide stays complete, as one undo step. Remove point is in the Edge panel, and in Detect while a point is chosen. Choosing a point needs the pointer. Esc clears the choice first. With no point chosen, Delete dismisses the guide. Width is measured from the edge the tool finds, not from the guide. Automatic width lets the tool estimate how far to either side of that edge it reads and rebuilds the surface, up to 1 mm unless the edge cannot be read within 1 mm. Turn it off to set Width yourself. Strength sets how loosely the edge follows the guide’s line, arc or spline, from no change to fully on it.',
+          'Drag the points of a selected guide to adjust it: along the surface, or on the guide’s plane or line. The preview updates when the pointer rests and when you let go, and Accept waits for it. Each completed drag that moves a handle is one undo step. Click a point of a selected guide to choose it; the chosen point is highlighted. Clicking the first point of an open guide that can close closes it instead. Remove point, Delete, or Backspace removes the chosen point when the guide stays complete, as one undo step. Remove point is in the Edge panel, and in Detect while a point is chosen. Choosing a point needs the pointer. Esc clears the choice first. With no point chosen, Delete dismisses the guide. Width is measured from the edge the tool finds, not from the guide. Automatic width lets the tool estimate how far to either side of that edge it reads and rebuilds the surface, up to 1 mm unless the edge cannot be read within 1 mm. Turn it off to set Width yourself. Strength sets how loosely the edge follows the guide’s line, arc or spline, from no change to fully on it.',
           'Ends sets Start and End separately for an open guide; the larger point marks the start. Choose Hold when Auto fades an edge that should run sharp into a corner, and Fade when Auto holds one that should die away.',
         ],
         table: {
