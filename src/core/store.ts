@@ -85,7 +85,14 @@ import type { GuidePoint } from './refine-band';
 import type { RefineBrush } from './refine-brush';
 import type { EdgeCurve, GuideJoint, GuideKind } from './refine-curve';
 import type { RefineProposal } from './refine-detect';
-import type { EdgeEnd, EdgeInput, EdgeSegment, EdgeSolve } from './refine-edge';
+import type {
+  EdgeEnd,
+  EdgeInput,
+  EdgePosition,
+  EdgeRefusal,
+  EdgeSegment,
+  EdgeSolve,
+} from './refine-edge';
 import {
   type RefineMesh,
   cloneRefineMesh,
@@ -445,6 +452,16 @@ export interface RefineSession {
     strength: number;
     /** How the sharpness ends at each end of an open guide; null decides automatically. */
     ends: [EdgeEnd | null, EdgeEnd | null];
+    /** Where the next guide lies on the rounded edge. */
+    position: EdgePosition;
+    /** How far, mm, the next guide's edge may move to fit the scan; null is today's reach. */
+    fit: number | null;
+    /** Whether the next guide's edge keeps the guide's shape. */
+    path: boolean;
+    /** Degrees between the surface and the wall; null reads it from the scan. */
+    wallAngle: number | null;
+    /** Whether a guide on a sketch plane takes its surface from the plane. */
+    usePlane: boolean;
   };
   region: Omit<RegionInput, 'triangles'>;
   brush: { kind: RefineBrush; strength: number };
@@ -653,7 +670,7 @@ interface EditorState {
    */
   setRefineEdge: (
     options: Partial<RefineSession['edge']>,
-    each?: Record<string, Partial<Pick<EdgeInput, 'width' | 'strength' | 'ends'>>>,
+    each?: Record<string, Partial<Pick<EdgeInput, 'width' | 'strength' | 'ends' | 'fit'>>>,
   ) => void;
   /**
    * Goes to the selected pending regions when there are any, each with its own entry of `each` on
@@ -3793,6 +3810,11 @@ export const useEditor = create<EditorState>((set, get) => ({
             width: edge.width,
             strength: edge.strength,
             ends: edge.ends,
+            position: edge.position,
+            fit: edge.fit,
+            path: edge.path,
+            wallAngle: edge.wallAngle,
+            usePlane: edge.usePlane,
           },
         },
       };
@@ -5736,7 +5758,14 @@ const newRefineSession = (part: Part, epoch: number): RefineSession => ({
   selected: [],
   chosenPoint: null,
   triangles: [],
-  edge: { kind: 'line', width: null, joint: 'sharp', strength: 1, ends: [null, null] },
+  edge: {
+    kind: 'line',
+    width: null,
+    joint: 'sharp',
+    strength: 1,
+    ends: [null, null],
+    ...handGuideDefaults,
+  },
   region: {
     treatment: 'smooth',
     shape: 'auto',
@@ -6170,6 +6199,8 @@ interface SolveAttempt {
   input: unknown;
   solve: EdgeSolve | RegionSolve | null;
   tooLong: boolean;
+  /** Why an edge's solve was refused, when it was. */
+  refusal?: EdgeRefusal | null;
 }
 const refineSolves = new WeakMap<object, SolveAttempt & { mesh: RefineMesh }>();
 
@@ -6189,7 +6220,13 @@ const sameSolveInput = (a: unknown, b: unknown) => {
     x.joints.length === y.joints.length &&
     x.joints.every((joint, i) => joint === y.joints[i]) &&
     (x.ends?.[0] ?? null) === (y.ends?.[0] ?? null) &&
-    (x.ends?.[1] ?? null) === (y.ends?.[1] ?? null)
+    (x.ends?.[1] ?? null) === (y.ends?.[1] ?? null) &&
+    (x.position ?? 'along') === (y.position ?? 'along') &&
+    (x.fit ?? null) === (y.fit ?? null) &&
+    !!x.path === !!y.path &&
+    (x.wallAngle ?? null) === (y.wallAngle ?? null) &&
+    (x.plane ?? null) === (y.plane ?? null) &&
+    (x.usePlane ?? true) === (y.usePlane ?? true)
   );
 };
 
@@ -6209,23 +6246,29 @@ function solveProposal<P extends RefineProposal>(
   const { edge, region, curve } = refineCode!;
   let solve: EdgeSolve | RegionSolve | null = null;
   let tooLong = false;
+  const why = { reason: null as EdgeRefusal | null };
   try {
     solve =
       proposal.type === 'edge'
-        ? edge.solveEdge(mesh, model.topology, solvedForm(proposal.input), model.noise)
+        ? edge.solveEdge(mesh, model.topology, solvedForm(proposal.input), model.noise, why)
         : region.solveRegion(mesh, model.topology, proposal.input, model.noise);
   } catch (error) {
     if (proposal.type !== 'edge' || !(error instanceof curve.GuideLengthError)) throw error;
     tooLong = true;
   }
-  const attempt = { input: proposal.input, solve, tooLong };
+  const attempt = { input: proposal.input, solve, tooLong, refusal: why.reason };
   if (mesh === model.mesh) refineSolves.set(key, { ...attempt, mesh });
   latestSolves.set(key, { ...attempt, model: model.mesh });
   return solve as Solve;
 }
 
-const edgeFailure = (input: EdgeInput) =>
-  latestSolves.get(input.segments)?.tooLong ? longGuideNotice : noEdgeNotice;
+const edgeFailure = (input: EdgeInput) => {
+  const latest = latestSolves.get(input.segments);
+  if (latest?.tooLong) return longGuideNotice;
+  if (latest?.refusal === 'wall') return noWallNotice;
+  if (latest?.refusal === 'angle') return wallAngleNotice;
+  return noEdgeNotice;
+};
 
 /**
  * Folds one solve pass into the failures already reported, one record per feature id: a feature
@@ -6808,6 +6851,18 @@ const unsteppedRefine = { draft: null, folds: noFolds, skipped: noFolds, chosenP
 const noEdgeNotice =
   'No edge found under this guide. Move it onto the rounded edge or change Width.';
 const longGuideNotice = 'This guide is too long for this mesh. Try a shorter guide.';
+const noWallNotice =
+  'No wall found beside this guide. Set Position to Along, or turn off Use guide plane.';
+const wallAngleNotice =
+  'The wall here is more than 5° off Wall angle. Change Wall angle or set it to Automatic.';
+/** The settings a guide placed by hand starts with: its guide is the edge. */
+const handGuideDefaults = {
+  position: 'corner',
+  fit: 0,
+  path: true,
+  wallAngle: null,
+  usePlane: true,
+} satisfies Partial<RefineSession['edge']>;
 const smallRegionNotice = 'This area is too small to fit a surface. Paint more of it.';
 const zeroStrengthNotice = 'This changes nothing at 0 % strength.';
 const noChangeNotice =

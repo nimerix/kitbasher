@@ -49,6 +49,7 @@ import { useXR } from '../../src/core/xr-session';
 import type { Joint, Part } from '../../src/core/types';
 import { changedVertices, closed, edgeNeighbours, modelOf, splitEdge } from '../helpers/refine';
 import {
+  alongPreset,
   boxPart,
   differingAttributes,
   editor,
@@ -120,6 +121,11 @@ describe('refine session lifecycle', () => {
       joint: 'sharp',
       strength: 1,
       ends: [null, null],
+      position: 'corner',
+      fit: 0,
+      path: true,
+      wallAngle: null,
+      usePlane: true,
     });
     expect(session().region).toEqual({
       treatment: 'smooth',
@@ -514,6 +520,7 @@ describe('refine guides', () => {
   it('previews a line guide without changing the model, then bakes it on accept', async () => {
     setup([boxPart()], ['box']);
     await ready();
+    editor().setRefineEdge(alongPreset);
     const model = session().model!;
     editor().addRefinePoint(crest(-1.6));
     editor().addRefinePoint(crest(1.6));
@@ -1371,7 +1378,7 @@ describe('refine session integrity', { timeout: 20_000 }, () => {
   it('closes a spline being drawn on its first point as one step, and solves it on a rim', async () => {
     setup([canPart()], ['can']);
     await ready();
-    editor().setRefineEdge({ kind: 'spline', joint: 'smooth', width: 0.6 });
+    editor().setRefineEdge({ kind: 'spline', joint: 'smooth', width: 0.6, ...alongPreset });
     const points = [0, 1, 2, 3, 4].map((i) => rim((2 * Math.PI * i) / 5));
     for (const point of points) editor().addRefinePoint(point);
     const undo = session().undo.length;
@@ -2050,6 +2057,7 @@ describe('refine session integrity', { timeout: 20_000 }, () => {
   it('says failure before pieces before skipped triangles and undo removes the cut marks', async () => {
     setup([boxPart()], ['box']);
     await ready();
+    editor().setRefineEdge(alongPreset);
     editor().addRefinePoint(top(-1));
     editor().addRefinePoint(top(1));
     const failed = session().selected[0];

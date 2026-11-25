@@ -20,6 +20,7 @@ import {
   plateFixture,
   screen,
   surfaceCorner,
+  useAlongPreset,
 } from './helpers/refine';
 import type { RegionSolve } from '../../src/core/refine-region';
 import type { RefineMode } from '../../src/core/store';
@@ -183,6 +184,7 @@ const rivetMeasure = (page: Page) =>
 
 test('guides a straight edge, accepts it and applies it', async ({ page }) => {
   await openRefine(page);
+  await useAlongPreset(page);
   await clickSurface(page, crest(-3));
   await clickSurface(page, crest(3));
   await expect(page.getByText('0 accepted · 1 proposed')).toBeVisible();
@@ -827,7 +829,18 @@ test('settings with no matching selection go to the next guide and region', asyn
   await page.getByRole('radio', { name: 'Smooth', exact: true }).click();
   await expect
     .poll(() => inStore(page, (s) => s.refine!.edge))
-    .toEqual({ kind: 'arc', width: 1.1, joint: 'smooth', strength: 0.5, ends: [null, null] });
+    .toEqual({
+      kind: 'arc',
+      width: 1.1,
+      joint: 'smooth',
+      strength: 0.5,
+      ends: [null, null],
+      position: 'corner',
+      fit: 0,
+      path: true,
+      wallAngle: null,
+      usePlane: true,
+    });
   // Two arcs: three clicks, then two more.
   for (const x of [-3, -2, -1, 0, 1]) await clickSurface(page, crest(x));
   await expect

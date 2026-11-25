@@ -308,6 +308,19 @@ export async function openRefine(
 }
 
 /**
+ * Sets the next guide to today's solve, where the guide marks the rounding and the edge is where
+ * the two faces meet: Position Along, Fit automatic, Use guide path off.
+ */
+export async function useAlongPreset(page: Page) {
+  await page.getByRole('radio', { name: 'Along', exact: true }).click();
+  await page.getByRole('switch', { name: 'Choose fit automatically' }).click();
+  await page.getByRole('switch', { name: 'Use guide path' }).click();
+  await expect
+    .poll(() => inStore(page, (s) => s.refine!.edge))
+    .toMatchObject({ position: 'along', fit: null, path: false });
+}
+
+/**
  * Largest distance from their best straight line of the part's vertices on a sharp edge (where
  * faces around a vertex turn more than 60 degrees), along the middle of the top front edge.
  */

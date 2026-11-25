@@ -2,7 +2,7 @@ import { useId, useMemo, useState, type ReactNode } from 'react';
 import { useShallow } from 'zustand/react/shallow';
 import { LoaderCircle, TriangleAlert } from 'lucide-react';
 import { isTaskActive, useActivity } from '../core/activity';
-import type { EdgeInput, EdgeSolve } from '../core/refine-edge';
+import type { EdgeInput, EdgePosition, EdgeSolve } from '../core/refine-edge';
 import type { RegionInput, RegionSolve, RegionShape, Treatment } from '../core/refine-region';
 import {
   refineDraftLimit,
@@ -267,6 +267,37 @@ function MillimetreField({
   );
 }
 
+/** A number field in degrees on one row. */
+function DegreeField({
+  label,
+  value,
+  mixed,
+  owned,
+  onSet,
+}: {
+  label: string;
+  value: number;
+  mixed: boolean;
+  owned: () => boolean;
+  onSet: (value: number) => void;
+}) {
+  return (
+    <label className="brush-radius">
+      <span>{label}</span>
+      <NumericInput
+        label={label}
+        value={value}
+        mixed={mixed}
+        min={angleRange.min}
+        max={angleRange.max}
+        step={1}
+        onCommit={(next) => owned() && onSet(next)}
+      />
+      <small>°</small>
+    </label>
+  );
+}
+
 /** A labelled choice of a few options; none is chosen when the targets differ. */
 function Choice<T extends string>({
   label,
@@ -348,6 +379,12 @@ function EdgeControls({ view, targets, owned }: ModeProps) {
     settingOf(inputs, (i) => i.ends?.[k] ?? null, view.edge.ends[k]),
   );
   const closed = inputs.length > 0 && inputs.every((i) => i.closed);
+  const position = settingOf(inputs, (i) => i.position ?? 'along', view.edge.position);
+  const fits = inputs.length ? inputs.map((i) => i.fit ?? null) : [view.edge.fit];
+  const path = settingOf(inputs, (i) => !!i.path, view.edge.path);
+  const walls = inputs.length ? inputs.map((i) => i.wallAngle ?? null) : [view.edge.wallAngle];
+  const planed = inputs.filter((i) => i.plane);
+  const usePlane = settingOf(planed, (i) => i.usePlane !== false, view.edge.usePlane);
   const solveOf = (f: RefineFeature) => refineSolved(editor().refine!, f) as EdgeSolve | null;
   const solve = targets.length === 1 ? solveOf(targets[0]) : null;
   // Each target keeps its own other end.
@@ -433,6 +470,59 @@ function EdgeControls({ view, targets, owned }: ModeProps) {
         How loosely the edge follows the guide's line, arc or spline, from no change to fully on it.
       </p>
       <Choice
+        label="Position"
+        value={position.mixed ? null : position.value}
+        options={positionChoices}
+        onChange={(position) => editor().setRefineEdge({ position })}
+      />
+      <p className="anchor-help">Where the guide lies on the rounded edge of the scan.</p>
+      <AutoSetting
+        label="Fit"
+        values={fits}
+        seed={() => {
+          editor().setRefineEdge({ fit: 0 });
+          return false;
+        }}
+        onSet={(fit) => editor().setRefineEdge({ fit })}
+      >
+        {(fit, mixed, set) => (
+          <MillimetreField label="Fit" value={fit} mixed={mixed} owned={owned} onSet={set} />
+        )}
+      </AutoSetting>
+      <p className="anchor-help">
+        How far the edge may move off the guide to fit the scan. Automatic reaches as far as the
+        rounding.
+      </p>
+      <SwitchRow
+        title="Use guide path"
+        label="Use guide path"
+        checked={path.value}
+        mixed={path.mixed}
+        onChange={(path) => editor().setRefineEdge({ path })}
+      />
+      {planed.length ? (
+        <SwitchRow
+          title="Use guide plane"
+          label="Use guide plane"
+          checked={usePlane.value}
+          mixed={usePlane.mixed}
+          onChange={(usePlane) => editor().setRefineEdge({ usePlane })}
+        />
+      ) : null}
+      <AutoSetting
+        label="Wall angle"
+        values={walls}
+        seed={() => {
+          editor().setRefineEdge({ wallAngle: 90 });
+          return false;
+        }}
+        onSet={(wallAngle) => editor().setRefineEdge({ wallAngle })}
+      >
+        {(angle, mixed, set) => (
+          <DegreeField label="Wall angle" value={angle} mixed={mixed} owned={owned} onSet={set} />
+        )}
+      </AutoSetting>
+      <Choice
         label="Joints"
         value={view.edge.joint}
         options={[
@@ -497,6 +587,13 @@ function RemovePoint({ view }: Pick<ModeProps, 'view'>) {
 }
 
 const widthRange = { min: 0.1, max: 5 };
+const angleRange = { min: 10, max: 170 };
+const positionChoices: { id: EdgePosition; label: string }[] = [
+  { id: 'corner', label: 'Corner' },
+  { id: 'top', label: 'Top' },
+  { id: 'bottom', label: 'Bottom' },
+  { id: 'along', label: 'Along' },
+];
 const reachRange = { min: 0.3, max: 5 };
 
 const shapes: { id: RegionShape; label: string }[] = [
