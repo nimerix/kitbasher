@@ -172,10 +172,11 @@ export function unpackProposals(value: unknown): RefineProposal[] {
   return value as RefineProposal[];
 }
 
-/** The cleaned positions a message carried. */
+/** The cleaned positions, or the cleaned mesh, a message carried. */
 export function unpackClean(value: unknown): CleanResult {
   const result = value as CleanResult;
   const topology = result?.topology;
+  const mesh = result?.mesh;
   if (
     !(result?.moved instanceof Uint32Array) ||
     !(result.position instanceof Float64Array) ||
@@ -183,10 +184,17 @@ export function unpackClean(value: unknown): CleanResult {
     !(result.triangles instanceof Uint32Array) ||
     !(result.corners instanceof Uint32Array) ||
     result.corners.length !== result.triangles.length * 3 ||
-    result.triangles.length > 0 !== !!topology ||
+    !(result.split instanceof Uint32Array) ||
+    result.split.length % 2 !== 0 ||
+    (result.triangles.length > 0 || !!mesh) !== !!topology ||
     (topology &&
       (Object.keys(topology).length !== 4 ||
-        !Object.values(topology).every((array) => array instanceof Uint32Array)))
+        !Object.values(topology).every((array) => array instanceof Uint32Array))) ||
+    (mesh !== null &&
+      (!arrayFields.every(([key, Class]) => mesh?.[key] instanceof Class) ||
+        !(mesh.color === null || mesh.color instanceof Float32Array) ||
+        result.moved.length > 0 ||
+        result.triangles.length > 0))
   )
     throw new Error('The cleaned surface came back unreadable.');
   return result;

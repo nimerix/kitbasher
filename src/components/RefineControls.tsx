@@ -999,11 +999,12 @@ function CleanControls({ view, owned }: ModeProps) {
   );
   const set = (options: Partial<Omit<RefineSession['clean'], 'running'>>) =>
     editor().setRefineClean(options);
-  const idle = !clean.smooth && !clean.sharpen && !clean.depth;
+  const idle = !clean.smooth && !clean.sharpen && !clean.depth && !clean.square;
   return (
     <>
       <p className="anchor-help">
-        Removes scan noise, crisps edges and deepens detail, as sharpening does for a photo.
+        Removes scan noise, crisps edges and deepens detail, as sharpening does for a photo. Square
+        rebuilds rounded edges between faces at about 90° as sharp corners.
       </p>
       <Choice
         label="Area"
@@ -1033,6 +1034,12 @@ function CleanControls({ view, owned }: ModeProps) {
         most={cleanDepthMax}
         owned={owned}
         onSet={(depth) => set({ depth })}
+      />
+      <SliderSetting
+        label="Square"
+        value={clean.square}
+        owned={owned}
+        onSet={(square) => set({ square })}
       />
       <AutoSetting
         label="Size"

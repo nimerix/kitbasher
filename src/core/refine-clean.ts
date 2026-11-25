@@ -1,4 +1,12 @@
-import { type RefineMesh, type RefineTopology, buildTopology } from './refine-mesh';
+import { remapTriangles } from './refine-cut';
+import {
+  type RefineMesh,
+  type RefineTopology,
+  buildTopology,
+  cloneRefineMesh,
+  moveVertex,
+} from './refine-mesh';
+import { squareCorners } from './refine-square';
 
 /** How Clean treats the surface. Each setting reads 0 as leaving that part of the job out. */
 export interface CleanSettings {
@@ -8,7 +16,12 @@ export interface CleanSettings {
   sharpen: number;
   /** How much deeper features become, 0 to `maxCleanDepth`: 1 doubles their relief. */
   depth: number;
-  /** The widest feature, mm, that Depth deepens; null takes `autoCleanSize` of the scan. */
+  /** How far rounded edges between faces at about 90 degrees move to a sharp corner, 0 to 1. */
+  square: number;
+  /**
+   * The widest feature, mm, that Depth deepens and the widest rounding Square rebuilds; null takes
+   * `autoCleanSize` of the scan.
+   */
   size: number | null;
 }
 
@@ -30,11 +43,26 @@ export interface CleanResult {
   triangles: Uint32Array;
   /** Their new geometry vertices, three each. */
   corners: Uint32Array;
-  /** The topology of the mesh with those corners, or null when no triangle changed. */
+  /** The topology of the mesh with those corners, or with `mesh`; null when no triangle changed. */
   topology: RefineTopology | null;
+  /**
+   * The whole cleaned mesh when Square cut it, which then stands in for `moved`, `position`,
+   * `triangles` and `corners`; null otherwise.
+   */
+  mesh: RefineMesh | null;
+  /** With `mesh`: each triangle the cut added and the triangle it was cut from, two values each. */
+  split: Uint32Array;
+  /** Vertices on edges Square rebuilt sharp. */
+  squared: number;
 }
 
-export const cleanDefaults: CleanSettings = { smooth: 0.5, sharpen: 0.5, depth: 1, size: null };
+export const cleanDefaults: CleanSettings = {
+  smooth: 0.5,
+  sharpen: 0.5,
+  depth: 1,
+  square: 0,
+  size: null,
+};
 export const maxCleanDepth = 3;
 /** Depth's feature size when none is set: a few triangles across, where scans lose relief. */
 export const autoCleanSize = (step: number) => 8 * step;
@@ -45,6 +73,8 @@ export const maxCleanSize = 5;
 const featherRings = 4;
 /** Bilateral normal filtering rounds at full Smooth. */
 const smoothRounds = 10;
+/** Filtering rounds that settle the surface around corners Square rebuilt. */
+const squareRounds = 5;
 /** Normal difference (chord length) that still averages: differences across an edge are larger. */
 const range = 0.35;
 /** Sharpen's passes, the rounds of averaging that blur the normals it sharpens against, and the
@@ -93,11 +123,14 @@ export function cleanPlan(settings: CleanSettings, step: number) {
     passes: sharpen > 0 ? sharpenPasses : 0,
     amount: sharpenAmount * sharpen,
     depth: Math.min(maxCleanDepth, Math.max(0, settings.depth)),
+    square: clamp01(settings.square),
     size,
     pass,
     baseRounds: Math.min(maxBaseRounds, Math.ceil(2 / pass)),
   };
 }
+
+type Plan = ReturnType<typeof cleanPlan>;
 
 const clamp01 = (value: number) => Math.min(1, Math.max(0, value || 0));
 
@@ -119,6 +152,10 @@ const clamp01 = (value: number) => Math.min(1, Math.max(0, value || 0));
  * relief; each vertex's height above or below it is averaged with its neighbours', faded to nothing
  * where it is within the noise, and added again `depth` times.
  *
+ * Square rebuilds rounded edges between faces at about 90 degrees as sharp corners and cuts the mesh
+ * along them (see `squareCorners`). It runs after Smooth, then the surface around the new edges is
+ * settled with a few more filtering rounds, and Sharpen and Depth run with the new edges held.
+ *
  * A painted area eases in over `featherRings` edges from its border; everything outside it, every
  * vertex on an open border or a refined edge, keeps its exact position. A vertex whose move would
  * fold or collapse a triangle moves less, or not at all.
@@ -133,21 +170,176 @@ export function cleanSurface(
   signal?: AbortSignal,
 ): CleanResult {
   const plan = cleanPlan(input, step);
-  const empty: CleanResult = {
-    moved: new Uint32Array(0),
-    position: new Float64Array(0),
-    size: plan.size,
-    held: 0,
-    triangles: new Uint32Array(0),
-    corners: new Uint32Array(0),
-    topology: null,
-  };
-  if (!plan.rounds && !plan.passes && !plan.depth) return empty;
-  const work = workingSet(mesh, topology, input.triangles, plan, step);
-  if (!work) return empty;
   const check = () => {
     if (signal?.aborted) throw cancelled();
   };
+  if (plan.square) return squaredClean(mesh, topology, noise, step, input, plan, report, check);
+  return cleanPass(mesh, topology, noise, step, input.triangles, plan, true, report, check);
+}
+
+const emptyResult = (size: number): CleanResult => ({
+  moved: new Uint32Array(0),
+  position: new Float64Array(0),
+  size,
+  held: 0,
+  triangles: new Uint32Array(0),
+  corners: new Uint32Array(0),
+  topology: null,
+  mesh: null,
+  split: new Uint32Array(0),
+  squared: 0,
+});
+
+/** Writes a pass's moves and turned triangles into `mesh`; returns the topology it now has, or null. */
+function applyPass(mesh: RefineMesh, result: CleanResult) {
+  const { moved, position, triangles, corners } = result;
+  for (let i = 0; i < moved.length; i++)
+    moveVertex(mesh, moved[i], position[i * 3], position[i * 3 + 1], position[i * 3 + 2]);
+  triangles.forEach((t, i) => mesh.corners.set(corners.subarray(i * 3, i * 3 + 3), t * 3));
+  return result.topology;
+}
+
+/**
+ * Smooth, then Square, then a few filtering rounds around the new edges, then Sharpen and Depth with
+ * the new edges held as refined edges are. Each pass reads the surface the last one left.
+ */
+function squaredClean(
+  mesh: RefineMesh,
+  topology: RefineTopology,
+  noise: number,
+  step: number,
+  input: CleanInput,
+  plan: Plan,
+  report: (fraction: number) => void,
+  check: () => void,
+): CleanResult {
+  const work = cloneRefineMesh(mesh, true);
+  let held = 0;
+  const band = (from: number, to: number) => (f: number) => report(from + (to - from) * f);
+  if (plan.rounds) {
+    const smoothed = cleanPass(
+      work,
+      topology,
+      noise,
+      step,
+      input.triangles,
+      { ...plan, passes: 0, depth: 0 },
+      false,
+      band(0, 0.3),
+      check,
+    );
+    applyPass(work, smoothed);
+    held += smoothed.held;
+  }
+  check();
+  const squared = squareCorners(
+    work,
+    topology,
+    noise,
+    step,
+    {
+      strength: plan.square,
+      reach: plan.size,
+      free: freeVertices(work, topology, input.triangles),
+    },
+    band(0.3, 0.55),
+    check,
+  );
+  held += squared.held;
+  const cut = squared.mesh.triangleCount !== mesh.triangleCount;
+  const result = squared.mesh;
+  let shape = squared.topology;
+  const painted = input.triangles && remapTriangles(input.triangles, squared.children);
+  if (squared.moved) {
+    const settled = cleanPass(
+      result,
+      shape,
+      noise,
+      step,
+      painted,
+      { ...plan, rounds: squareRounds, passes: 0, depth: 0 },
+      false,
+      band(0.55, 0.65),
+      check,
+    );
+    applyPass(result, settled);
+    held += settled.held;
+    for (const v of squared.edge) result.crease[v] = 1;
+  }
+  const last = cleanPass(
+    result,
+    shape,
+    noise,
+    step,
+    painted,
+    { ...plan, rounds: 0 },
+    true,
+    band(0.65, 1),
+    check,
+  );
+  shape = applyPass(result, last) ?? shape;
+  held += last.held;
+  report(1);
+  const out: CleanResult = { ...emptyResult(plan.size), held, squared: squared.edge.length };
+  if (cut || last.triangles.length || squared.edge.length) {
+    const split: number[] = [];
+    for (const [t, list] of squared.children)
+      for (const child of list) if (child !== t) split.push(child, t);
+    return { ...out, mesh: result, topology: shape, split: Uint32Array.from(split) };
+  }
+  // Nothing was cut: the moves alone, against the mesh as it came.
+  const moved: number[] = [];
+  for (let v = 0; v < mesh.weldedCount; v++)
+    if (
+      result.position[v * 3] !== mesh.position[v * 3] ||
+      result.position[v * 3 + 1] !== mesh.position[v * 3 + 1] ||
+      result.position[v * 3 + 2] !== mesh.position[v * 3 + 2]
+    )
+      moved.push(v);
+  out.moved = Uint32Array.from(moved);
+  out.position = new Float64Array(moved.length * 3);
+  moved.forEach((v, i) => out.position.set(result.position.subarray(v * 3, v * 3 + 3), i * 3));
+  return out;
+}
+
+/**
+ * Vertices Square may move: in the painted area when there is one, away from its border, and not on
+ * an open or non-manifold edge or a refined edge.
+ */
+function freeVertices(mesh: RefineMesh, topology: RefineTopology, painted: Uint32Array | null) {
+  const { triangleStart, trianglesOf, neighbourStart } = topology;
+  const n = mesh.weldedCount;
+  const inside = painted ? new Uint8Array(mesh.triangleCount) : null;
+  if (inside && painted) for (const t of painted) if (t < mesh.triangleCount) inside[t] = 1;
+  const free = new Uint8Array(n);
+  for (let v = 0; v < n; v++) {
+    const around = triangleStart[v + 1] - triangleStart[v];
+    if (!around || around !== neighbourStart[v + 1] - neighbourStart[v] || mesh.crease[v]) continue;
+    let all = true;
+    if (inside)
+      for (let i = triangleStart[v]; i < triangleStart[v + 1] && all; i++)
+        all = inside[trianglesOf[i]] === 1;
+    free[v] = +all;
+  }
+  return free;
+}
+
+/** One run of Smooth, Sharpen and Depth over the mesh as it stands, turning triangles when `flips`. */
+function cleanPass(
+  mesh: RefineMesh,
+  topology: RefineTopology,
+  noise: number,
+  step: number,
+  painted: Uint32Array | null,
+  plan: Plan,
+  flips: boolean,
+  report: (fraction: number) => void,
+  check: () => void,
+): CleanResult {
+  const empty = emptyResult(plan.size);
+  if (!plan.rounds && !plan.passes && !plan.depth) return empty;
+  const work = workingSet(mesh, topology, painted, plan, step);
+  if (!work) return empty;
   check();
   report(0.05);
   const { count, weight } = work;
@@ -194,7 +386,7 @@ export function cleanSurface(
   const held = holdFolds(work, start, position);
   report(0.97);
   const flipped =
-    plan.rounds || plan.passes ? alignEdges(work, start, position) : new Uint32Array(0);
+    flips && (plan.rounds || plan.passes) ? alignEdges(work, start, position) : new Uint32Array(0);
   let moved = 0;
   for (let i = 0; i < count; i++) if (changed(start, position, i)) moved++;
   const result: CleanResult = {
@@ -261,7 +453,7 @@ function workingSet(
   mesh: RefineMesh,
   topology: RefineTopology,
   painted: Uint32Array | null,
-  plan: ReturnType<typeof cleanPlan>,
+  plan: Plan,
   step: number,
 ): WorkingSet | null {
   const { weldedCount, triangleCount, weldOf, corners: geometryCorners } = mesh;
@@ -698,7 +890,7 @@ function vertexNormals(work: WorkingSet, p: Float64Array) {
 function deepen(
   work: WorkingSet,
   position: Float64Array,
-  plan: ReturnType<typeof cleanPlan>,
+  plan: Plan,
   threshold: number,
   progress: (fraction: number) => void,
 ) {

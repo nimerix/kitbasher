@@ -4622,7 +4622,7 @@ export const useEditor = create<EditorState>((set, get) => ({
   cleanRefine: async () => {
     const refine = readyRefine();
     if (!refine || refine.clean.running) return;
-    const { where, smooth, sharpen, depth, size } = refine.clean;
+    const { where, smooth, sharpen, depth, square, size } = refine.clean;
     if (where === 'painted' && !refine.triangles.length) return;
     const model = refine.model!;
     const controller = new AbortController();
@@ -4644,6 +4644,7 @@ export const useEditor = create<EditorState>((set, get) => ({
           smooth,
           sharpen,
           depth,
+          square,
           size,
           triangles: where === 'painted' ? Uint32Array.from(refine.triangles) : null,
         },
@@ -4675,24 +4676,63 @@ export const useEditor = create<EditorState>((set, get) => ({
       return;
     }
     completeTask(taskId);
-    if (!result.moved.length) {
-      get().notify('These settings leave the surface as it is.', 'info');
+    if (!result.moved.length && !result.mesh) {
+      get().notify(
+        square > 0 && !result.squared
+          ? noSquareNotice
+          : 'These settings leave the surface as it is.',
+        'info',
+      );
       return;
     }
     // A stroke or drag under way began on the surface this replaces.
     discardRefineStroke();
-    const { moved, position, triangles, corners, topology } = result;
-    // Triangles turned to follow a sharpened edge take new corners and the topology made for them.
-    const mesh = cloneRefineMesh(model.mesh, triangles.length > 0);
-    triangles.forEach((t, i) => mesh.corners.set(corners.subarray(i * 3, i * 3 + 3), t * 3));
-    for (let i = 0; i < moved.length; i++)
-      moveVertex(mesh, moved[i], position[i * 3], position[i * 3 + 1], position[i * 3 + 2]);
     const latest = get().refine!;
-    commitRefine({
-      model: { ...model, mesh, topology: topology ?? model.topology },
-      features: latest.features.map((f) => refreshSketchTriangles(f, mesh)),
-    });
-    if (result.held) get().notify(heldNotice(result.held), 'info');
+    if (result.mesh) {
+      // Square cut the surface: paint, regions and marked folds follow each split triangle into
+      // the triangles it became.
+      const mesh = result.mesh;
+      const children = new Map<number, number[]>();
+      for (let i = 0; i < result.split.length; i += 2) {
+        const child = result.split[i],
+          parent = result.split[i + 1];
+        children.set(parent, [...(children.get(parent) ?? [parent]), child]);
+      }
+      const remap = (t: Uint32Array) => refineCode!.cut.remapTriangles(t, children);
+      commitRefine({
+        model: { ...model, mesh, topology: result.topology ?? model.topology },
+        features: latest.features.map((f) =>
+          refreshSketchTriangles(
+            f.feature.type === 'region'
+              ? {
+                  ...f,
+                  feature: {
+                    type: 'region',
+                    input: { ...f.feature.input, triangles: remap(f.feature.input.triangles) },
+                  },
+                }
+              : f,
+            mesh,
+          ),
+        ),
+        triangles: [...remap(Uint32Array.from(latest.triangles))],
+        folds: remap(latest.folds),
+        skipped: remap(latest.skipped),
+      });
+    } else {
+      const { moved, position, triangles, corners, topology } = result;
+      // Triangles turned to follow a sharpened edge take new corners and the topology made for them.
+      const mesh = cloneRefineMesh(model.mesh, triangles.length > 0);
+      triangles.forEach((t, i) => mesh.corners.set(corners.subarray(i * 3, i * 3 + 3), t * 3));
+      for (let i = 0; i < moved.length; i++)
+        moveVertex(mesh, moved[i], position[i * 3], position[i * 3 + 1], position[i * 3 + 2]);
+      commitRefine({
+        model: { ...model, mesh, topology: topology ?? model.topology },
+        features: latest.features.map((f) => refreshSketchTriangles(f, mesh)),
+      });
+    }
+    if (square > 0 && !result.squared) get().notify(noSquareNotice, 'info');
+    else if (result.held) get().notify(heldNotice(result.held), 'info');
   },
   cancelRefineClean: () => refineClean?.abort(),
   setRefineBrushRadius: (radius) =>
@@ -6198,7 +6238,15 @@ const newRefineSession = (part: Part, epoch: number): RefineSession => ({
   // detectDefaults, written out so the store does not load detection before a session needs it.
   detect: { where: 'part', sensitivity: 0.5, minLength: 1.5, running: false },
   // cleanDefaults, written out for the same reason.
-  clean: { where: 'part', smooth: 0.5, sharpen: 0.5, depth: 1, size: null, running: false },
+  clean: {
+    where: 'part',
+    smooth: 0.5,
+    sharpen: 0.5,
+    depth: 1,
+    square: 0,
+    size: null,
+    running: false,
+  },
   folds: noFolds,
   skipped: noFolds,
   drawing: false,
@@ -6473,6 +6521,8 @@ let refineDetect: AbortController | null = null;
 let refineClean: AbortController | null = null;
 /** The activity title of a clean, which the panel finds its progress by. */
 export const cleanTitle = 'Cleaning the surface';
+/** Said when Square found nothing to rebuild. */
+export const noSquareNotice = 'No rounded edge between faces at about 90° was found to square.';
 /** Said when a clean kept some vertices short of where it would have moved them. */
 export const heldNotice = (n: number) =>
   `${n === 1 ? '1 vertex' : `${n} vertices`} moved less so no triangle folds over.`;

@@ -32,6 +32,7 @@ import {
   commitRefine,
   fittedWarpBrushRadius,
   heldRefineState,
+  noSquareNotice,
   paintingRefine,
   refineBrushRadius,
   refineDraftLimit,
@@ -71,7 +72,7 @@ import {
   toast,
   trianglesArea,
 } from '../helpers/refine-session';
-import { rivetedPlate, softBox, softCylinder } from '../helpers/soft-edges';
+import { rippledSphere, rivetedPlate, softBox, softCylinder } from '../helpers/soft-edges';
 
 const job = vi.hoisted(() => ({ failure: null as Error | null }));
 vi.mock('../../src/core/refine-job', async (importOriginal) => {
@@ -1158,6 +1159,53 @@ describe('refine clean', () => {
       expect(painted.has(v)).toBe(true);
     }
     expect(moved).toBeGreaterThan(0);
+  });
+
+  it('squares rounded edges, cutting the surface, as one undo step', async () => {
+    setup([boxPart()], ['box']);
+    await ready();
+    editor().setRefineMode('clean');
+    // Paint made before the clean follows the triangles the cut splits.
+    editor().setRefineClean({ where: 'painted' });
+    paint([[0.3, 1.5, 0.2]]);
+    const paintBefore = [...session().triangles];
+    expect(paintBefore.length).toBeGreaterThan(0);
+    editor().setRefineClean({ where: 'part', square: 1 });
+    const start = session().model!;
+    const undo = session().undo.length;
+    await editor().cleanRefine();
+    expect(cleanTask().status).toBe('completed');
+    expect(session().undo.length).toBe(undo + 1);
+    const { mesh, topology } = session().model!;
+    expect(mesh.triangleCount).toBeGreaterThan(start.mesh.triangleCount);
+    expect(closedMesh(mesh)).toBe(true);
+    expect(topology).toEqual(buildTopology(mesh));
+    let creased = 0;
+    for (let v = 0; v < mesh.weldedCount; v++) creased += mesh.crease[v];
+    expect(creased).toBeGreaterThan(0);
+    const paintAfter = new Set(session().triangles);
+    for (const t of paintBefore) expect(paintAfter.has(t)).toBe(true);
+    expect(differingAttributes(session().preview!, fresh())).toEqual([]);
+    editor().undoRefine();
+    expect(session().model).toBe(start);
+    expect(session().triangles).toEqual(paintBefore);
+    expect(differingAttributes(session().preview!, fresh())).toEqual([]);
+    editor().redoRefine();
+    const squared = fresh();
+    expect(editor().applyRefine()).toBe(true);
+    expect(differingAttributes(editor().scene.parts[0].geometry, squared)).toEqual([]);
+    expect(closed(editor().scene.parts[0].geometry)).toBe(true);
+  });
+
+  it('says so when Square finds no rounded corner', async () => {
+    setup([boxPart({ geometry: rippledSphere(1) })], ['box']);
+    await ready();
+    editor().setRefineMode('clean');
+    editor().setRefineClean({ smooth: 0, sharpen: 0, depth: 0, square: 1 });
+    const model = session().model;
+    await editor().cleanRefine();
+    expect(session().model).toBe(model);
+    expect(toast()).toBe(noSquareNotice);
   });
 
   it('says so when the settings leave the surface as it is', async () => {
