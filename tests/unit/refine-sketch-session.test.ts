@@ -1,8 +1,8 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { EdgeInput } from '../../src/core/refine-edge';
 import { nearestTriangle } from '../../src/core/refine-sketch';
 import type { GuidePoint } from '../../src/core/refine-band';
-import { useEditor } from '../../src/core/store';
+import { refineStatus, useEditor } from '../../src/core/store';
 import type { Vec3 } from '../../src/core/types';
 import { boxPart, editor, ready, session, setup, surfacePoint } from '../helpers/refine-session';
 import { useActivity } from '../../src/core/activity';
@@ -310,5 +310,34 @@ describe('constraints', () => {
     expect(useActivity.getState().notifications.map((n) => n.message)).toContainEqual(
       expect.stringMatching(/sketch plane/),
     );
+  });
+});
+
+describe('the status line', () => {
+  it('says what the session waits for while it picks, and counts the picks', async () => {
+    setup([boxPart()], ['box']);
+    await ready();
+    expect(refineStatus(session())).toBeNull();
+    editor().startRefinePicking({ kind: 'plane', from: 'points', points: [], lock: null });
+    expect(refineStatus(session())).toBe(
+      'Click 3 points on the part for the plane. 0 of 3 picked. Esc stops picking.',
+    );
+    editor().pickRefine(top(-1, -0.5));
+    expect(refineStatus(session())).toMatch(/1 of 3 picked/);
+    editor().cancelRefinePicking();
+    expect(refineStatus(session())).toBeNull();
+  });
+
+  it('says why the selected guide was refused', async () => {
+    setup([boxPart()], ['box']);
+    await ready();
+    // On the flat middle of the top face there is no edge to rebuild.
+    editor().addRefinePoint(top(-1, 0));
+    editor().addRefinePoint(top(1, 0));
+    await vi.waitFor(() =>
+      expect(refineStatus(session())).toMatch(/^No edge found under this guide/),
+    );
+    editor().selectRefine([]);
+    expect(refineStatus(session())).toBeNull();
   });
 });

@@ -6594,6 +6594,32 @@ const edgeFailure = (input: EdgeInput) => {
   return noEdgeNotice;
 };
 
+/** What the session asks for while it waits for picks, with how many it has. */
+export function refinePickingPrompt(picking: RefinePicking) {
+  const wanted =
+    picking.kind === 'line' ? 2 : picking.kind === 'plane' && picking.from === 'points' ? 3 : 1;
+  const what =
+    picking.kind === 'line'
+      ? 'Click 2 points, on the part or on guide points, for the line.'
+      : picking.kind === 'align'
+        ? `Click the point to align this one with ${picking.axis === 'horizontal' ? 'horizontally' : 'vertically'}.`
+        : picking.kind === 'constrain'
+          ? 'Click the other segment of the guide.'
+          : picking.from === 'face'
+            ? 'Click a flat face of the part for the plane.'
+            : 'Click 3 points on the part for the plane.';
+  return wanted > 1 ? `${what} ${picking.points.length} of ${wanted} picked.` : what;
+}
+
+/**
+ * What the status line says in a ready session beyond its mode's hint: the picks it waits for,
+ * else why the selected guide was refused; null for neither.
+ */
+export function refineStatus(refine: RefineSession) {
+  if (refine.picking) return `${refinePickingPrompt(refine.picking)} Esc stops picking.`;
+  return refineFailure(refine);
+}
+
 /** Current refusal for a selected guide, cleared as soon as its input or model changes. */
 export function refineFailure(refine: RefineSession) {
   for (const f of refine.features) {

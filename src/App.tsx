@@ -55,6 +55,7 @@ import {
   liveHost,
   liveSession,
   refineHoldsWork,
+  refineStatus,
   useEditor,
   type RefineMode,
   type WarpGizmo,
@@ -676,6 +677,10 @@ function StatusBar() {
     // Escape keeps the tool while leaving would lose work, so the hint says how to leave.
     refineWork = useEditor(
       (s) => s.tool === 'refine' && s.refine?.stage === 'ready' && refineHoldsWork(s.refine),
+    ),
+    // The picks a Refine session waits for, or why its selected guide was refused.
+    refineSaid = useEditor((s) =>
+      s.tool === 'refine' && s.refine?.stage === 'ready' ? refineStatus(s.refine) : null,
     );
   const hold = useShortcut('holdOrbit'),
     cancel = useShortcut('cancel'),
@@ -711,7 +716,7 @@ function StatusBar() {
                   : surfacePainting
                     ? `Drag to paint · Alt erases${smaller || larger ? ` · ${[smaller, larger].filter(Boolean).join(' / ')} brush size` : ''} · ${orbitHint} orbits`
                     : refineMode
-                      ? `${refineHints(refineMode, smaller, larger)}${refineWork ? ` ${refineLeaveHint}` : ''}`
+                      ? `${refineSaid ?? refineHints(refineMode, smaller, larger)}${refineWork && !refineSaid ? ` ${refineLeaveHint}` : ''}`
                       : warpStage === 'warp'
                         ? warpAdd === 'line'
                           ? `Drag on the surface to draw a line · Esc discards it · ${orbitHint} orbits`
