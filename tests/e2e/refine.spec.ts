@@ -1559,7 +1559,11 @@ async function uArrow(page: Page) {
 /** A plane through three clicks on the block's top face, seen from above. */
 async function topPlane(page: Page) {
   await page.getByRole('combobox', { name: 'Plane' }).selectOption('points');
-  await expect(page.getByText('Click 3 points on the part for the plane.')).toBeVisible();
+  // The panel and the status line both say what the session waits for.
+  await expect(page.locator('.refine-picking')).toContainText('Click 3 points on the part');
+  await expect(page.locator('.status-context')).toHaveText(
+    'Click 3 points on the part for the plane. 0 of 3 picked. Esc stops picking.',
+  );
   for (const p of [
     [-2, half[1], -1],
     [2, half[1], -1],
@@ -1643,7 +1647,12 @@ test('a Parallel constraint holds through a drag, and its icon deletes it', asyn
   const menu = page.getByRole('menu', { name: 'Guide segment actions' });
   await expect(menu).toBeVisible();
   await menu.getByRole('menuitem', { name: 'Parallel' }).click();
-  await expect(page.getByText('Click the other segment of the guide.')).toBeVisible();
+  await expect(page.locator('.refine-picking')).toContainText(
+    'Click the other segment of the guide.',
+  );
+  await expect(page.locator('.status-context')).toContainText(
+    'Click the other segment of the guide.',
+  );
   await clickSurface(page, [(c[0] + d[0]) / 2, y, (c[2] + d[2]) / 2]);
   const parallelism = () =>
     inStore(page, (s) => {

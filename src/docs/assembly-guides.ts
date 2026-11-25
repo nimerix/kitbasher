@@ -588,7 +588,7 @@ export const assemblyGuides: DocArticle[] = [
         },
         note: {
           title: 'Today’s solve',
-          text: 'New guides start at Corner, Fit 0 and Use guide path on, so the guide is the edge. For a guide that only marks a rounded edge, choose Along, turn on Automatic fit and turn off Use guide path. When a guide’s settings cannot hold, it is refused and the Refine status line says what to change, for example No wall found beside this guide. Set Position to Along, or turn off Use guide plane.',
+          text: 'New guides start at Corner, Fit 0 and Use guide path on, so the guide is the edge. For a guide that only marks a rounded edge, choose Along, turn on Automatic fit and turn off Use guide path. When a guide’s settings cannot hold, it is refused, and while it is selected the Refine panel and the status line at the bottom of the window say what to change, for example No wall found beside this guide. Set Position to Along, or turn off Use guide plane.',
         },
       },
       {
@@ -605,7 +605,7 @@ export const assemblyGuides: DocArticle[] = [
         ],
         note: {
           title: 'Moving a guide onto a plane',
-          text: 'With guides selected, choosing a plane under Plane moves their points onto it. Lock in a point’s menu does the same for that point’s guide. If the new plane conflicts with locks or constraints, the guide stays where it is. Press Esc to stop picking points for a plane.',
+          text: 'With guides selected, choosing a plane under Plane moves their points onto it. Lock in a point’s menu does the same for that point’s guide. If the new plane conflicts with locks or constraints, the guide stays where it is. While Refine waits for points, the status line says what to click and how many you have picked. Press Esc to stop picking points for a plane.',
         },
       },
       {
