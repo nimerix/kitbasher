@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useThree } from '@react-three/fiber';
+import { Html } from '@react-three/drei';
 import {
   BufferAttribute,
   BufferGeometry,
@@ -20,6 +21,8 @@ import {
 } from '../core/refine-sketch';
 import { chosenRefinePoint, useEditor, type RefineSession } from '../core/store';
 import { ManagedTransformControls } from './ManagedTransformControls';
+import { constraintLabels, type GuideConstraint } from '../core/refine-constraints';
+import { constraintGlyphs } from './RefinePointMenu';
 import { pointAccent } from './WarpStroke';
 
 const uColor = '#e5484d';
@@ -95,6 +98,86 @@ function PlaneGrid({ plane, input }: { plane: SketchPlane; input: EdgeInput }) {
   );
 }
 
+/** Where a constraint's icon sits: beside its first segment's middle, or its first point. */
+function anchorOf(input: EdgeInput, constraint: GuideConstraint): number[] | null {
+  if (constraint.kind === 'align') {
+    const { segment, index } = constraint.points[0];
+    return input.segments[segment]?.points[index]?.position ?? null;
+  }
+  const points = input.segments[constraint.segments[0]]?.points;
+  if (!points?.length) return null;
+  if (points.length % 2) return points[points.length >> 1].position;
+  const [a, b] = [points[points.length / 2 - 1].position, points[points.length / 2].position];
+  return [0, 1, 2].map((k) => (a[k] + b[k]) / 2);
+}
+
+/**
+ * A small icon beside each constraint of a selected guide, and each fixed point, as a sketch shows
+ * them; a right-click on one opens its menu, to delete it.
+ */
+function ConstraintIcons({ feature, input }: { feature: string; input: EdgeInput }) {
+  const groups = new Map<string, { at: number[]; items: GuideConstraint[] }>();
+  for (const constraint of input.constraints ?? []) {
+    const at = anchorOf(input, constraint);
+    if (!at) continue;
+    const key = at.join(' ');
+    const group = groups.get(key) ?? { at, items: [] };
+    group.items.push(constraint);
+    groups.set(key, group);
+  }
+  const fixed = input.segments.flatMap((s, segment) =>
+    s.points.flatMap((p, index) =>
+      p.lock?.kind === 'fixed' ? [{ at: p.position, segment, index }] : [],
+    ),
+  );
+  const open = (event: React.MouseEvent, menu: object) => {
+    event.preventDefault();
+    event.stopPropagation();
+    useEditor.getState().openContextMenu({ x: event.clientX, y: event.clientY, ...menu });
+  };
+  return (
+    <>
+      {[...groups.values()].map(({ at, items }) => (
+        <Html key={at.join(' ')} position={at as [number, number, number]} zIndexRange={[20, 0]}>
+          <div className="refine-constraint-icons">
+            {items.map((c) => (
+              <span
+                key={c.id}
+                className="refine-constraint-icon"
+                role="img"
+                aria-label={`${constraintLabels[c.kind]} constraint`}
+                title={`${constraintLabels[c.kind]}. Right-click to delete.`}
+                onContextMenu={(event) => open(event, { refineConstraint: { feature, id: c.id } })}
+              >
+                {constraintGlyphs[c.kind]}
+              </span>
+            ))}
+          </div>
+        </Html>
+      ))}
+      {fixed.map(({ at, segment, index }) => (
+        <Html
+          key={`fixed ${at.join(' ')}`}
+          position={at as [number, number, number]}
+          zIndexRange={[20, 0]}
+        >
+          <div className="refine-constraint-icons">
+            <span
+              className="refine-constraint-icon"
+              role="img"
+              aria-label="Fixed point"
+              title="Fixed. Right-click for the point menu, to unlock it."
+              onContextMenu={(event) => open(event, { refinePoint: { feature, segment, index } })}
+            >
+              ⚓
+            </span>
+          </div>
+        </Html>
+      ))}
+    </>
+  );
+}
+
 /** The points picked so far for a new plane or a line lock. */
 function Picked({ points }: { points: number[][] }) {
   const shape = useMemo(() => {
@@ -137,6 +220,9 @@ export function RefineSketch({ refine, onPress }: { refine: RefineSession; onPre
     <>
       {planes.map(({ id, input, plane }) => (
         <PlaneGrid key={id} plane={plane} input={input} />
+      ))}
+      {planes.map(({ id, input }) => (
+        <ConstraintIcons key={id} feature={id} input={input} />
       ))}
       {refine.picking?.points.length ? <Picked points={refine.picking.points} /> : null}
       <PointWidget refine={refine} onPress={onPress} />

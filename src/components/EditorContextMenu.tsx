@@ -33,7 +33,14 @@ import type { CommandContext, CommandId } from '../core/commands';
 import { useEditor } from '../core/store';
 import type { EditorContextMenu as MenuLocation } from '../core/store';
 import { BrushSettings } from './BrushSettings';
-import { RefinePointItems, refinePointTitle } from './RefinePointMenu';
+import {
+  RefineConstraintItems,
+  RefinePointItems,
+  RefineSegmentItems,
+  refineConstraintTitle,
+  refinePointTitle,
+  refineSegmentTitle,
+} from './RefinePointMenu';
 
 const icons = {
   copy: Copy,
@@ -79,7 +86,7 @@ function OpenContextMenu({
 }) {
   const state = useEditor();
   const brush = location.kind === 'brush';
-  const refinePoint = location.refinePoint;
+  const { refinePoint, refineSegment, refineConstraint } = location;
   const brushTitle =
     activeBrush(state) === contactBrush ? 'Paint brush settings' : 'Brush settings';
   const menu = useRef<HTMLDivElement>(null);
@@ -186,7 +193,17 @@ function OpenContextMenu({
       ref={menu}
       className={`editor-context-menu ${brush ? 'brush-context-menu' : ''}`}
       role={brush ? 'dialog' : 'menu'}
-      aria-label={brush ? brushTitle : refinePoint ? 'Guide point actions' : 'Component actions'}
+      aria-label={
+        brush
+          ? brushTitle
+          : refinePoint
+            ? 'Guide point actions'
+            : refineSegment
+              ? 'Guide segment actions'
+              : refineConstraint
+                ? 'Constraint actions'
+                : 'Component actions'
+      }
       tabIndex={-1}
       style={position}
       onContextMenu={(event) => event.preventDefault()}
@@ -278,6 +295,21 @@ function OpenContextMenu({
             <small>Guide point actions</small>
           </div>
           <RefinePointItems target={refinePoint} close={close} />
+        </>
+      ) : refineSegment ? (
+        <>
+          <div className="context-heading" role="presentation">
+            <span>{refineSegmentTitle(refineSegment)}</span>
+            <small>Guide segment actions</small>
+          </div>
+          <RefineSegmentItems target={refineSegment} close={close} />
+        </>
+      ) : refineConstraint ? (
+        <>
+          <div className="context-heading" role="presentation">
+            <span>{refineConstraintTitle(refineConstraint)}</span>
+          </div>
+          <RefineConstraintItems target={refineConstraint} close={close} />
         </>
       ) : (
         <>

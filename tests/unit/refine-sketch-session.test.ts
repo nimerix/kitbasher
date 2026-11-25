@@ -172,3 +172,97 @@ describe('point locks', () => {
     expect(session().chosenPoint).toEqual({ feature: id, segment: 0, index: 1 });
   });
 });
+
+describe('constraints', () => {
+  /** A U of three lines on the top face's plane: A to B, B to C, C to D. */
+  async function uGuide() {
+    setup([boxPart()], ['box']);
+    await ready();
+    topPlane();
+    for (const p of [
+      [-1, 1.5, 0.5],
+      [-1, 1.5, -0.5],
+      [1, 1.5, -0.5],
+      [1.2, 1.5, 0.6],
+    ] as Vec3[])
+      editor().addRefinePoint(at(p));
+    return session().selected[0];
+  }
+  const directionOf = (segment: number) => {
+    const [a, b] = guide().segments[segment].points.map((p) => p.position);
+    const d = [0, 1, 2].map((k) => b[k] - a[k]);
+    const length = Math.hypot(...d);
+    return d.map((x) => x / length);
+  };
+  const crossLength = (a: number[], b: number[]) =>
+    Math.hypot(a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]);
+
+  it('keeps two lines parallel through a drag, and through undo and redo', async () => {
+    const id = await uGuide();
+    expect(editor().addRefineConstraint(id, { kind: 'parallel', segments: [0, 2] })).toBe(true);
+    expect(crossLength(directionOf(0), directionOf(2))).toBeLessThan(1e-6);
+    editor().moveRefinePoint(id, 2, 1, at([1.5, 1.5, 0.9]), true);
+    expect(crossLength(directionOf(0), directionOf(2))).toBeLessThan(1e-6);
+    for (const s of guide().segments)
+      for (const p of s.points) expect(offPlane(p.position)).toBeLessThan(1e-9);
+    editor().undoRefine();
+    expect(guide().constraints).toHaveLength(1);
+    editor().undoRefine();
+    expect(guide().constraints ?? []).toHaveLength(0);
+    editor().redoRefine();
+    expect(guide().constraints).toHaveLength(1);
+  });
+
+  it('refuses a constraint that conflicts, changing nothing', async () => {
+    const id = await uGuide();
+    editor().lockRefinePoint(id, 0, 0, { kind: 'fixed' });
+    editor().lockRefinePoint(id, 0, 1, { kind: 'fixed' });
+    const before = session().features;
+    // Segment 0 runs along z; u runs along x, so Horizontal cannot hold with both ends fixed.
+    expect(editor().addRefineConstraint(id, { kind: 'horizontal', segments: [0] })).toBe(false);
+    expect(session().features).toBe(before);
+  });
+
+  it('aligns a point level with another it is clicked onto, and keeps it so', async () => {
+    const id = await uGuide();
+    editor().startRefinePicking({
+      kind: 'align',
+      axis: 'horizontal',
+      point: { feature: id, segment: 2, index: 1 },
+      points: [],
+    });
+    editor().pickRefine(pointOf(0, 1), { point: { feature: id, segment: 0, index: 1 } });
+    const plane = guide().plane!;
+    const v = (p: Vec3) => [0, 1, 2].reduce((s, a) => s + (p[a] - plane.origin[a]) * plane.v[a], 0);
+    expect(Math.abs(v(pointOf(2, 1).position) - v(pointOf(0, 1).position))).toBeLessThan(1e-6);
+    expect(guide().constraints?.[0]).toMatchObject({ kind: 'align', axis: 'horizontal' });
+    editor().moveRefinePoint(id, 0, 1, at([-1.2, 1.5, -0.8]), true);
+    expect(Math.abs(v(pointOf(2, 1).position) - v(pointOf(0, 1).position))).toBeLessThan(1e-6);
+  });
+
+  it('keeps the constraints of the segments a deleted point leaves', async () => {
+    const id = await uGuide();
+    editor().addRefineConstraint(id, { kind: 'parallel', segments: [0, 2] });
+    editor().addRefineConstraint(id, { kind: 'horizontal', segments: [1] });
+    editor().removeRefinePoint(id, 2, 1);
+    expect(guide().segments).toHaveLength(2);
+    expect(guide().constraints).toEqual([
+      expect.objectContaining({ kind: 'horizontal', segments: [1] }),
+    ]);
+    editor().removeRefineConstraint(id, guide().constraints![0].id);
+    expect(guide().constraints).toEqual([]);
+  });
+
+  it('refuses a constraint on a guide with no plane', async () => {
+    setup([boxPart()], ['box']);
+    await ready();
+    editor().addRefinePoint(top(-1, 0.5));
+    editor().addRefinePoint(top(1, 0.5));
+    expect(
+      editor().addRefineConstraint(session().selected[0], { kind: 'horizontal', segments: [0] }),
+    ).toBe(false);
+    expect(useActivity.getState().notifications.map((n) => n.message)).toContainEqual(
+      expect.stringMatching(/sketch plane/),
+    );
+  });
+});

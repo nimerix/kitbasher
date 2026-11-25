@@ -33,6 +33,7 @@ import {
   vertexNormal,
   weldedCorner,
 } from './refine-mesh';
+import type { GuideConstraint } from './refine-constraints';
 import { type SketchPlane, bestPlaneNormal, nearestOnSurface } from './refine-sketch';
 import type { Vec3 } from './types';
 
@@ -76,6 +77,8 @@ export interface EdgeInput {
   plane?: SketchPlane | null;
   /** Take the surface from the plane, not the scan. Only read with a plane. */
   usePlane?: boolean;
+  /** Constraints between the guide's segments and points, in its plane; the solve never reads them. */
+  constraints?: GuideConstraint[];
 }
 /**
  * Where a guide lies relative to the rounded edge on the scan: on the sharp edge itself, where the

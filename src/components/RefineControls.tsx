@@ -617,13 +617,18 @@ function EdgeControls({ view, targets, owned }: ModeProps) {
 function Picking({ view }: Pick<ModeProps, 'view'>) {
   const picking = view.picking;
   if (!picking) return null;
-  const wanted = picking.kind === 'line' ? 2 : picking.from === 'face' ? 1 : 3;
+  const wanted =
+    picking.kind === 'line' ? 2 : picking.kind === 'plane' && picking.from === 'points' ? 3 : 1;
   const what =
     picking.kind === 'line'
       ? 'Click 2 points, on the part or on guide points, for the line.'
-      : picking.from === 'face'
-        ? 'Click a flat face of the part for the plane.'
-        : 'Click 3 points on the part for the plane.';
+      : picking.kind === 'align'
+        ? `Click the point to align this one with, ${picking.axis === 'horizontal' ? 'level along u' : 'level along v'}.`
+        : picking.kind === 'constrain'
+          ? 'Click the other segment of the guide.'
+          : picking.from === 'face'
+            ? 'Click a flat face of the part for the plane.'
+            : 'Click 3 points on the part for the plane.';
   return (
     <div className="refine-picking">
       <p className="anchor-help" role="status">
