@@ -223,6 +223,26 @@ describe('constraints', () => {
     expect(session().features).toBe(before);
   });
 
+  it('refuses a rotated plane that conflicts with a fixed horizontal line', async () => {
+    const id = await uGuide();
+    expect(editor().addRefineConstraint(id, { kind: 'horizontal', segments: [1] })).toBe(true);
+    editor().lockRefinePoint(id, 1, 0, { kind: 'fixed' });
+    editor().lockRefinePoint(id, 1, 1, { kind: 'fixed' });
+    const before = session();
+    editor().startRefinePicking({ kind: 'plane', from: 'points', points: [], lock: id });
+    for (const p of [top(-1, -0.5), top(-1, 0.5), top(1, 0.5)]) editor().pickRefine(p);
+    expect(session().features).toBe(before.features);
+    expect(session().planes).toBe(before.planes);
+    expect(session().undo).toBe(before.undo);
+    editor().setRefineGuidePlane(id, null);
+    expect(guide().constraints).toBeUndefined();
+    expect(useActivity.getState().notifications.map((n) => n.message)).toContainEqual(
+      expect.stringMatching(/removed its guide constraints/),
+    );
+    editor().undoRefine();
+    expect(guide()).toEqual(before.features[0].feature.input);
+  });
+
   it('aligns a point level with another it is clicked onto, and keeps it so', async () => {
     const id = await uGuide();
     editor().startRefinePicking({
