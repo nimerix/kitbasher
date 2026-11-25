@@ -1,9 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import type { GuidePoint } from '../../src/core/refine-band';
-import { edgeUnderStroke, fitTrace } from '../../src/core/refine-trace';
+import { edgeUnderStroke, fitTrace, traceStroke } from '../../src/core/refine-trace';
 import type { Vec3 } from '../../src/core/types';
 import { modelOf, pointOn } from '../helpers/refine';
-import { softBox } from '../helpers/soft-edges';
+import { slottedPlate, softBox } from '../helpers/soft-edges';
 
 /** Seeded uniform numbers in [0, 1). */
 function random(seed: number) {
@@ -39,21 +39,42 @@ describe('Refine trace: the edge beside a stroke', () => {
     ['on the wall, 0.2 mm below the rounding', (x: number): Vec3 => [x, 1.0, 1]],
     ['on the rounding', (x: number): Vec3 => [x, rounding[0], rounding[1]]],
   ] as const)
-    it(`finds the middle of the rounding from a stroke ${where}`, () => {
+    it(`traces the sharp corner from a stroke ${where}`, () => {
       const path = pathOn(mesh, at);
-      const found = edgeUnderStroke(mesh, topology, path, 0.6, step);
-      const points = found.filter((p) => p !== null);
-      expect(points.length).toBeGreaterThanOrEqual(path.length - 1);
-      for (const { position: p, triangle } of points) {
-        expect(Math.hypot(p[1] - rounding[0], p[2] - rounding[1])).toBeLessThan(0.03);
+      const traced = traceStroke(mesh, topology, path, 0.6, step);
+      expect(traced.length).toBeGreaterThanOrEqual(path.length - 2);
+      for (const { position: p, triangle } of traced) {
+        expect(Math.hypot(p[1] - 1.5, p[2] - 1)).toBeLessThan(0.05);
         expect(triangle).toBeGreaterThanOrEqual(0);
       }
     });
 
-  it('finds no edge where the surface under the brush is flat', () => {
-    const path = pathOn(mesh, (x) => [x, 1.5, -0.2]);
-    const found = edgeUnderStroke(mesh, topology, path, 0.3, step);
-    expect(found.every((p) => p === null)).toBe(true);
+  it('finds the middle of the rounding in each slice', () => {
+    const path = pathOn(mesh, (x) => [x, 1.5, 0.5]);
+    const found = edgeUnderStroke(mesh, topology, path, 0.6, step).filter((s) => s !== null);
+    expect(found.length).toBeGreaterThanOrEqual(path.length - 1);
+    for (const { middle, side } of found) {
+      const p = middle.position;
+      expect(Math.hypot(p[1] - rounding[0], p[2] - rounding[1])).toBeLessThan(0.1);
+      expect(side).toBe(1);
+    }
+  });
+
+  it('finds no edge where the surface within reach is flat', () => {
+    const path = pathOn(mesh, (x) => [x, 1.5, 0]);
+    expect(edgeUnderStroke(mesh, topology, path, 0.25, step).every((s) => s === null)).toBe(true);
+    expect(traceStroke(mesh, topology, path, 0.25, step)).toEqual([]);
+  });
+
+  it('keeps to the edge on the side of the stroke most of it finds', () => {
+    // A plate 1 mm wide round a slot: a stroke along its middle has the slot's rounded rim on one
+    // side and the plate's sharp outer edge 0.5 mm away on the other.
+    const plate = modelOf(slottedPlate(1, fillet));
+    const path = pathOn(plate.mesh, (x) => [x, 1, -1.45], -1, 1.2);
+    const traced = traceStroke(plate.mesh, plate.topology, path, 0.6, step);
+    expect(traced.length).toBeGreaterThanOrEqual(path.length - 2);
+    // The slot's rim, its sharp corner at z = -1 and height 1.
+    for (const { position: p } of traced) expect(Math.hypot(p[1] - 1, p[2] + 1)).toBeLessThan(0.05);
   });
 });
 

@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { applyEdge, solveEdge } from '../../src/core/refine-edge';
 import { creaseInput, flattenDab, smoothDab } from '../../src/core/refine-brush';
-import { cloneRefineMesh, weldedCorner } from '../../src/core/refine-mesh';
+import type { GuidePoint } from '../../src/core/refine-band';
+import { type RefineMesh, cloneRefineMesh, weldedCorner } from '../../src/core/refine-mesh';
 import { trianglesUnderBrush, verticesUnderBrush } from '../../src/core/refine-paint';
 import type { Vec3 } from '../../src/core/types';
 import { chainPieces, modelOf, pointOn } from '../helpers/refine';
@@ -17,9 +18,59 @@ import {
   rippleAmplitude,
 } from '../helpers/refine-brush';
 import { heightAt } from '../helpers/refine-region';
-import { foldedStrip, rippledSphere, rivetedPlate, softBox, softStep } from '../helpers/soft-edges';
+import {
+  foldedStrip,
+  rippledSphere,
+  rivetedPlate,
+  slottedPlate,
+  softBox,
+  softStep,
+} from '../helpers/soft-edges';
 
 const exact = { step: 0.06, ripple: 0, noise: 0 };
+
+const crease = (
+  model: ReturnType<typeof modelOf>,
+  stroke: GuidePoint[],
+  radius: number,
+  strength: number,
+) => creaseInput(model.mesh, model.topology, model.noise, stroke, radius, strength);
+
+/** Largest distance of a curve's points with |x| <= `within` from softBox([2, 1.5, 1])'s top front edge. */
+function onBoxEdge(curve: ArrayLike<number>, within: number) {
+  let worst = 0;
+  for (let k = 0; k < curve.length; k += 3)
+    if (Math.abs(curve[k]) <= within)
+      worst = Math.max(worst, Math.hypot(curve[k + 1] - 1.5, curve[k + 2] - 1));
+  return worst;
+}
+
+/** Distance from the sharp rim of slottedPlate(1, ...)'s slot, at height 1. */
+function offSlotRim(p: Vec3) {
+  const [x, , z] = p;
+  const across = Math.abs(x) <= 1.5 ? Math.abs(z) - 1 : Math.hypot(Math.abs(x) - 1.5, z) - 1;
+  return Math.hypot(across, p[1] - 1);
+}
+
+/**
+ * A stroke on slottedPlate(1, ...)'s top, `out` mm from the slot's rim: from x = -1 along z < 0, round
+ * the end at x = 1.5 and back along z > 0, or, `closed`, on round the other end to where it began.
+ */
+function slotStroke(mesh: RefineMesh, out: number, closed: boolean) {
+  const r = 1 + out;
+  const points: Vec3[] = [];
+  for (let x = -1; x < 1.5; x += 0.1) points.push([x, 1, -r]);
+  for (let a = -Math.PI / 2; a < Math.PI / 2; a += 0.1 / r)
+    points.push([1.5 + r * Math.cos(a), 1, r * Math.sin(a)]);
+  for (let x = 1.5; x > (closed ? -1.5 : -1); x -= 0.1) points.push([x, 1, r]);
+  if (closed) {
+    for (let a = Math.PI / 2; a < (3 * Math.PI) / 2; a += 0.1 / r)
+      points.push([-1.5 + r * Math.cos(a), 1, r * Math.sin(a)]);
+    for (let x = -1.5; x <= -0.8; x += 0.1) points.push([x, 1, -r]);
+  }
+  return points.map((p) => pointOn(mesh, p));
+}
+
 const brushes = [smoothDab, flattenDab];
 
 describe('Refine brushes', () => {
@@ -180,12 +231,11 @@ describe('Refine brushes', () => {
     expect(broken).toBe(0);
   });
 
-  it('turns a freehand stroke into a guide that sharpens the edge', () => {
+  it('turns a freehand stroke along a straight edge into a line that sharpens it', () => {
     const model = modelOf(softBox([2, 1.5, 1], 0.3));
     const stroke = jitteredCrest(model.mesh, -1.2, 1.2, 0.05); // points every 0.1 mm, 0.05 mm of hand jitter
-    const input = creaseInput(stroke, 0.6, 1)!;
-    expect(input.segments[0].kind).toBe('spline');
-    expect(input.segments[0].points.length).toBeGreaterThanOrEqual(4);
+    const input = crease(model, stroke, 0.6, 1)!;
+    expect(input.segments.map((s) => s.kind)).toEqual(['line']);
     expect(input).toMatchObject({ joints: [], closed: false, width: 0.6, strength: 1 });
     const solve = solveEdge(model.mesh, model.topology, input, model.noise)!;
     const out = cloneRefineMesh(model.mesh, true);
@@ -199,39 +249,98 @@ describe('Refine brushes', () => {
       );
   });
 
-  it('gives a stroke ceil(length / (4 radius)) + 3 controls', () => {
-    const stroke = Array.from({ length: 24 }, (_, i) => ({
-      triangle: 0,
-      position: [0.1 * i, 0.035 * (i % 2 ? 1 : -1), 0] as Vec3,
-    }));
-    let length = 0;
-    for (let i = 1; i < stroke.length; i++)
-      length += Math.hypot(
-        ...[0, 1, 2].map((a) => stroke[i].position[a] - stroke[i - 1].position[a]),
+  for (const [where, z, y] of [
+    ['on the face beside the rounding', 0.5, 1.5],
+    ['on the wall below the rounding', 1, 1],
+  ] as const)
+    it(`finds the edge from a stroke ${where}`, () => {
+      const model = modelOf(softBox([2, 1.5, 1], 0.3));
+      const stroke = Array.from({ length: 25 }, (_, i) =>
+        pointOn(model.mesh, [-1.2 + 0.1 * i, y, z]),
       );
-    const input = creaseInput(stroke, 0.6, 0.8)!;
-    expect(input.segments[0].points).toHaveLength(Math.ceil(length / 2.4) + 3);
+      const input = crease(model, stroke, 0.6, 1)!;
+      expect(input.segments.map((s) => s.kind)).toEqual(['line']);
+      // The guide lies on the rounding, where the solve reads the edge.
+      for (const { position: p } of input.segments[0].points)
+        expect(Math.abs(Math.hypot(p[1] - 1.2, p[2] - 0.7) - 0.3)).toBeLessThan(0.03);
+      const solve = solveEdge(model.mesh, model.topology, input, model.noise)!;
+      expect(solve).not.toBeNull();
+      expect(onBoxEdge(solve.curve.points, 0.8)).toBeLessThan(0.005);
+    });
+
+  it('fits a stroke round the end of a slot as a line, an arc and a line', () => {
+    const model = modelOf(slottedPlate(1, 0.3));
+    // On the plate 0.2 mm out from the rounding: down one side, round the end and back.
+    const stroke = slotStroke(model.mesh, 0.5, false);
+    const input = crease(model, stroke, 0.6, 1)!;
+    expect(input.segments.map((s) => s.kind)).toEqual(['line', 'arc', 'line']);
+    expect(input.joints).toEqual(['smooth', 'smooth']);
+    const solve = solveEdge(model.mesh, model.topology, input, model.noise)!;
+    expect(solve).not.toBeNull();
+    const curve = solve.curve.points;
+    for (let k = 0; k < curve.length; k += 3)
+      if (curve[k] > -0.4)
+        expect(offSlotRim([curve[k], curve[k + 1], curve[k + 2]])).toBeLessThan(0.02);
+  });
+
+  it('closes a stroke that comes back round to its start', () => {
+    const model = modelOf(slottedPlate(1, 0.3));
+    const input = crease(model, slotStroke(model.mesh, 0.5, true), 0.6, 1)!;
+    expect(input.closed).toBe(true);
+    expect(input.segments.map((s) => s.kind).sort()).toEqual(['arc', 'arc', 'line', 'line']);
+    expect(input.joints).toEqual(['smooth', 'smooth', 'smooth', 'smooth']);
+    expect(solveEdge(model.mesh, model.topology, input, model.noise)).not.toBeNull();
+  });
+
+  it('splits a stroke round a corner into two lines meeting sharply', () => {
+    const model = modelOf(softBox([2, 1.5, 1], 0.3));
+    // Along the top's front edge to the corner at x = 2, then back along its side edge.
+    const stroke = [
+      ...Array.from({ length: 16 }, (_, i) => pointOn(model.mesh, [0.2 + 0.1 * i, 1.5, 0.5])),
+      ...Array.from({ length: 11 }, (_, i) => pointOn(model.mesh, [1.5, 1.5, 0.4 - 0.1 * i])),
+    ];
+    const input = crease(model, stroke, 0.6, 1)!;
+    expect(input.segments.map((s) => s.kind)).toEqual(['line', 'line']);
+    expect(input.joints).toEqual(['sharp']);
+    const corner = input.segments[0].points[1].position;
+    expect(Math.hypot(corner[0] - 2, corner[1] - 1.5, corner[2] - 1)).toBeLessThan(0.3);
+    // The second arm runs on the edge, by the box's other corner.
+    const end = input.segments[1].points[1].position;
+    expect(Math.abs(Math.hypot(end[0] - 1.7, end[1] - 1.2) - 0.3)).toBeLessThan(0.03);
+    const solve = solveEdge(model.mesh, model.topology, input, model.noise)!;
+    expect(solve).not.toBeNull();
+    // The first arm on the box's sharp edge, clear of the corner. Where three faces meet the solve
+    // itself is unsteady, whoever places the guide, so the second arm is not measured.
+    const curve = solve.curve.points;
+    for (let k = 0; k < curve.length; k += 3)
+      if (curve[k] < 1.4 && curve[k] > 0.6)
+        expect(Math.hypot(curve[k + 1] - 1.5, curve[k + 2] - 1)).toBeLessThan(0.005);
   });
 
   it('turns a stroke retraced along a crest into one guide over it', () => {
     const model = modelOf(softBox([2, 1.5, 1], 0.3, exact));
     const forward = jitteredCrest(model.mesh, -1.2, 1.2, 0);
-    const there = creaseInput(forward, 0.6, 1)!.segments[0].points;
-    const input = creaseInput([...forward, ...forward.slice(0, -1).reverse()], 0.6, 1)!;
-    const points = input.segments[0].points;
-    expect(points).toHaveLength(there.length);
-    points.forEach((p, i) => {
-      expect(
-        Math.hypot(...[0, 1, 2].map((a) => p.position[a] - there[i].position[a])),
-      ).toBeLessThan(1e-9);
-      if (i) expect(p.position[0]).toBeGreaterThan(points[i - 1].position[0]);
-    });
+    const there = crease(model, forward, 0.6, 1)!.segments;
+    const input = crease(model, [...forward, ...forward.slice(0, -1).reverse()], 0.6, 1)!;
+    expect(input.segments).toEqual(there);
     expect(solveEdge(model.mesh, model.topology, input, model.noise)).not.toBeNull();
+  });
+
+  it('keeps the stroke as the guide where it finds no edge', () => {
+    const model = modelOf(softBox([2, 1.5, 1], 0.3));
+    const stroke = Array.from({ length: 13 }, (_, i) =>
+      pointOn(model.mesh, [-0.6 + 0.1 * i, 1.5, 0]),
+    );
+    const input = crease(model, stroke, 0.25, 1)!;
+    expect(input.segments.map((s) => s.kind)).toEqual(['line']);
+    for (const { position: p } of input.segments[0].points)
+      expect(Math.abs(p[2])).toBeLessThan(0.01);
+    expect(solveEdge(model.mesh, model.topology, input, model.noise)).toBeNull();
   });
 
   it('ignores a stroke shorter than the radius', () => {
     const model = modelOf(softBox([2, 1.5, 1], 0.3));
     const shortStroke = jitteredCrest(model.mesh, 0, 0.4, 0.02);
-    expect(creaseInput(shortStroke, 0.6, 1)).toBeNull();
+    expect(crease(model, shortStroke, 0.6, 1)).toBeNull();
   });
 });
