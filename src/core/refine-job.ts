@@ -1,3 +1,4 @@
+import type { CleanInput, CleanResult } from './refine-clean';
 import type { DetectOptions, RefineProposal } from './refine-detect';
 import {
   type RefineModel,
@@ -6,6 +7,7 @@ import {
   buffersOf,
   packRefineModel,
   runRefineRequest,
+  unpackClean,
   unpackProposals,
   unpackRefineModel,
 } from './refine-model';
@@ -35,6 +37,22 @@ export function detectRefineJob(
     options: { ...options, triangles },
   };
   return run(request, signal, report, unpackProposals);
+}
+
+/** Cleans copies of the model's arrays and returns the vertices that moved, with their positions. */
+export function cleanRefineJob(
+  model: RefineModel,
+  input: CleanInput,
+  signal: AbortSignal,
+  report: (fraction: number) => void,
+): Promise<CleanResult> {
+  if (signal.aborted) return Promise.reject(cancelled());
+  const request: RefineRequest = {
+    type: 'clean',
+    model: packRefineModel(model),
+    input: { ...input, triangles: input.triangles?.slice() ?? null },
+  };
+  return run(request, signal, report, unpackClean);
 }
 
 function run<T>(

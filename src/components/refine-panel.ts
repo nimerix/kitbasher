@@ -35,10 +35,12 @@ export const endOption = (chosen: EdgeEnd | undefined) =>
  * where a setting taken off Auto starts when no solve says what it used.
  */
 export function autoRule(
-  setting: 'width' | 'scale' | 'detail' | 'blend',
+  setting: 'width' | 'scale' | 'detail' | 'blend' | 'size',
   model: Pick<RefineModel, 'noise' | 'step'>,
 ) {
   switch (setting) {
+    case 'size':
+      return 8 * model.step;
     case 'width':
       return Math.min(1, 6 * model.step);
     case 'scale':
@@ -49,6 +51,10 @@ export function autoRule(
       return 4 * model.step;
   }
 }
+
+/** Clean's largest Depth, and the range of its Size in mm, as refine-clean holds them. */
+export const cleanDepthMax = 3;
+export const cleanSizeRange = { min: 0.05, max: 5 };
 
 /** A setting's first manual value: `start` held to the control's range, and whether that moved it. */
 export function manualStart(start: number, range: { min: number; max: number }) {

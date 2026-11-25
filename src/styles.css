@@ -6703,7 +6703,7 @@ optgroup {
 }
 /* Refine: Warp's controls, with four modes, a shared label column and selects. */
 .display-segmented.refine-modes {
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(5, minmax(0, 1fr));
 }
 .display-segmented.refine-pair {
   grid-template-columns: repeat(2, minmax(0, 1fr));

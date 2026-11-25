@@ -5,6 +5,7 @@ import { isTaskActive, useActivity } from '../core/activity';
 import type { EdgeInput, EdgePosition, EdgeSolve } from '../core/refine-edge';
 import type { RegionInput, RegionSolve, RegionShape, Treatment } from '../core/refine-region';
 import {
+  cleanTitle,
   refineDraftLimit,
   refineFailure,
   refinePickingPrompt,
@@ -17,6 +18,8 @@ import {
 } from '../core/store';
 import {
   autoRule,
+  cleanDepthMax,
+  cleanSizeRange,
   draftSkippedHint,
   endLabels,
   endOption,
@@ -58,6 +61,7 @@ const panelView = (refine: RefineSession | null) =>
     region: refine.region,
     brush: refine.brush,
     detect: refine.detect,
+    clean: refine.clean,
     folds: refine.folds.length,
     skipped: refine.skipped.length,
     edited: refineEdited(refine),
@@ -74,8 +78,8 @@ function currentTarget() {
 const ownedBy = (target: string) => () => currentTarget() === target;
 
 /**
- * A slider with a number field. A percent setting holds 0 to 1 and shows 0 to 100; a setting with
- * `range` is in mm on a logarithmic slider. Unless `live`, a drag sets its value once on release;
+ * A slider with a number field. A percent setting holds 0 to `most` (1 unless set) and shows it as
+ * a percentage; a setting with `range` is in mm on a logarithmic slider. Unless `live`, a drag sets its value once on release;
  * a live one gives `begin` to put the value back on Escape.
  */
 function SliderSetting({
@@ -83,6 +87,7 @@ function SliderSetting({
   value,
   mixed = false,
   range,
+  most = 1,
   live = false,
   begin,
   owned,
@@ -92,6 +97,7 @@ function SliderSetting({
   value: number;
   mixed?: boolean;
   range?: { min: number; max: number };
+  most?: number;
   live?: boolean;
   begin?: () => () => void;
   owned: () => boolean;
@@ -131,7 +137,7 @@ function SliderSetting({
           aria-label={`${label} slider`}
           aria-valuetext={hidden ? 'Mixed' : undefined}
           min={0}
-          max={100}
+          max={Math.round(most * 100)}
           step={1}
           value={hidden ? 0 : Math.round(shown * 100)}
           onChange={(event) => slider.change(Number(event.target.value) / 100)}
@@ -142,7 +148,7 @@ function SliderSetting({
         value={range ? shown : Math.round(shown * 100)}
         mixed={hidden}
         min={range ? range.min : 0}
-        max={range ? range.max : 100}
+        max={range ? range.max : Math.round(most * 100)}
         step={range ? 0.01 : 1}
         onCommit={(next) => owned() && onSet(range ? next : next / 100)}
       />
@@ -984,6 +990,100 @@ function DetectControls({ view, targets, owned }: ModeProps) {
   );
 }
 
+function CleanControls({ view, owned }: ModeProps) {
+  const { clean } = view;
+  const model = view.model!;
+  const painted = useEditor((s) => (s.refine?.triangles.length ?? 0) > 0);
+  const task = useActivity((s) =>
+    s.tasks.find((task) => task.title === cleanTitle && isTaskActive(task)),
+  );
+  const set = (options: Partial<Omit<RefineSession['clean'], 'running'>>) =>
+    editor().setRefineClean(options);
+  const idle = !clean.smooth && !clean.sharpen && !clean.depth;
+  return (
+    <>
+      <p className="anchor-help">
+        Removes scan noise, crisps edges and deepens detail, as sharpening does for a photo.
+      </p>
+      <Choice
+        label="Area"
+        value={clean.where}
+        options={[
+          { id: 'part', label: 'Whole part' },
+          { id: 'painted', label: 'Painted area' },
+        ]}
+        onChange={(where) => set({ where })}
+      />
+      {clean.where === 'painted' ? <PaintControls /> : null}
+      <SliderSetting
+        label="Smooth"
+        value={clean.smooth}
+        owned={owned}
+        onSet={(smooth) => set({ smooth })}
+      />
+      <SliderSetting
+        label="Sharpen"
+        value={clean.sharpen}
+        owned={owned}
+        onSet={(sharpen) => set({ sharpen })}
+      />
+      <SliderSetting
+        label="Depth"
+        value={clean.depth}
+        most={cleanDepthMax}
+        owned={owned}
+        onSet={(depth) => set({ depth })}
+      />
+      <AutoSetting
+        label="Size"
+        values={[clean.size]}
+        seed={() => {
+          const start = manualStart(autoRule('size', model), cleanSizeRange);
+          set({ size: start.value });
+          return start.adjusted;
+        }}
+        onSet={(size) => set({ size })}
+      >
+        {(size, mixed, setSize) => (
+          <SliderSetting
+            label="Size"
+            value={size}
+            mixed={mixed}
+            range={cleanSizeRange}
+            owned={owned}
+            onSet={setSize}
+          />
+        )}
+      </AutoSetting>
+      {clean.running ? (
+        <>
+          <div className="job-inline-progress" role="status">
+            <p>
+              {cleanTitle}
+              {task?.progress != null ? ` · ${Math.round(task.progress * 100)}%` : ''}
+            </p>
+            <progress aria-label="Clean progress" max={1} value={task?.progress ?? undefined} />
+          </div>
+          <button
+            className="button secondary full-width refine-spaced"
+            onClick={() => editor().cancelRefineClean()}
+          >
+            Cancel
+          </button>
+        </>
+      ) : (
+        <button
+          className="button primary full-width refine-spaced"
+          disabled={idle || (clean.where === 'painted' && !painted)}
+          onClick={() => void editor().cleanRefine()}
+        >
+          Clean surface
+        </button>
+      )}
+    </>
+  );
+}
+
 /** Ends the session without a notice and leaves the tool. */
 function cancel() {
   const state = editor();
@@ -991,7 +1091,13 @@ function cancel() {
   state.setTool('select');
 }
 
-const modeTitles = { edge: 'Edge', region: 'Region', brush: 'Brush', detect: 'Detect' } as const;
+const modeTitles = {
+  edge: 'Edge',
+  region: 'Region',
+  brush: 'Brush',
+  detect: 'Detect',
+  clean: 'Clean',
+} as const;
 
 export function RefineControls() {
   const view = useEditor(useShallow((s) => panelView(s.refine)));
@@ -1045,6 +1151,7 @@ export function RefineControls() {
               { id: 'region', label: 'Region' },
               { id: 'brush', label: 'Brush' },
               { id: 'detect', label: 'Detect' },
+              { id: 'clean', label: 'Clean' },
             ]}
             onChange={(mode) => editor().setRefineMode(mode)}
           />
@@ -1059,8 +1166,10 @@ export function RefineControls() {
             <RegionControls key={target} {...props} />
           ) : view.mode === 'brush' ? (
             <BrushControls key={target} {...props} />
-          ) : (
+          ) : view.mode === 'detect' ? (
             <DetectControls key={target} {...props} />
+          ) : (
+            <CleanControls key={target} {...props} />
           )}
         </Section>
       )}
@@ -1100,7 +1209,7 @@ export function RefineControls() {
               ? `Unlock ${part.name} to apply the refinement.`
               : view.edited
                 ? undefined
-                : 'Accept a feature or make a stroke first.'
+                : 'Accept a feature, make a stroke or clean the surface first.'
           }
           onClick={() => editor().applyRefine()}
         >

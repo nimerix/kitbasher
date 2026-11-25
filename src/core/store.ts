@@ -83,6 +83,7 @@ import {
 import type { FreeTransformMode, TransformAxis, TransformPatch } from './free-transform';
 import type { GuidePoint } from './refine-band';
 import type { RefineBrush } from './refine-brush';
+import type { CleanResult, CleanSettings } from './refine-clean';
 import type { EdgeCurve, GuideJoint, GuideKind } from './refine-curve';
 import type { RefineProposal } from './refine-detect';
 import type {
@@ -97,6 +98,7 @@ import {
   type RefineMesh,
   cloneRefineMesh,
   foldedTriangles,
+  moveVertex,
   trimRefineMesh,
   writeRefinedGeometry,
 } from './refine-mesh';
@@ -417,7 +419,7 @@ interface WarpRecovery {
   session: WarpSession;
 }
 
-export type RefineMode = 'edge' | 'region' | 'brush' | 'detect';
+export type RefineMode = 'edge' | 'region' | 'brush' | 'detect' | 'clean';
 type DistributiveOmit<T, K extends PropertyKey> = T extends unknown ? Omit<T, K> : never;
 export interface RefineFeature {
   id: string;
@@ -512,6 +514,7 @@ export interface RefineSession {
   region: Omit<RegionInput, 'triangles'>;
   brush: { kind: RefineBrush; strength: number };
   detect: { where: 'part' | 'painted'; sensitivity: number; minLength: number; running: boolean };
+  clean: CleanSettings & { where: 'part' | 'painted'; running: boolean };
   /** Triangles of the working surface that the last accept folded over. */
   folds: Uint32Array;
   /** Triangles of the working surface that the last accept's cuts left straddling an edge. */
@@ -740,6 +743,7 @@ interface EditorState {
   ) => void;
   setRefineBrush: (options: Partial<RefineSession['brush']>) => void;
   setRefineDetect: (options: Partial<Omit<RefineSession['detect'], 'running'>>) => void;
+  setRefineClean: (options: Partial<Omit<RefineSession['clean'], 'running'>>) => void;
   /** Adds a point to the guide being drawn, starting one if none is selected. `close` is set when the point is the path's first point. */
   addRefinePoint: (point: GuidePoint, close?: boolean) => void;
   /** `begin` starts a new undo step for a drag; moves without it extend the current drag. */
@@ -807,6 +811,9 @@ interface EditorState {
   endRefineDrag: () => void;
   detectRefine: () => Promise<void>;
   cancelRefineDetect: () => void;
+  /** Cleans the whole working surface or its painted area as one session step. */
+  cleanRefine: () => Promise<void>;
+  cancelRefineClean: () => void;
   setRefineBrushRadius: (radius: number) => void;
   setOperation: (patch: Partial<AssemblyOperation>) => void;
   resetPicks: () => void;
@@ -3718,7 +3725,7 @@ export const useEditor = create<EditorState>((set, get) => ({
     // Without a cut, triangle t is still the source's, so its tree only needs new bounds.
     if (mesh.corners === refine.start?.mesh.corners) refitWarpTree(refine.source, geometry);
     const refined: Part = { ...part, geometry, source: `Refine · ${part.source}` };
-    const { mode, edge, region, brush, detect } = refine;
+    const { mode, edge, region, brush, detect, clean } = refine;
     const next: RefineSession = {
       ...newRefineSession(refined, state.sceneEpoch),
       mode,
@@ -3726,6 +3733,7 @@ export const useEditor = create<EditorState>((set, get) => ({
       region,
       brush,
       detect: { ...detect, running: false },
+      clean: { ...clean, running: false },
     };
     disposeRefinePreview(refine.preview);
     const build = refineBuild();
@@ -3860,6 +3868,16 @@ export const useEditor = create<EditorState>((set, get) => ({
         refine: {
           ...refine,
           detect: { ...refine.detect, ...options, running: refine.detect.running },
+        },
+      });
+  },
+  setRefineClean: (options) => {
+    const { refine } = get();
+    if (refine)
+      set({
+        refine: {
+          ...refine,
+          clean: { ...refine.clean, ...options, running: refine.clean.running },
         },
       });
   },
@@ -4601,6 +4619,80 @@ export const useEditor = create<EditorState>((set, get) => ({
       scheduleRefineDraft();
   },
   cancelRefineDetect: () => refineDetect?.abort(),
+  cleanRefine: async () => {
+    const refine = readyRefine();
+    if (!refine || refine.clean.running) return;
+    const { where, smooth, sharpen, depth, size } = refine.clean;
+    if (where === 'painted' && !refine.triangles.length) return;
+    const model = refine.model!;
+    const controller = new AbortController();
+    refineJobs.add(controller);
+    refineClean = controller;
+    const taskId = startTask({
+      title: cleanTitle,
+      progress: 0,
+      notify: false,
+      cancel: () => controller.abort(),
+    });
+    set({ refine: { ...refine, clean: { ...refine.clean, running: true } } });
+    let result: CleanResult | null = null;
+    let failure: unknown = null;
+    try {
+      result = await refineCode!.job.cleanRefineJob(
+        model,
+        {
+          smooth,
+          sharpen,
+          depth,
+          size,
+          triangles: where === 'painted' ? Uint32Array.from(refine.triangles) : null,
+        },
+        controller.signal,
+        (progress) => updateTask(taskId, { progress }),
+      );
+    } catch (error) {
+      failure = error;
+    }
+    refineJobs.delete(controller);
+    if (refineClean === controller) refineClean = null;
+    // Checked here, just before publishing: a cancel may come after the job has replied.
+    const current = get().refine;
+    const clean = current?.id === refine.id ? { ...current.clean, running: false } : null;
+    if (failure !== null && !controller.signal.aborted) {
+      failTask(taskId, failure instanceof Error ? failure.message : String(failure));
+      if (clean) set({ refine: { ...current!, clean } });
+      return;
+    }
+    if (!result || !clean || controller.signal.aborted) {
+      cancelTask(taskId);
+      if (clean) set({ refine: { ...current!, clean } });
+      return;
+    }
+    set({ refine: { ...current!, clean } });
+    if (current!.model !== model || readyRefine() !== get().refine) {
+      cancelTask(taskId);
+      get().notify('The surface changed, so cleaning was stopped.', 'info');
+      return;
+    }
+    completeTask(taskId);
+    if (!result.moved.length) {
+      get().notify('These settings leave the surface as it is.', 'info');
+      return;
+    }
+    // A stroke or drag under way began on the surface this replaces.
+    discardRefineStroke();
+    const mesh = cloneRefineMesh(model.mesh, false);
+    const { moved, position } = result;
+    for (let i = 0; i < moved.length; i++)
+      moveVertex(mesh, moved[i], position[i * 3], position[i * 3 + 1], position[i * 3 + 2]);
+    const latest = get().refine!;
+    commitRefine({
+      model: { ...model, mesh },
+      features: latest.features.map((f) => refreshSketchTriangles(f, mesh)),
+    });
+    if (result.held) get().notify(heldNotice(result.held), 'info');
+  },
+  cancelRefineClean: () => refineClean?.abort(),
   setRefineBrushRadius: (radius) =>
     set((state) =>
       state.refine && Number.isFinite(radius)
@@ -6103,6 +6195,8 @@ const newRefineSession = (part: Part, epoch: number): RefineSession => ({
   brush: { kind: 'smooth', strength: 0.5 },
   // detectDefaults, written out so the store does not load detection before a session needs it.
   detect: { where: 'part', sensitivity: 0.5, minLength: 1.5, running: false },
+  // cleanDefaults, written out for the same reason.
+  clean: { where: 'part', smooth: 0.5, sharpen: 0.5, depth: 1, size: null, running: false },
   folds: noFolds,
   skipped: noFolds,
   drawing: false,
@@ -6373,6 +6467,13 @@ export function commitRefine(next: Partial<RefineSession>) {
 
 /** The detection running in the session, which Cancel aborts. */
 let refineDetect: AbortController | null = null;
+/** The clean running in the session, which Cancel aborts. */
+let refineClean: AbortController | null = null;
+/** The activity title of a clean, which the panel finds its progress by. */
+export const cleanTitle = 'Cleaning the surface';
+/** Said when a clean kept some vertices short of where it would have moved them. */
+export const heldNotice = (n: number) =>
+  `${n === 1 ? '1 vertex' : `${n} vertices`} moved less so no triangle folds over.`;
 
 /** The point last dragged and the step its drag recorded, so a drag is one step. */
 let refineDrag: {
@@ -6461,6 +6562,7 @@ function releaseRefineState() {
   refineStroke = null;
   refineDrag = null;
   refineDetect = null;
+  refineClean = null;
   builtDraft = null;
   cancelRefineDraft();
   clearRefineRest();
@@ -6473,6 +6575,7 @@ export const heldRefineState = () =>
     refineStroke && 'stroke',
     refineDrag && 'drag',
     refineDetect && 'detection',
+    refineClean && 'clean',
     draftFrame && 'frame',
     draftRest && 'rest',
   ].filter(Boolean);
@@ -7313,11 +7416,12 @@ export function refineBrushRadius(state: Pick<EditorState, 'scene' | 'refine' | 
   return part ? fittedWarpBrushRadius(part) : 0;
 }
 
-/** Whether a press on the part paints triangles: Region, or Detect in a painted area. */
+/** Whether a press on the part paints triangles: Region, or Detect or Clean in a painted area. */
 export const paintingRefine = (state: Pick<EditorState, 'tool' | 'refine'>) =>
   state.tool === 'refine' &&
   (state.refine?.mode === 'region' ||
-    (state.refine?.mode === 'detect' && state.refine.detect.where === 'painted'));
+    (state.refine?.mode === 'detect' && state.refine.detect.where === 'painted') ||
+    (state.refine?.mode === 'clean' && state.refine.clean.where === 'painted'));
 
 /** Whether a press on the part makes a brush stroke. */
 export const brushingRefine = (state: Pick<EditorState, 'tool' | 'refine'>) =>

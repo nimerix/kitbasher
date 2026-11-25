@@ -1233,7 +1233,9 @@ export function RefinePointerController({ pressed }: { pressed: () => boolean })
             after.redo !== before.redo ||
             after.selected.length !== before.selected.length ||
             after.selected.some((id, i) => id !== before.selected[i]) ||
-            (d.kind === 'paint' && after.detect.where !== before.detect.where)
+            (d.kind === 'paint' &&
+              (after.detect.where !== before.detect.where ||
+                after.clean.where !== before.clean.where))
           )
             return discard();
         }

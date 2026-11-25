@@ -1,4 +1,5 @@
 import { BufferAttribute, BufferGeometry, Matrix4 } from 'three';
+import { type CleanInput, type CleanResult, cleanSurface } from './refine-clean';
 import { type DetectOptions, type RefineProposal, detectFeatures } from './refine-detect';
 import { solveEdge } from './refine-edge';
 import { estimateNoise, noiseRings } from './refine-fit';
@@ -115,7 +116,8 @@ export function keepSolvable(
 
 export type RefineRequest =
   | { type: 'build'; input: RefineModelInput }
-  | { type: 'detect'; model: RefineModel; options: DetectOptions };
+  | { type: 'detect'; model: RefineModel; options: DetectOptions }
+  | { type: 'clean'; model: RefineModel; input: CleanInput };
 
 /** The buffers of every typed array in `value`, for a transfer list. */
 export function buffersOf(value: unknown): ArrayBuffer[] {
@@ -170,14 +172,36 @@ export function unpackProposals(value: unknown): RefineProposal[] {
   return value as RefineProposal[];
 }
 
+/** The cleaned positions a message carried. */
+export function unpackClean(value: unknown): CleanResult {
+  const result = value as CleanResult;
+  if (
+    !(result?.moved instanceof Uint32Array) ||
+    !(result.position instanceof Float64Array) ||
+    result.position.length !== result.moved.length * 3
+  )
+    throw new Error('The cleaned surface came back unreadable.');
+  return result;
+}
+
 /** Runs a request as the worker does, both in the worker and in-thread. */
 export function runRefineRequest(
   request: RefineRequest,
   report: (fraction: number) => void,
   signal?: AbortSignal,
-): RefineModel | RefineProposal[] {
+): RefineModel | RefineProposal[] | CleanResult {
   if (request.type === 'build') return buildRefineModel(request.input);
   const model = unpackRefineModel(request.model);
+  if (request.type === 'clean')
+    return cleanSurface(
+      model.mesh,
+      model.topology,
+      model.noise,
+      model.step,
+      request.input,
+      report,
+      signal,
+    );
   const { mesh, topology, noise } = model;
   const found = detectFeatures(
     mesh,

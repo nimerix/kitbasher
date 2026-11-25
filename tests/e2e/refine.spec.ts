@@ -1693,3 +1693,55 @@ test('a Parallel constraint holds through a drag, and its icon deletes it', asyn
   await iconMenu.getByRole('menuitem', { name: 'Delete constraint' }).click();
   await expect.poll(async () => (await parallelism())?.kinds).toEqual([]);
 });
+
+test('cleans the whole part, steps back, then cleans a painted area and applies', async ({
+  page,
+}) => {
+  await openRefine(page, { scene: plateFixture, view: '7' });
+  const original = await partMesh(page);
+  await page.getByRole('radio', { name: 'Clean', exact: true }).click();
+  const clean = page.getByRole('button', { name: 'Clean surface' });
+  const setting = async (name: string, percent: number) => {
+    const field = page.getByRole('spinbutton', { name, exact: true });
+    await field.fill(String(percent));
+    await field.press('Enter');
+  };
+  const run = async () => {
+    await clean.click();
+    await expect.poll(() => inStore(page, (s) => s.refine!.clean.running)).toBe(false);
+  };
+  const before = await rivetMeasure(page);
+  // Smooth alone evens out the plate's ripple.
+  await setting('Sharpen', 0);
+  await setting('Depth', 0);
+  await expect
+    .poll(() => inStore(page, (s) => s.refine!.clean))
+    .toMatchObject({ smooth: 0.5, sharpen: 0, depth: 0 });
+  await run();
+  expect(await steps(page)).toEqual({ undo: 1, redo: 0 });
+  expect((await rivetMeasure(page)).spread).toBeLessThan(before.spread / 2);
+  await undo(page);
+  expect(await steps(page)).toEqual({ undo: 0, redo: 1 });
+  expect(await rivetMeasure(page)).toEqual(before);
+  // Depth alone raises the rivet off the plate.
+  await setting('Smooth', 0);
+  await setting('Depth', 150);
+  await expect.poll(() => inStore(page, (s) => s.refine!.clean.depth)).toBe(1.5);
+  await run();
+  expect((await rivetMeasure(page)).height).toBeGreaterThan(1.1 * before.height);
+  await undo(page);
+
+  await page.getByRole('radio', { name: 'Painted area', exact: true }).click();
+  await expect(clean).toBeDisabled();
+  await brushRadius(page, 0.5);
+  await paintRivet(page);
+  await expect(clean).toBeEnabled();
+  // Each paint stroke is a step of its own; the clean is one more.
+  const painted = (await steps(page)).undo;
+  await run();
+  expect(await steps(page)).toEqual({ undo: painted + 1, redo: 0 });
+  expect((await rivetMeasure(page)).height).toBeGreaterThan(1.1 * before.height);
+  await page.getByRole('button', { name: 'Apply' }).click();
+  await expect.poll(async () => (await partMesh(page)).sum).not.toBe(original.sum);
+  expect((await partMesh(page)).source).toBe(`Refine · ${original.source}`);
+});
