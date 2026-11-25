@@ -64,8 +64,9 @@ top of the viewport, with Studio as the default. Smaller screens use collapsible
   to a shape) while keeping detail, offers crease, flatten and smooth brushes,
   proposes guides and regions for review, and cleans the whole part or a
   painted area at once: bilateral normal filtering removes noise, an unsharp
-  mask on the normals narrows softened edges, and an unsharp mask along the
-  normal deepens relief up to a set size. Apply bakes the result as one
+  mask on the normals narrows softened edges, edge flips line triangles up with
+  the edges it sharpens, and an unsharp mask along the normal deepens relief up
+  to a set size. Apply bakes the result as one
   undo step without modifying pins, anchors, joints, or any other part. Cancel
   discards it.
 - Paint only edge-connected mesh patches; optional fixed seed-plane angle and

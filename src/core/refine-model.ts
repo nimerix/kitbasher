@@ -175,10 +175,18 @@ export function unpackProposals(value: unknown): RefineProposal[] {
 /** The cleaned positions a message carried. */
 export function unpackClean(value: unknown): CleanResult {
   const result = value as CleanResult;
+  const topology = result?.topology;
   if (
     !(result?.moved instanceof Uint32Array) ||
     !(result.position instanceof Float64Array) ||
-    result.position.length !== result.moved.length * 3
+    result.position.length !== result.moved.length * 3 ||
+    !(result.triangles instanceof Uint32Array) ||
+    !(result.corners instanceof Uint32Array) ||
+    result.corners.length !== result.triangles.length * 3 ||
+    result.triangles.length > 0 !== !!topology ||
+    (topology &&
+      (Object.keys(topology).length !== 4 ||
+        !Object.values(topology).every((array) => array instanceof Uint32Array)))
   )
     throw new Error('The cleaned surface came back unreadable.');
   return result;

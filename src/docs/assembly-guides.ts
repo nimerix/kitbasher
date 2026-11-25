@@ -773,7 +773,7 @@ export const assemblyGuides: DocArticle[] = [
         },
         note: {
           title: 'What Clean keeps',
-          text: 'A painted area eases into the surface around it, and nothing outside it moves. Edges the tool has rebuilt and open borders stay where they are. Where moving a vertex would fold a triangle over, it moves less, and the app says how many vertices it held back. A clean is one session undo step. On a very large part it can take a while: a 700,000-triangle scan takes several seconds.',
+          text: 'A painted area eases into the surface around it, and nothing outside it moves. Edges the tool has rebuilt and open borders stay where they are. Where moving a vertex would fold a triangle over, it moves less, and the app says how many vertices it held back. Along an edge it sharpens, Clean can turn triangles so the edge runs along them instead of zigzagging across them. The number of triangles stays the same. A clean is one session undo step. On a very large part it can take a while: a 700,000-triangle scan takes several seconds.',
         },
       },
       {

@@ -1,4 +1,4 @@
-import type { RefineMesh, RefineTopology } from './refine-mesh';
+import { type RefineMesh, type RefineTopology, buildTopology } from './refine-mesh';
 
 /** How Clean treats the surface. Each setting reads 0 as leaving that part of the job out. */
 export interface CleanSettings {
@@ -26,6 +26,12 @@ export interface CleanResult {
   size: number;
   /** Vertices kept in place because moving them would fold or collapse a triangle. */
   held: number;
+  /** Triangles whose corners changed to follow a sharpened edge, ascending. */
+  triangles: Uint32Array;
+  /** Their new geometry vertices, three each. */
+  corners: Uint32Array;
+  /** The topology of the mesh with those corners, or null when no triangle changed. */
+  topology: RefineTopology | null;
 }
 
 export const cleanDefaults: CleanSettings = { smooth: 0.5, sharpen: 0.5, depth: 1, size: null };
@@ -59,6 +65,14 @@ const maxBaseRounds = 300;
 const collapse = 1e-3;
 /** Times a vertex's move is halved for a triangle it would fold or collapse before it is dropped. */
 const halvings = 6;
+/** Rounds of edge flips that line triangles up with sharpened edges. */
+const flipRounds = 4;
+/** An edge flips when that leaves at most this share of the bending around it. */
+const flipGain = 0.85;
+/** Edges whose two triangles turn less than this (cosine of 8 degrees) are left alone. */
+const flipBend = Math.cos((8 * Math.PI) / 180);
+/** The least shape quality (1 for an equilateral triangle) a flip may make. */
+const flipQuality = 0.15;
 
 const cancelled = () => new DOMException('Refine cancelled', 'AbortError');
 
@@ -119,11 +133,14 @@ export function cleanSurface(
   signal?: AbortSignal,
 ): CleanResult {
   const plan = cleanPlan(input, step);
-  const empty = {
+  const empty: CleanResult = {
     moved: new Uint32Array(0),
     position: new Float64Array(0),
     size: plan.size,
     held: 0,
+    triangles: new Uint32Array(0),
+    corners: new Uint32Array(0),
+    topology: null,
   };
   if (!plan.rounds && !plan.passes && !plan.depth) return empty;
   const work = workingSet(mesh, topology, input.triangles, plan, step);
@@ -175,15 +192,31 @@ export function cleanSurface(
   }
   check();
   const held = holdFolds(work, start, position);
-  report(1);
+  report(0.97);
+  const flipped =
+    plan.rounds || plan.passes ? alignEdges(work, start, position) : new Uint32Array(0);
   let moved = 0;
   for (let i = 0; i < count; i++) if (changed(start, position, i)) moved++;
-  const result = {
+  const result: CleanResult = {
+    ...empty,
     moved: new Uint32Array(moved),
     position: new Float64Array(moved * 3),
-    size: plan.size,
     held,
   };
+  if (flipped.length) {
+    // Each flipped triangle takes its corners' geometry vertices from the two it was made from,
+    // which `alignEdges` carried along in `work.geometry`.
+    const order = Array.from(flipped).sort((a, b) => work.triangle[a] - work.triangle[b]);
+    result.triangles = Uint32Array.from(order, (f) => work.triangle[f]);
+    result.corners = new Uint32Array(order.length * 3);
+    order.forEach((f, i) => result.corners.set(work.geometry.subarray(f * 3, f * 3 + 3), i * 3));
+    const corners = mesh.corners.slice(0, mesh.triangleCount * 3);
+    result.triangles.forEach((t, i) =>
+      corners.set(result.corners.subarray(i * 3, i * 3 + 3), t * 3),
+    );
+    result.topology = buildTopology({ ...mesh, corners });
+  }
+  report(1);
   // The working set is in ascending welded order, so the moved list is too.
   for (let i = 0, j = 0; i < count; i++) {
     if (!changed(start, position, i)) continue;
@@ -210,6 +243,8 @@ interface WorkingSet {
   fixed: Uint8Array;
   /** Local corners of each local triangle. */
   corners: Uint32Array;
+  /** The geometry vertex of each of those corners. */
+  geometry: Uint32Array;
   /** Global triangle of each local triangle. */
   triangle: Uint32Array;
   /** CSR: local triangles around each local vertex. */
@@ -313,10 +348,14 @@ function workingSet(
   for (let t = 0; t < triangleCount; t++) if (keep(t)) faceCount++;
   const triangle = new Uint32Array(faceCount);
   const corners = new Uint32Array(faceCount * 3);
+  const geometry = new Uint32Array(faceCount * 3);
   for (let t = 0, f = 0; t < triangleCount; t++) {
     if (!keep(t)) continue;
     triangle[f] = t;
-    for (let k = 0; k < 3; k++) corners[f * 3 + k] = local[corner(t, k)];
+    for (let k = 0; k < 3; k++) {
+      corners[f * 3 + k] = local[corner(t, k)];
+      geometry[f * 3 + k] = geometryCorners[t * 3 + k];
+    }
     f++;
   }
   const faceStart = new Uint32Array(count + 1);
@@ -357,6 +396,7 @@ function workingSet(
     weight,
     fixed,
     corners,
+    geometry,
     triangle,
     faceStart,
     faces,
@@ -760,4 +800,176 @@ function holdFolds(work: WorkingSet, start: Float64Array, position: Float64Array
   let held = 0;
   for (let i = 0; i < work.count; i++) if (reduced[i]) held++;
   return held;
+}
+
+/**
+ * Flips edges between moved vertices where the other diagonal of their two triangles bends the
+ * surface less, so an edge that sharpening made crisp runs along triangle edges instead of
+ * zigzagging across them. The bending of the five edges a flip changes is each edge's length times
+ * the angle between the normals of its two triangles; minimising its sum recovers sharp edges from a
+ * triangulation (Dyn, Hormann, Kim and Levin 2001). A flip must keep both triangles facing the way
+ * the pair did, keep them well shaped, and not join two vertices already joined. Vertices do not
+ * move. Returns the local triangles whose corners changed; `work.corners` and `work.geometry` are
+ * updated in place.
+ */
+function alignEdges(work: WorkingSet, start: Float64Array, p: Float64Array): Uint32Array {
+  const { corners: tri, geometry, faceStart, faces, weight, neighbourStart } = work;
+  const slots = tri.length;
+  const next = (s: number) => (s % 3 === 2 ? s - 2 : s + 1);
+  const prev = (s: number) => (s % 3 === 0 ? s + 2 : s - 1);
+  // The slot across each slot's edge, from the triangles around its far end.
+  const opposite = new Int32Array(slots).fill(-1);
+  for (let s = 0; s < slots; s++) {
+    const a = tri[s],
+      b = tri[next(s)];
+    for (let i = faceStart[b]; i < faceStart[b + 1] && opposite[s] < 0; i++) {
+      const t = faces[i] * 3;
+      for (let k = 0; k < 3; k++)
+        if (tri[t + k] === b && tri[t + ((k + 1) % 3)] === a) opposite[s] = t + k;
+    }
+  }
+  const degree = new Int32Array(work.count);
+  for (let i = 0; i < work.count; i++) degree[i] = neighbourStart[i + 1] - neighbourStart[i];
+  const moved = (i: number) => weight[i] > 0 && changed(start, p, i);
+  const faceCount = slots / 3;
+  const normal = new Float64Array(slots);
+  const area = new Float64Array(faceCount);
+  faceNormals(work, p, normal, area);
+  const unit = (a: number, b: number, c: number, out: Float64Array) => {
+    const ux = p[b * 3] - p[a * 3],
+      uy = p[b * 3 + 1] - p[a * 3 + 1],
+      uz = p[b * 3 + 2] - p[a * 3 + 2];
+    const vx = p[c * 3] - p[a * 3],
+      vy = p[c * 3 + 1] - p[a * 3 + 1],
+      vz = p[c * 3 + 2] - p[a * 3 + 2];
+    const x = uy * vz - uz * vy,
+      y = uz * vx - ux * vz,
+      z = ux * vy - uy * vx;
+    const length = Math.sqrt(x * x + y * y + z * z);
+    const scale = length > 0 ? work.sign / length : 0;
+    out[0] = x * scale;
+    out[1] = y * scale;
+    out[2] = z * scale;
+    return length / 2;
+  };
+  const length = (a: number, b: number) =>
+    Math.hypot(p[a * 3] - p[b * 3], p[a * 3 + 1] - p[b * 3 + 1], p[a * 3 + 2] - p[b * 3 + 2]);
+  const angle = (x: ArrayLike<number>, i: number, y: ArrayLike<number>, j: number) =>
+    Math.acos(Math.max(-1, Math.min(1, x[i] * y[j] + x[i + 1] * y[j + 1] + x[i + 2] * y[j + 2])));
+  const quality = (area: number, a: number, b: number, c: number) =>
+    (4 * Math.sqrt(3) * area) / (a * a + b * b + c * c);
+  /** Whether `c` and `d` are joined, turning around `c` from its slot `from` both ways. */
+  const joined = (from: number, d: number) => {
+    let s = from;
+    do {
+      if (tri[next(s)] === d) return true;
+      const o = opposite[prev(s)];
+      if (o < 0) break;
+      s = o;
+    } while (s !== from);
+    for (s = from; ;) {
+      const o = opposite[s];
+      if (o < 0) return false;
+      s = next(o);
+      if (s === from) return false;
+      if (tri[next(s)] === d) return true;
+    }
+  };
+  const m1 = new Float64Array(3),
+    m2 = new Float64Array(3);
+  const flipped = new Uint8Array(faceCount);
+  for (let round = 0; round < flipRounds; round++) {
+    let flips = 0;
+    for (let s1 = 0; s1 < slots; s1++) {
+      const s2 = opposite[s1];
+      if (s2 < s1) continue;
+      const t1 = (s1 / 3) | 0,
+        t2 = (s2 / 3) | 0;
+      const a = tri[s1],
+        b = tri[next(s1)],
+        c = tri[prev(s1)],
+        d = tri[prev(s2)];
+      if (c === d || degree[a] <= 3 || degree[b] <= 3) continue;
+      if (!moved(a) || !moved(b) || !moved(c) || !moved(d)) continue;
+      const n1 = t1 * 3,
+        n2 = t2 * 3;
+      const bend =
+        normal[n1] * normal[n2] + normal[n1 + 1] * normal[n2 + 1] + normal[n1 + 2] * normal[n2 + 2];
+      if (bend > flipBend) continue;
+      const bc = next(s1),
+        ca = prev(s1),
+        ad = next(s2),
+        db = prev(s2);
+      const obc = opposite[bc],
+        oca = opposite[ca],
+        oad = opposite[ad],
+        odb = opposite[db];
+      if (obc < 0 || oca < 0 || oad < 0 || odb < 0) continue;
+      const area1 = unit(c, a, d, m1),
+        area2 = unit(d, b, c, m2);
+      // Both new triangles face the way the pair does.
+      const sx = normal[n1] + normal[n2],
+        sy = normal[n1 + 1] + normal[n2 + 1],
+        sz = normal[n1 + 2] + normal[n2 + 2];
+      if (m1[0] * sx + m1[1] * sy + m1[2] * sz <= 0 || m2[0] * sx + m2[1] * sy + m2[2] * sz <= 0)
+        continue;
+      const lab = length(a, b),
+        lcd = length(c, d),
+        lbc = length(b, c),
+        lca = length(c, a),
+        lad = length(a, d),
+        ldb = length(d, b);
+      if (
+        quality(area1, lca, lad, lcd) < flipQuality ||
+        quality(area2, ldb, lbc, lcd) < flipQuality
+      )
+        continue;
+      const face = (slot: number) => ((slot / 3) | 0) * 3;
+      const before =
+        lab * angle(normal, n1, normal, n2) +
+        lbc * angle(normal, n1, normal, face(obc)) +
+        lca * angle(normal, n1, normal, face(oca)) +
+        lad * angle(normal, n2, normal, face(oad)) +
+        ldb * angle(normal, n2, normal, face(odb));
+      const after =
+        lcd * angle(m1, 0, m2, 0) +
+        lbc * angle(m2, 0, normal, face(obc)) +
+        lca * angle(m1, 0, normal, face(oca)) +
+        lad * angle(m1, 0, normal, face(oad)) +
+        ldb * angle(m2, 0, normal, face(odb));
+      if (after >= flipGain * before || joined(prev(s1), d)) continue;
+      // t1 becomes (c, a, d) and t2 (d, b, c), each corner keeping a geometry vertex it had.
+      const gc = geometry[prev(s1)],
+        ga = geometry[s1],
+        gb = geometry[s2],
+        gd = geometry[prev(s2)];
+      tri.set([c, a, d], n1);
+      tri.set([d, b, c], n2);
+      geometry.set([gc, ga, gd], n1);
+      geometry.set([gd, gb, gc], n2);
+      const link = (x: number, y: number) => {
+        opposite[x] = y;
+        opposite[y] = x;
+      };
+      link(n1, oca);
+      link(n1 + 1, oad);
+      link(n2, odb);
+      link(n2 + 1, obc);
+      link(n1 + 2, n2 + 2);
+      normal.set(m1, n1);
+      normal.set(m2, n2);
+      degree[a]--;
+      degree[b]--;
+      degree[c]++;
+      degree[d]++;
+      flipped[t1] = flipped[t2] = 1;
+      flips++;
+    }
+    if (!flips) break;
+  }
+  let total = 0;
+  for (let f = 0; f < faceCount; f++) total += flipped[f];
+  const out = new Uint32Array(total);
+  for (let f = 0, i = 0; f < faceCount; f++) if (flipped[f]) out[i++] = f;
+  return out;
 }
