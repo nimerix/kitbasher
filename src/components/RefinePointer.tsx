@@ -18,11 +18,13 @@ import {
 import {
   brushingRefine,
   paintingRefine,
+  refineDrawingPlane,
   useEditor,
   type RefineMode,
   type RefineSession,
 } from '../core/store';
 import type { GuidePoint } from '../core/refine-band';
+import { lineNearRay, nearestOnSurface, pointAt, rayOnPlane } from '../core/refine-sketch';
 import type { RefineMesh } from '../core/refine-mesh';
 import type { RefineBrush } from '../core/refine-brush';
 import { prepareEditedForPicking } from '../core/bvh';
@@ -963,8 +965,42 @@ export function RefinePointerController({ pressed }: { pressed: () => boolean })
       );
     };
 
-    /** Moves the dragged point to the model surface under the sample. */
+    /**
+     * Where a point locked to a line, or of a guide on a plane, goes under the sample: the line's
+     * point nearest the ray, or where the ray meets the plane. Undefined for a free point.
+     */
+    const heldOnRay = (d: HandleDrag): GuidePoint | null | undefined => {
+      const refine = useEditor.getState().refine;
+      const feature = refine?.features.find((f) => f.id === d.handle.feature)?.feature;
+      if (!refine?.model || feature?.type !== 'edge') return undefined;
+      const { lock } = d.current;
+      const plane = feature.input.plane;
+      if (lock?.kind !== 'line' && !plane) return undefined;
+      const { origin, direction } = raycaster.ray;
+      const o = origin.toArray(),
+        dir = direction.toArray();
+      const position =
+        lock?.kind === 'line' ? lineNearRay(lock, o, dir) : rayOnPlane(plane!, o, dir);
+      if (!position) return null;
+      const { mesh, topology } = refine.model;
+      const near = nearestOnSurface(mesh, topology, { triangle: d.current.triangle, position });
+      return { triangle: near.triangle, position, ...(lock ? { lock } : {}) };
+    };
+
+    /** Moves the dragged point to the model surface under the sample, or along its lock. */
     const dragSample = (d: HandleDrag, live: boolean) => {
+      if (d.current.lock?.kind === 'fixed') return true;
+      const held = heldOnRay(d);
+      if (held !== undefined) {
+        if (!held) return true;
+        const { handle } = d;
+        useEditor
+          .getState()
+          .moveRefinePoint(handle.feature, handle.segment, handle.index, held, !d.began);
+        d.began = true;
+        d.current = held;
+        return true;
+      }
       const [point, near] = nearPick(() => modelHitOnRay(d.partId));
       if (near && live) return false;
       if (!point) return true;
@@ -974,7 +1010,7 @@ export function RefinePointerController({ pressed }: { pressed: () => boolean })
         .getState()
         .moveRefinePoint(handle.feature, handle.segment, handle.index, point, !d.began);
       d.began = true;
-      d.current = point;
+      d.current = { ...point, ...(d.current.lock ? { lock: d.current.lock } : {}) };
       return true;
     };
     const dragHandle = (d: HandleDrag, x: number, y: number) => {
@@ -1282,6 +1318,8 @@ export function RefinePointerController({ pressed }: { pressed: () => boolean })
     };
 
     let pressX: [number, number] = [0, 0];
+    /** Where the last primary press went down, for telling a click from a drag. */
+    let pressAt: [number, number] = [0, 0];
     let unpress: (() => void) | null = null;
     const clearPress = () => {
       pressedProposal = null;
@@ -1293,6 +1331,7 @@ export function RefinePointerController({ pressed }: { pressed: () => boolean })
     const down = (event: PointerEvent) => {
       clearPress();
       cancelledPointer = null;
+      if (event.button === 0) pressAt = [event.clientX, event.clientY];
       if (gesture?.waiting && event.button === 0 && canvas().contains(event.target as Node))
         drainSamples(() => true);
       const state = useEditor.getState(),
@@ -1309,7 +1348,9 @@ export function RefinePointerController({ pressed }: { pressed: () => boolean })
         event.metaKey ||
         event.altKey ||
         blocked(state) ||
-        !canvas().contains(event.target as Node)
+        !canvas().contains(event.target as Node) ||
+        // While the session waits for picks, a press on a handle picks it on its click.
+        refine.picking
       )
         return;
       const handle = event.shiftKey ? null : handleAt(refine, event.clientX, event.clientY, true);
@@ -1353,6 +1394,11 @@ export function RefinePointerController({ pressed }: { pressed: () => boolean })
         event.stopImmediatePropagation();
         return;
       }
+      if (sketchClick(event)) {
+        event.stopImmediatePropagation();
+        clearPress();
+        return;
+      }
       const id = pressedProposal;
       clearPress();
       const still = Math.hypot(event.clientX - pressX[0], event.clientY - pressX[1]) <= 5;
@@ -1369,6 +1415,70 @@ export function RefinePointerController({ pressed }: { pressed: () => boolean })
             : [...selected, id]
           : [id],
       );
+    };
+
+    /**
+     * A click the session's sketching takes: a pick while it waits for picks, on a guide point or
+     * the part; or, in Edge mode with a guide drawn on a plane, a point where the ray meets the
+     * plane, also off the part. True when taken.
+     */
+    const sketchClick = (event: MouseEvent) => {
+      const state = useEditor.getState(),
+        refine = state.refine;
+      if (
+        event.button !== 0 ||
+        state.tool !== 'refine' ||
+        refine?.stage !== 'ready' ||
+        !refine.model ||
+        blocked(state) ||
+        pressed() ||
+        !canvas().contains(event.target as Node) ||
+        Math.hypot(event.clientX - pressAt[0], event.clientY - pressAt[1]) > clickSlop
+      )
+        return false;
+      const { clientX: x, clientY: y } = event;
+      if (refine.picking) {
+        const handle = handleAt(refine, x, y, false);
+        aimAt(x, y);
+        const point = handle ? handle.point : modelHitOnRay(refine.partId);
+        if (point) state.pickRefine(point);
+        return true;
+      }
+      const plane = refineDrawingPlane(refine);
+      if (!plane || handleAt(refine, x, y, true)) return false;
+      aimAt(x, y);
+      const { origin, direction } = raycaster.ray;
+      const at = rayOnPlane(plane, origin.toArray(), direction.toArray());
+      const point = at && pointAt(refine.model.mesh, refine.model.topology, at);
+      if (point) state.addRefinePoint(point);
+      return true;
+    };
+
+    /** A right-click on a guide point opens its menu. */
+    const menu = (event: MouseEvent) => {
+      const state = useEditor.getState(),
+        refine = state.refine;
+      if (
+        gesture ||
+        state.tool !== 'refine' ||
+        refine?.stage !== 'ready' ||
+        refine.mode !== 'edge' ||
+        blocked(state) ||
+        !canvas().contains(event.target as Node) ||
+        !ready()
+      )
+        return;
+      const handle = handleAt(refine, event.clientX, event.clientY, false);
+      if (!handle) return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      const { feature, segment, index } = handle;
+      if (!refine.selected.includes(feature)) state.selectRefine([feature]);
+      state.openContextMenu({
+        x: event.clientX,
+        y: event.clientY,
+        refinePoint: { feature, segment, index },
+      });
     };
 
     // The cursor: busy over the part while it has no index and one is being built, a pointer over a
@@ -1443,6 +1553,7 @@ export function RefinePointerController({ pressed }: { pressed: () => boolean })
     window.addEventListener('pointerdown', down, true);
     window.addEventListener('pointerup', released, true);
     window.addEventListener('click', click, true);
+    window.addEventListener('contextmenu', menu, true);
     window.addEventListener('pointermove', hover);
     return () => {
       discard();
@@ -1457,6 +1568,7 @@ export function RefinePointerController({ pressed }: { pressed: () => boolean })
       window.removeEventListener('pointerdown', down, true);
       window.removeEventListener('pointerup', released, true);
       window.removeEventListener('click', click, true);
+      window.removeEventListener('contextmenu', menu, true);
       window.removeEventListener('pointermove', hover);
       if (shown && document.body.style.cursor === shown) document.body.style.cursor = before;
     };

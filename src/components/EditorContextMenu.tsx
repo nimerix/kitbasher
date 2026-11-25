@@ -33,6 +33,7 @@ import type { CommandContext, CommandId } from '../core/commands';
 import { useEditor } from '../core/store';
 import type { EditorContextMenu as MenuLocation } from '../core/store';
 import { BrushSettings } from './BrushSettings';
+import { RefinePointItems, refinePointTitle } from './RefinePointMenu';
 
 const icons = {
   copy: Copy,
@@ -78,6 +79,7 @@ function OpenContextMenu({
 }) {
   const state = useEditor();
   const brush = location.kind === 'brush';
+  const refinePoint = location.refinePoint;
   const brushTitle =
     activeBrush(state) === contactBrush ? 'Paint brush settings' : 'Brush settings';
   const menu = useRef<HTMLDivElement>(null);
@@ -184,7 +186,7 @@ function OpenContextMenu({
       ref={menu}
       className={`editor-context-menu ${brush ? 'brush-context-menu' : ''}`}
       role={brush ? 'dialog' : 'menu'}
-      aria-label={brush ? brushTitle : 'Component actions'}
+      aria-label={brush ? brushTitle : refinePoint ? 'Guide point actions' : 'Component actions'}
       tabIndex={-1}
       style={position}
       onContextMenu={(event) => event.preventDefault()}
@@ -268,6 +270,14 @@ function OpenContextMenu({
           <button className="button secondary full-width" onClick={() => close(true)}>
             Done
           </button>
+        </>
+      ) : refinePoint ? (
+        <>
+          <div className="context-heading" role="presentation">
+            <span>{refinePointTitle(refinePoint)}</span>
+            <small>Guide point actions</small>
+          </div>
+          <RefinePointItems target={refinePoint} close={close} />
         </>
       ) : (
         <>

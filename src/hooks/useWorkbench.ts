@@ -30,7 +30,8 @@ export const keyTools = {
 } as const;
 
 /**
- * What Escape, Delete and Enter do in the Refine tool. Escape dismisses the guide being drawn in
+ * What Escape, Delete and Enter do in the Refine tool. Escape first stops waiting for picks (a new
+ * plane, a line lock) and lets go of a chosen point; then it dismisses the guide being drawn in
  * Edge mode and lets go of (deselects, never dismisses) a crease guide waiting in Brush mode;
  * otherwise, unless the session holds work leaving would lose, it returns false and the tool is
  * left. Delete dismisses and Enter accepts the mode's
@@ -44,6 +45,10 @@ export function refineKey(
   const refine = state.refine?.stage === 'ready' ? state.refine : null;
   const point = refine && chosenRefinePoint(refine);
   if (action === 'cancel') {
+    if (refine?.picking) {
+      state.cancelRefinePicking();
+      return true;
+    }
     if (point) {
       state.clearChosenRefinePoint();
       return true;

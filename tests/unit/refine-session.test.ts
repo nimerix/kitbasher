@@ -126,6 +126,7 @@ describe('refine session lifecycle', () => {
       path: true,
       wallAngle: null,
       usePlane: true,
+      plane: null,
     });
     expect(session().region).toEqual({
       treatment: 'smooth',
@@ -416,6 +417,7 @@ describe('refine session steps', () => {
       selected: [],
       triangles: [],
       drawing: false,
+      planes: [],
     });
     const models = [start];
     for (let i = 0; i < 4; i++) models.push(movedModel(models[i], [i], [0, 0.01, 0]));
@@ -1313,6 +1315,7 @@ describe('refine lifecycle edges', () => {
       selected: [],
       triangles: [],
       drawing: false,
+      planes: [],
     });
     const oversized = {
       ...start,
