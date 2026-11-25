@@ -6953,3 +6953,7 @@ optgroup {
     min-width: 28px;
   }
 }
+
+.refine-refusal {
+  display: block;
+}

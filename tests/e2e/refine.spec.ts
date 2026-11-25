@@ -7,6 +7,7 @@ import {
   crest,
   drag,
   half,
+  fixture,
   inEditor,
   inStore,
   indexedBlockFixture,
@@ -22,6 +23,8 @@ import {
   surfaceCorner,
   useAlongPreset,
 } from './helpers/refine';
+import { serializeGeometry } from '../../src/core/geometry';
+import { slottedPlate } from '../helpers/soft-edges';
 import type { RegionSolve } from '../../src/core/refine-region';
 import type { RefineMode } from '../../src/core/store';
 import type { BufferGeometry } from 'three';
@@ -259,6 +262,36 @@ test('places an arc', async ({ page }) => {
   expect(sagitta).toBeGreaterThan(0.3);
   expect(standoff).toBeGreaterThan(sagitta / 2);
   expect(standoff).toBeLessThan(sagitta * 1.5);
+});
+
+test('previews a closed guide on the plane of a rounded slot', async ({ page }, info) => {
+  const geometry = serializeGeometry(
+    slottedPlate(0.35, 0.15, { step: 0.035, ripple: 0.01, noise: 0.006, indexed: true }),
+  );
+  const scene = { ...fixture, parts: [{ ...fixture.parts[0], name: 'Slotted plate', geometry }] };
+  await openRefine(page, { scene, view: '7' });
+  await page.getByRole('combobox', { name: 'Plane' }).selectOption('points');
+  for (const p of [
+    [-1, 1, -0.85],
+    [1, 1, -0.85],
+    [0, 1, 0.85],
+  ] as Vec3[])
+    await clickSurface(page, p);
+  await expect.poll(() => inStore(page, (s) => s.refine!.planes.length)).toBe(1);
+  await inStore(page, (s) => s.setRefineEdge({ width: 0.5, wallAngle: 90, joint: 'smooth' }));
+  const start: Vec3 = [-1.5, 1, -0.35];
+  await clickSurface(page, start);
+  await clickSurface(page, [1.5, 1, -0.35]);
+  await page.getByRole('radio', { name: 'Arc', exact: true }).click();
+  await clickSurface(page, [1.85, 1, 0]);
+  await clickSurface(page, [1.5, 1, 0.35]);
+  await page.getByRole('radio', { name: 'Line', exact: true }).click();
+  await clickSurface(page, [-1.5, 1, 0.35]);
+  await page.getByRole('radio', { name: 'Arc', exact: true }).click();
+  await clickSurface(page, [-1.85, 1, 0]);
+  await clickSurface(page, start);
+  await expect.poll(() => inStore(page, (s) => s.refine!.features[0]?.curve?.closed)).toBe(true);
+  await page.screenshot({ path: info.outputPath('slotted-plate.png') });
 });
 
 test('places a closed path and accepts it', async ({ page }) => {
@@ -635,7 +668,9 @@ test('says so when a guide finds no edge', async ({ page }) => {
   await openRefine(page);
   await clickSurface(page, front(-2, 0));
   await clickSurface(page, front(2, 0));
-  await expect(page.getByText('No edge found under this guide.')).toBeVisible();
+  await expect(
+    page.locator('.refine-counts').filter({ hasText: 'No edge found under this guide.' }),
+  ).toBeVisible();
 });
 
 const noEdge = 'No edge found under this guide. Move it onto the rounded edge or change Width.';
@@ -644,7 +679,7 @@ test('says once per guide that it finds no edge', async ({ page }) => {
   await openRefine(page);
   await clickSurface(page, front(-2, 1));
   await clickSurface(page, front(2, 1));
-  await expect(page.getByText(noEdge)).toBeVisible();
+  await expect(page.locator('.refine-counts').filter({ hasText: noEdge })).toBeVisible();
   await expect.poll(() => noticeCount(page, noEdge)).toBe(1);
   // A new Width for the same guide fails for the same reason: nothing new to say.
   await keepDraft(page);
