@@ -6585,10 +6585,32 @@ function solveProposal<P extends RefineProposal>(
 const edgeFailure = (input: EdgeInput) => {
   const latest = latestSolves.get(input.segments);
   if (latest?.tooLong) return longGuideNotice;
+  if (latest?.refusal === 'fit')
+    return 'The faces cannot meet this edge within Fit. Increase Fit or move the guide.';
+  if (latest?.refusal === 'width')
+    return 'The band is too narrow to rebuild this edge. Increase Width.';
   if (latest?.refusal === 'wall') return noWallNotice;
   if (latest?.refusal === 'angle') return wallAngleNotice;
   return noEdgeNotice;
 };
+
+/** Current refusal for a selected guide, cleared as soon as its input or model changes. */
+export function refineFailure(refine: RefineSession) {
+  for (const f of refine.features) {
+    if (!refine.selected.includes(f.id) || f.state !== 'pending' || f.feature.type !== 'edge')
+      continue;
+    const input = f.feature.input;
+    const attempt = latestSolves.get(input.segments);
+    if (
+      attempt &&
+      !attempt.solve &&
+      attempt.model === refine.model?.mesh &&
+      sameSolveInput(attempt.input, input)
+    )
+      return edgeFailure(input);
+  }
+  return null;
+}
 
 /**
  * Folds one solve pass into the failures already reported, one record per feature id: a feature

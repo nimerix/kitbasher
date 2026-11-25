@@ -6,6 +6,7 @@ import type { EdgeInput, EdgePosition, EdgeSolve } from '../core/refine-edge';
 import type { RegionInput, RegionSolve, RegionShape, Treatment } from '../core/refine-region';
 import {
   refineDraftLimit,
+  refineFailure,
   refineEdited,
   refinePointRemovable,
   refineSolved,
@@ -40,6 +41,7 @@ const editor = () => useEditor.getState();
 /** What the panel shows of the session: everything but the painted triangles. */
 const panelView = (refine: RefineSession | null) =>
   refine && {
+    failure: refineFailure(refine),
     partId: refine.partId,
     stage: refine.stage,
     model: refine.model,
@@ -1074,7 +1076,7 @@ export function RefineControls() {
         </Section>
       )}
       <p className="anchor-help refine-counts" role="status">
-        {counts}
+        {view.failure ?? counts}
       </p>
       {view.folds ? (
         <p className="warp-warning" role="status">

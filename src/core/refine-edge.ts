@@ -90,7 +90,7 @@ export type EdgePosition = 'corner' | 'top' | 'bottom' | 'along';
  * Why `solveEdge` refused: no edge under the guide; no wall it could fit; a wall more than
  * `wallTolerance` degrees off the wall angle; or a width that leaves no usable core.
  */
-export type EdgeRefusal = 'edge' | 'wall' | 'angle' | 'width';
+export type EdgeRefusal = 'edge' | 'wall' | 'angle' | 'width' | 'fit';
 /** How the sharpness ends at an open guide's end: tapered along the edge, or held to the end. */
 export type EdgeEnd = 'taper' | 'hold';
 export interface EdgeSolve {
@@ -959,7 +959,7 @@ function wallThrough(
 
 /**
  * The guide moved by one offset toward the points where the faces meet, `meet` (xyz), at most
- * `limit` mm: a line along itself, an arc radially and along its axis so it keeps its centre's axis,
+ * `limit` mm: a line along itself, an arc radially about its centre in its plane,
  * a spline as a whole. The offset is the median of the meet's offsets from the guide.
  */
 function shifted(
@@ -986,19 +986,18 @@ function shifted(
   if (circle) {
     const { centre, radius, u, v } = circle;
     const axis = crossOf(u, v);
-    const offsets: number[][] = [];
+    const offsets: number[] = [];
     for (let k = 0; k < count; k++) {
       const d = m(k).map((x, a) => x - centre[a]);
       const h = dot(d, axis);
-      offsets.push([Math.hypot(...d.map((x, a) => x - h * axis[a])) - radius, h]);
+      offsets.push(Math.hypot(...d.map((x, a) => x - h * axis[a])) - radius);
     }
-    const [radial, along] = clamp(medianOf(offsets, 2));
+    const radial = Math.max(-limit, Math.min(limit, median(offsets)));
     for (const p of ps) {
       const d = p.map((x, a) => x - centre[a]);
       const h = dot(d, axis);
       const e = unit(d.map((x, a) => x - h * axis[a]));
-      for (let a = 0; a < 3; a++)
-        p[a] = centre[a] + (h + along) * axis[a] + (radius + radial) * e[a];
+      for (let a = 0; a < 3; a++) p[a] = centre[a] + h * axis[a] + (radius + radial) * e[a];
     }
     return drawnCurve(kind, flat(), edge);
   }
@@ -1087,6 +1086,7 @@ function settle(part: Part): EdgeRefusal | null {
     curve = guide.path
       ? shifted(drawnKind, part.points, drawn, meet.points, Infinity, edge)
       : fitted(meet.points);
+  else if (reach === 0) curve = drawn;
   else
     curve = guide.path
       ? shifted(drawnKind, part.points, drawn, meet.points, reach, edge)
@@ -1639,13 +1639,11 @@ export function solveEdge(
   if (n === 1) {
     curve = parts[0].curve;
     bounds = [0, curveLength(curve)];
-  } else if (circle) {
+  } else if (circle && guide.legacy) {
     // Today's solve fits the circle where the faces meet; with settings, through the parts' edges.
     curve = fitCurve(
       'arc',
-      Float64Array.from(
-        parts.flatMap((part) => [...(guide.legacy ? part.meet.points : part.curve.points)]),
-      ),
+      Float64Array.from(parts.flatMap((part) => [...part.meet.points])),
       3,
       edge,
     );
@@ -1687,6 +1685,25 @@ export function solveEdge(
       : [0, ...starts, curveLength(curve)];
   }
 
+  // Joining segments and refitting a clamped set of samples can both exceed the requested Fit.
+  if (
+    !guide.legacy &&
+    guide.fit !== null &&
+    (guide.position === 'corner' || guide.position === 'along')
+  ) {
+    const near = new Float64Array(3);
+    const limit = guide.fit + 1e-6;
+    for (let k = 0; k < curve.points.length; k += 3) {
+      const [x, y, z] = curve.points.subarray(k, k + 3);
+      if (
+        !parts.some((part) => {
+          closestOnCurve(part.drawn, x, y, z, near);
+          return Math.hypot(x - near[0], y - near[1], z - near[2]) <= limit;
+        })
+      )
+        return refuse('fit');
+    }
+  }
   const ends: [EdgeEnd, EdgeEnd] = closed
     ? ['hold', 'hold']
     : [
@@ -2519,6 +2536,7 @@ export function applyEdge(
   const apartAt = new Float64Array(count);
   const p = [0, 0, 0];
   const target = [0, 0, 0];
+  const planeTarget = new Float64Array(3);
   const end = [0, 0, 0];
   for (const [v, i] of indexOf) {
     const weight = strength * weights[i];
@@ -2539,10 +2557,11 @@ export function applyEdge(
     for (const side of [nearer, 1 - nearer]) {
       surface.target(side, p[0], p[1], p[2], target);
       const onPlane = solve.planeSides?.[owner] === side;
-      if (onPlane) solve.flanks[owner][side].project(p[0], p[1], p[2], target);
+      if (onPlane) solve.flanks[owner][side].project(p[0], p[1], p[2], planeTarget);
+      const destination = onPlane ? planeTarget : target;
       let share = onPlane && solve.curve.closed ? strength : weight;
       if (frame.corners.length) share *= cornerFade(solve, frame, owner, side, p);
-      for (let a = 0; a < 3; a++) end[a] = p[a] + share * (target[a] - p[a]);
+      for (let a = 0; a < 3; a++) end[a] = p[a] + share * (destination[a] - p[a]);
       apart =
         surface.distance(0, end[0], end[1], end[2]) - surface.distance(1, end[0], end[1], end[2]);
       if (side === nearer || apart > 0 === (side === 1)) {
