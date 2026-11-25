@@ -232,7 +232,7 @@ const length3 = (p: Float64Array, a: number, b: number) =>
   Math.hypot(p[a * 3] - p[b * 3], p[a * 3 + 1] - p[b * 3 + 1], p[a * 3 + 2] - p[b * 3 + 2]);
 
 /** Mean length of the edges at the corners of the clicked triangles. */
-function localEdge(mesh: RefineMesh, topology: RefineTopology, points: GuidePoint[]) {
+export function localEdge(mesh: RefineMesh, topology: RefineTopology, points: GuidePoint[]) {
   const { neighbourStart, neighbours } = topology;
   let sum = 0,
     count = 0;
@@ -1729,12 +1729,19 @@ function classifyOriented(
   // start to the first of its end, its slice's last vertex and the width, is flankRun edges long. A
   // cap past `gathered` is held to it, since vertices within the cap of the solved edge may lie
   // outside the gather.
-  const result = (cap: number): EdgeBand | null => {
-    const width = Math.min(cap, gathered);
+  const result = (cap: number, widthEdge?: EdgeCurve): EdgeBand | null => {
+    const width = Math.min(cap, widthEdge ? band.width : gathered);
     const keep: number[] = [];
     const counts = [0, 0];
     for (let i = 0; i < count; i++) {
-      if (Math.abs(heldO[i]) > width) continue;
+      if (widthEdge) {
+        const v = vertices[i] * 3;
+        closestOnCurve(widthEdge, position[v], position[v + 1], position[v + 2], at);
+        if (
+          Math.hypot(position[v] - at[0], position[v + 1] - at[1], position[v + 2] - at[2]) > width
+        )
+          continue;
+      } else if (Math.abs(heldO[i]) > width) continue;
       keep.push(i);
       if (runZone[i] === BandZone.Left || runZone[i] === BandZone.Right) counts[runZone[i] - 1]++;
     }
@@ -1833,8 +1840,8 @@ function classify(
   if (!found || !backward) return found;
   return {
     ...found,
-    result: (cap: number) => {
-      const band = found.result(cap);
+    result: (cap: number, widthEdge?: EdgeCurve) => {
+      const band = found.result(cap, widthEdge);
       return band && mirrored(band);
     },
   };
@@ -1860,12 +1867,13 @@ export function buildBand(
   width: number,
   noise: number,
   known?: BandClassification | null,
+  widthEdge?: EdgeCurve,
 ): EdgeBand | null {
   const found =
     (known && width <= known.gathered
       ? known
       : classify(mesh, topology, kind, points, width, noise)) ?? known;
-  return found?.result(width) ?? null;
+  return found?.result(width, widthEdge) ?? null;
 }
 
 /**

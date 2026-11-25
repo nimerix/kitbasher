@@ -6,7 +6,7 @@ import { cloneRefineMesh } from '../../src/core/refine-mesh';
 import { planeOf } from '../../src/core/refine-sketch';
 import type { Vec3 } from '../../src/core/types';
 import { chainPieces, edgeLoops, modelOf, pointOn } from '../helpers/refine';
-import { extrudedProfile, softSlot } from '../helpers/soft-edges';
+import { extrudedProfile, slottedPlate } from '../helpers/soft-edges';
 
 type Model = ReturnType<typeof modelOf>;
 const scan = { step: 0.06, ripple: 0.01, noise: 0.006 };
@@ -81,10 +81,10 @@ function slotGuide(model: Model, settings: Partial<EdgeInput>): EdgeInput {
   const plane = planeOf('plane', 'Plane 1', [0, 1, 0], [0, 1, 0], [1, 0, 0])!;
   return {
     segments: [
-      { kind: 'line', points: [p(-1.5, -1), p(1.5, -1)] },
-      { kind: 'arc', points: [p(1.5, -1), p(2.5, 0), p(1.5, 1)] },
-      { kind: 'line', points: [p(1.5, 1), p(-1.5, 1)] },
-      { kind: 'arc', points: [p(-1.5, 1), p(-2.5, 0), p(-1.5, -1)] },
+      { kind: 'line', points: [p(-1.5, -0.35), p(1.5, -0.35)] },
+      { kind: 'arc', points: [p(1.5, -0.35), p(1.85, 0), p(1.5, 0.35)] },
+      { kind: 'line', points: [p(1.5, 0.35), p(-1.5, 0.35)] },
+      { kind: 'arc', points: [p(-1.5, 0.35), p(-1.85, 0), p(-1.5, -0.35)] },
     ],
     joints: ['smooth', 'smooth', 'smooth', 'smooth'],
     closed: true,
@@ -103,12 +103,12 @@ function slotGuide(model: Model, settings: Partial<EdgeInput>): EdgeInput {
 function offSlotRim(p: number[]) {
   const [x, y, z] = p;
   const ax = Math.abs(x);
-  const flat = ax <= 1.5 ? Math.abs(Math.abs(z) - 1) : Math.abs(Math.hypot(ax - 1.5, z) - 1);
+  const flat = ax <= 1.5 ? Math.abs(Math.abs(z) - 0.35) : Math.abs(Math.hypot(ax - 1.5, z) - 0.35);
   return Math.hypot(flat, y - 1);
 }
 
 describe('a guide placed at the corner of a slot on a sketch plane', () => {
-  const model = modelOf(softSlot(0.15, scan));
+  const model = modelOf(slottedPlate(0.35, 0.15, { ...scan, step: 0.035 }));
 
   for (const wallAngle of [90, null])
     it(`cuts the edge on the guide in one piece at wall angle ${wallAngle ?? 'Automatic'}`, () => {
@@ -124,20 +124,17 @@ describe('a guide placed at the corner of a slot on a sketch plane', () => {
       ]);
       expect(edgeLoops(solved.result.cut!.edges, solved.chain)).toEqual([solved.chain.length]);
       expect(worst).toBeLessThan(0.002);
-      // The top within the band is flat: every vertex of it inside the rim the solve moved.
-      const inset = (p: number[]) => {
-        const ax = Math.abs(p[0]);
-        return ax <= 1.5 ? 1 - Math.abs(p[2]) : 1 - Math.hypot(ax - 1.5, p[2]);
-      };
-      const tops: number[][] = [];
-      for (let v = 0; v < solved.out.weldedCount; v++) {
-        const p = [0, 1, 2].map((a) => solved.out.position[v * 3 + a]);
-        const q = [0, 1, 2].map((a) => model.mesh.position[v * 3 + a]);
-        const moved = Math.hypot(p[0] - q[0], p[1] - q[1], p[2] - q[2]);
-        if (q[1] > 0.9 && inset(q) > 0 && inset(q) < 0.25) tops.push([moved, Math.abs(p[1] - 1)]);
+      // The unrounded top starts one fillet radius outside the slot wall.
+      const tops: number[] = [];
+      const members = new Set(solved.solve.bands.flatMap((b) => [...b.vertices]));
+      for (const v of members) {
+        const [x, y, z] = model.mesh.position.subarray(v * 3, v * 3 + 3);
+        const radius = Math.hypot(Math.max(0, Math.abs(x) - 1.5), z);
+        if (y > 0.95 && radius >= 0.35 + 0.15)
+          tops.push(Math.abs(solved.out.position[v * 3 + 1] - 1));
       }
       expect(tops.length).toBeGreaterThan(100);
-      const top = Math.max(...tops.map((t) => t[1]));
+      const top = Math.max(...tops);
       expect(top).toBeLessThan(0.002);
     });
 });
