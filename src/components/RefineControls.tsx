@@ -1076,7 +1076,8 @@ export function RefineControls() {
         </Section>
       )}
       <p className="anchor-help refine-counts" role="status">
-        {view.failure ?? counts}
+        {counts}
+        {view.failure && <span className="refine-refusal">{view.failure}</span>}
       </p>
       {view.folds ? (
         <p className="warp-warning" role="status">
