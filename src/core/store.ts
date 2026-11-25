@@ -4119,6 +4119,10 @@ export const useEditor = create<EditorState>((set, get) => ({
     const lock = refine.features.find((f) => f.id === picking.lock);
     if (lock?.state === 'pending' && lock.feature.type === 'edge') {
       const input = guideOnPlane(refine, lock.feature.input, plane);
+      if (!input) {
+        set({ refine: { ...refine, picking: null } });
+        return get().notify(conflictNotice, 'info');
+      }
       commitRefine({
         planes,
         picking: null,
@@ -4134,11 +4138,20 @@ export const useEditor = create<EditorState>((set, get) => ({
     refineDrag = null;
     const plane = id === null ? null : refine.planes.find((p) => p.id === id);
     if (plane === undefined) return;
-    const features = updateSelected(refine, (proposal) =>
-      proposal.type === 'edge'
-        ? { type: 'edge', input: guideOnPlane(refine, proposal.input, plane) }
-        : null,
-    );
+    let conflict = false;
+    let removed = false;
+    const features = updateSelected(refine, (proposal) => {
+      if (proposal.type !== 'edge') return null;
+      const input = guideOnPlane(refine, proposal.input, plane);
+      if (!input) {
+        conflict = true;
+        return null;
+      }
+      if (!plane && proposal.input.constraints?.length) removed = true;
+      return { type: 'edge', input };
+    });
+    if (conflict) return get().notify(conflictNotice, 'info');
+    if (removed) get().notify(removedConstraintsNotice, 'info');
     if (features === refine.features) {
       set({ refine: { ...refine, edge: { ...refine.edge, plane: id } } });
       return;
@@ -4152,6 +4165,9 @@ export const useEditor = create<EditorState>((set, get) => ({
     const plane = id === null ? null : refine.planes.find((p) => p.id === id);
     if (plane === undefined) return;
     const input = guideOnPlane(refine, feature.feature.input, plane);
+    if (!input) return get().notify(conflictNotice, 'info');
+    if (!plane && feature.feature.input.constraints?.length)
+      get().notify(removedConstraintsNotice, 'info');
     commitRefine({
       features: withProposal(refine, featureId, { type: 'edge', input }),
       chosenPoint: refine.chosenPoint,
@@ -7162,6 +7178,7 @@ const noEdgeNotice =
   'No edge found under this guide. Move it onto the rounded edge or change Width.';
 const longGuideNotice = 'This guide is too long for this mesh. Try a shorter guide.';
 const samePointsNotice = 'Pick two different points for the line.';
+const removedConstraintsNotice = 'Removing the sketch plane removed its guide constraints.';
 const conflictNotice = "This conflicts with the guide's other constraints. Nothing was changed.";
 const collinearNotice = 'These points are in a line. Pick three points that make a triangle.';
 const curvedFaceNotice = 'This surface is not flat here. Click a flat face, or pick 3 points.';
@@ -7283,6 +7300,7 @@ function guideOnPlane(refine: RefineSession, input: EdgeInput, plane: SketchPlan
     const { plane: _, constraints: __, ...rest } = input;
     return rest;
   }
+  let conflict = false;
   const moved = new Map<GuidePoint, GuidePoint>();
   const segments = input.segments.map((s) => ({
     ...s,
@@ -7290,12 +7308,18 @@ function guideOnPlane(refine: RefineSession, input: EdgeInput, plane: SketchPlan
       const same = [...moved.keys()].find((q) => samePoint(q, p));
       if (same) return moved.get(same)!;
       let point = onPlane(refine, plane, p);
+      if (
+        p.lock?.kind === 'fixed' &&
+        Math.hypot(...point.position.map((x, i) => x - p.position[i])) > 1e-6
+      )
+        conflict = true;
       if (p.lock?.kind === 'line') {
         const { direction: d, origin: o } = p.lock;
         const lock = lineThrough(
           ontoPlane(plane, o),
           ontoPlane(plane, [o[0] + d[0], o[1] + d[1], o[2] + d[2]]),
         );
+        if (!lock) conflict = true;
         const { lock: _, ...bare } = point;
         point = lock
           ? { ...bare, lock, position: heldPoint(lock, plane, point.position, point.position) }
@@ -7305,13 +7329,11 @@ function guideOnPlane(refine: RefineSession, input: EdgeInput, plane: SketchPlan
       return point;
     }),
   }));
+  if (conflict) return null;
   const placed = { ...input, segments, plane };
   if (!input.constraints?.length) return placed;
-  // On a new plane the constraints hold again, or the guide keeps its points and loses them.
   const solved = constrained(refine, placed, {});
-  if (solved) return { ...placed, segments: solved };
-  const { constraints: _, ...rest } = placed;
-  return rest;
+  return solved ? { ...placed, segments: solved } : null;
 }
 
 /**
