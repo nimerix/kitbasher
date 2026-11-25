@@ -980,6 +980,51 @@ export function softSlot(fillet: number, options?: SoftOptions) {
   return extrudedOutline(outline, 1, fillet, options);
 }
 
+/** A plate with a through-slot. Sweep its closed cross-section around the slot perimeter. */
+export function slottedPlate(radius: number, fillet: number, options?: SoftOptions) {
+  const surface = new Surface(options);
+  const { step } = surface.options;
+  const outline = new Path(true);
+  outline.line([-1.5, -radius], [1.5, -radius]);
+  outline.arc([1.5, 0], radius, -Math.PI / 2, Math.PI);
+  outline.line([1.5, radius], [-1.5, radius]);
+  outline.arc([-1.5, 0], radius, Math.PI / 2, Math.PI);
+  const profile = new Path(true);
+  profile.line([0, 0], [0, 1 - fillet]);
+  profile.arc([fillet, 1 - fillet], fillet, Math.PI, -Math.PI / 2);
+  profile.line([fillet, 1], [1, 1]);
+  profile.line([1, 1], [1, 0]);
+  profile.line([1, 0], [0, 0]);
+  const columns = Math.ceil(outline.length / step);
+  const rings: number[][] = [];
+  for (const segment of profile.segments) {
+    const rows = Math.ceil(segment.length / step);
+    for (let i = 0; i < rows; i++) {
+      const {
+        point: [offset, height],
+        normal: n,
+      } = segment.at((segment.length * i) / rows);
+      rings.push(
+        Array.from({ length: columns }, (_, j) => {
+          const { point, normal } = outline.at(((j + surface.wobble()) * outline.length) / columns);
+          return surface.add(
+            [point[0] + normal[0] * offset, point[1] + normal[1] * offset, height],
+            [-normal[0] * n[0], -normal[1] * n[0], -n[1]],
+          );
+        }),
+      );
+    }
+  }
+  rings.forEach((ring, i) => {
+    const next = rings[(i + 1) % rings.length];
+    ring.forEach((a, j) => {
+      const k = (j + 1) % columns;
+      surface.quad(a, next[j], next[k], ring[k]);
+    });
+  });
+  return surface.geometry().rotateX(-Math.PI / 2);
+}
+
 /**
  * A prism over the polygon `corners` in (x, z), its upright edges rounded by `rounding` (over 0.5,
  * so the top's inner rim, 0.5 in from the wall, stays a simple polygon), extruded y 0..1 with the

@@ -4,6 +4,7 @@ import {
   BandZone,
   type EdgeBand,
   type GuidePoint,
+  localEdge,
   type BandClassification,
   buildBand,
   estimateBand,
@@ -94,6 +95,8 @@ export type EdgeRefusal = 'edge' | 'wall' | 'angle' | 'width';
 export type EdgeEnd = 'taper' | 'hold';
 export interface EdgeSolve {
   bands: EdgeBand[];
+  /** Surface side held to the sketch plane for each segment. */
+  planeSides?: number[];
   flanks: [Flank, Flank][];
   /** The solved edge, all segments joined. */
   curve: EdgeCurve;
@@ -1172,6 +1175,7 @@ function solvePart(
   noise: number,
   known: BandClassification | null,
   guide: GuideSettings,
+  carried?: EdgeCurve,
 ): Part | EdgeRefusal {
   const band = buildBand(
     mesh,
@@ -1181,6 +1185,14 @@ function solvePart(
     width,
     noise,
     known,
+    carried ??
+      (guide.position === 'corner'
+        ? drawnCurve(
+            kind,
+            points.flatMap((p) => p.position),
+            localEdge(mesh, topology, points),
+          )
+        : undefined),
   );
   if (!band) return 'edge';
   const edge = bandEdgeLength(mesh, topology, band);
@@ -1221,7 +1233,11 @@ function solvePart(
     surface: guide.legacy ? 0 : surfaceSide(band, flanks, guide.reference),
   };
   if (guide.legacy) return part;
-  return settle(part) ?? part;
+  const refusal = settle(part);
+  if (refusal) return refusal;
+  if (!carried && (guide.position === 'top' || guide.position === 'bottom'))
+    return solvePart(mesh, topology, kind, points, width, noise, known, guide, part.curve);
+  return part;
 }
 
 /** True when `sample` lies within tolerance of `flank`: `sameShare` within 3 local, mean within local. */
@@ -1679,6 +1695,10 @@ export function solveEdge(
       ];
   const solve: EdgeSolve = {
     bands: parts.map((part) => part.band),
+    planeSides:
+      guide.plane && (guide.position === 'corner' || guide.position === 'top')
+        ? parts.map((part) => part.surface)
+        : undefined,
     flanks: parts.map((part) => part.flanks),
     curve,
     sign: Int8Array.from(parts, (part) =>
@@ -2518,7 +2538,9 @@ export function applyEdge(
     let apart = 0;
     for (const side of [nearer, 1 - nearer]) {
       surface.target(side, p[0], p[1], p[2], target);
-      let share = weight;
+      const onPlane = solve.planeSides?.[owner] === side;
+      if (onPlane) solve.flanks[owner][side].project(p[0], p[1], p[2], target);
+      let share = onPlane && solve.curve.closed ? strength : weight;
       if (frame.corners.length) share *= cornerFade(solve, frame, owner, side, p);
       for (let a = 0; a < 3; a++) end[a] = p[a] + share * (target[a] - p[a]);
       apart =
