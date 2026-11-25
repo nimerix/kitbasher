@@ -178,6 +178,11 @@ export function solveGuide(shape: GuideShape, request: SolveRequest = {}) {
     const length = Math.hypot(d[0], d[1]);
     return length > 1e-12 ? { o, d: [d[0] / length, d[1] / length] } : null;
   });
+  const constrainedLines = new Set(
+    constraints.flatMap((c) =>
+      c.kind === 'align' ? [] : c.segments.filter((i) => shape.segments[i].kind === 'line'),
+    ),
+  );
   const residuals = (x: Float64Array) => {
     const p = coordinates(x);
     const out: number[] = [];
@@ -311,6 +316,11 @@ export function solveGuide(shape: GuideShape, request: SolveRequest = {}) {
   }
   if (r.length && !solved()) return null;
   const solvedAt = coordinates(x);
+  for (const i of constrainedLines) {
+    const a = solvedAt[ids[i][0]],
+      b = solvedAt[ids[i].at(-1)!];
+    if (Math.hypot(a[0] - b[0], a[1] - b[1]) <= constraintTolerance) return null;
+  }
   return points.map((p, k): Vec3 =>
     slot[k] < 0 ? p.position : planePoint(plane, solvedAt[k][0], solvedAt[k][1]),
   );
