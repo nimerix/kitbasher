@@ -3,7 +3,8 @@
 Click **Google Drive** in the header or **File → Google Drive**, connect your Google
 account, then choose **Save this scene to Drive**. Kitbasher creates one ordinary
 `.kitbash` file in My Drive and updates that file as you work. Renaming the assembly
-also renames its Drive file. **Saved to Drive** means the latest edited revision has
+renames its Drive file without uploading the scene again, and opening a Drive scene uses
+its Drive name. **Saved to Drive** means the latest edited revision has
 finished uploading. **File → Download scene copy** remains available, and the file
 in Drive can also be downloaded and opened as a normal Kitbasher scene.
 
