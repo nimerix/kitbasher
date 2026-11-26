@@ -21,6 +21,32 @@ export interface Release {
 export const releases: Release[] = [
   {
     date: '2026-11-25',
+    title: 'Groups and range selection',
+    changes: [
+      {
+        kind: 'new',
+        text: 'Group parts with Ctrl/⌘ + G and ungroup them with Ctrl/⌘ + Shift + G, or from the context menu. A group shows as a folder in the Parts panel, and clicking any of its parts in the viewport selects the whole group.',
+        guide: 'parts',
+      },
+      {
+        kind: 'new',
+        text: 'Shift + click in the Parts panel selects every part between the last one you clicked and this one. Ctrl or ⌘ + click still adds or removes one part.',
+        guide: 'parts',
+      },
+      {
+        kind: 'improved',
+        text: 'The eye on a row of a larger selection hides or shows every selected part.',
+        guide: 'parts',
+      },
+      {
+        kind: 'improved',
+        text: 'The view menu names the projection it switches to: Orthographic view or Perspective view.',
+        guide: 'navigation',
+      },
+    ],
+  },
+  {
+    date: '2026-11-25',
     title: 'Rename Drive scenes in place',
     changes: [
       {

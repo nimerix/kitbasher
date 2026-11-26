@@ -65,8 +65,10 @@ for an empty workbench or to reload the sample.
 1. Drop STL, OBJ, GLB, embedded GLTF, or 3MF files into the editor. Source units
    and up axis can be overridden. Automatic mode uses meters / Y up for glTF,
    millimeters / Z up for STL and OBJ, and declared 3MF units / Z up.
-2. Select parts in the viewport or the searchable part tree. Shift-click selects
-   several parts. Move, rotate, and scale using gizmos or numeric fields. The
+2. Select parts in the viewport or the searchable part tree. Ctrl/⌘-click selects
+   several parts, as does Shift-click in the viewport; Shift-click in the part tree
+   selects a range. **Ctrl/⌘ + G** groups the selection, and clicking a grouped part
+   in the viewport selects its whole group. Move, rotate, and scale using gizmos or numeric fields. The
    inspector’s **Move** and **Rotate** controls also offer X/Y/Z −/+ buttons for
    precise adjustments, including whole selections. Enter a **Step** in millimeters
    or degrees; **Snap dragging** uses that same increment for the handles. The
@@ -692,6 +694,7 @@ During contact painting, undo removes the last brush stroke before scene changes
 | Deselect all                   | `Ctrl/⌘ + Shift + A`; `Esc` in Select mode      |
 | Copy / cut / paste components  | `Ctrl/⌘ + C` / `X` / `V`                        |
 | Duplicate selected             | `Ctrl/⌘ + D`                                    |
+| Group / ungroup                | `Ctrl/⌘ + G` / `Ctrl/⌘ + Shift + G`             |
 | Rename one component           | `F2`                                            |
 | Delete unlocked selection      | `Delete` / `Backspace`                          |
 | Undo / redo                    | `Ctrl/⌘ + Z` / `Ctrl/⌘ + Shift + Z`; `Ctrl + Y` |

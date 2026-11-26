@@ -214,7 +214,7 @@ export const startGuides: DocArticle[] = [
         title: 'Parts, Joints, and Constraints',
         image: referenceImages.partsControls,
         paragraphs: [
-          'The left panel’s Parts tab lists individual mesh objects under the assembly name. Search by name, select from the list, and use the eye and lock controls to manage each object. Triangle and part totals help explain the scene’s complexity.',
+          'The left panel’s Parts tab lists individual mesh objects under the assembly name, with grouped parts in a folder for their group. Search by name, select from the list, and use the eye and lock controls to manage each object. Triangle and part totals help explain the scene’s complexity.',
           'Joints lists parent-to-child connections and lets you select their child or remove the relationship. Constraints lists saved plane relationships with their editing and suppression controls. The search field follows the active tab.',
         ],
       },
@@ -352,7 +352,7 @@ export const startGuides: DocArticle[] = [
         image: referenceImages.viewMenu,
         paragraphs: [
           'Press F to frame the selection and Home to frame all currently relevant parts. With isolation active, Frame all frames the isolated view. Double-clicking a part in the Parts panel also requests a focus.',
-          'Press 1 for Front, 3 for Right, and 7 for Top. Press 5 to switch between perspective and orthographic projection. Orthographic views are useful for checking apparent offsets without perspective foreshortening; orbit afterward to confirm depth and clearance.',
+          'Press 1 for Front, 3 for Right, and 7 for Top. Press 5, or choose Orthographic view or Perspective view in the view menu, to switch between perspective and orthographic projection. Orthographic views are useful for checking apparent offsets without perspective foreshortening; orbit afterward to confirm depth and clearance.',
           'Zoom and panning do not edit geometry. Tune wheel speed, smoothing, and direction in Preferences when the default movement feels too fast for a small interface.',
         ],
       },
@@ -410,8 +410,8 @@ export const startGuides: DocArticle[] = [
         id: 'selection',
         title: 'Select exactly what you need',
         paragraphs: [
-          'Click a visible component in the viewport or its row in the Parts panel. Hold Shift, Ctrl, or ⌘ while clicking to add or remove parts from a selection. Search parts by name to reach an internal or obscured component without picking through other surfaces.',
-          'Select All includes hidden and locked components. Check the resulting selection before an operation; move, cut, and delete still respect locks. A multiple selection acts together for supported transforms, but it does not create a persistent named folder or a new mesh object.',
+          'Click a visible component in the viewport or its row in the Parts panel. Hold Ctrl or ⌘ while clicking to add or remove parts from a selection; in the viewport, Shift does the same. In the Parts panel, Shift + click selects every part listed between the part you clicked last and this one. Search parts by name to reach an internal or obscured component without picking through other surfaces.',
+          'Select All includes hidden and locked components. Check the resulting selection before an operation; move, cut, and delete still respect locks. A multiple selection acts together for supported transforms, but it does not create a new mesh object. To keep parts together, group them.',
         ],
         table: {
           headers: ['Action', 'Default shortcut'],
@@ -421,16 +421,27 @@ export const startGuides: DocArticle[] = [
             ['Find a part', 'Ctrl/⌘ + F'],
             ['Rename one component', 'F2'],
             ['Duplicate selected', 'Ctrl/⌘ + D'],
+            ['Group selected', 'Ctrl/⌘ + G'],
+            ['Ungroup', 'Ctrl/⌘ + Shift + G'],
             ['Delete unlocked parts', 'Delete or Backspace'],
           ],
         },
+      },
+      {
+        id: 'groups',
+        title: 'Group parts that belong together',
+        paragraphs: [
+          'Select two or more parts and choose Group selected in the context menu, or press Ctrl/⌘ + G. The Parts panel shows the group as a folder with its parts under it. A part belongs to one group at a time; grouping it again moves it to the new group.',
+          'Clicking a grouped part in the viewport selects the whole group, so it moves, hides, and copies as one. Click a part’s row in the Parts panel to select only that part. Click the group’s row to select the group, use its arrow to fold it, and double-click its name to rename it.',
+          'Ungroup, or Ctrl/⌘ + Shift + G, ends the groups of the selected parts and leaves the parts where they are. Groups are saved with the scene. Copying a whole group pastes a new group; copying some of a group’s parts pastes them into the same group.',
+        ],
       },
       {
         id: 'visibility-and-locks',
         title: 'Visibility and locks have different jobs',
         image: referenceImages.partsControls,
         paragraphs: [
-          'Use the eye control beside a part to hide or show it. Visibility belongs to the scene and matters when exporting visible parts. Use the lock control to protect a stationary reference or a component whose placement is already established.',
+          'Use the eye control beside a part to hide or show it. On a row that is part of a larger selection, the eye hides or shows every selected part, and a group’s eye hides or shows the whole group. Visibility belongs to the scene and matters when exporting visible parts. Use the lock control to protect a stationary reference or a component whose placement is already established.',
           'A hidden component still exists in the scene. A locked component can still be selected for inspection and unlocking. Temporary isolation is useful when you only want a cleaner view; it leaves the saved visibility unchanged.',
         ],
       },
@@ -461,7 +472,7 @@ export const startGuides: DocArticle[] = [
         title: 'Context actions and permanent combinations',
         image: referenceImages.contextActions,
         paragraphs: [
-          'Right-click a component in the viewport or Parts panel for transform, clipboard, rename, delete, alignment, painting, joints, merge, inspection, isolation, visibility, and lock actions. Right-clicking a selected part preserves the whole selection. Shift + F10 or the Menu key also opens the context menu.',
+          'Right-click a component in the viewport or Parts panel for transform, clipboard, rename, delete, group, alignment, painting, joints, merge, inspection, isolation, visibility, and lock actions. Right-clicking a selected part preserves the whole selection. Shift + F10 or the Menu key also opens the context menu.',
           'Merge selected replaces selected parts and their joints with one mesh object. Combine meshes preserves the original triangles; Boolean union attempts to fuse overlapping solid volumes. Save a scene copy before merging if you want the separate assembly available later. Undo reverses the merge while that history remains available.',
         ],
       },
