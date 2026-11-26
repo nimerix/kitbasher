@@ -21,6 +21,17 @@ export interface Release {
 export const releases: Release[] = [
   {
     date: '2026-11-25',
+    title: 'Rename Drive scenes in place',
+    changes: [
+      {
+        kind: 'fixed',
+        text: 'Renaming an assembly saved to Google Drive now renames its Drive file without uploading the whole scene again. Opening a Drive scene uses its Drive name.',
+        guide: 'google-drive',
+      },
+    ],
+  },
+  {
+    date: '2026-11-25',
     title: 'Clean and sharpen scans',
     changes: [
       {

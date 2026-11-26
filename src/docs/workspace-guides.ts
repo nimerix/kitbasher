@@ -119,7 +119,7 @@ export const workspaceGuides: DocArticle[] = [
           'Click Google Drive in the header, or choose File → Google Drive.',
           'Choose Connect Google Drive and complete Google’s authorization flow.',
           'Choose Save this scene to Drive. Kitbasher creates an ordinary .kitbash file in My Drive.',
-          'Keep editing. Later changes update that file; renaming the assembly also renames it in Drive.',
+          'Keep editing. Later changes update that file; renaming the assembly renames it in Drive without uploading the scene again.',
           'Wait for Saved to Drive before closing the tab. Choose View in Drive to open the file’s Drive page.',
         ],
         paragraphs: [
