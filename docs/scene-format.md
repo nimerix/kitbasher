@@ -49,6 +49,8 @@ editor metadata, independent of mesh buffers, supported by all three scene reade
   ],
   "joints": [],
   "constraints": [],
+  // Only when parts are grouped.
+  "groups": [{ "id": "4f0c…", "name": "Upper body" }],
   // Only when the scene has lighting of its own.
   "lighting": {
     "exposure": 1,
@@ -180,6 +182,15 @@ light. Only its direction counts, so it cannot be zero. A point light's `positio
 position in millimeters; it does not dim with distance unless it has a `range`. With `camera`,
 both are in the camera's frame instead: x right, y up, +z toward the viewer.
 
+### Groups
+
+Groups are optional and only organize the editor. No export contains them, and a file without
+them opens with every part ungrouped.
+
+- `groups` lists each group's `id`, unique within `groups`, and its `name`. It is present only
+  when at least one part is grouped, and lists only groups that have parts.
+- `parts[].groupId` names the group the part belongs to. It is absent when the part has none.
+
 ## Validation
 
 A file can be damaged, or crafted, so the reader checks it before trusting it:
@@ -204,6 +215,8 @@ A file can be damaged, or crafted, so the reader checks it before trusting it:
   it is directional with a zero position, and only the first 8 valid lights are kept. Its other
   fields fall back to the name `Light` or `Point`, `#ffffff`, intensity 1, range 0, enabled,
   without shadows, and not following the camera. Unknown fields are dropped.
+- Groups are repaired rather than refused. A group whose `id` or `name` is not a string, or
+  whose `id` is empty or repeated, is dropped, and so is a `groupId` that names no group.
 - A file with a higher version number asks for a newer version of Kitbasher.
 
 Blocks carry no checksum. Damage that still unpacks to finite values in range opens as a
