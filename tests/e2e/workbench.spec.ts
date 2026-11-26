@@ -111,7 +111,7 @@ test('imports an STL, combines objects, and restores the merge with undo', async
   await page.getByRole('dialog').getByRole('button', { name: 'Import parts', exact: true }).click();
   await expect(page.getByText('Imported 1 part', { exact: true })).toBeVisible();
   await expect(page.locator('.part-row')).toHaveCount(16);
-  await page.locator('.part-select[title="Right arm"]').click({ modifiers: ['Shift'] });
+  await page.locator('.part-select[title="Right arm"]').click({ modifiers: ['ControlOrMeta'] });
   await page.getByRole('button', { name: 'Merge selected', exact: true }).click();
   await page.getByRole('button', { name: 'Merge parts', exact: true }).click();
   await expect(page.getByText('2 parts combined into one mesh')).toBeVisible();

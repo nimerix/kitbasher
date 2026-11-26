@@ -223,7 +223,7 @@ test('limits analysis to selected visible parts and handles insufficient selecti
   await expect(page.locator('.inspection-status')).toContainText(
     'Select at least two visible parts',
   );
-  await page.locator('.part-select[title="Target block"]').click({ modifiers: ['Shift'] });
+  await page.locator('.part-select[title="Target block"]').click({ modifiers: ['ControlOrMeta'] });
   await ready(page);
   await expect(page.locator('.inspection-status')).toContainText('1 pair checked');
   await expect(page.locator('.inspection-status')).toContainText('1 overlapping pair');
@@ -266,7 +266,7 @@ test('reuses completed work across scope, selection, visibility, and enable togg
     await ready(page);
   };
 
-  await page.locator('.part-select[title="Target block"]').click({ modifiers: ['Shift'] });
+  await page.locator('.part-select[title="Target block"]').click({ modifiers: ['ControlOrMeta'] });
   await page.getByRole('combobox', { name: 'Inspection scope' }).selectOption('selected');
   await noNewWork();
   await expect(page.locator('.inspection-status')).toContainText('1 pair checked');
@@ -274,7 +274,7 @@ test('reuses completed work across scope, selection, visibility, and enable togg
 
   await page.locator('.part-select[title="Moving block"]').click();
   await expect(page.locator('.inspection-status')).toContainText('Select at least two');
-  await page.locator('.part-select[title="Distant block"]').click({ modifiers: ['Shift'] });
+  await page.locator('.part-select[title="Distant block"]').click({ modifiers: ['ControlOrMeta'] });
   await noNewWork();
   await expect(page.locator('.inspection-status')).toContainText('0 overlapping pairs');
   expect(

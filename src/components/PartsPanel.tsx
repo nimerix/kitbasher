@@ -1,4 +1,5 @@
-import { useMemo, useState } from 'react';
+import { useMemo, useRef, useState } from 'react';
+import type { MouseEvent } from 'react';
 import {
   ArrowDownToLine,
   Box,
@@ -21,6 +22,7 @@ import {
 import { useEditor } from '../core/store';
 import { referencePlanes } from '../core/references';
 import { triangleCount } from '../core/geometry';
+import { selectionRange } from '../core/part-tree';
 import { distinctColors, swatchBackground, swatchColors } from '../core/appearance';
 import { IconButton } from './ui';
 import { ConstraintList } from './ConstraintList';
@@ -37,6 +39,28 @@ export function PartsPanel({ onClose }: { onClose: () => void }) {
     [query, setQuery] = useState(''),
     [expanded, setExpanded] = useState(true);
   const filtered = scene.parts.filter((p) => p.name.toLowerCase().includes(query.toLowerCase()));
+  // Where Shift+click ranges from: the last part clicked here, or else the last one selected.
+  const anchor = useRef<string | null>(null);
+  const choose = (event: MouseEvent, id: string) => {
+    const state = useEditor.getState();
+    if (event.shiftKey) {
+      const from =
+        anchor.current && state.selected.includes(anchor.current)
+          ? anchor.current
+          : state.selected.at(-1);
+      anchor.current = from ?? id;
+      state.selectParts(
+        selectionRange(
+          filtered.map((part) => part.id),
+          from,
+          [id],
+        ),
+      );
+      return;
+    }
+    anchor.current = id;
+    state.select(id, event.metaKey || event.ctrlKey);
+  };
   const distinct = useMemo(() => distinctColors(scene.parts), [scene.parts]);
   const triangles = scene.parts.reduce((sum, p) => sum + triangleCount(p.geometry), 0);
   return (
@@ -103,7 +127,7 @@ export function PartsPanel({ onClose }: { onClose: () => void }) {
                     <button
                       className="part-select"
                       aria-haspopup="menu"
-                      onClick={(e) => select(part.id, e.shiftKey || e.metaKey || e.ctrlKey)}
+                      onClick={(e) => choose(e, part.id)}
                       onDoubleClick={() => useEditor.getState().focus()}
                       title={part.name}
                     >
