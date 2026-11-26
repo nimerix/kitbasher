@@ -432,7 +432,7 @@ describe('AC-6/7: persistent plane relationships', () => {
     expect(captureComponents(document, ['source']).constraints).toHaveLength(0);
     const copies = instantiateComponents(
       captureComponents(document, ['source', 'target']),
-      document.parts,
+      document,
     );
     expect(copies.constraints).toHaveLength(1);
     expect(copies.constraints[0].id).not.toBe('c');

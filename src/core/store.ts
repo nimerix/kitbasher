@@ -145,7 +145,8 @@ import {
   type SculptSession,
   type SculptStrokeCommit,
 } from './sculpt-session';
-import { captureComponents, instantiateComponents } from './clipboard';
+import { addedGroups, captureComponents, instantiateComponents } from './clipboard';
+import { groupParts, renameGroup, ungroupParts, withGroups } from './part-tree';
 import type { ComponentClipboard } from './clipboard';
 import { referencePlanes, resolvePart } from './references';
 import { bindTrianglePoint } from './warp-bind';
@@ -598,9 +599,15 @@ interface EditorState {
     all?: boolean;
   };
   measurement: SurfacePoint[];
-  select: (id: string | null, additive?: boolean) => void;
+  /** With `whole`, a part in a group brings the rest of its group along. */
+  select: (id: string | null, additive?: boolean, whole?: boolean) => void;
   /** Replaces the selection with these parts, the first being the primary one. */
   selectParts: (ids: string[]) => void;
+  /** Puts the selected parts in a new group. */
+  groupSelected: () => void;
+  /** Ends the groups of the selected parts. */
+  ungroupSelected: () => void;
+  renameGroup: (id: string, name: string) => void;
   selectAll: () => void;
   isolate: (ids: string[] | null) => void;
   /** Isolates the selection, or shows everything when it is already isolated. */
@@ -2244,23 +2251,43 @@ export const useEditor = create<EditorState>((set, get) => ({
   indexingMeshes: 0,
   focusRequest: { id: 0, all: true },
   measurement: [],
-  select: (id, additive = false) => {
-    if (afterReleasedSculpt(() => get().select(id, additive))) return;
-    set((state) => ({
-      selected: id
-        ? additive
-          ? state.selected.includes(id)
-            ? state.selected.filter((i) => i !== id)
-            : [...state.selected, id]
-          : [id]
-        : [],
-    }));
+  select: (id, additive = false, whole = false) => {
+    if (afterReleasedSculpt(() => get().select(id, additive, whole))) return;
+    set((state) => {
+      if (!id) return { selected: [] };
+      const ids = whole ? withGroups(state.scene, [id]) : [id];
+      if (!additive) return { selected: ids };
+      if (ids.every((i) => state.selected.includes(i)))
+        return { selected: state.selected.filter((i) => !ids.includes(i)) };
+      return { selected: [...state.selected, ...ids.filter((i) => !state.selected.includes(i))] };
+    });
   },
   selectParts: (ids) => {
     if (afterReleasedSculpt(() => get().selectParts(ids))) return;
     set((state) => {
       const known = new Set(state.scene.parts.map((part) => part.id));
       return { selected: [...new Set(ids)].filter((id) => known.has(id)) };
+    });
+  },
+  groupSelected: () => {
+    if (afterReleasedSculpt(() => get().groupSelected())) return;
+    set((state) => {
+      const grouped = groupParts(state.scene, state.selected);
+      return grouped ? changed(state, grouped.scene) : {};
+    });
+  },
+  ungroupSelected: () => {
+    if (afterReleasedSculpt(() => get().ungroupSelected())) return;
+    set((state) => {
+      const scene = ungroupParts(state.scene, state.selected);
+      return scene ? changed(state, scene) : {};
+    });
+  },
+  renameGroup: (id, name) => {
+    if (afterReleasedSculpt(() => get().renameGroup(id, name))) return;
+    set((state) => {
+      const scene = renameGroup(state.scene, id, name);
+      return scene ? changed(state, scene) : {};
     });
   },
   selectAll: () => set((state) => ({ selected: state.scene.parts.map((part) => part.id) })),
@@ -2339,13 +2366,14 @@ export const useEditor = create<EditorState>((set, get) => ({
   pasteClipboard: () => {
     const state = get();
     if (!state.clipboard?.parts.length) return;
-    const copies = instantiateComponents(state.clipboard, state.scene.parts);
+    const copies = instantiateComponents(state.clipboard, state.scene);
     set({
       ...changed(state, {
         ...state.scene,
         parts: [...state.scene.parts, ...copies.parts],
         joints: [...state.scene.joints, ...copies.joints],
         constraints: [...(state.scene.constraints ?? []), ...copies.constraints],
+        ...addedGroups(state.scene, copies.groups),
       }),
       selected: copies.parts.map((part) => part.id),
       ...alsoIsolated(state, copies.parts),
@@ -5345,13 +5373,14 @@ export const useEditor = create<EditorState>((set, get) => ({
     set((state) => {
       const clipboard = captureComponents(state.scene, state.selected);
       if (!clipboard.parts.length) return {};
-      const copies = instantiateComponents(clipboard, state.scene.parts);
+      const copies = instantiateComponents(clipboard, state.scene);
       return {
         ...changed(state, {
           ...state.scene,
           parts: [...state.scene.parts, ...copies.parts],
           joints: [...state.scene.joints, ...copies.joints],
           constraints: [...(state.scene.constraints ?? []), ...copies.constraints],
+          ...addedGroups(state.scene, copies.groups),
         }),
         selected: copies.parts.map((part) => part.id),
         ...alsoIsolated(state, copies.parts),

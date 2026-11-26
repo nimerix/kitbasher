@@ -5,6 +5,7 @@ import { hexColor } from './appearance';
 import { sanitizeLighting } from './lighting';
 import { meshCodecs, packedMesh, unpackMesh, validatePacked } from './mesh-pack';
 import { validatePlaneConstraints } from './plane-constraints';
+import { liveGroups } from './part-tree';
 import type {
   BinaryGeometry,
   BinarySceneHeader,
@@ -13,6 +14,7 @@ import type {
   Joint,
   PackedLayout,
   Part,
+  PartGroup,
   PlaneConstraint,
   RawSceneHeader,
   SceneDocument,
@@ -34,8 +36,9 @@ const unreadable = 'This file could not be read as a Kitbasher scene.';
 const incomplete =
   'This scene file is incomplete or damaged. It may not have finished downloading.';
 
-export const sceneMetadata = (scene: SceneDocument) =>
-  ({
+export const sceneMetadata = (scene: SceneDocument) => {
+  const groups = liveGroups(scene);
+  return {
     format: 'kitbasher',
     version: sectionVersion,
     units: 'mm',
@@ -43,7 +46,9 @@ export const sceneMetadata = (scene: SceneDocument) =>
     joints: scene.joints,
     constraints: scene.constraints ?? [],
     ...(scene.lighting ? { lighting: scene.lighting } : {}),
-  }) as const;
+    ...(groups.length ? { groups } : {}),
+  } as const;
+};
 
 export function blobParts(values: ArrayBufferView) {
   const parts: Uint8Array<ArrayBuffer>[] = [];
@@ -318,6 +323,18 @@ export function parseSceneDocument(
   ) {
     throw new Error('This is not a supported Kitbasher scene.');
   }
+  // Groups only organize the editor, so a bad one is dropped rather than refusing the scene.
+  const groups: PartGroup[] = [];
+  for (const group of Array.isArray(data.groups) ? data.groups : [])
+    if (
+      group &&
+      typeof group.id === 'string' &&
+      group.id &&
+      typeof group.name === 'string' &&
+      !groups.some((known) => known.id === group.id)
+    )
+      groups.push({ id: group.id, name: group.name });
+  const groupIds = new Set(groups.map((group) => group.id));
   const ids = new Set<string>();
   const parts = data.parts.map((p) => {
     if (
@@ -374,11 +391,12 @@ export function parseSceneDocument(
       }
     }
     ids.add(p.id);
-    const { displayColor, ...rest } = p;
+    const { displayColor, groupId, ...rest } = p;
     return {
       ...rest,
       // Editor-only, so a bad value is dropped rather than refusing the scene.
       ...(typeof displayColor === 'string' && hexColor.test(displayColor) ? { displayColor } : {}),
+      ...(typeof groupId === 'string' && groupIds.has(groupId) ? { groupId } : {}),
       source: typeof p.source === 'string' ? p.source : 'Scene',
       geometry: geometryOf(p.geometry),
     };
@@ -445,6 +463,8 @@ export function parseSceneDocument(
       ? { lighting: sanitizeLighting(data.lighting) }
       : {}),
   };
+  const live = liveGroups({ parts, groups });
+  if (live.length) scene.groups = live;
   validatePlaneConstraints(scene);
   return scene;
 }

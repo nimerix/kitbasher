@@ -1,6 +1,7 @@
 import { downloadScene } from './files';
 import { driveAutosave, useDrive } from './drive-sync';
 import { nextIsolation } from './isolation';
+import { canGroup, canUngroup } from './part-tree';
 import { matchKeyAction } from './keybindings';
 import type { KeyActionId, KeyInput } from './keybindings';
 import { primaryShortcutText, usePreferences } from './preferences';
@@ -191,6 +192,18 @@ export function editorCommands(context: CommandContext = {}) {
       idle && hasSelection,
       'duplicate',
     ),
+    group: command(
+      'Group selected',
+      state.groupSelected,
+      idle && canGroup(state.scene, state.selected),
+      'group',
+    ),
+    ungroup: command(
+      'Ungroup',
+      state.ungroupSelected,
+      idle && canUngroup(state.scene, state.selected),
+      'ungroup',
+    ),
     rename: command(
       'Rename component…',
       () => state.setModal('rename'),
@@ -368,6 +381,8 @@ const keyboardCommands = [
   'cut',
   'paste',
   'duplicate',
+  'group',
+  'ungroup',
   'rename',
   'new',
   'open',

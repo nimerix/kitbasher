@@ -82,6 +82,14 @@ export interface Part {
   pins?: Pin[];
   /** Viewport-only color. Saved with the scene; exports and merges use `color`. */
   displayColor?: string;
+  /** The group the part belongs to, one of the scene's `groups`. */
+  groupId?: string;
+}
+
+/** Parts that are selected together. A group's parts name it with their `groupId`. */
+export interface PartGroup {
+  id: string;
+  name: string;
 }
 
 /** What the viewport paints parts with: export colors, editor colors, or one color per part. */
@@ -183,6 +191,8 @@ export interface SceneDocument {
   constraints?: PlaneConstraint[];
   /** Absent until the user changes it; the viewport then uses their default lighting. */
   lighting?: SceneLighting;
+  /** Absent until parts are grouped. A group no part belongs to is left out when saving. */
+  groups?: PartGroup[];
 }
 
 export interface SurfacePoint {
@@ -297,6 +307,7 @@ interface SceneHeader<Version, Layout> {
   joints: Joint[];
   constraints: PlaneConstraint[];
   lighting?: SceneLighting;
+  groups?: PartGroup[];
   geometries: Layout[];
   bodyLength: number;
 }
@@ -315,6 +326,7 @@ export interface SceneFile {
   joints: Joint[];
   constraints?: PlaneConstraint[];
   lighting?: SceneLighting;
+  groups?: PartGroup[];
 }
 
 export interface ViewSettings {

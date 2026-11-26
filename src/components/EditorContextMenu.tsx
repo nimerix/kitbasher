@@ -10,6 +10,7 @@ import {
   EyeOff,
   Focus,
   GitMerge,
+  Group,
   Import,
   Layers2,
   Link2,
@@ -25,6 +26,7 @@ import {
   ScanLine,
   Scissors,
   Trash2,
+  Ungroup,
   UnlockKeyhole,
 } from 'lucide-react';
 import { contactBrush, activeBrush } from '../core/editor-brush';
@@ -49,6 +51,8 @@ const icons = {
   duplicate: Copy,
   rename: Pencil,
   delete: Trash2,
+  group: Group,
+  ungroup: Ungroup,
   move: Move3D,
   rotate: Rotate3D,
   scale: Scaling,
@@ -178,6 +182,7 @@ function OpenContextMenu({
     ? [
         ['cut', 'copy', 'paste', 'duplicate'],
         ['rename', 'delete'],
+        ['group', 'ungroup'],
         ['focus', 'pivot', 'align', 'paint', 'joint', 'merge', 'inspect'],
         ['isolate', 'isolateNearby'],
         ['hide', 'hideOthers', unlocked ? 'lock' : 'unlock', 'showAll'],
