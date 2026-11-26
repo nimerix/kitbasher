@@ -44,7 +44,7 @@ export const keyActions = {
   viewFront: { group: 'Camera', label: 'Front view', keys: ['1'] },
   viewRight: { group: 'Camera', label: 'Right view', keys: ['3'] },
   viewTop: { group: 'Camera', label: 'Top view', keys: ['7'] },
-  projection: { group: 'Camera', label: 'Toggle projection', keys: ['5'] },
+  projection: { group: 'Camera', label: 'Perspective / orthographic view', keys: ['5'] },
   undo: { group: 'Edit', label: 'Undo', keys: ['Mod+Z'] },
   redo: { group: 'Edit', label: 'Redo', keys: ['Mod+Shift+Z', 'Mod+Y'] },
   selectAll: { group: 'Edit', label: 'Select all components', keys: ['Mod+A'] },

@@ -61,9 +61,9 @@ export const referenceImages = {
     src: './images/reference/view-menu.webp',
     width: 760,
     height: 440,
-    alt: 'Perspective menu at the top-left of the viewport showing Isometric, Front, Right, Top, Back, Left, and Toggle projection.',
+    alt: 'Perspective menu at the top-left of the viewport showing Isometric, Front, Right, Top, Back, Left, and Orthographic view.',
     caption:
-      'Open Perspective or Orthographic above the viewport to choose a named view or toggle projection.',
+      'Open Perspective or Orthographic above the viewport to choose a named view or switch between perspective and orthographic.',
   },
   isolation: {
     src: './images/reference/isolation.webp',

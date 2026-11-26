@@ -653,7 +653,7 @@ function HelpDialog() {
     ['Pick pivot on model', `${key('pivot')} · click a surface`],
     ['Align / Joint / Measure', keys('align', 'joint', 'measure')],
     ['Front / Right / Top', keys('viewFront', 'viewRight', 'viewTop')],
-    ['Toggle projection', key('projection')],
+    ['Perspective / orthographic view', key('projection')],
     ['Undo / Redo', keys('undo', 'redo')],
     ['Save / Open', keys('save', 'open')],
     ['New assembly / Import', keys('new', 'import')],
