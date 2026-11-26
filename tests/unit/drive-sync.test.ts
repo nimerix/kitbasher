@@ -8,6 +8,8 @@ import { createSample } from '../../src/core/sample';
 
 const file = { id: 'cloud-1', name: 'Assembly.kitbash', version: '2' };
 const save = vi.fn();
+const rename = vi.fn();
+const md5Checksum = 'a'.repeat(32);
 let sync: DriveAutosave;
 let stop: () => void;
 const edit = (name: string) => useEditor.getState().renameScene(name);
@@ -26,6 +28,12 @@ beforeEach(() => {
   vi.stubGlobal('window', new EventTarget());
   vi.stubGlobal('navigator', { onLine: true });
   save.mockReset().mockResolvedValue(file);
+  rename.mockReset().mockImplementation(async (name: string) => ({
+    ...file,
+    name: `${name}.kitbash`,
+    version: '3',
+    md5Checksum,
+  }));
   useActivity.setState({ tasks: [], notifications: [] });
   useEditor.getState().setScene({ name: 'Assembly', parts: [], joints: [] });
   useDrive.setState({
@@ -36,7 +44,7 @@ beforeEach(() => {
     dialogOpen: false,
     conflict: null,
   });
-  sync = new DriveAutosave({ save });
+  sync = new DriveAutosave({ save, rename });
   stop = sync.start();
 });
 afterEach(() => {
@@ -225,6 +233,52 @@ describe('Drive autosave coordination', () => {
     edit('Renamed');
     await vi.advanceTimersByTimeAsync(1500);
     expect(save).toHaveBeenCalledTimes(1);
+  });
+
+  it('renames the Drive file without uploading when only the name changed', async () => {
+    save.mockResolvedValueOnce({ ...file, md5Checksum });
+    bound();
+    await vi.advanceTimersByTimeAsync(1500);
+    expect(save).toHaveBeenCalledTimes(1);
+    edit('Renamed');
+    await vi.advanceTimersByTimeAsync(1500);
+    expect(save).toHaveBeenCalledTimes(1);
+    expect(rename).toHaveBeenCalledTimes(1);
+    expect(rename.mock.calls[0][0]).toBe('Renamed');
+    expect(rename.mock.calls[0][1]).toMatchObject({ id: file.id, md5Checksum });
+    expect(useDrive.getState()).toMatchObject({
+      status: 'saved',
+      savedRevision: useEditor.getState().revision,
+    });
+    expect(useEditor.getState().driveFile).toEqual({ id: file.id, version: '3', md5Checksum });
+    edit('Renamed again');
+    await vi.advanceTimersByTimeAsync(1500);
+    expect(rename).toHaveBeenCalledTimes(2);
+    useEditor.getState().setLighting({ ...useEditor.getState().defaultLighting, exposure: 0.5 });
+    await vi.advanceTimersByTimeAsync(1500);
+    expect(save).toHaveBeenCalledTimes(2);
+    expect(save.mock.calls[1][0].name).toBe('Renamed again');
+  });
+
+  it('renames an opened scene without uploading it', async () => {
+    useEditor.setState({ driveFile: { id: file.id, version: '1', md5Checksum } });
+    sync.acceptOpenedScene();
+    edit('Renamed');
+    await vi.advanceTimersByTimeAsync(1500);
+    expect(rename).toHaveBeenCalledTimes(1);
+    expect(save).not.toHaveBeenCalled();
+  });
+
+  it('uploads the whole scene when the bound Drive content is not the one it uploaded', async () => {
+    save.mockResolvedValue({ ...file, md5Checksum });
+    bound();
+    await vi.advanceTimersByTimeAsync(1500);
+    // An overwrite after a conflict binds the other version, which needs this scene's content.
+    useEditor.setState({ driveFile: { id: file.id, version: '9', md5Checksum: 'b'.repeat(32) } });
+    edit('Renamed');
+    await vi.advanceTimersByTimeAsync(1500);
+    expect(rename).not.toHaveBeenCalled();
+    expect(save).toHaveBeenCalledTimes(2);
   });
 
   it('shows queued and measured upload progress without routine completion notifications', async () => {
