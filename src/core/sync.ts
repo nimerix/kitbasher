@@ -3,7 +3,15 @@ import { partMatrix } from './geometry';
 import { solvePlaneConstraints, validatePlaneConstraints } from './plane-constraints';
 import { sceneMetadata } from './scene-file';
 import { hardPinsSatisfied } from './pins';
-import type { Joint, Part, PlaneConstraint, SceneDocument, SceneLighting } from './types';
+import { liveGroups } from './part-tree';
+import type {
+  Joint,
+  Part,
+  PartGroup,
+  PlaneConstraint,
+  SceneDocument,
+  SceneLighting,
+} from './types';
 
 // Rules for one scene edited from several places at once: an agent's MCP server and the browser
 // tabs that share it. Changes combine field by field, so edits to different parts, or to different
@@ -16,10 +24,10 @@ export const sharedScene = (scene: SceneDocument) => ({
 });
 export type SharedScene = ReturnType<typeof sharedScene>;
 
-type Kind = 'parts' | 'joints' | 'constraints' | 'name' | 'lighting';
+type Kind = 'parts' | 'joints' | 'constraints' | 'name' | 'lighting' | 'groups';
 type Entity = { id: string } & Record<string, unknown>;
 type Lists = Record<Kind, Entity[]>;
-const kinds: Kind[] = ['parts', 'joints', 'constraints', 'name', 'lighting'];
+const kinds: Kind[] = ['parts', 'joints', 'constraints', 'name', 'lighting', 'groups'];
 
 /** Fields that only make sense together, such as a pose, change as one. */
 const fieldGroups: Record<Kind, string[][]> = {
@@ -34,6 +42,7 @@ const fieldGroups: Record<Kind, string[][]> = {
     ['locked'],
     ['geometry', 'source'],
     ['pins'],
+    ['groupId'],
   ],
   joints: [
     ['parentId', 'childId', 'parentAnchor', 'childAnchor'],
@@ -49,6 +58,7 @@ const fieldGroups: Record<Kind, string[][]> = {
   ],
   name: [['name']],
   lighting: [['exposure'], ['ambient'], ['hemisphere', 'sky', 'ground'], ['shadows'], ['lights']],
+  groups: [['name']],
 };
 
 const displayColorGroup = fieldGroups.parts.findIndex((keys) => keys.includes('displayColor'));
@@ -78,6 +88,7 @@ const lists = (scene: SceneDocument): Lists => ({
   constraints: (scene.constraints ?? []) as unknown as Entity[],
   name: [{ id: 'scene', name: scene.name }],
   lighting: scene.lighting ? [{ id: 'lighting', ...scene.lighting }] : [],
+  groups: (scene.groups ?? []) as unknown as Entity[],
 });
 
 /** Relationships to a part that is gone would make the scene invalid, so they go with it. */
@@ -90,9 +101,11 @@ function fromLists(source: Lists): SceneDocument {
     const { id: _, ...rest } = lit;
     lighting = rest as unknown as SceneLighting;
   }
+  const groups = liveGroups({ parts, groups: source.groups as unknown as PartGroup[] });
   return {
     name: String(source.name[0]?.name ?? 'Untitled assembly'),
     ...(lighting ? { lighting } : {}),
+    ...(groups.length ? { groups } : {}),
     parts,
     joints: (source.joints as unknown as Joint[]).filter(
       (joint) => ids.has(joint.parentId) && ids.has(joint.childId),
@@ -354,13 +367,15 @@ export function keepUnchanged(previous: SceneDocument, next: SceneDocument): Sce
     previous.lighting && next.lighting && same(previous.lighting, next.lighting)
       ? previous.lighting
       : next.lighting;
-  const { lighting: _, ...rest } = next;
+  const { lighting: _, groups: __, ...rest } = next;
+  const groups = reuse(previous.groups ?? [], next.groups ?? []);
   const scene: SceneDocument = {
     ...rest,
     parts: reuse(previous.parts, next.parts),
     joints: reuse(previous.joints, next.joints),
     constraints: reuse(previous.constraints ?? [], next.constraints ?? []),
     ...(lighting ? { lighting } : {}),
+    ...(groups.length ? { groups } : {}),
   };
   return reused && previous.name === next.name && previous.lighting === lighting ? previous : scene;
 }

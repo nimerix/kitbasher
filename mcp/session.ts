@@ -12,7 +12,7 @@ import { solveAlignment } from '../src/core/alignment';
 import { evaluateBoolean } from '../src/core/boolean';
 import type { ClipReport } from '../src/core/clipping';
 import type { BooleanOperation } from '../src/core/boolean';
-import { captureComponents, instantiateComponents } from '../src/core/clipboard';
+import { addedGroups, captureComponents, instantiateComponents } from '../src/core/clipboard';
 import { anchorError, isJointConnected } from '../src/core/constraints';
 import {
   export3mf,
@@ -724,7 +724,10 @@ export class Session {
         transform = step.clone().multiply(transform);
         const scene = editor().scene;
         const clipboard = { ...captureComponents(scene, sources), nextOffset: 0 };
-        const copies = instantiateComponents(clipboard, [...scene.parts, ...added]);
+        const copies = instantiateComponents(clipboard, {
+          parts: [...scene.parts, ...added],
+          groups: scene.groups,
+        });
         const ids = new Map<string, string>();
         const parts = copies.parts.map((part, i) => {
           const name = spec.names?.[added.length + i] ?? part.name;
@@ -770,6 +773,7 @@ export class Session {
           parts: [...scene.parts, ...parts],
           joints: [...scene.joints, ...joints],
           constraints: [...(scene.constraints ?? []), ...constraints],
+          ...addedGroups(scene, copies.groups),
         });
         added.push(...parts);
       }

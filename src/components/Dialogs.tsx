@@ -659,6 +659,7 @@ function HelpDialog() {
     ['New assembly / Import', keys('new', 'import')],
     ['Export', key('export')],
     ['Duplicate', key('duplicate')],
+    ['Group / Ungroup', keys('group', 'ungroup')],
     ['Delete unlocked parts', key('delete')],
     ['Finish / Cancel tool', keys('apply', 'cancel')],
     ['Exit camera tool', `${key('cancel')} (keeps picked pairs)`],

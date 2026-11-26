@@ -53,6 +53,8 @@ export const keyActions = {
   cut: { group: 'Edit', label: 'Cut components', keys: ['Mod+X'] },
   paste: { group: 'Edit', label: 'Paste components', keys: ['Mod+V'] },
   duplicate: { group: 'Edit', label: 'Duplicate selected', keys: ['Mod+D'] },
+  group: { group: 'Edit', label: 'Group selected', keys: ['Mod+G'] },
+  ungroup: { group: 'Edit', label: 'Ungroup', keys: ['Mod+Shift+G'] },
   rename: { group: 'Edit', label: 'Rename component', keys: ['F2'] },
   delete: { group: 'Edit', label: 'Delete unlocked parts', keys: ['Delete', 'Backspace'] },
   new: { group: 'File', label: 'New assembly', keys: ['Mod+N'] },

@@ -325,7 +325,10 @@ const PartMesh = memo(function PartMesh({
       const point = mesh.worldToLocal(event.point.clone());
       const normal = event.face?.normal?.clone() ?? new Vector3(0, 1, 0);
       state.pick({ partId: part.id, point: point.toArray(), normal: normal.toArray() });
-    } else state.select(part.id, event.shiftKey || event.metaKey || event.ctrlKey);
+    } else {
+      // A part in a group is chosen with its group, so the group moves as one.
+      state.select(part.id, event.shiftKey || event.metaKey || event.ctrlKey, true);
+    }
   };
   return (
     <>
@@ -348,9 +351,11 @@ const PartMesh = memo(function PartMesh({
           receiveShadow={!ghost}
           onContextMenu={(event) => {
             event.nativeEvent.preventDefault();
-            if (useEditor.getState().tool === 'sculpt') return;
+            const state = useEditor.getState();
+            if (state.tool === 'sculpt') return;
             event.stopPropagation();
-            useEditor.getState().openContextMenu({
+            if (!state.selected.includes(part.id)) state.select(part.id, false, true);
+            state.openContextMenu({
               x: event.nativeEvent.clientX,
               y: event.nativeEvent.clientY,
               partId: part.id,

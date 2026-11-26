@@ -86,7 +86,7 @@ describe('component clipboard and selection', () => {
     scene.parts[0].position[0] = 400;
     scene.parts[0].pivot![0] = 900;
     scene.joints[0].rotationLocks[0] = true;
-    const copies = instantiateComponents(clipboard, []);
+    const copies = instantiateComponents(clipboard, { parts: [] });
     expect(copies.parts[0].position).toEqual([12, 0, 0]);
     expect(copies.parts[0].pivot).toEqual([1, 2, 3]);
     expect(copies.joints[0].rotationLocks[0]).toBe(false);

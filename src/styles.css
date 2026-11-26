@@ -843,6 +843,44 @@ optgroup {
 .part-row.selected .part-actions button {
   color: #ad8c6f;
 }
+.group-toggle {
+  position: absolute;
+  left: 22px;
+  top: 50%;
+  translate: 0 -50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 20px;
+  color: #77808b;
+  border-radius: 3px;
+  z-index: 1;
+}
+.group-toggle:hover {
+  color: #d3d9e0;
+  background: #ffffff0a;
+}
+.group-row .part-select {
+  padding-left: 40px;
+}
+.group-row .tree-count {
+  margin-left: auto;
+}
+.group-name-input {
+  flex: 1;
+  min-width: 0;
+  height: 22px;
+  margin-left: 40px;
+  padding: 0 6px;
+  font-size: 10.5px;
+}
+.part-row.in-group .part-select {
+  padding-left: 38px;
+}
+.part-row.in-group .tree-branch {
+  left: 29px;
+}
 .reference-planes {
   padding: 8px 0 12px;
   border-top: 1px solid var(--border);
