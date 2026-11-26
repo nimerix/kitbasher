@@ -65,7 +65,8 @@ describe('key bindings', () => {
 
   it('keeps modifiers strict, so Shift and ⌘ variants never trigger plain tools', () => {
     expect(matchKeyAction(press('S', { shiftKey: true }), {})).toBeNull();
-    expect(matchKeyAction(press('g', { metaKey: true }), {})).toBeNull();
+    expect(matchKeyAction(press('r', { metaKey: true }), {})).toBeNull();
+    expect(matchKeyAction(press('g', { metaKey: true }), {})).toBe('group');
     expect(matchKeyAction(press('g', { altKey: true }), {})).toBeNull();
   });
 
