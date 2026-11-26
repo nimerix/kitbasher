@@ -118,57 +118,71 @@ export function PartsPanel({ onClose }: { onClose: () => void }) {
               <span className="tree-count">{scene.parts.length}</span>
             </button>
             {expanded
-              ? filtered.map((part) => (
-                  <div
-                    key={part.id}
-                    data-part-id={part.id}
-                    className={`part-row ${selected.includes(part.id) ? 'selected' : ''} ${!part.visible ? 'muted' : ''} ${isolated && !isolated.includes(part.id) ? 'outside-isolation' : ''}`}
-                  >
-                    <button
-                      className="part-select"
-                      aria-haspopup="menu"
-                      onClick={(e) => choose(e, part.id)}
-                      onDoubleClick={() => useEditor.getState().focus()}
-                      title={part.name}
+              ? filtered.map((part) => {
+                  const selectedRow = selected.length > 1 && selected.includes(part.id);
+                  return (
+                    <div
+                      key={part.id}
+                      data-part-id={part.id}
+                      className={`part-row ${selected.includes(part.id) ? 'selected' : ''} ${!part.visible ? 'muted' : ''} ${isolated && !isolated.includes(part.id) ? 'outside-isolation' : ''}`}
                     >
-                      <span className="tree-branch" />
-                      <Box size={14} />
-                      <span
-                        className="part-swatch"
-                        aria-hidden="true"
-                        style={{
-                          background: swatchBackground(
-                            swatchColors(part, view.partColors, distinct.get(part.id)),
-                          ),
-                        }}
-                      />
-                      <span>{part.name}</span>
-                      {scene.joints.some((j) => j.childId === part.id) ? (
-                        <Link2 className="part-joint-icon" size={11} />
-                      ) : null}
-                      {isolated?.includes(part.id) ? (
-                        <ScanEye className="part-isolated-icon" size={11} aria-label="Isolated" />
-                      ) : null}
-                    </button>
-                    <div className="part-actions">
                       <button
-                        title={part.visible ? 'Hide part' : 'Show part'}
-                        aria-label={`${part.visible ? 'Hide' : 'Show'} ${part.name}`}
-                        onClick={() => patchParts([part.id], { visible: !part.visible })}
+                        className="part-select"
+                        aria-haspopup="menu"
+                        onClick={(e) => choose(e, part.id)}
+                        onDoubleClick={() => useEditor.getState().focus()}
+                        title={part.name}
                       >
-                        {part.visible ? <Eye size={12} /> : <EyeOff size={12} />}
+                        <span className="tree-branch" />
+                        <Box size={14} />
+                        <span
+                          className="part-swatch"
+                          aria-hidden="true"
+                          style={{
+                            background: swatchBackground(
+                              swatchColors(part, view.partColors, distinct.get(part.id)),
+                            ),
+                          }}
+                        />
+                        <span>{part.name}</span>
+                        {scene.joints.some((j) => j.childId === part.id) ? (
+                          <Link2 className="part-joint-icon" size={11} />
+                        ) : null}
+                        {isolated?.includes(part.id) ? (
+                          <ScanEye className="part-isolated-icon" size={11} aria-label="Isolated" />
+                        ) : null}
                       </button>
-                      <button
-                        title={part.locked ? 'Unlock part' : 'Lock part'}
-                        aria-label={`${part.locked ? 'Unlock' : 'Lock'} ${part.name}`}
-                        className={part.locked ? 'always-visible' : ''}
-                        onClick={() => patchParts([part.id], { locked: !part.locked })}
-                      >
-                        {part.locked ? <LockKeyhole size={12} /> : <UnlockKeyhole size={12} />}
-                      </button>
+                      <div className="part-actions">
+                        <button
+                          title={
+                            selectedRow
+                              ? `${part.visible ? 'Hide' : 'Show'} ${selected.length} selected parts`
+                              : part.visible
+                                ? 'Hide part'
+                                : 'Show part'
+                          }
+                          aria-label={`${part.visible ? 'Hide' : 'Show'} ${part.name}${selectedRow ? ` and ${selected.length - 1} more selected` : ''}`}
+                          // On a row of a larger selection, the eye shows or hides the selection.
+                          onClick={() =>
+                            patchParts(selectedRow ? selected : [part.id], {
+                              visible: !part.visible,
+                            })
+                          }
+                        >
+                          {part.visible ? <Eye size={12} /> : <EyeOff size={12} />}
+                        </button>
+                        <button
+                          title={part.locked ? 'Unlock part' : 'Lock part'}
+                          aria-label={`${part.locked ? 'Unlock' : 'Lock'} ${part.name}`}
+                          className={part.locked ? 'always-visible' : ''}
+                          onClick={() => patchParts([part.id], { locked: !part.locked })}
+                        >
+                          {part.locked ? <LockKeyhole size={12} /> : <UnlockKeyhole size={12} />}
+                        </button>
+                      </div>
                     </div>
-                  </div>
-                ))
+                  );
+                })
               : null}
             {!filtered.length ? (
               <div className="panel-empty">
