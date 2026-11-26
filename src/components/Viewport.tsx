@@ -1341,7 +1341,8 @@ export function Viewport() {
                   setViewMenu(false);
                 }}
               >
-                Toggle projection {keys.projection ? <kbd>{keys.projection}</kbd> : null}
+                {view.projection === 'perspective' ? 'Orthographic view' : 'Perspective view'}{' '}
+                {keys.projection ? <kbd>{keys.projection}</kbd> : null}
               </button>
             </div>
           ) : null}
