@@ -599,6 +599,8 @@ interface EditorState {
   };
   measurement: SurfacePoint[];
   select: (id: string | null, additive?: boolean) => void;
+  /** Replaces the selection with these parts, the first being the primary one. */
+  selectParts: (ids: string[]) => void;
   selectAll: () => void;
   isolate: (ids: string[] | null) => void;
   /** Isolates the selection, or shows everything when it is already isolated. */
@@ -2253,6 +2255,13 @@ export const useEditor = create<EditorState>((set, get) => ({
           : [id]
         : [],
     }));
+  },
+  selectParts: (ids) => {
+    if (afterReleasedSculpt(() => get().selectParts(ids))) return;
+    set((state) => {
+      const known = new Set(state.scene.parts.map((part) => part.id));
+      return { selected: [...new Set(ids)].filter((id) => known.has(id)) };
+    });
   },
   selectAll: () => set((state) => ({ selected: state.scene.parts.map((part) => part.id) })),
   isolate: (ids) => set({ isolated: ids?.length ? ids : null }),

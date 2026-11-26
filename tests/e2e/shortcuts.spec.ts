@@ -152,7 +152,7 @@ for (const modifier of ['Control', 'Meta']) {
 test('copies and pastes a joined selection through OS shortcuts, then undoes/redoes it', async ({
   page,
 }) => {
-  await page.locator('.part-select[title="Target piece"]').click({ modifiers: ['Shift'] });
+  await page.locator('.part-select[title="Target piece"]').click({ modifiers: ['ControlOrMeta'] });
   const before = await editorState(page);
   await page.keyboard.press('Meta+c');
   expect((await editorState(page)).revision).toBe(before.revision);
@@ -175,7 +175,7 @@ test('copies and pastes a joined selection through OS shortcuts, then undoes/red
 test('cuts unlocked components, pastes in place, renames with F2, and preserves text editing in the dialog', async ({
   page,
 }) => {
-  await page.locator('.part-select[title="Fixed base"]').click({ modifiers: ['Shift'] });
+  await page.locator('.part-select[title="Fixed base"]').click({ modifiers: ['ControlOrMeta'] });
   await page.keyboard.press('Control+x');
   const cut = await editorState(page);
   expect(cut.parts.map((part: any) => part.id)).toEqual(['b', 'fixed']);
@@ -290,7 +290,7 @@ test('preserves multiselection under right-click and makes visibility and select
   page,
 }) => {
   const partA = page.locator('.part-select[title="Moving piece"]');
-  await page.locator('.part-select[title="Target piece"]').click({ modifiers: ['Shift'] });
+  await page.locator('.part-select[title="Target piece"]').click({ modifiers: ['ControlOrMeta'] });
   await partA.click({ button: 'right' });
   const menu = page.getByRole('menu', { name: 'Component actions' });
   await expect(menu).toBeVisible();

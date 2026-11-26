@@ -45,7 +45,7 @@ test.beforeEach(async ({ page }) => {
   await expect(page.locator('.document-title')).toContainText(fixture.name);
   await page.getByRole('button', { name: 'Toggle grid', exact: true }).click();
   await page.locator('.part-select[title="Moving piece"]').click();
-  await page.locator('.part-select[title="Target piece"]').click({ modifiers: ['Shift'] });
+  await page.locator('.part-select[title="Target piece"]').click({ modifiers: ['ControlOrMeta'] });
   await page.keyboard.press('1');
   await page.keyboard.press('5');
   await page.getByRole('button', { name: 'Align A', exact: true }).click();

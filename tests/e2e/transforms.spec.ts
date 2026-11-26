@@ -165,7 +165,7 @@ test('explains locked joints and selections, and offers precise group transforms
   ).toBeVisible();
   await expect(page.getByRole('button', { name: 'Rotate Y positive', exact: true })).toBeDisabled();
   await page.locator('.part-select[title="Left arm"]').click();
-  await page.locator('.part-select[title="Right arm"]').click({ modifiers: ['Shift'] });
+  await page.locator('.part-select[title="Right arm"]').click({ modifiers: ['ControlOrMeta'] });
   await expect(page.getByText('Groups use world axes and move together.')).toBeVisible();
   await expect(page.getByText('Pivot: selection center')).toBeVisible();
   const before = await state(page);

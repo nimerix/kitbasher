@@ -253,7 +253,7 @@ test('works in orthographic view with a group and cancels when clicking another 
     cube,
     { ...cube, id: 'second', name: 'Second cube', position: [50, 15, 0] },
   ]);
-  await page.locator('.part-select[title="Second cube"]').click({ modifiers: ['Shift'] });
+  await page.locator('.part-select[title="Second cube"]').click({ modifiers: ['ControlOrMeta'] });
   await page.keyboard.press('5');
   const before = await state(page);
   await page.mouse.move(pointer.x, pointer.y);
