@@ -7,6 +7,7 @@ const api = 'https://www.googleapis.com/drive/v3/files';
 const uploadApi = 'https://www.googleapis.com/upload/drive/v3/files';
 const fields = 'id,name,version,modifiedTime,trashed,appProperties,md5Checksum';
 const chunkSize = 8 * 1024 * 1024;
+const nameKey = 'kitbasherName';
 
 export interface DriveFile {
   id: string;
@@ -33,6 +34,21 @@ export function driveBinding(file: DriveFile): DriveFileBinding {
     version: file.version,
     ...(file.md5Checksum ? { md5Checksum: file.md5Checksum } : {}),
   };
+}
+
+const driveName = (name: string) => `${safeFilename(name)}.kitbash`;
+
+/** Keeps the exact name when Drive's 124-byte limit per app property allows, else clears it. */
+function nameProperty(name: string, existing: boolean): Record<string, string | null> {
+  if (new TextEncoder().encode(nameKey + name).length <= 124) return { [nameKey]: name };
+  return existing ? { [nameKey]: null } : {};
+}
+
+/** A rename only changes Drive metadata, so the Drive name outranks the name inside the file. */
+export function driveSceneName(file: DriveFile, inner: string) {
+  for (const name of [file.appProperties?.[nameKey], inner])
+    if (name && driveName(name) === file.name) return name;
+  return file.name.replace(/\.kitbash$/i, '').trim() || inner;
 }
 
 function sameContent(a: { version: string | null; md5Checksum?: string }, b: DriveFile) {
@@ -211,7 +227,35 @@ export class GoogleDriveClient {
         'conflict',
       );
     }
-    return { scene, file: latest };
+    return { scene: { ...scene, name: driveSceneName(latest, scene.name) }, file: latest };
+  }
+
+  /** Renames the Drive file without uploading the scene again. */
+  async rename(name: string, binding: DriveFileBinding, signal: AbortSignal): Promise<DriveFile> {
+    const current = await this.metadata(binding.id, signal);
+    if (current.trashed)
+      throw new DriveError('This scene is in Google Drive trash. Restore it or save a new copy.');
+    if (!sameContent(binding, current)) throw new DriveConflict(current);
+    const response = await this.request(
+      `${api}/${encodeURIComponent(binding.id)}?fields=${fields}`,
+      {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json; charset=UTF-8' },
+        body: JSON.stringify({ name: driveName(name), appProperties: nameProperty(name, true) }),
+      },
+      signal,
+    );
+    const file = fileRecord(
+      await response.json().catch(() => {
+        throw new DriveError(
+          'Google Drive did not confirm the new name. Autosave will retry.',
+          'retryable',
+        );
+      }),
+    );
+    if (file.id !== binding.id)
+      throw new DriveError('Google Drive returned a different file. Saving has stopped.');
+    return file;
   }
 
   async save(
@@ -249,9 +293,13 @@ export class GoogleDriveClient {
     }
     const metadata = {
       ...(!current ? { id: binding.id } : {}),
-      name: `${safeFilename(scene.name)}.kitbash`,
+      name: driveName(scene.name),
       mimeType: 'application/octet-stream',
-      appProperties: { kitbasher: 'scene', kitbasherWrite: binding.pendingWriteId },
+      appProperties: {
+        kitbasher: 'scene',
+        kitbasherWrite: binding.pendingWriteId,
+        ...nameProperty(scene.name, !!current),
+      },
     };
     const response = await this.request(
       `${uploadApi}${current ? `/${encodeURIComponent(binding.id)}` : ''}?uploadType=resumable&fields=${fields}`,

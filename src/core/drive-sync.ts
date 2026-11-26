@@ -4,6 +4,7 @@ import { DriveError, endDriveSession, forgetDriveToken, restoreDriveSession } fr
 import { DriveConflict, driveBinding, googleDrive } from './google-drive';
 import { committedScene, liveSession, useEditor } from './store';
 import type { DriveFile, GoogleDriveClient } from './google-drive';
+import type { DriveFileBinding, SceneDocument } from './types';
 
 type DriveStatus =
   | 'disconnected'
@@ -47,6 +48,13 @@ export const driveStatusText = (status: DriveStatus) =>
     conflict: 'Drive file changed',
   })[status];
 
+/** Whether only the name changed, which Drive can apply without a new upload. */
+const renamedOnly = (before: SceneDocument, after: SceneDocument) =>
+  before.name !== after.name &&
+  (Object.keys({ ...before, ...after }) as (keyof SceneDocument)[]).every(
+    (key) => key === 'name' || before[key] === after[key],
+  );
+
 /** A single writer coalesces edits made during an upload into the next revision. */
 export class DriveAutosave {
   private timer: ReturnType<typeof setTimeout> | undefined;
@@ -59,8 +67,10 @@ export class DriveAutosave {
   private stopped = true;
   private paused = false;
   private activityId: string | undefined;
+  /** The scene whose content is in the bound Drive file, apart from its name. */
+  private uploaded: { scene: SceneDocument; binding: DriveFileBinding } | undefined;
 
-  constructor(private readonly client: Pick<GoogleDriveClient, 'save'> = googleDrive) {}
+  constructor(private readonly client: Pick<GoogleDriveClient, 'save' | 'rename'> = googleDrive) {}
 
   start() {
     if (liveSession) return () => {};
@@ -73,6 +83,7 @@ export class DriveAutosave {
       ) {
         this.cancel();
         this.failures = 0;
+        this.uploaded = undefined;
         useDrive.setState({
           savedRevision: -1,
           conflict: null,
@@ -218,6 +229,14 @@ export class DriveAutosave {
       this.generation === generation &&
       useEditor.getState().sceneEpoch === state.sceneEpoch &&
       useEditor.getState().driveFile?.id === binding.id;
+    const scene = committedScene(state);
+    const uploaded = this.uploaded;
+    const rename =
+      !!uploaded &&
+      !!binding.md5Checksum &&
+      uploaded.binding.id === binding.id &&
+      uploaded.binding.md5Checksum === binding.md5Checksum &&
+      renamedOnly(uploaded.scene, scene);
     const pending = { ...binding, pendingWriteId: binding.pendingWriteId ?? crypto.randomUUID() };
     useEditor.setState({ driveFile: pending });
     useDrive.setState({ status: 'saving', progress: 0, message: null });
@@ -228,29 +247,31 @@ export class DriveAutosave {
         notify: false,
       });
     this.activityId = taskId;
-    updateTask(taskId, { status: 'running', detail: 'Preparing scene for upload', progress: null });
+    updateTask(taskId, {
+      status: 'running',
+      detail: rename ? 'Renaming the Drive file' : 'Preparing scene for upload',
+      progress: null,
+    });
     this.inFlight = (async () => {
       try {
-        const file = await this.client.save(
-          committedScene(state),
-          pending,
-          controller.signal,
-          (progress) => {
-            if (current()) {
-              useDrive.setState({ progress });
-              updateTask(taskId, {
-                detail: progress < 1 ? 'Uploading scene' : 'Confirming saved scene',
-                progress,
-              });
-            }
-          },
-        );
+        const file = rename
+          ? await this.client.rename(scene.name, pending, controller.signal)
+          : await this.client.save(scene, pending, controller.signal, (progress) => {
+              if (current()) {
+                useDrive.setState({ progress });
+                updateTask(taskId, {
+                  detail: progress < 1 ? 'Uploading scene' : 'Confirming saved scene',
+                  progress,
+                });
+              }
+            });
         if (!current()) {
           cancelTask(taskId, 'Drive save stopped for this scene.');
           return;
         }
         // Acknowledgements only cover the captured revision, never edits made during upload.
-        useEditor.setState({ driveFile: driveBinding(file) });
+        this.uploaded = { scene, binding: driveBinding(file) };
+        useEditor.setState({ driveFile: this.uploaded.binding });
         this.failures = 0;
         useDrive.setState({
           savedRevision: state.revision,
@@ -337,8 +358,12 @@ export class DriveAutosave {
     this.activityId = undefined;
     clearTimeout(this.timer);
     this.timer = undefined;
+    const state = useEditor.getState();
+    this.uploaded = state.driveFile
+      ? { scene: committedScene(state), binding: state.driveFile }
+      : undefined;
     useDrive.setState({
-      savedRevision: useEditor.getState().revision,
+      savedRevision: state.revision,
       status: 'saved',
       conflict: null,
       message: null,

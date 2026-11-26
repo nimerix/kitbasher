@@ -58,7 +58,7 @@ describe('Google Drive scene files', () => {
     expect(new Headers(request.headers).get('Authorization')).toBe('Bearer test-access-token');
     expect(JSON.parse(request.body as string)).toMatchObject({
       name: 'Assembly.kitbash',
-      appProperties: { kitbasher: 'scene', kitbasherWrite: 'write-1' },
+      appProperties: { kitbasher: 'scene', kitbasherWrite: 'write-1', kitbasherName: 'Assembly' },
     });
     const uploaded = await readSceneFile(fetcher.mock.calls[2][1].body as Blob);
     expect(uploaded.parts[0].position).toEqual([4, 5, 6]);
@@ -140,6 +140,72 @@ describe('Google Drive scene files', () => {
       kind: 'conflict',
       file: changed,
     });
+  });
+
+  it('renames the file through metadata alone, without uploading the scene', async () => {
+    const md5Checksum = 'c'.repeat(32);
+    const renamed = { ...file, name: 'Renamed.kitbash', version: '3', md5Checksum };
+    const fetcher = vi
+      .fn()
+      .mockResolvedValueOnce(json({ ...file, md5Checksum }))
+      .mockResolvedValueOnce(json(renamed));
+    vi.stubGlobal('fetch', fetcher);
+    expect(await client().rename('Renamed', { ...binding, md5Checksum }, signal())).toEqual(
+      renamed,
+    );
+    const [url, request] = fetcher.mock.calls[1] as [string, RequestInit];
+    expect(url).toMatch(/^https:\/\/www\.googleapis\.com\/drive\/v3\/files\/scene-1\?/);
+    expect(request.method).toBe('PATCH');
+    expect(JSON.parse(request.body as string)).toEqual({
+      name: 'Renamed.kitbash',
+      appProperties: { kitbasherName: 'Renamed' },
+    });
+    expect(fetcher).toHaveBeenCalledTimes(2);
+  });
+
+  it('refuses to rename a file whose content changed elsewhere', async () => {
+    const changed = { ...file, md5Checksum: 'd'.repeat(32) };
+    const fetcher = vi.fn().mockResolvedValueOnce(json(changed));
+    vi.stubGlobal('fetch', fetcher);
+    await expect(
+      client().rename('Renamed', { ...binding, md5Checksum: 'c'.repeat(32) }, signal()),
+    ).rejects.toMatchObject({ kind: 'conflict', file: changed });
+    expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+
+  it('clears the stored exact name when it is too long for a Drive app property', async () => {
+    const md5Checksum = 'c'.repeat(32);
+    const fetcher = vi
+      .fn()
+      .mockResolvedValueOnce(json({ ...file, md5Checksum }))
+      .mockResolvedValueOnce(json({ ...file, md5Checksum }));
+    vi.stubGlobal('fetch', fetcher);
+    await client().rename('x'.repeat(112), { ...binding, md5Checksum }, signal());
+    expect(JSON.parse(fetcher.mock.calls[1][1].body).appProperties).toEqual({
+      kitbasherName: null,
+    });
+  });
+
+  it('opens a renamed scene under its Drive name', async () => {
+    const document = await sceneFileBlob(scene());
+    const open = async (remote: typeof file & { appProperties?: Record<string, string> }) => {
+      vi.stubGlobal(
+        'fetch',
+        vi
+          .fn()
+          .mockResolvedValueOnce(json(remote))
+          .mockResolvedValueOnce(new Response(document))
+          .mockResolvedValueOnce(json(remote)),
+      );
+      return (await client().open(file.id)).scene.name;
+    };
+    expect(
+      await open({ ...file, name: 'A-B.kitbash', appProperties: { kitbasherName: 'A/B' } }),
+    ).toBe('A/B');
+    expect(await open({ ...file, name: 'Renamed in Drive.kitbash' })).toBe('Renamed in Drive');
+    expect(
+      await open({ ...file, name: 'Assembly.kitbash', appProperties: { kitbasherName: 'Stale' } }),
+    ).toBe('Assembly');
   });
 
   it('opens a stable scene when only metadata changes during download', async () => {

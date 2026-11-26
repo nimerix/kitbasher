@@ -17,6 +17,7 @@ async function mockGoogle(page: Page, denied = false, hosted = false) {
   const cloud = {
     files: new Map<string, CloudFile>(),
     uploads: [] as string[],
+    renames: [] as string[],
     downloads: [] as string[],
     expired: false,
     renewals: 0,
@@ -130,6 +131,21 @@ async function mockGoogle(page: Page, denied = false, hosted = false) {
         await route.fulfill({ status: 404, json: {} });
         return;
       }
+      if (request.method() === 'PATCH') {
+        const patch = request.postDataJSON() as Partial<CloudFile>;
+        const appProperties = { ...file.appProperties, ...patch.appProperties };
+        for (const key of Object.keys(appProperties))
+          if (appProperties[key] === null) delete appProperties[key];
+        Object.assign(file, {
+          name: patch.name ?? file.name,
+          appProperties,
+          version: String(Number(file.version) + 1),
+        });
+        cloud.renames.push(file.id);
+        const { bytes: _, ...metadata } = file;
+        await route.fulfill({ json: metadata });
+        return;
+      }
       if (url.searchParams.get('alt') === 'media') {
         cloud.downloads.push(file.id);
         await route.fulfill({ contentType: 'application/octet-stream', body: file.bytes });
@@ -161,6 +177,12 @@ async function rename(page: Page, name: string) {
   await input.fill(name);
   await input.press('Enter');
 }
+async function moveTorso(page: Page, x: number) {
+  await page.locator('.part-select[title="Torso shell"]').click();
+  const position = page.getByRole('spinbutton', { name: 'Position X', exact: true });
+  await position.fill(String(x));
+  await position.press('Enter');
+}
 
 test('saves edits to one portable Drive file and stays connected after local recovery', async ({
   page,
@@ -169,17 +191,15 @@ test('saves edits to one portable Drive file and stays connected after local rec
   await connectAndSave(page);
   await rename(page, 'Drive assembly');
   await saved(page);
-  await page.locator('.part-select[title="Torso shell"]').click();
-  const position = page.getByRole('spinbutton', { name: 'Position X', exact: true });
-  await position.fill('12');
-  await position.press('Enter');
+  await moveTorso(page, 12);
   const downloads: string[] = [];
   page.on('download', (download) => downloads.push(download.suggestedFilename()));
   await page.keyboard.press('ControlOrMeta+s');
   await saved(page);
   expect(downloads).toEqual([]);
   expect(cloud.files.size).toBe(1);
-  expect(cloud.uploads).toEqual(['cloud-1', 'cloud-1', 'cloud-1']);
+  expect(cloud.uploads).toEqual(['cloud-1', 'cloud-1']);
+  expect(cloud.renames).toEqual(['cloud-1']);
   const uploaded = await readSceneFile(
     new Blob([new Uint8Array(cloud.files.get('cloud-1')!.bytes)]),
   );
@@ -192,7 +212,8 @@ test('saves edits to one portable Drive file and stays connected after local rec
   // Leave enough time for a mistakenly queued autosave to run.
   await page.waitForTimeout(2000);
   await saved(page);
-  expect(cloud.uploads).toHaveLength(3);
+  expect(cloud.uploads).toHaveLength(2);
+  expect(cloud.renames).toHaveLength(1);
   await driveButton(page).click();
   await expect(
     page.getByRole('button', { name: 'Reconnect Google Drive', exact: true }),
@@ -208,8 +229,41 @@ test('saves edits to one portable Drive file and stays connected after local rec
   await page.getByRole('button', { name: 'Done', exact: true }).click();
   await rename(page, 'After recovery');
   await saved(page);
-  expect(cloud.uploads).toHaveLength(4);
-  expect(cloud.uploads.every((id) => id === 'cloud-1')).toBe(true);
+  expect(cloud.uploads).toHaveLength(2);
+  expect(cloud.renames).toEqual(['cloud-1', 'cloud-1']);
+  expect(cloud.files.size).toBe(1);
+  expect(cloud.files.get('cloud-1')!.name).toBe('After recovery.kitbash');
+});
+
+test('renames the Drive file without uploading the scene again and reopens it under the new name', async ({
+  page,
+}) => {
+  const cloud = await mockGoogle(page);
+  await connectAndSave(page);
+  await rename(page, 'Renamed/scene');
+  await saved(page);
+  expect(cloud.uploads).toEqual(['cloud-1']);
+  expect(cloud.renames).toEqual(['cloud-1']);
+  expect(cloud.files.size).toBe(1);
+  const file = cloud.files.get('cloud-1')!;
+  expect(file.name).toBe('Renamed-scene.kitbash');
+  expect(file.appProperties.kitbasherName).toBe('Renamed/scene');
+  await page.getByRole('button', { name: 'File', exact: true }).click();
+  await page.getByRole('button', { name: /New assembly/ }).click();
+  await page.getByRole('button', { name: /Empty assembly/ }).click();
+  await expect(page.locator('.part-row')).toHaveCount(0);
+  await driveButton(page).click();
+  await page.getByRole('button', { name: /Renamed-scene\.kitbash/ }).click();
+  await page.getByRole('button', { name: 'Open scene', exact: true }).click();
+  await saved(page);
+  await expect(page.getByTitle('Rename assembly', { exact: true })).toContainText('Renamed/scene');
+  await moveTorso(page, 12);
+  await saved(page);
+  expect(cloud.uploads).toEqual(['cloud-1', 'cloud-1']);
+  const uploaded = await readSceneFile(
+    new Blob([new Uint8Array(cloud.files.get('cloud-1')!.bytes)]),
+  );
+  expect(uploaded.name).toBe('Renamed/scene');
 });
 
 test('opens a Drive scene after creating a new scene without uploading the replacement to the old file', async ({
@@ -291,7 +345,7 @@ for (const legacy of [false, true]) {
   });
 }
 
-test('retains offline edits and automatically uploads them on reconnect', async ({
+test('retains offline edits and automatically saves them on reconnect', async ({
   page,
   context,
 }) => {
@@ -305,7 +359,8 @@ test('retains offline edits and automatically uploads them on reconnect', async 
   await context.setOffline(false);
   await saved(page);
   expect(cloud.files.get('cloud-1')!.name).toBe('Edited offline.kitbash');
-  expect(cloud.uploads).toHaveLength(2);
+  expect(cloud.uploads).toHaveLength(1);
+  expect(cloud.renames).toEqual(['cloud-1']);
 });
 
 test('handles expired authorization and remote conflicts without creating duplicates or overwriting the remote file', async ({
@@ -324,7 +379,8 @@ test('handles expired authorization and remote conflicts without creating duplic
   await changeRemote(remote, 'Cloud edits');
   await rename(page, 'Local conflicting edits');
   await expect(driveButton(page)).toHaveAccessibleName('Google Drive: Drive file changed');
-  expect(cloud.uploads).toHaveLength(2);
+  expect(cloud.uploads).toHaveLength(1);
+  expect(cloud.renames).toEqual(['cloud-1']);
   await driveButton(page).click();
   await page.getByRole('button', { name: 'Save a new Drive copy', exact: true }).click();
   await page.getByRole('button', { name: 'Done', exact: true }).click();
@@ -539,7 +595,7 @@ test('ignores metadata-only version changes and keeps saving to the same Drive f
   const cloud = await mockGoogle(page);
   await connectAndSave(page);
   cloud.files.get('cloud-1')!.version = '50';
-  await rename(page, 'No content conflict');
+  await moveTorso(page, 12);
   await saved(page);
   expect(cloud.uploads).toEqual(['cloud-1', 'cloud-1']);
 });
@@ -559,7 +615,8 @@ test('renews hosted authorization and restores after reload without reconnect, b
   await expect(page.getByText('Recovered your local assembly', { exact: true })).toBeVisible();
   await page.waitForTimeout(2000);
   await saved(page);
-  expect(cloud.uploads).toHaveLength(2);
+  expect(cloud.uploads).toHaveLength(1);
+  expect(cloud.renames).toEqual(['cloud-1']);
   expect(cloud.authorizations).toBe(1);
   expect(cloud.renewals).toBe(2);
   await driveButton(page).click();
